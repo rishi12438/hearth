@@ -575,6 +575,11 @@ function plainMessage(m: any, grouped = false) {
   return row(mateWho(m.teammateId || "hearth"), m.createdAt, body, grouped, m.error ? "err" : "");
 }
 
+/** Markdown answer as one plain line of text for previews. */
+function plain(md: string) {
+  return String(md).replace(/```[\s\S]*?```/g, " ").replace(/[*_`#>]+/g, "").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").replace(/^\s*[-•]\s+/gm, "").replace(/\s+/g, " ").trim();
+}
+
 /** The few words shown for a task; older jobs have no label, so take the first clause of the brief. */
 function jobLabel(j: any) {
   if (j.label) return j.label;
@@ -603,15 +608,23 @@ function taskMessage(m: any) {
     body.push(h("div", { class: "block" }, h("div", { class: "blockhead" }, h("b", null, `Stuck: ${latest.blocked?.need || ""}`)), latest.blocked?.unblock ? h("p", null, latest.blocked.unblock) : null,
       h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => retry(latest.id) } }, "Try again"))));
   } else {
+    // The channel keeps it short: two lines and small tiles. Lists, files and the full answer live in the thread.
     const tiles = st === "done" ? (latest.tiles || []) : [];
-    const skipText = tiles.length && (latest.how === "skill" || latest.how === "workflow");
+    const small = tiles.filter((x: any) => x.type === "weather" || x.type === "stat").map((x: any) => ({ ...x, options: { ...x.options, compact: true } }));
+    const more = [
+      ...tiles.filter((x: any) => !small.some((y: any) => y.type === x.type)).map((x: any) => {
+        const n = x.data?.items?.length;
+        return n ? `${n} ${x.type === "places" ? "places" : "items"}` : x.title || x.type;
+      }),
+      ...((latest.fileIds || []).length ? [`${latest.fileIds.length} file${latest.fileIds.length === 1 ? "" : "s"}`] : []),
+    ];
     body.push(
-      skipText ? null : h("div", { class: tiles.length ? "clamp short" : "clamp" }, richText(st === "failed" ? `Couldn't do it: ${latest.result || "it failed"}` : latest.result || "Done.")),
-      tiles.map(tile),
-      (latest.fileIds || []).map(fileCard));
+      h("button", { class: "clamp short", on: { click: open } }, plain(st === "failed" ? `Couldn't do it: ${latest.result || "it failed"}` : latest.result || "Done.")),
+      small.length ? h("button", { class: "tilelink", on: { click: open } }, small.map(tile)) : null,
+      more.length ? h("button", { class: "chips", on: { click: open } }, more.map((x) => h("span", { class: "chipx" }, x))) : null);
+    const n = follow.length * 2;
+    body.push(h("button", { class: "tfoot", on: { click: open } }, n ? h("b", null, `${n} replies`) : null, h("span", null, n ? `Last ${clockTime(latest.finishedAt || latest.updatedAt)}` : "Open thread"), icon("chevron", 14)));
   }
-  const n = follow.length * 2;
-  body.push(h("button", { class: "tfoot", on: { click: open } }, n ? h("b", null, `${n} replies`) : null, h("span", null, n ? `Last ${clockTime(latest.finishedAt || latest.updatedAt)}` : "Reply in thread"), icon("chevron", 14)));
   return row(mateWho(j.teammateId, jobState(latest)), m.createdAt, body, false, st === "failed" ? "err" : "");
 }
 
