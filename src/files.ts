@@ -14,6 +14,10 @@ const TYPES: Record<string, string> = {
   ".html": "text/html", ".xml": "application/xml", ".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".heic": "image/heic", ".svg": "image/svg+xml",
   ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".wav": "audio/wav", ".mp4": "video/mp4", ".mov": "video/quicktime",
+  ".webm": "video/webm", ".m4v": "video/mp4", ".ogg": "audio/ogg", ".oga": "audio/ogg", ".opus": "audio/ogg", ".aac": "audio/aac",
+  ".flac": "audio/flac", ".avif": "image/avif", ".tsv": "text/tab-separated-values", ".log": "text/plain", ".yaml": "text/plain",
+  ".yml": "text/plain", ".toml": "text/plain", ".ini": "text/plain", ".sh": "text/plain", ".py": "text/plain", ".js": "text/plain",
+  ".ts": "text/plain", ".css": "text/plain", ".sql": "text/plain", ".go": "text/plain", ".rs": "text/plain", ".swift": "text/plain",
   ".zip": "application/zip", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 };

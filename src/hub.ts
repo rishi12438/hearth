@@ -387,7 +387,10 @@ export class Hub {
 
     if (plan.title && !thread.id.startsWith("tm-") && thread.title === m.text.split(/\s+/).slice(0, 6).join(" ")) await this.touchThread(thread.id, { title: String(plan.title).slice(0, 60) });
     // Hearth's short reply, then one message per task; each task's thread (the teammate working, replies) hangs under it.
-    await this.addMessage({ role: "assistant", teammateId: "hearth", threadId: thread.id, text: String(plan.reply || "On it.").slice(0, 1000), jobIds: jobs.map((j) => j.id) });
+    // Keep Hearth's line short when there are task posts under it; they say the rest.
+    let reply = String(plan.reply || "On it.").trim();
+    if (jobs.length && reply.length > 160) reply = reply.match(/^.{20,160}?[.!?](\s|$)/)?.[0].trim() || `${reply.slice(0, 150).replace(/\s+\S*$/, "")}…`;
+    await this.addMessage({ role: "assistant", teammateId: "hearth", threadId: thread.id, text: reply.slice(0, 1000), jobIds: jobs.map((j) => j.id) });
     for (const j of jobs) await this.addMessage({ role: "assistant", teammateId: "hearth", threadId: thread.id, text: j.label || j.task, taskJobId: j.id });
     for (const j of jobs) this.emit("job", j);
     this.pump(m.id); // runs in the background; a new ramble is handled right away
@@ -476,6 +479,12 @@ export class Hub {
         durationMs: Date.now() - started, costUsd: meter.unknown ? null : +meter.costUsd.toFixed(4),
         finishedAt: status === "done" || status === "failed" ? this.clock().toISOString() : undefined,
       });
+      // Tell the phone: "Fitness finished: Knee before volleyball". Tapping it opens the task's thread.
+      if (!job.parentId && (status === "done" || status === "failed")) {
+        const first = String(cur.result || "").split("\n").map((x) => x.replace(/^[-*#>\s]+|\*\*/g, "").trim()).find(Boolean) || "";
+        this.push?.send({ title: `${mate?.name || "Hearth"} ${status === "done" ? "finished" : "couldn't finish"}: ${cur.label || shortLabel(undefined, cur.task)}`,
+          body: first.slice(0, 180), tag: job.id, url: job.threadId.startsWith("tm-") ? threadLink(job.threadId) : `/#c/${job.threadId}/${job.followsUp || job.id}` }).catch(() => {});
+      }
     };
     const overCap = async () => {
       const r = await this.spendCheck(job.messageId);

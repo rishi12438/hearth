@@ -121,7 +121,17 @@ function onEvent(e: { type: string; data?: any }) {
       else if (e.data.proactive) toast(e.data.proactive.title);
       soon();
       return;
-    case "job":
+    case "job": {
+      // A teammate finished something you're not looking at: an in-app banner you can tap, like a phone notification.
+      const was = jobStatus.get(e.data.id);
+      jobStatus.set(e.data.id, e.data.status);
+      const here = (open && e.data.threadId === open) || (r.view === "dm" && e.data.threadId === `tm-${r.id}`);
+      if (was && was !== e.data.status && (e.data.status === "done" || e.data.status === "failed") && !e.data.parentId && !here) {
+        const m = mate(e.data.teammateId);
+        banner(m, `${m.name} ${e.data.status === "done" ? "finished" : "couldn't finish"}`, jobLabel(e.data),
+          () => { location.hash = e.data.threadId.startsWith("tm-") ? `#t/${e.data.teammateId}` : `#c/${e.data.threadId}/${e.data.followsUp || e.data.id}`; });
+      }
+    }
       if (open && S.chat && e.data.threadId === open) { upsert(S.chat.jobs, e.data); drawChat(false); }
       if (r.view === "dm" && S.dm && e.data.teammateId === r.id) { upsert(S.dm.jobs, e.data); drawDm(false); }
       soon();
@@ -133,7 +143,7 @@ function onEvent(e: { type: string; data?: any }) {
       else if (e.data.status === "pending") toast(`Needs your OK: ${e.data.summary}`);
       soon();
       return;
-    case "threads": soon(); if (open && S.chat) call("/api/threads").then((l: any[]) => { const t = l.find((x) => x.id === open); if (t && S.chat) { S.chat.thread.title = t.title; drawHeader(); } }).catch(() => {}); return;
+    case "threads": if (open) markSeen(open); soon(); if (open && S.chat) call("/api/threads").then((l: any[]) => { const t = l.find((x) => x.id === open); if (t && S.chat) { S.chat.thread.title = t.title; drawHeader(); } }).catch(() => {}); return;
     case "teammates": loadTeammates().then(soon); return;
     case "skills": loadSkills(); return;
     case "apps": loadApps().then(() => { const r2 = route(); if (r2.view === "app") { toast("Updated"); renderApp(r2.id); } else if (r2.view === "home") { drawPins(); drawHome(); } else if (r2.view === "chat") drawChat(false); else if (r2.view === "dm") drawDm(false); }); return;
@@ -204,8 +214,8 @@ async function loadFiles() {
 // ---------------- files: cards with View and Download ----------------
 
 const kb = (n: number) => n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
-const fileIcon = (m: string) => m.startsWith("image/") ? "eye" : m === "text/calendar" ? "clock" : m.includes("pdf") ? "download" : "code";
-const viewable = (m: string) => /^(image\/(png|jpeg|gif|webp)|application\/pdf|text\/(plain|markdown|csv|calendar)|application\/json|audio\/|video\/)/.test(m);
+const fileIcon = (m: string) => m.startsWith("image/") || m.startsWith("video/") ? "eye" : m.startsWith("audio/") ? "mic" : m === "text/calendar" ? "clock" : m.includes("pdf") ? "download" : "code";
+const viewable = (m: string) => /^(image\/(png|jpeg|gif|webp|heic|avif)|application\/pdf|text\/(plain|markdown|csv|tab-separated-values|calendar)|application\/json|audio\/|video\/)/.test(m);
 
 async function fileBlob(f: any, inline: boolean) {
   const hub = activeHub()!;
@@ -223,14 +233,64 @@ async function downloadFile(f: any) {
   } catch (e) { handleError(e); }
 }
 
+/** A file shown in the app: rendered Markdown, a video/audio player, CSV as a table, calendar invites as events. */
 async function viewFile(f: any) {
   try {
     const blob = await fileBlob(f, true);
     const url = URL.createObjectURL(blob);
-    if (f.mime.startsWith("image/")) openSheet(f.name, [h("img", { src: url, alt: f.name, class: "file-preview" }), h("button", { class: "btn primary big", on: { click: () => downloadFile(f) } }, icon("download", 16), "Download")]);
-    else if (f.mime.startsWith("text/") || f.mime === "application/json") openSheet(f.name, [h("pre", { class: "output" }, await blob.text()), h("button", { class: "btn primary big", on: { click: () => downloadFile(f) } }, icon("download", 16), "Download")]);
-    else window.open(url, "_blank", "noopener");
+    const m: string = f.mime;
+    if (m === "application/pdf") { window.open(url, "_blank", "noopener"); setTimeout(() => URL.revokeObjectURL(url), 60_000); return; }
+    const big = (t: string) => (t.length > 400_000 ? `${t.slice(0, 400_000)}\n\n… (cut here; download for the rest)` : t);
+    let view: Node;
+    if (m.startsWith("image/")) view = h("img", { src: url, alt: f.name, class: "file-preview" });
+    else if (m.startsWith("video/")) view = h("video", { src: url, controls: true, playsInline: true, preload: "metadata", class: "file-preview" });
+    else if (m.startsWith("audio/")) view = h("div", { class: "file-audio" }, h("span", { class: "ficon big" }, icon("mic", 26)), h("audio", { src: url, controls: true, preload: "metadata" }));
+    else {
+      const text = big(await blob.text());
+      if (m === "text/markdown") view = h("div", { class: "doc" }, richText(text));
+      else if (m === "text/csv" || m === "text/tab-separated-values") view = csvTable(text, m === "text/csv" ? "," : "\t");
+      else if (m === "text/calendar") view = icsView(text);
+      else if (m === "application/json") { let t = text; try { t = JSON.stringify(JSON.parse(text), null, 2); } catch {} view = h("pre", { class: "code" }, t); }
+      else view = h("pre", { class: /\.(md|txt|log)$/i.test(f.name) ? "output" : "code" }, text);
+    }
+    openSheet(f.name, [view, h("button", { class: "btn primary big", on: { click: () => downloadFile(f) } }, icon("download", 16), "Download")],
+      { onClose: () => URL.revokeObjectURL(url) });
   } catch (e) { handleError(e); }
+}
+
+/** CSV/TSV as a scrollable table (quotes handled; first row is the header). */
+function csvTable(text: string, sep: string) {
+  const rows: string[][] = [];
+  let row: string[] = [], cell = "", q = false;
+  for (let i = 0; i < text.length && rows.length < 2000; i++) {
+    const c = text[i];
+    if (q) { if (c === '"' && text[i + 1] === '"') { cell += '"'; i++; } else if (c === '"') q = false; else cell += c; }
+    else if (c === '"') q = true;
+    else if (c === sep) { row.push(cell); cell = ""; }
+    else if (c === "\n" || c === "\r") { if (c === "\r" && text[i + 1] === "\n") i++; row.push(cell); rows.push(row); row = []; cell = ""; }
+    else cell += c;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  const [head = [], ...body] = rows.filter((r) => r.some((c) => c.trim()));
+  return h("div", { class: "tablewrap" }, h("table", null,
+    h("thead", null, h("tr", null, head.map((c) => h("th", null, c)))),
+    h("tbody", null, body.map((r) => h("tr", null, head.map((_, k) => h("td", null, r[k] || "")))))),
+    h("p", { class: "muted small" }, `${body.length} row${body.length === 1 ? "" : "s"}`));
+}
+
+/** A calendar invite as readable events; Download adds it to your calendar. */
+function icsView(text: string) {
+  const unfolded = text.replace(/\r?\n[ \t]/g, "");
+  const events = unfolded.split("BEGIN:VEVENT").slice(1).map((e) => {
+    const get = (k: string) => (e.match(new RegExp(`^${k}(?:;[^:\\n]*)?:(.*)$`, "m"))?.[1] || "").replace(/\\n/g, "\n").replace(/\\([,;\\])/g, "$1").trim();
+    const when = (v: string) => { const m = v.match(/^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2}))?(Z?)/); if (!m) return v; const d = m[4] ? new Date(m[6] ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) : new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]).getTime()) : new Date(+m[1], +m[2] - 1, +m[3]); return d.toLocaleString(undefined, m[4] ? { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" } : { weekday: "short", month: "short", day: "numeric" }); };
+    return { title: get("SUMMARY") || "Event", start: when(get("DTSTART")), end: get("DTEND") ? when(get("DTEND")) : "", where: get("LOCATION"), notes: get("DESCRIPTION") };
+  });
+  if (!events.length) return h("pre", { class: "code" }, text);
+  return h("div", { class: "events" }, events.slice(0, 50).map((e) => h("div", { class: "event" },
+    h("b", null, e.title), h("small", null, [e.start, e.end && e.end !== e.start ? `– ${e.end}` : ""].filter(Boolean).join(" ")),
+    e.where ? h("small", null, e.where) : null, e.notes ? h("p", null, e.notes.slice(0, 600)) : null)),
+    h("p", { class: "muted small" }, "Download to add it to your calendar."));
 }
 
 function fileCard(id: string) {
@@ -380,9 +440,10 @@ function drawHome() {
       extra || null,
       h("button", { class: `chev ${collapsed.has(id) ? "down" : ""}`, "aria-label": collapsed.has(id) ? "Expand" : "Collapse", on: { click: () => toggleSection(id) } }, icon("up", 22))),
     collapsed.has(id) ? null : rows);
-  const channelRow = (t: any) => h("button", { class: `hrow ${t.working || t.needsYou ? "unread" : ""}`, on: { click: () => { location.hash = `#c/${t.id}`; } } },
+  const fresh = (t: any) => !!t.updatedAt && t.updatedAt > (seen[t.id] || t.createdAt);
+  const channelRow = (t: any) => h("button", { class: `hrow ${t.working || t.needsYou || fresh(t) ? "unread" : ""}`, on: { click: () => { location.hash = `#c/${t.id}`; } } },
     h("span", { class: "hicon" }, "#"), h("span", { class: "grow" }, channelName(t)),
-    t.needsYou ? h("em", { class: "badge" }, String(t.needsYou)) : t.working ? h("i", { class: "spin" }) : null);
+    t.needsYou ? h("em", { class: "badge" }, String(t.needsYou)) : t.working ? h("i", { class: "spin" }) : fresh(t) ? h("i", { class: "udot", "aria-label": "New" }) : null);
   clear(top, h("div", { class: "tiles" }, tiles.map(([ic, title, sub, fn, hot]) =>
     h("button", { class: `tilebtn ${hot ? "hot" : ""}`, on: { click: fn } }, h("span", { class: "ti" }, icon(ic, 22), hot ? h("i", { class: "dot" }) : null), h("b", null, title), h("small", null, sub)))));
   clear(el,
@@ -481,6 +542,7 @@ function openJump() {
 // ---------------- a ramble channel ----------------
 
 async function loadChat(id: string) {
+  if (id !== "new") markSeen(id);
   if (id === "new") { S.chat = { thread: { id: "new", title: "" }, messages: [], jobs: [], approvals: [] }; drawChat(); setTimeout(() => document.getElementById("composer")?.focus(), 80); return; }
   try { S.chat = await call(`/api/threads/${id}`); drawChat(); }
   catch (e) { if (e instanceof ApiError && e.status === 404) { location.hash = ""; return; } handleError(e); }
@@ -732,10 +794,10 @@ function chatMenu() {
 
 // ---------------- a DM with one teammate ----------------
 
-// When you last opened each DM (this device), for the unread dot.
+// When you last opened each DM or ramble (this device), for the unread dot.
 const seen: Record<string, string> = JSON.parse(localStorage.getItem("hearth.seen") || "{}");
-function markSeen(teammateId: string) {
-  seen[teammateId] = new Date().toISOString();
+function markSeen(id: string) {
+  seen[id] = new Date(Date.now() + 2000).toISOString(); // a little ahead, so your own message landing doesn't count as new
   localStorage.setItem("hearth.seen", JSON.stringify(seen));
 }
 const unreadDm = (t: any) => !!t.lastDmAt && t.lastDmAt > (seen[t.id] || "");
@@ -868,9 +930,38 @@ function shapeOf(id: string) {
 }
 
 /** state: idle | thinking | working | waiting | blocked | done */
+// What each teammate holds, from its name (then its description): Fitness lifts a dumbbell, Research sweeps a magnifier…
+const PROPS: [RegExp, string][] = [
+  [/fit|gym|workout|exercise|training|sport|run|yoga/i, "dumbbell"], [/health|doctor|medic|wellness|sleep/i, "heart"],
+  [/research|search|find|scout|news/i, "search"], [/travel|trip|flight|vacation/i, "plane"],
+  [/bill|money|financ|budget|tax|invest|expense|pay/i, "coin"], [/remind|plan|calendar|schedul|errand/i, "bell"],
+  [/language|learn|study|school|flashcard|read|book|tutor/i, "book"], [/meal|food|cook|recipe|diet|grocer|nutrition/i, "food"],
+  [/gift|shop|buy/i, "gift"], [/repair|fix|maintenance|car|diy/i, "wrench"], [/home|house|apartment|rent|landlord/i, "home"],
+  [/music|song|playlist|concert|ticket/i, "note"], [/job|career|work|interview|resume/i, "case"], [/pet|dog|cat|vet/i, "paw"],
+];
+function propOf(t: any) {
+  if (t.id === "hearth") return "flame";
+  return PROPS.find(([re]) => re.test(t.name || ""))?.[1] || PROPS.find(([re]) => re.test(t.description || ""))?.[1] || null;
+}
+
 function face(t: any, size = 44, state = "idle") {
+  const prop = size >= 26 ? propOf(t) : null;
   return h("span", { class: `face ${shapeOf(t.id)} ${state}`, style: `--c:${t.color};--s:${size}px`, role: "img", "aria-label": `${t.name}, ${state}` },
-    h("span", { class: "eyes" }, h("i", { class: "eye" }), h("i", { class: "eye" })));
+    h("span", { class: "eyes" }, h("i", { class: "eye" }), h("i", { class: "eye" })),
+    prop ? h("span", { class: `prop p-${prop}` }, icon(`p-${prop}`, Math.round(size * 0.36))) : null);
+}
+
+const jobStatus = new Map<string, string>();
+
+/** An in-app notification: who, what, tap to open. Stacks at the top; goes away on its own. */
+function banner(who: any, title: string, text: string, onTap: () => void) {
+  const b = h("button", { class: "banner", on: { click: () => { b.remove(); onTap(); } } },
+    face(who, 34, "done"), h("span", { class: "grow" }, h("b", null, title), h("small", null, text)));
+  let stack = document.getElementById("banners");
+  if (!stack) { stack = h("div", { id: "banners", "aria-live": "polite" }); document.body.appendChild(stack); }
+  stack.appendChild(b);
+  requestAnimationFrame(() => b.classList.add("show"));
+  setTimeout(() => { b.classList.remove("show"); setTimeout(() => b.remove(), 350); }, 6000);
 }
 
 function secs(ms?: number) {

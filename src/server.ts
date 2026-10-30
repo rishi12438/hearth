@@ -206,7 +206,7 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
           const bytes = f && hub.files.bytes(f.id);
           if (!f || !bytes) break;
           // Only harmless types may display inline; anything that could run (html, svg) always downloads.
-          const inlineOk = url.searchParams.get("inline") === "1" && /^(image\/(png|jpeg|gif|webp|heic)|application\/pdf|text\/(plain|markdown|csv|calendar)|application\/json|audio\/|video\/)/.test(f.mime);
+          const inlineOk = url.searchParams.get("inline") === "1" && /^(image\/(png|jpeg|gif|webp|heic|avif)|application\/pdf|text\/(plain|markdown|csv|tab-separated-values|calendar)|application\/json|audio\/|video\/)/.test(f.mime);
           return new Response(bytes, { headers: {
             "Content-Type": inlineOk ? f.mime : "application/octet-stream",
             "Content-Disposition": `${inlineOk ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(f.name)}`,
