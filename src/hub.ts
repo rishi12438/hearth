@@ -241,7 +241,7 @@ export class Hub {
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
       .map((t) => {
         const mine = jobs.filter((j) => j.threadId === t.id);
-        return { ...t, members: [...new Set(mine.map((j) => j.teammateId))],
+        return { ...t, name: t.num ? `ramble-${t.num}` : t.title, archived: !!t.archivedAt, members: [...new Set(mine.map((j) => j.teammateId))],
           working: mine.filter((j) => j.status === "working" || j.status === "queued").length,
           needsYou: mine.filter((j) => j.status === "waiting" || j.status === "blocked").length };
       });
@@ -263,10 +263,11 @@ export class Hub {
     return ok;
   }
 
+  /** Any activity in a ramble brings it back from the archive. */
   private async touchThread(id: string, patch: Partial<Thread>) {
     const t = await this.store.get<Thread>("threads", id);
     if (!t) return;
-    await this.store.put<Thread>("threads", { ...t, ...patch, updatedAt: this.clock().toISOString() });
+    await this.store.put<Thread>("threads", { ...t, ...patch, archivedAt: undefined, updatedAt: this.clock().toISOString() });
     this.emit("threads");
   }
 
@@ -290,7 +291,8 @@ export class Hub {
     if (threadId && !thread) return { error: "No such chat." };
     if (!thread) {
       const now = this.clock().toISOString();
-      thread = await this.store.put<Thread>("threads", { id: randomUUID(), createdAt: now, updatedAt: now, title: clean.split(/\s+/).slice(0, 6).join(" ") });
+      const num = Math.max(0, ...(await this.store.all<Thread>("threads")).map((t) => t.num || 0)) + 1;
+      thread = await this.store.put<Thread>("threads", { id: randomUUID(), createdAt: now, updatedAt: now, num, title: clean.split(/\s+/).slice(0, 6).join(" ") });
     }
     const files = (await Promise.all(fileIds.slice(0, 5).map((id) => this.store.get<StoredFile>("files", id)))).filter(Boolean) as StoredFile[];
     for (const f of files) await this.store.put<StoredFile>("files", { ...f, threadId: thread.id });
@@ -687,6 +689,26 @@ export class Hub {
     await this.log(status === "active" ? "workflow.saved" : "workflow.proposed", wf.name);
     this.emit("skills");
     return { value: wf };
+  }
+
+  /**
+   * Rambles are temporary: once nothing in one is running, waiting or stuck, and it's been quiet for an hour,
+   * it archives itself. Nothing is deleted; it leaves "Active rambles" and stays searchable.
+   */
+  async archiveQuietRambles() {
+    const quietMs = Number(process.env.HEARTH_RAMBLE_ARCHIVE_MIN || 60) * 60_000;
+    const now = this.clock().getTime();
+    const jobs = await this.store.all<Job>("jobs");
+    let changed = false;
+    for (const t of await this.store.all<Thread>("threads")) {
+      if (t.archivedAt || t.id.startsWith("tm-") || t.id === "main") continue;
+      if (now - new Date(t.updatedAt).getTime() < quietMs) continue;
+      const open = jobs.some((j) => j.threadId === t.id && !["done", "failed"].includes(j.status));
+      if (open) continue;
+      await this.store.put<Thread>("threads", { ...t, archivedAt: this.clock().toISOString() });
+      changed = true;
+    }
+    if (changed) this.emit("threads");
   }
 
   /** One tap: a finished ramble's jobs become a workflow, in order, reusing skills where they were used. No model. */
@@ -1176,6 +1198,29 @@ export class Hub {
     });
   }
 
+  /**
+   * Activity (Slack's Activity tab): what needs you first (approvals, stuck jobs), then proactive messages
+   * and recently finished work, newest first.
+   */
+  async inbox() {
+    const jobs = (await this.store.all<Job>("jobs")).filter((j) => !j.parentId);
+    const approvals = (await this.store.all<Approval>("approvals")).filter((a) => a.status === "pending");
+    const msgs = await this.store.recent<Message>("messages", 200);
+    const rootOf = (j: Job) => j.followsUp || j.id;
+    const items: any[] = [];
+    for (const a of approvals) {
+      const j = jobs.find((x) => x.id === a.jobId);
+      items.push({ kind: "approval", at: a.createdAt, id: a.id, summary: a.summary, approval: a, teammateId: j?.teammateId || "hearth", threadId: a.threadId, jobId: j ? rootOf(j) : undefined });
+    }
+    for (const j of jobs.filter((x) => x.status === "blocked")) items.push({ kind: "blocked", at: j.updatedAt || j.createdAt, id: j.id, summary: j.blocked?.need || j.task, unblock: j.blocked?.unblock, teammateId: j.teammateId, threadId: j.threadId, jobId: rootOf(j) });
+    for (const m of msgs.filter((x) => x.proactive)) items.push({ kind: "proactive", at: m.createdAt, id: m.id, summary: m.text, title: m.proactive!.title, teammateId: m.teammateId || "hearth", threadId: m.threadId });
+    for (const j of jobs.filter((x) => (x.status === "done" || x.status === "failed") && x.finishedAt).sort((a, b) => b.finishedAt!.localeCompare(a.finishedAt!)).slice(0, 25)) {
+      items.push({ kind: j.status === "failed" ? "failed" : "done", at: j.finishedAt, id: j.id, summary: j.task, result: (j.result || "").split("\n").find((l) => l.trim()) || "", teammateId: j.teammateId, threadId: j.threadId, jobId: rootOf(j) });
+    }
+    const urgent = (k: string) => (k === "approval" || k === "blocked" ? 0 : 1);
+    return items.sort((a, b) => urgent(a.kind) - urgent(b.kind) || String(b.at).localeCompare(String(a.at))).slice(0, 60);
+  }
+
   /** Everything one teammate has done, across chats, plus its routines and direct messages. */
   async teammateDetail(id: string) {
     const teammate = await this.teammate(id);
@@ -1298,6 +1343,7 @@ export class Hub {
   }
 
   async tick() {
+    await this.archiveQuietRambles();
     const now = this.clock();
     const prefs = await this.prefs();
     for (const h of await this.store.all<Hook>("hooks")) {

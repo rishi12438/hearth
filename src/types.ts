@@ -63,7 +63,8 @@ export type Hook = Doc & {
 };
 
 // ---- Rambles: each chat is a thread; the orchestrator splits what you say into jobs for teammates. ----
-export type Thread = Doc & { title: string; updatedAt: string; preview?: string };
+/** A ramble is a temporary channel (#ramble-N). It archives itself an hour after everything in it is done. */
+export type Thread = Doc & { title: string; updatedAt: string; preview?: string; num?: number; archivedAt?: string };
 
 export type Job = Doc & {
   threadId: string;

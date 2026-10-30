@@ -30,12 +30,13 @@ Run one hub on an always-on box so routines fire while your laptop sleeps. Run a
 3. Teammates are a name plus a role prompt. If no teammate fits, the orchestrator creates one, which you can see and delete in the app.
 4. Voice: the app records audio and the hub transcribes it with Deepgram (`HEARTH_DEEPGRAM_API_KEY`), so the key never reaches the phone. Speech-to-text is an interface in [src/voice.ts](src/voice.ts), so other providers can be added.
 
-### How it looks (like Slack)
+### How it looks (like Slack on your phone)
 
-- **Home** works like Slack's sidebar: a **Jump to…** search (⌘K) that finds teammates, chats and individual tasks, then your **group chats** and **direct messages** with each teammate. Each teammate has a face that acts out what it's doing (idle, thinking, working, waiting for you, stuck, done) and a one-line status in its own voice.
-- **Each ramble becomes a group chat.** Hearth posts each task as its own message ("@Scout find pottery studios near Priya"). Under each task you watch that teammate work, then see their reply, a tile preview and "1 reply". Approve and Try again sit right there.
-- **Tap a task to open its thread**, full screen on a phone and beside the chat on a wide screen. Read the full answer and reply to that teammate; follow-ups keep the thread as context.
-- **Direct messages** go straight to one teammate, skipping the orchestrator, and show its routines and the tasks it has in group chats.
+- **Home** is Slack's Home tab: a purple workspace header; tiles for **Needs you**, **Working**, **Plans** and **Files**; collapsible **Active rambles** (`# ramble-1`, `# ramble-2` with purple badges), **Direct messages** with each teammate and **Archived**; and a purple **+** for a new ramble. A frosted **Home · DMs · Activity** bar and a round search button float at the bottom.
+- **Each ramble is a temporary channel** (`#ramble-N`). Hearth posts each task as a message ("@Scout find pottery studios near Priya") with Slack's thread line under it: "Scout is working on it…", then "**1 reply** Today at 4:05 AM". Approve and Try again sit right there. A ramble **archives itself an hour after everything in it is done**, and posting in it brings it back.
+- **Tap a thread line** to open the thread: the task, a "1 reply" divider, then the teammate's answer, tiles and files. Reply to keep going with that teammate.
+- **Activity** puts what needs you (approvals, stuck jobs) first, then replies and check-ins. **DMs** go straight to one teammate.
+- Every teammate's avatar is a face that acts out what it's doing.
 
 ### Parallel jobs
 

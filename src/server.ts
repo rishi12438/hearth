@@ -265,6 +265,7 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
         break;
       }
       case "roster": return json(await hub.roster());
+      case "inbox": return json(await hub.inbox());
       case "teammates": {
         if (method === "GET" && id) { const d = await hub.teammateDetail(id); if (!d) break; return json(d); }
         if (method === "POST" && id && seg[3] === "messages") { const r = await hub.askTeammate(id, String((await body(req)).text || "")); if (r.error) throw new HttpError(400, r.error); return json(r.value); }

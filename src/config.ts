@@ -32,7 +32,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     agentCmd = parsed;
   }
   return {
-    name: env.HEARTH_NAME || "Home",
+    name: env.HEARTH_NAME || "Hearth",
     dataDir: resolve(env.HEARTH_DATA || "./data"),
     dbUrl: env.HEARTH_DB_URL || undefined,
     host: env.HEARTH_HOST || "127.0.0.1",

@@ -210,3 +210,25 @@ test("teammates make files, scripts hand files over, and downloads are sandboxed
   expect(hub.files.textOf(upFile)).toBe("remember the milk");
   server.stop(true);
 });
+
+test("rambles are numbered temporary channels that archive an hour after they're done", async () => {
+  await setup();
+  process.env.FAKE_MS = "30";
+  plan([{ task: "quick thing", teammate: "Hearth" }]);
+  const a = await hub.ramble("one");
+  const b = await hub.ramble("two");
+  await until(() => allDone(2));
+  const list = await hub.listThreads();
+  expect(list.map((t: any) => t.name).sort()).toEqual(["ramble-1", "ramble-2"]);
+  await hub.archiveQuietRambles();
+  expect((await hub.listThreads()).every((t: any) => !t.archived)).toBe(true); // not quiet long enough
+  const later = Date.now() + 61 * 60_000;
+  hub.clock = () => new Date(later);
+  await hub.archiveQuietRambles();
+  expect((await hub.listThreads()).every((t: any) => t.archived)).toBe(true);
+  // Posting in an archived ramble brings it back.
+  await hub.ramble("one more thing", a.value!.thread.id);
+  const back = (await hub.listThreads()).find((t: any) => t.id === a.value!.thread.id);
+  expect(back!.archived).toBe(false);
+  expect(b.value).toBeTruthy();
+});
