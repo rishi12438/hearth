@@ -70,6 +70,8 @@ export type Job = Doc & {
   threadId: string;
   messageId: string;
   task: string;
+  /** 2-6 words for the user ("Pottery gift for Priya"); task is the full brief for the agent. */
+  label?: string;
   teammateId: string;
   status: "queued" | "working" | "waiting" | "blocked" | "done" | "failed";
   /** Set when the job can't go on without you (a login, your laptop, a permission). It parks until you unblock it. */

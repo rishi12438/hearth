@@ -354,7 +354,7 @@ export class Hub {
       const workflow = use?.workflow ? (await this.store.all<Workflow>("workflows")).find((w) => w.name === String(use.workflow) && w.status === "active") : null;
       const inputs = use?.inputs && typeof use.inputs === "object" ? Object.fromEntries(Object.entries(use.inputs).slice(0, 8).map(([k, v]) => [k, String(v).slice(0, 400)])) : undefined;
       jobs.push(await this.store.put<Job>("jobs", {
-        ...this.doc({}), threadId: thread.id, messageId: m.id, task: j.task.trim().slice(0, 1000), teammateId: mate.id,
+        ...this.doc({}), threadId: thread.id, messageId: m.id, task: j.task.trim().slice(0, 1000), label: shortLabel(j.label, j.task), teammateId: mate.id,
         status: "queued", effort: j.effort === "heavy" ? "heavy" : "light",
         skillId: skill?.status === "active" ? skill.id : undefined, workflowId: workflow?.id, inputs,
       } as Job));
@@ -372,7 +372,7 @@ export class Hub {
     if (plan.title && !thread.id.startsWith("tm-") && thread.title === m.text.split(/\s+/).slice(0, 6).join(" ")) await this.touchThread(thread.id, { title: String(plan.title).slice(0, 60) });
     // Hearth's short reply, then one message per task; each task's thread (the teammate working, replies) hangs under it.
     await this.addMessage({ role: "assistant", teammateId: "hearth", threadId: thread.id, text: String(plan.reply || "On it.").slice(0, 1000), jobIds: jobs.map((j) => j.id) });
-    for (const j of jobs) await this.addMessage({ role: "assistant", teammateId: "hearth", threadId: thread.id, text: j.task, taskJobId: j.id });
+    for (const j of jobs) await this.addMessage({ role: "assistant", teammateId: "hearth", threadId: thread.id, text: j.label || j.task, taskJobId: j.id });
     for (const j of jobs) this.emit("job", j);
     this.pump(m.id); // runs in the background; a new ramble is handled right away
   }
@@ -1483,4 +1483,14 @@ export class Hub {
     await this.log("data.wiped", "All personal data deleted from this hub.");
     this.emit("reset");
   }
+}
+
+/** The few words shown in the chat for a job: the orchestrator's label, else the first clause of the task. */
+export function shortLabel(label: unknown, task: string) {
+  const l = typeof label === "string" ? label.trim() : "";
+  if (l) return l.slice(0, 60);
+  const first = task.trim().split(/[.!?\n]|,\s|\s(?:and|then)\s/)[0].replace(/^(please|can you|could you)\s+/i, "");
+  const words = first.split(/\s+/);
+  const out = words.slice(0, 7).join(" ");
+  return (out.charAt(0).toUpperCase() + out.slice(1)).slice(0, 60) + (words.length > 7 ? "…" : "");
 }

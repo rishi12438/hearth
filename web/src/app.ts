@@ -540,8 +540,8 @@ function drawChannel(el: HTMLElement, stick: boolean) {
     const who = m.role === "user" ? "you" : m.teammateId || "hearth";
     const t = new Date(m.createdAt).getTime();
     const grouped = who === lastWho && t - lastAt < 5 * 60_000 && !m.proactive;
-    nodes.push(m.taskJobId ? taskMessage(m, grouped) : plainMessage(m, grouped));
-    lastWho = who; lastAt = t;
+    nodes.push(m.taskJobId ? taskMessage(m) : plainMessage(m, grouped));
+    lastWho = m.taskJobId ? "task" : who; lastAt = t;
   }
   if (S.planning === S.chat.thread.id) nodes.push(row(mateWho("hearth", "thinking"), new Date().toISOString(), [h("div", { class: "typing" }, h("i"), h("i"), h("i"), h("span", null, "turning that into tasks…"))], lastWho === "hearth"));
   const atBottom = el.parentElement!.scrollHeight - el.parentElement!.scrollTop - el.parentElement!.clientHeight < 120;
@@ -575,34 +575,44 @@ function plainMessage(m: any, grouped = false) {
   return row(mateWho(m.teammateId || "hearth"), m.createdAt, body, grouped, m.error ? "err" : "");
 }
 
-/** Hearth: "@Scout find …", then the Slack thread line under it: who's working, or "2 replies  Today at 3:47 AM". */
-function taskMessage(m: any, grouped = false) {
+/** The few words shown for a task; older jobs have no label, so take the first clause of the brief. */
+function jobLabel(j: any) {
+  if (j.label) return j.label;
+  const first = String(j.task).trim().split(/[.!?\n]|,\s|\s(?:and|then)\s/)[0].replace(/^(please|can you|could you)\s+/i, "");
+  const words = first.split(/\s+/);
+  return first.charAt(0).toUpperCase() + words.slice(0, 7).join(" ").slice(1) + (words.length > 7 ? "…" : "");
+}
+
+/** A task is a post by the teammate doing it: a bold title, then the answer (or working / Approve / stuck) right there. */
+function taskMessage(m: any) {
   const j = S.chat.jobs.find((x: any) => x.id === m.taskJobId);
-  if (!j) return plainMessage(m, grouped);
+  if (!j) return plainMessage(m);
   const t = mate(j.teammateId);
   const follow = S.chat.jobs.filter((x: any) => x.followsUp === j.id);
   const latest = follow.length ? follow[follow.length - 1] : j;
-  const replies = (j.status === "done" || j.status === "failed" ? 1 : 0) + follow.length * 2;
   const open = () => { location.hash = `#c/${S.chat.thread.id}/${j.id}`; };
   const aps = (S.chat.approvals || []).filter((a: any) => (a.jobId === j.id || follow.some((f: any) => f.id === a.jobId)) && a.status === "pending");
   const st = latest.status;
-  const threadLine = st === "working" || st === "queued"
-    ? h("button", { class: "tline", on: { click: open } }, face(t, 22, jobState(latest)), h("span", { class: "muted" }, `${t.name} ${st === "working" ? "is working on it" : latest.dependsOn?.length ? "is waiting on another task" : "is up next"}`), h("span", { class: "typing small" }, h("i"), h("i"), h("i")))
-    : st === "waiting" ? h("div", { class: "tline col" },
-        h("button", { class: "tline", on: { click: open } }, face(t, 22, "waiting"), h("span", { class: "warn" }, `${t.name} needs your OK: ${aps[0]?.summary || latest.task}`)),
-        aps.length ? h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => decide(aps[0].id, true) } }, "Approve"), h("button", { class: "sbtn", on: { click: () => decide(aps[0].id, false) } }, "No")) : null)
-    : st === "blocked" ? h("div", { class: "tline col" },
-        h("button", { class: "tline", on: { click: open } }, face(t, 22, "blocked"), h("span", { class: "warn" }, `${t.name} is stuck: ${latest.blocked?.need || ""}. ${latest.blocked?.unblock || ""}`)),
-        h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => retry(latest.id) } }, "Try again")))
-    : h("button", { class: "tline", on: { click: open } }, face(t, 22, st === "done" ? "done" : "idle"),
-        h("span", { class: "replies" }, `${replies} repl${replies === 1 ? "y" : "ies"}`),
-        h("span", { class: "muted" }, `${dayLabel(latest.finishedAt || latest.updatedAt)} at ${clockTime(latest.finishedAt || latest.updatedAt)}`));
-  const preview = st === "done" ? (latest.tiles || []).slice(0, 1) : [];
-  return row(mateWho("hearth"), m.createdAt, [
-    withMentions(`@${t.name} ${m.text}`),
-    preview.length ? h("button", { class: "tilelink", on: { click: open } }, preview.map(tile)) : null,
-    threadLine,
-  ], grouped);
+  const body: (Node | Node[] | null)[] = [h("button", { class: "ttitle", on: { click: open } }, jobLabel(j))];
+  if (st === "working" || st === "queued") {
+    body.push(h("div", { class: "typing" }, h("i"), h("i"), h("i"), h("span", null, st === "working" ? "working on it" : latest.dependsOn?.length ? "waiting on another task" : "up next")));
+  } else if (st === "waiting") {
+    body.push(h("div", { class: "block" }, h("div", { class: "blockhead" }, icon("lock", 15), h("b", null, aps[0]?.summary || "Needs your OK")),
+      aps.length ? h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => decide(aps[0].id, true) } }, "Approve"), h("button", { class: "sbtn", on: { click: () => decide(aps[0].id, false) } }, "No")) : null));
+  } else if (st === "blocked") {
+    body.push(h("div", { class: "block" }, h("div", { class: "blockhead" }, h("b", null, `Stuck: ${latest.blocked?.need || ""}`)), latest.blocked?.unblock ? h("p", null, latest.blocked.unblock) : null,
+      h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => retry(latest.id) } }, "Try again"))));
+  } else {
+    const tiles = st === "done" ? (latest.tiles || []) : [];
+    const skipText = tiles.length && (latest.how === "skill" || latest.how === "workflow");
+    body.push(
+      skipText ? null : h("div", { class: tiles.length ? "clamp short" : "clamp" }, richText(st === "failed" ? `Couldn't do it: ${latest.result || "it failed"}` : latest.result || "Done.")),
+      tiles.map(tile),
+      (latest.fileIds || []).map(fileCard));
+  }
+  const n = follow.length * 2;
+  body.push(h("button", { class: "tfoot", on: { click: open } }, n ? h("b", null, `${n} replies`) : null, h("span", null, n ? `Last ${clockTime(latest.finishedAt || latest.updatedAt)}` : "Reply in thread"), icon("chevron", 14)));
+  return row(mateWho(j.teammateId, jobState(latest)), m.createdAt, body, false, st === "failed" ? "err" : "");
 }
 
 async function decide(id: string, yes: boolean) { try { await call(`/api/approvals/${id}/${yes ? "approve" : "reject"}`, { body: {} }); } catch (e) { handleError(e); } }
@@ -616,7 +626,7 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
   const follow = S.chat.jobs.filter((x: any) => x.followsUp === j.id);
   const n = (j.status === "done" || j.status === "failed" ? 1 : 0) + follow.length * 2;
   const nodes: (Node | null)[] = [
-    row(mateWho("hearth"), j.createdAt, [withMentions(`@${t.name} ${j.task}`)]),
+    row(mateWho("hearth"), j.createdAt, [h("div", { class: "ttitle" }, jobLabel(j)), h("div", { class: "brief" }, withMentions(`@${t.name} ${j.task}`))]),
     h("div", { class: "repdiv" }, n ? `${n} repl${n === 1 ? "y" : "ies"}` : "No replies yet"),
     answer(j),
   ];
