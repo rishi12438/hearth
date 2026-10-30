@@ -17,6 +17,7 @@ const S = {
   chat: null as any,            // open group chat: { thread, messages, jobs, approvals }
   dm: null as any,              // open DM: { teammate, jobs, messages, routines, approvals }
   teammates: [] as any[],
+  files: new Map<string, any>(),
   skills: [] as any[],
   workflows: [] as any[],
   hooks: [] as any[],
@@ -49,7 +50,7 @@ async function boot() {
   const pairCode = new URLSearchParams(location.hash.slice(1)).get("pair");
   if (!activeHub() || pairCode) return renderPairing(pairCode || "");
   if (/^#(chat\/|hearth)/.test(location.hash)) history.replaceState(null, "", "#"); // old links
-  await Promise.all([refreshState(), loadTeammates(), loadSkills()]);
+  await Promise.all([refreshState(), loadTeammates(), loadSkills(), loadFiles()]);
   show();
   connect();
   if (localStorage.getItem("hearth.autoLocation") === "1") shareLocation(true);
@@ -122,6 +123,7 @@ function onEvent(e: { type: string; data?: any }) {
     case "threads": soon(); if (open && S.chat) call("/api/threads").then((l: any[]) => { const t = l.find((x) => x.id === open); if (t && S.chat) { S.chat.thread.title = t.title; drawHeader(); } }).catch(() => {}); return;
     case "teammates": loadTeammates().then(soon); return;
     case "skills": loadSkills(); return;
+    case "files": loadFiles().then(() => { const r2 = route(); if (r2.view === "chat") drawChat(false); else if (r2.view === "dm") drawDm(false); }); return;
     case "hooks": if (S.panel === "plans") loadHooks(); if (r.view === "dm") loadDm(r.id); return;
     case "memory": if (S.panel === "memory") loadMemory(); return;
     case "scripts": refreshState(); return;
@@ -177,6 +179,61 @@ const mate = (id?: string) => S.roster.find((t) => t.id === (id || "hearth")) ||
 const ROLE: Record<string, string> = { hearth: "Chief of staff", planner: "Time, reminders, routines", scout: "Finds things", money: "Bills and spending" };
 const role = (t: any) => ROLE[t.id] || String(t.description || "").split(/[.,:;]/)[0].slice(0, 32);
 const jobState = (j: any) => j.status === "working" ? "working" : j.status === "queued" ? "thinking" : j.status === "waiting" ? "waiting" : j.status === "blocked" ? "blocked" : "idle";
+
+async function loadFiles() {
+  try { for (const f of await call("/api/files")) S.files.set(f.id, f); } catch {}
+}
+
+// ---------------- files: cards with View and Download ----------------
+
+const kb = (n: number) => n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
+const fileIcon = (m: string) => m.startsWith("image/") ? "eye" : m === "text/calendar" ? "clock" : m.includes("pdf") ? "download" : "code";
+const viewable = (m: string) => /^(image\/(png|jpeg|gif|webp)|application\/pdf|text\/(plain|markdown|csv|calendar)|application\/json|audio\/|video\/)/.test(m);
+
+async function fileBlob(f: any, inline: boolean) {
+  const hub = activeHub()!;
+  const res = await fetch(`${hub.url}/api/files/${f.id}${inline ? "?inline=1" : ""}`, { headers: { Authorization: `Bearer ${hub.token}` } });
+  if (!res.ok) throw new Error("Couldn't fetch the file");
+  return new Blob([await res.arrayBuffer()], { type: inline ? f.mime : "application/octet-stream" });
+}
+
+async function downloadFile(f: any) {
+  try {
+    const url = URL.createObjectURL(await fileBlob(f, false));
+    const a = h("a", { href: url, download: f.name });
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  } catch (e) { handleError(e); }
+}
+
+async function viewFile(f: any) {
+  try {
+    const blob = await fileBlob(f, true);
+    const url = URL.createObjectURL(blob);
+    if (f.mime.startsWith("image/")) openSheet(f.name, [h("img", { src: url, alt: f.name, class: "file-preview" }), h("button", { class: "btn primary big", on: { click: () => downloadFile(f) } }, icon("download", 16), "Download")]);
+    else if (f.mime.startsWith("text/") || f.mime === "application/json") openSheet(f.name, [h("pre", { class: "output" }, await blob.text()), h("button", { class: "btn primary big", on: { click: () => downloadFile(f) } }, icon("download", 16), "Download")]);
+    else window.open(url, "_blank", "noopener");
+  } catch (e) { handleError(e); }
+}
+
+function fileCard(id: string) {
+  const f = S.files.get(id);
+  if (!f) return null;
+  return h("div", { class: "filecard" },
+    h("span", { class: "ficon" }, icon(fileIcon(f.mime), 18)),
+    h("span", { class: "grow" }, h("b", null, f.name), h("small", null, `${kb(f.size)}${f.source === "you" ? " · from you" : ""}`)),
+    viewable(f.mime) ? h("button", { class: "btn ghost small", on: { click: () => viewFile(f) } }, "View") : null,
+    h("button", { class: "btn ghost small", "aria-label": `Download ${f.name}`, on: { click: () => downloadFile(f) } }, icon("download", 15)));
+}
+
+function openFiles() {
+  const list = [...S.files.values()];
+  openSheet("Files", [
+    h("p", { class: "muted" }, "Everything you attached and everything your teammates made. Stored on your hub."),
+    list.length ? list.map((f) => h("div", { class: "filerow" }, fileCard(f.id), h("button", { class: "iconbtn", "aria-label": `Delete ${f.name}`, on: { click: () => confirmSheet(`Delete ${f.name}?`, "It's removed from your hub.", "Delete", async () => { await call(`/api/files/${f.id}`, { method: "DELETE" }); S.files.delete(f.id); }) } }, icon("trash", 16))))
+      : h("p", { class: "empty" }, "No files yet."),
+  ]);
+}
 
 async function loadRoster() {
   try { S.roster = await call("/api/roster"); if (route().view === "home") drawHome(); else drawHeader(); } catch (e) { handleError(e); }
@@ -355,7 +412,7 @@ function drawChannel(el: HTMLElement, stick: boolean) {
 }
 
 function plainMessage(m: any) {
-  if (m.role === "user") return h("div", { class: "msg me" }, h("div", { class: "bubble" }, m.text));
+  if (m.role === "user") return h("div", { class: "msg me" }, h("div", { class: "bubble" }, m.text), (m.fileIds || []).map(fileCard));
   const t = mate(m.teammateId);
   const parts: (Node | null)[] = [h("div", { class: "who" }, face(t, 22, "idle"), h("b", null, t.name), m.proactive ? h("span", { class: "tag" }, icon("bell", 11), m.proactive.title) : null, h("time", null, clockTime(m.createdAt))), richText(m.text)];
   if (m.proactive) {
@@ -396,6 +453,7 @@ function taskMessage(m: any) {
     h("div", { class: "tasktext" }, h("span", { class: "mention", style: `--c:${t.color}` }, `@${t.name}`), " ", m.text),
     h("button", { class: `preview st-${latest.status}`, on: { click: open } },
       face(t, 24, jobState(latest)), preview,
+      latest.fileIds?.length ? h("small", { class: "replies" }, `📎 ${latest.fileIds.length}`) : null,
       replies ? h("small", { class: "replies" }, `${replies} repl${replies === 1 ? "y" : "ies"}`) : null, icon("chevron", 14)),
     actions ? h("div", { class: "pv-actions" }, actions) : null,
     tiles.length ? h("button", { class: "tilelink", on: { click: open } }, tiles.map(tile)) : null);
@@ -446,6 +504,7 @@ function answer(j: any) {
   return h("div", { class: `msg bot ${j.status === "failed" ? "err" : ""}` }, head,
     tiles.length && (j.how === "skill" || j.how === "workflow") ? null : richText(j.status === "failed" ? `Couldn't do it: ${j.result || "it failed"}` : j.result || "Done."),
     tiles.map(tile),
+    (j.fileIds || []).map(fileCard),
     did.length ? h("div", { class: "did-line" }, icon("check", 12), did.join(" · ")) : null,
     canSave ? h("button", { class: "link small", on: { click: async (e: Event) => {
       const b = e.currentTarget as HTMLButtonElement; b.disabled = true;
@@ -548,32 +607,53 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
   if (targetId === "composerwrap") box.id = "composer";
   const submit = () => { const v = box.value; box.value = ""; sessionStorage.removeItem(draftKey); box.dispatchEvent(new Event("input")); send(v, inThread); };
   const action = h("button", { class: "act", "aria-label": "Hold to talk" });
+  const canAttach = !inThread && r.view !== "dm";
+  const pending: any[] = [];
+  const chips = h("div", { class: "attach-chips" });
+  const drawChips = () => clear(chips, pending.map((f) => h("span", { class: "chip" }, f.name, h("button", { "aria-label": `Remove ${f.name}`, on: { click: () => { pending.splice(pending.indexOf(f), 1); drawChips(); swap(); } } }, icon("x", 12)))));
+  const picker = h("input", { type: "file", multiple: true, hidden: true, on: { change: async () => {
+    for (const file of Array.from(picker.files || []).slice(0, 5)) {
+      try {
+        const hub = activeHub()!;
+        const res = await fetch(`${hub.url}/api/files`, { method: "POST", headers: { Authorization: `Bearer ${hub.token}`, "X-File-Name": encodeURIComponent(file.name), "Content-Type": file.type || "application/octet-stream" }, body: file });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Upload failed");
+        S.files.set(data.id, data); pending.push(data); drawChips(); swap();
+      } catch (e) { handleError(e); }
+    }
+    picker.value = "";
+  } } }) as HTMLInputElement;
+  const clip = canAttach ? h("button", { class: "clip", "aria-label": "Attach a file", on: { click: () => picker.click() } }, icon("clip", 19)) : null;
+  attachments = () => pending.splice(0).map((f) => f.id);
   const swap = () => {
-    const hasText = !!box.value.trim();
+    const hasText = !!box.value.trim() || pending.length > 0;
     action.classList.toggle("send", hasText);
     clear(action, icon(hasText ? "send" : "mic", 20));
     action.setAttribute("aria-label", hasText ? "Send" : "Hold to talk");
   };
-  action.addEventListener("pointerdown", (e) => { if (box.value.trim()) return; e.preventDefault(); micTarget = inThread; onMicDown(); });
+  action.addEventListener("pointerdown", (e) => { if (box.value.trim() || pending.length) return; e.preventDefault(); micTarget = inThread; onMicDown(); });
   action.addEventListener("pointerup", () => { if (recording) onMicUp(); });
   action.addEventListener("pointerleave", () => { if (recording && Date.now() - pressAt > 350) onMicUp(); });
-  action.addEventListener("click", () => { if (box.value.trim()) submit(); });
-  clear(wrap, h("div", { class: "rec", id: targetId === "composerwrap" ? "rec" : undefined, hidden: true }), h("div", { class: "composer", id: targetId === "composerwrap" ? "composerbox" : undefined }, box, action));
+  action.addEventListener("click", () => { if (box.value.trim() || pending.length) { submit(); drawChips(); } });
+  clear(wrap, h("div", { class: "rec", id: targetId === "composerwrap" ? "rec" : undefined, hidden: true }), chips, h("div", { class: "composer", id: targetId === "composerwrap" ? "composerbox" : undefined }, clip, box, action, picker));
   swap();
   autosize(box);
 }
 
 let micTarget: string | undefined;
+/** Takes the files waiting in the message box (set by renderComposer). */
+let attachments: () => string[] = () => [];
 
 async function send(text: string, threadJob?: string) {
   const t = text.trim();
-  if (!t) return;
+  const fileIds = threadJob || route().view === "dm" ? [] : attachments();
+  if (!t && !fileIds.length) return;
   const r = route();
   try {
     if (threadJob) { await call(`/api/jobs/${threadJob}/reply`, { body: { text: t } }); if (r.view === "chat") loadChat(r.id); return; }
     if (r.view === "dm") { await call(`/api/teammates/${r.id}/messages`, { body: { text: t } }); loadDm(r.id); return; }
     const inChat = r.view === "chat" && r.id !== "new";
-    const res = inChat ? await call(`/api/threads/${r.id}/messages`, { body: { text: t } }) : await call("/api/threads", { body: { text: t } });
+    const res = inChat ? await call(`/api/threads/${r.id}/messages`, { body: { text: t, fileIds } }) : await call("/api/threads", { body: { text: t, fileIds } });
     S.planning = res.thread.id;
     if (!inChat) { S.chat = { thread: res.thread, messages: [res.message], jobs: [], approvals: [] }; location.hash = `#c/${res.thread.id}`; return; }
     upsert(S.chat.messages, res.message);
@@ -728,6 +808,7 @@ function openMenu() {
       item("users", "Teammates", "Who the orchestrator can hand work to", openTeammates),
       item("sparkle", "Skills", "What the team already knows how to do", openSkills),
       item("brain", "Brains", "Which harness and model does what", openBrains),
+      item("download", "Files", "Attached and made, ready to download", openFiles),
       item("code", "Scripts", "What I can run", openScripts, st?.pendingScripts ? `${st.pendingScripts} to approve` : undefined),
       item("settings", "Settings", "Notifications, location, data", openSettings)),
     h("p", { class: "foot" }, `Hearth · open source · ${__BUILD__}`),

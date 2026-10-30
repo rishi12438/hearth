@@ -5,9 +5,10 @@ import { sha256, deviceForToken, newPairingCode, redeemPairingCode, RateLimiter 
 import type { Hub } from "./hub.ts";
 import type { SpeechToText } from "./voice.ts";
 import { availableHarnesses } from "./brain.ts";
+import { MAX_FILE_BYTES } from "./files.ts";
 import { isActive, search } from "./memory.ts";
 import { isValidTimeZone } from "./time.ts";
-import type { Approval, Device, Fact, Hook, LocationFix, Message, Notebook, Place, Prefs, Skill, Teammate, Workflow } from "./types.ts";
+import type { StoredFile, Approval, Device, Fact, Hook, LocationFix, Message, Notebook, Place, Prefs, Skill, Teammate, Workflow } from "./types.ts";
 import pkg from "../package.json" with { type: "json" };
 
 const WEB = resolve(import.meta.dir, "../web");
@@ -70,7 +71,7 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
       "Cross-Origin-Opener-Policy": "same-origin",
       "Permissions-Policy": "geolocation=(self), camera=(), microphone=(self), payment=()",
       "Content-Security-Policy": [
-        "default-src 'self'", "script-src 'self'", "style-src 'self'", "img-src 'self' data:",
+        "default-src 'self'", "script-src 'self'", "style-src 'self'", "img-src 'self' data: blob:", "media-src 'self' blob:",
         `connect-src 'self' ${config.allowedOrigins.join(" ")}`.trim(), "manifest-src 'self'", "worker-src 'self'",
         "frame-ancestors 'none'", "base-uri 'none'", "form-action 'none'", "object-src 'none'",
       ].join("; "),
@@ -173,9 +174,46 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
       case "threads": {
         if (method === "GET" && !id) return json(await hub.listThreads());
         if (method === "GET" && id) { const d = await hub.threadDetail(id); if (!d) break; return json({ ...d, approvals: (await store.all<Approval>("approvals")).filter((a) => a.threadId === id) }); }
-        if (method === "POST" && !id) { const r = await hub.ramble(String((await body(req)).text || "")); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
-        if (method === "POST" && seg[3] === "messages") { const r = await hub.ramble(String((await body(req)).text || ""), id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "POST" && (!id || seg[3] === "messages")) {
+          const b = await body(req);
+          const fileIds = Array.isArray(b.fileIds) ? b.fileIds.map(String).slice(0, 5) : [];
+          const r = await hub.ramble(String(b.text || ""), id || undefined, fileIds);
+          if (r.error) throw new HttpError(400, r.error);
+          return json(r.value);
+        }
         if (method === "DELETE" && id) return json({ ok: await hub.removeThread(id) });
+        break;
+      }
+      case "files": {
+        if (method === "POST" && !id) {
+          const len = Number(req.headers.get("content-length") || 0);
+          if (len > MAX_FILE_BYTES) throw new HttpError(413, "That file is over 15 MB.");
+          const bytes = new Uint8Array(await req.arrayBuffer());
+          let name = "file";
+          try { name = decodeURIComponent(req.headers.get("x-file-name") || "file"); } catch {}
+          const r = await hub.files.save(bytes, { name, source: "you" });
+          if (r.error) throw new HttpError(413, r.error);
+          hub.emit("files");
+          return json(r.value);
+        }
+        if (method === "GET" && !id) {
+          const thread = url.searchParams.get("thread");
+          return json((await store.all<StoredFile>("files")).filter((f) => !thread || f.threadId === thread).reverse());
+        }
+        if (method === "GET" && id) {
+          const f = await store.get<StoredFile>("files", id);
+          const bytes = f && hub.files.bytes(f.id);
+          if (!f || !bytes) break;
+          // Only harmless types may display inline; anything that could run (html, svg) always downloads.
+          const inlineOk = url.searchParams.get("inline") === "1" && /^(image\/(png|jpeg|gif|webp|heic)|application\/pdf|text\/(plain|markdown|csv|calendar)|application\/json|audio\/|video\/)/.test(f.mime);
+          return new Response(bytes, { headers: {
+            "Content-Type": inlineOk ? f.mime : "application/octet-stream",
+            "Content-Disposition": `${inlineOk ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(f.name)}`,
+            "Content-Security-Policy": "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'",
+            "Cache-Control": "private, max-age=3600",
+          } });
+        }
+        if (method === "DELETE" && id) { const ok = await hub.files.remove(id); hub.emit("files"); return json({ ok }); }
         break;
       }
       case "skills": {
@@ -345,7 +383,8 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
       const host = req.headers.get("x-forwarded-host") || req.headers.get("host");
       const sameOrigin = !origin || (() => { try { return new URL(origin).host === host; } catch { return false; } })();
       const headers = security(origin, sameOrigin);
-      const finish = (res: Response) => { for (const [k, v] of Object.entries(headers)) res.headers.set(k, v); return res; };
+      // A response that brings its own CSP (file downloads: sandboxed) keeps it.
+      const finish = (res: Response) => { for (const [k, v] of Object.entries(headers)) if (!(k === "Content-Security-Policy" && res.headers.has(k))) res.headers.set(k, v); return res; };
 
       if (url.pathname.startsWith("/api/")) {
         if (req.method === "OPTIONS") return finish(new Response(null, { status: 204 }));

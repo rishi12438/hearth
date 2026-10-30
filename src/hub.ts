@@ -9,9 +9,10 @@ import { parseReply } from "./reply.ts";
 import { validateHook, computeNextAt, describeTrigger, isUserReminder } from "./hooks.ts";
 import { recall, isActive, validateFact } from "./memory.ts";
 import { describeLocal, inQuietHours, quietEndsAt, localDate, distanceMeters } from "./time.ts";
-import type { Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
+import type { StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
 import { Library, validateSkill, validateWorkflow, fill } from "./library.ts";
 import { cleanTile, cleanOptions, extractTiles, type Tile } from "./tiles.ts";
+import { Files, extractFiles } from "./files.ts";
 
 const DEFAULT_PREFS: Prefs = {
   userName: "", tz: "UTC", quietStart: "23:00", quietEnd: "07:30",
@@ -70,6 +71,7 @@ export class Hub {
     readonly config: Config, readonly store: Store, readonly brain: Brain,
     readonly scripts: Scripts, readonly push: Push | null,
     readonly library: Library = new Library(null),
+    readonly files: Files = new Files(store, config.dataDir),
   ) {}
 
   // ---------- plumbing ----------
@@ -169,8 +171,9 @@ export class Hub {
     const first = parseReply(await this.brain.think({ mode, context: ctx, input, toolResults: extra }, profile, opts.meter));
     if (first.text.includes(ESCALATE)) return { text: ESCALATE, did: [] as Done[], used: [] as string[] };
     const applied = await this.applyActions(first.actions, evidence, where);
-    if (!applied.runs.length) return { text: first.text, did: applied.done, used: applied.used, split: applied.split, tiles: applied.tiles };
+    if (!applied.runs.length) return { text: first.text, did: applied.done, used: applied.used, split: applied.split, tiles: applied.tiles, fileIds: applied.fileIds };
     const scriptTiles: Tile[] = [];
+    const scriptFiles: string[] = [];
 
     const results: string[] = [];
     for (const r of applied.runs.slice(0, 3)) {
@@ -186,7 +189,12 @@ export class Hub {
         continue;
       }
       applied.done.push({ kind: "script", label: `Ran ${r.name}${out.ok ? "" : " (failed)"}` });
-      const ex = extractTiles(out.output);
+      const fx = extractFiles(out.output);
+      for (const n of fx.names) {
+        const f = await this.files.adopt(this.scripts.workDir, n, { source: "script", threadId: opts.threadId, jobId: opts.jobId, teammateId: teammate?.id });
+        if (f.value) { scriptFiles.push(f.value.id); applied.done.push({ kind: "file", label: `Made ${f.value.name}`, id: f.value.id }); }
+      }
+      const ex = extractTiles(fx.text);
       scriptTiles.push(...ex.tiles);
       results.push(`## ${r.name}\n${ex.text}${ex.tiles.length ? `\n(${ex.tiles.length} tile(s) already shown to the user)` : ""}`);
     }
@@ -194,7 +202,8 @@ export class Hub {
     const second = parseReply(await this.brain.think({ mode, context: ctx2, input, toolResults: [extra, ...results].filter(Boolean).join("\n\n") }, profile, opts.meter));
     const applied2 = await this.applyActions(second.actions.filter((a: any) => a?.type !== "script.run"), evidence, where);
     const tiles = [...applied.tiles, ...applied2.tiles, ...scriptTiles].slice(0, 4);
-    return { text: second.text || first.text, did: [...applied.done, ...applied2.done], used: [...applied.used, ...applied2.used], split: applied.split ?? applied2.split, tiles };
+    const fileIds = [...applied.fileIds, ...applied2.fileIds, ...scriptFiles];
+    return { text: second.text || first.text, did: [...applied.done, ...applied2.done], used: [...applied.used, ...applied2.used], split: applied.split ?? applied2.split, tiles, fileIds };
   }
 
   // ---------- brains: who plans, who works ----------
@@ -273,8 +282,8 @@ export class Hub {
   private async updatesThread() { return (await this.dmThread("hearth")).id; }
 
   /** Stores what you said right away; the orchestrator and teammates work in the background. */
-  async ramble(text: string, threadId?: string) {
-    const clean = text.trim().slice(0, 8000);
+  async ramble(text: string, threadId?: string, fileIds: string[] = []) {
+    const clean = text.trim().slice(0, 8000) || (fileIds.length ? "Have a look at this." : "");
     if (!clean) return { error: "Say something first." };
     // Every new ramble starts its own group chat (Slack-style); a ramble inside a chat continues it.
     let thread = threadId ? await this.store.get<Thread>("threads", threadId) : null;
@@ -283,12 +292,27 @@ export class Hub {
       const now = this.clock().toISOString();
       thread = await this.store.put<Thread>("threads", { id: randomUUID(), createdAt: now, updatedAt: now, title: clean.split(/\s+/).slice(0, 6).join(" ") });
     }
-    const m = await this.addMessage({ role: "user", text: clean, threadId: thread.id });
+    const files = (await Promise.all(fileIds.slice(0, 5).map((id) => this.store.get<StoredFile>("files", id)))).filter(Boolean) as StoredFile[];
+    for (const f of files) await this.store.put<StoredFile>("files", { ...f, threadId: thread.id });
+    const m = await this.addMessage({ role: "user", text: clean, threadId: thread.id, fileIds: files.map((f) => f.id) });
     await this.setPrefs({ lastUserAt: m.createdAt });
     await this.touchThread(thread.id, { preview: clean.slice(0, 120) });
     this.inflight++;
     this.orchestrate(thread, m).finally(() => this.inflight--);
     return { value: { thread, message: m } };
+  }
+
+  /** What a teammate gets to see of attached files: the text of text-like ones, the name and type of the rest. */
+  async attachmentNote(fileIds?: string[]) {
+    if (!fileIds?.length) return "";
+    const parts: string[] = [];
+    for (const id of fileIds) {
+      const f = await this.store.get<StoredFile>("files", id);
+      if (!f) continue;
+      const text = this.files.textOf(f);
+      parts.push(text ? `### ${f.name}\n${text}` : `### ${f.name} (${f.mime}, ${Math.round(f.size / 1024)} KB; you can't open this type yet, say so if you need its contents)`);
+    }
+    return parts.length ? `\n\nAttached files:\n<untrusted>\n${parts.join("\n\n")}\n</untrusted>` : "";
   }
 
   private async orchestrate(thread: Thread, m: Message) {
@@ -300,7 +324,7 @@ export class Hub {
       const ctx = await this.context(m.text, "orchestrate", null);
       const history = (await this.store.all<Message>("messages")).filter((x) => x.threadId === thread.id && x.id !== m.id).slice(-10)
         .map((x) => ({ role: x.role, text: x.text.slice(0, 500) }));
-      const raw = await this.brain.think({ mode: "orchestrate", context: { ...ctx, thisChat: history }, input: m.text }, brains.orchestrator);
+      const raw = await this.brain.think({ mode: "orchestrate", context: { ...ctx, thisChat: history }, input: m.text + (await this.attachmentNote(m.fileIds)) }, brains.orchestrator);
       plan = parsePlan(raw);
     } catch (err: any) {
       await this.log("orchestrator.failed", err.message);
@@ -412,7 +436,7 @@ export class Hub {
         const r = job.workflowId
           ? await this.runWorkflow(job.workflowId, job.inputs || {}, { job, mate, meter })
           : await this.runSkill(job.skillId!, job.inputs || {}, { job, mate, meter });
-        return await finish({ how: job.workflowId ? "workflow" : "skill", tier: r.usedModel ? "workhorse" : undefined, result: r.output.slice(0, 4000), did: r.did, tiles: r.tiles });
+        return await finish({ how: job.workflowId ? "workflow" : "skill", tier: r.usedModel ? "workhorse" : undefined, result: r.output.slice(0, 4000), did: r.did, tiles: r.tiles, fileIds: r.did.filter((d) => d.kind === "file" && d.id).map((d) => d.id!) });
       } catch (err: any) {
         const sk = job.skillId ? await this.store.get<Skill>("skills", job.skillId) : null;
         failedSkill = { name: sk?.name || "workflow", error: err.message };
@@ -426,7 +450,9 @@ export class Hub {
       : "\n\nIf this job is likely to come back and you had to work it out, save it with skill.save.";
     const depNote = earlier ? `\n\nResults from earlier jobs you depend on:\n<untrusted>\n${earlier.slice(0, 6000)}\n</untrusted>` : "";
     const splitNote = job.effort === "heavy" && !job.depth ? "\n\nThis is a heavy job: if it has 2-4 parts that can be done independently, you may use jobs.split." : "";
-    const input = `${job.task}${depNote}${repairNote}${splitNote}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")`;
+    const ask = await this.store.get<Message>("messages", job.messageId);
+    const attached = await this.attachmentNote(ask?.fileIds);
+    const input = `${job.task}${depNote}${repairNote}${splitNote}${attached}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")`;
     const attempt = async (tier: "workhorse" | "heavy") => {
       cur = await this.saveJob({ ...cur, status: "working", tier });
       return this.turn("job", input, job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains[tier], meter });
@@ -446,7 +472,7 @@ export class Hub {
         const merged = await this.runSplit(cur, r.split, ramble, meter);
         return await finish({ how: "fresh", tier, escalated, result: merged.text.slice(0, 4000), did: [...r.did, ...merged.did], tiles: merged.tiles });
       }
-      await finish({ how: failedSkill ? "repaired" : "fresh", tier, escalated, result: r.text.slice(0, 4000), did: r.did, tiles: r.tiles });
+      await finish({ how: failedSkill ? "repaired" : "fresh", tier, escalated, result: r.text.slice(0, 4000), did: r.did, tiles: r.tiles, fileIds: r.fileIds });
     } catch (err: any) {
       await finish({ status: "failed", how: "fresh", tier, escalated, result: err.message });
     }
@@ -554,7 +580,14 @@ export class Hub {
           output = "Waiting for your Approve.";
           did = [{ kind: "approval", label: `Waiting for your Approve: ${sk.name}`, id: ap.value!.id }];
         } else if (!out.ok) throw new Error(out.output.slice(0, 300));
-        else { const ex = extractTiles(out.output); output = ex.text; tiles = ex.tiles; }
+        else {
+          const fx = extractFiles(out.output);
+          for (const n of fx.names) {
+            const f = await this.files.adopt(this.scripts.workDir, n, { source: "script", threadId: ctx.job?.threadId, jobId: ctx.job?.id, teammateId: ctx.mate?.id });
+            if (f.value) did.push({ kind: "file", label: `Made ${f.value.name}`, id: f.value.id });
+          }
+          const ex = extractTiles(fx.text); output = ex.text; tiles = ex.tiles;
+        }
       } else {
         usedModel = true;
         const recipe = [`Follow this saved recipe exactly ("${sk.name}": ${sk.description}).`,
@@ -824,6 +857,7 @@ export class Hub {
     const runs: { name: string; args: string[] }[] = [];
     let split: { subtasks: { task: string; teammate?: string }[]; merge: string } | null = null;
     const tiles: Tile[] = [];
+    const fileIds: string[] = [];
     for (const a of actions.slice(0, 12)) {
       if (!a || typeof a !== "object") continue;
       try {
@@ -873,6 +907,12 @@ export class Hub {
           case "place.add": {
             const r = await this.addPlace(a);
             done.push({ kind: "place", label: r.value ? `Saved place: ${r.value.name}` : `Couldn't save place: ${r.error}` });
+            break;
+          }
+          case "file.create": {
+            if (typeof a.content !== "string" || !a.content || a.content.length > 200_000 || fileIds.length >= 5) break;
+            const r = await this.files.save(new TextEncoder().encode(a.content), { name: String(a.name || "notes.txt"), source: "teammate", threadId: where.threadId, jobId: where.jobId, teammateId: where.teammateId });
+            if (r.value) { fileIds.push(r.value.id); done.push({ kind: "file", label: `Made ${r.value.name}`, id: r.value.id }); this.emit("files"); }
             break;
           }
           case "tile": {
@@ -943,7 +983,7 @@ export class Hub {
         await this.log("action.failed", `${a.type}: ${err.message}`);
       }
     }
-    return { done, used, runs, split, tiles };
+    return { done, used, runs, split, tiles, fileIds };
   }
 
   // ---------- hooks ----------
@@ -1390,6 +1430,7 @@ export class Hub {
   }
 
   async wipePersonal() {
+    for (const f of await this.store.all<StoredFile>("files")) await this.files.remove(f.id);
     for (const col of ["threads", "messages", "jobs", "approvals", "hooks", "memory", "notebooks", "places", "locations", "activity"] as const) await this.store.clear(col);
     await this.ensureSystemHooks();
     await this.ensureTeammates();

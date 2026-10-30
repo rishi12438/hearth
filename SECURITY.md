@@ -25,6 +25,11 @@ Hearth holds personal data and can act on a schedule, so it is built to fail clo
 - The classification is a guard rail, not a proof: a script could still leak data through a GET request. Reading the code before you approve it is the real gate, which is why code always needs your review.
 - Recipes may only run the approved scripts they list. A repaired recipe can't add new ones.
 
+## Files
+- Files are stored under `<data>/files` with mode `0600`, named by random id; original names are stripped of path parts.
+- Downloads need a device token and are served with `Content-Security-Policy: sandbox` and `nosniff`. Only images, PDFs, plain text, audio and video may display inline; HTML, SVG and everything else download as `application/octet-stream`.
+- A script can only hand over files from its own working folder, by name.
+
 ## Your data
 - SQLite files and the data folder are created with mode `0700`. Use a Postgres or MySQL user with access only to the Hearth tables.
 - Web Push VAPID keys are generated on first run and kept with your data; nothing is hard-coded. Push payloads go from your hub to your browser's push service, encrypted end to end per the Web Push standard.

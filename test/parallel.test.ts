@@ -169,3 +169,44 @@ test("replying in a job's thread goes to the same teammate with the thread as co
   const r2 = await hub.ramble("something else");
   expect(r2.value!.thread.id).not.toBe(r.value!.thread.id);
 });
+
+test("teammates make files, scripts hand files over, and downloads are sandboxed", async () => {
+  await setup();
+  // A teammate's file.create action
+  const r = await hub.applyActions([{ type: "file.create", name: "trip.ics", content: "BEGIN:VCALENDAR\nEND:VCALENDAR" }, { type: "file.create", name: "../../etc/passwd", content: "x" }], "", { threadId: "t1" });
+  expect(r.fileIds.length).toBe(2);
+  const files = await store.all<any>("files");
+  expect(files.map((f) => f.name).sort()).toEqual(["passwd", "trip.ics"]); // path parts stripped
+  expect(files.find((f) => f.name === "trip.ics").mime).toBe("text/calendar");
+
+  // A script that writes a file and prints @file
+  const { sha256 } = await import("../src/auth.ts");
+  const code = 'await Bun.write("report.csv", "a,b\\n1,2"); console.log("@file report.csv"); console.log("wrote it")';
+  const p = await hub.scripts.propose({ name: "make-report", code });
+  await hub.scripts.approve(p.value!.id, sha256(code));
+  await hub.saveSkill({ name: "report", description: "Make a report", kind: "script", script: "make-report" });
+  const sk = (await hub.skillByName("report"))!;
+  const out = await hub.runSkill(sk.id, {}, {});
+  expect(out.output).toBe("wrote it");
+  const csv = (await store.all<any>("files")).find((f) => f.name === "report.csv");
+  expect(new TextDecoder().decode(hub.files.bytes(csv.id)!)).toBe("a,b\n1,2");
+
+  // Downloads over HTTP: auth required, html never inline, sandbox CSP
+  const { startServer } = await import("../src/server.ts");
+  const { newPairingCode, redeemPairingCode } = await import("../src/auth.ts");
+  (hub.config as any).port = 0;
+  const { server } = await startServer(hub);
+  const { code: pc } = await newPairingCode(store);
+  const { token } = (await redeemPairingCode(store, pc, "test"))!;
+  const html = (await hub.files.save(new TextEncoder().encode("<script>alert(1)</script>"), { name: "evil.html", source: "teammate" })).value!;
+  const base = `http://127.0.0.1:${server.port}`;
+  expect((await fetch(`${base}/api/files/${html.id}`)).status).toBe(401);
+  const res = await fetch(`${base}/api/files/${html.id}?inline=1`, { headers: { Authorization: `Bearer ${token}` } });
+  expect(res.headers.get("content-disposition")).toStartWith("attachment");
+  expect(res.headers.get("content-type")).toBe("application/octet-stream");
+  expect(res.headers.get("content-security-policy")).toStartWith("sandbox");
+  const up = await fetch(`${base}/api/files`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "X-File-Name": encodeURIComponent("notes.txt") }, body: "remember the milk" });
+  const upFile = await up.json();
+  expect(hub.files.textOf(upFile)).toBe("remember the milk");
+  server.stop(true);
+});

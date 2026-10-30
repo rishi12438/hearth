@@ -49,6 +49,10 @@ Results like weather, places, checklists and numbers show as tiles: fixed compon
 
 Tap **Save as workflow** on a finished ramble to keep it, or say "save this as my …". "Run my …" replays it, reusing skills where it can. A nightly cleanup, with no model, removes skills and workflows unused for `HEARTH_PURGE_UNUSED_DAYS` (default 45), ones that keep failing, proposals never switched on, and assistant scripts nothing uses. Pinned items are never removed, and everything removed is logged.
 
+### Files
+
+Teammates make files (an itinerary `.md`, a calendar invite `.ics`, a `.csv`) with a `file.create` action. Scripts write files in their working folder and print `@file name`. You attach files with the paperclip. Every file shows as a card with **View** (images, PDFs, text, audio, video) and **Download** (saves to your phone or computer). Files live on your hub under `data/files`, only paired devices can fetch them, and downloads carry a sandbox CSP. HTML and SVG always download instead of rendering. Teammates read attached text files; other types are listed by name for now.
+
 ### Approve before send
 
 Anything that would send, post, pay, book, delete or change something outside the hub stops at an **Approve** card, and the hub enforces it, not the model. Each script is classified when it's saved: an `// effects: external` header, write-style HTTP calls or known senders mark it *external*. External scripts refuse to run unless you tapped Approve for that specific run. That holds even after you've approved the script's code, inside recipes and workflows, and when a hook fires.

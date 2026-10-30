@@ -550,3 +550,17 @@ a.place:active { background: var(--surface-2); }
 .jump-row .hash { width: 26px; text-align: center; color: var(--muted); font-size: 18px; font-weight: 600; }
 .jump-row b { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .jump-row small { display: block; color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---------- files ---------- */
+.filecard { display: flex; align-items: center; gap: 12px; margin-top: 8px; padding: 10px 10px 10px 12px; border-radius: 14px; background: var(--surface); border: 1px solid var(--line); max-width: 420px; width: 100%; }
+.msg.me .filecard { max-width: 86%; }
+.filecard .ficon { width: 36px; height: 36px; border-radius: 10px; background: var(--surface-2); display: grid; place-items: center; color: var(--ink-2); flex: none; }
+.filecard b { display: block; font-size: 14.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.filecard small { display: block; color: var(--muted); font-size: 12.5px; }
+.filecard .btn.ghost { width: auto; margin: 0; }
+.filerow { display: flex; align-items: center; gap: 6px; }
+.file-preview { width: 100%; border-radius: 14px; display: block; }
+.clip { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; color: var(--muted); flex: none; margin-left: -10px; }
+.attach-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 6px 8px; }
+.attach-chips:empty { display: none; }
+.attach-chips .chip button { display: inline-grid; place-items: center; margin-left: 4px; color: var(--muted); }
