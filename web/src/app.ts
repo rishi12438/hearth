@@ -136,7 +136,7 @@ function onEvent(e: { type: string; data?: any }) {
     case "threads": soon(); if (open && S.chat) call("/api/threads").then((l: any[]) => { const t = l.find((x) => x.id === open); if (t && S.chat) { S.chat.thread.title = t.title; drawHeader(); } }).catch(() => {}); return;
     case "teammates": loadTeammates().then(soon); return;
     case "skills": loadSkills(); return;
-    case "apps": loadApps().then(() => { const r2 = route(); if (r2.view === "app") { toast("Updated"); renderApp(r2.id); } else if (r2.view === "home") drawHome(); else if (r2.view === "chat") drawChat(false); else if (r2.view === "dm") drawDm(false); }); return;
+    case "apps": loadApps().then(() => { const r2 = route(); if (r2.view === "app") { toast("Updated"); renderApp(r2.id); } else if (r2.view === "home") { drawPins(); drawHome(); } else if (r2.view === "chat") drawChat(false); else if (r2.view === "dm") drawDm(false); }); return;
     case "files": loadFiles().then(() => { const r2 = route(); if (r2.view === "chat") drawChat(false); else if (r2.view === "dm") drawDm(false); }); return;
     case "hooks": if (S.panel === "plans") loadHooks(); if (r.view === "dm") loadDm(r.id); return;
     case "memory": if (S.panel === "memory") loadMemory(); return;
@@ -353,7 +353,9 @@ function toggleSection(id: string) {
 }
 
 function renderHome() {
-  frame({ header: h("div"), body: h("div", { id: "home" }), fab: true, purple: true });
+  frame({ header: h("div"), body: h("div", null, h("div", { id: "pins" }), h("div", { id: "home" })), fab: true, purple: true });
+  pinsKey = "";
+  drawPins();
   drawHeader();
   drawHome();
 }
@@ -387,9 +389,9 @@ function drawHome() {
     section("rambles", "Active rambles", active.length ? active.map(channelRow)
       : [h("p", { class: "hempty" }, "Tap + and ramble. Each ramble becomes a channel; it archives itself an hour after everything's done.")],
       h("button", { class: "chev", "aria-label": "New ramble", on: { click: () => { location.hash = "#c/new"; } } }, icon("plus", 20))),
-    section("apps", "Apps", S.apps.length ? [...S.apps].sort((a, b) => Number(b.pinned) - Number(a.pinned)).map((a) => h("button", { class: "hrow", on: { click: () => { location.hash = `#a/${a.id}`; } } },
+    section("apps", "Mini apps", S.apps.length ? [...S.apps].sort((a, b) => Number(b.pinned) - Number(a.pinned)).map((a) => h("button", { class: "hrow", on: { click: () => { location.hash = `#a/${a.id}`; } } },
       appIcon(a, 30), h("span", { class: "grow" }, a.title), h("small", null, mate(a.teammateId).name)))
-      : [h("p", { class: "hempty" }, "Little apps your teammates build for you: flashcards, trackers, checklists. Tap + or just ask in a ramble.")],
+      : [h("p", { class: "hempty" }, "Little apps your teammates build for you: flashcards, trackers, a today view. Ask for one anywhere, or say \"pin it to Home\".")],
       h("button", { class: "chev", "aria-label": "New app", on: { click: newApp } }, icon("plus", 20))),
     section("dms", "Direct messages", team.map((t) => h("button", { class: `hrow ${t.needsYou || t.busy ? "unread" : ""}`, on: { click: () => { location.hash = `#t/${t.id}`; } } },
       face(t, 30, t.state), h("span", { class: "grow" }, t.name), t.needsYou ? h("em", { class: "badge" }, String(t.needsYou)) : null))),
@@ -1645,32 +1647,60 @@ function newApp() {
   setTimeout(() => what.focus(), 50);
 }
 
-let appListener: ((e: MessageEvent) => void) | null = null;
+// Every app frame on screen (full screen or pinned on Home) and which app it is. Messages are trusted only from these.
+const appFrames = new Map<Window, string>();
+const saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+window.addEventListener("message", (e: MessageEvent) => {
+  const id = e.source ? appFrames.get(e.source as Window) : undefined;
+  if (!id || typeof e.data !== "object" || !e.data) return;
+  if (e.data.hearth === "save") {
+    clearTimeout(saveTimers.get(id));
+    const state = e.data.state;
+    saveTimers.set(id, setTimeout(() => call(`/api/apps/${id}/state`, { method: "PUT", body: { state } }).catch(handleError), 400));
+  } else if (e.data.hearth === "ask") {
+    const a = S.apps.find((x) => x.id === id);
+    call(`/api/apps/${id}/ask`, { body: { text: String(e.data.text || "") } }).then(() => toast(`Asked ${mate(a?.teammateId).name}`)).catch(handleError);
+  } else if (e.data.hearth === "open") location.hash = `#a/${id}`;
+});
+
+/** A sandboxed frame for an app (opaque origin, no network), registered so its messages are accepted. */
+async function appFrame(id: string, title: string, view: "full" | "small" | "tall" = "full") {
+  const { url } = await call(`/api/apps/${id}/open`, { body: { view } });
+  const f = h("iframe", { sandbox: "allow-scripts allow-forms", src: activeHub()!.url + url, title }) as HTMLIFrameElement;
+  f.addEventListener("load", () => { for (const [w, x] of appFrames) if (x === id && !w.parent) appFrames.delete(w); if (f.contentWindow) appFrames.set(f.contentWindow, id); });
+  return f;
+}
+
+/** Pinned mini apps run live at the top of Home. Redrawn only when the pins change, so they don't reload. */
+let pinsKey = "";
+async function drawPins() {
+  const el = document.getElementById("pins");
+  if (!el) return;
+  const pins = S.apps.filter((a) => a.pinned).sort((a, b) => (a.order || 0) - (b.order || 0));
+  const key = pins.map((a) => `${a.id}:${a.size}:${a.updatedAt}`).join("|");
+  if (key === pinsKey) return;
+  pinsKey = key;
+  clear(el, pins.map((a) => {
+    const box = h("div", { class: "pinbody" });
+    appFrame(a.id, a.title, a.size === "tall" ? "tall" : "small").then((f) => clear(box, f)).catch(() => clear(box, h("p", { class: "muted center" }, "Couldn't open")));
+    return h("section", { class: `pin ${a.size === "tall" ? "tall" : ""}` },
+      h("button", { class: "pinhead", on: { click: () => { location.hash = `#a/${a.id}`; } } }, appIcon(a, 22), h("b", { class: "grow" }, a.title), icon("chevron", 16)),
+      box);
+  }));
+}
 
 /** Full screen: the app in a sandboxed frame (no network, no hub access), with a glass back button and menu. */
 async function renderApp(id: string) {
-  if (appListener) window.removeEventListener("message", appListener);
   const box = h("div", { class: "appframe" }, h("p", { class: "muted center" }, "Opening…"));
   const title = h("b", null, S.apps.find((x) => x.id === id)?.title || "App");
   clear(app, h("div", { class: "screen appscreen" },
     box,
     h("header", { class: "chrome-top" }, h("div", { class: "toprow" },
       h("button", { class: "circle glass", "aria-label": "Back", on: { click: () => { history.length > 1 ? history.back() : (location.hash = ""); } } }, icon("back", 24)),
-      h("button", { class: "titlepill glass", on: { click: () => appMenu(id) } }, h("span", { class: "grow" }, title, h("small", null, "Tap for changes, undo and more"))),
+      h("button", { class: "titlepill glass", on: { click: () => appMenu(id) } }, h("span", { class: "grow" }, title, h("small", null, "Tap to change, pin or undo"))),
       h("button", { class: "circle glass", "aria-label": "Reload", on: { click: () => renderApp(id) } }, icon("repeat", 20))))));
-  try {
-    const { url } = await call(`/api/apps/${id}/open`, { body: {} });
-    const frame = h("iframe", { sandbox: "allow-scripts allow-forms", src: activeHub()!.url + url, title: title.textContent || "App" }) as HTMLIFrameElement;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    appListener = (e: MessageEvent) => {
-      if (e.source !== frame.contentWindow || e.data?.hearth !== "save") return;
-      if (timer) clearTimeout(timer);
-      const state = e.data.state;
-      timer = setTimeout(() => call(`/api/apps/${id}/state`, { method: "PUT", body: { state } }).catch(handleError), 400);
-    };
-    window.addEventListener("message", appListener);
-    clear(box, frame);
-  } catch (err) { clear(box, h("p", { class: "muted center" }, "That app is gone.")); handleError(err); }
+  try { clear(box, await appFrame(id, title.textContent || "App")); }
+  catch (err) { clear(box, h("p", { class: "muted center" }, "That app is gone.")); handleError(err); }
 }
 
 function appMenu(id: string) {
@@ -1689,7 +1719,8 @@ function appMenu(id: string) {
     } } }, icon("sparkle", 16), "Ask for a change"),
     h("div", { class: "stack" },
       a.versions ? h("button", { class: "btn ghost", on: { click: async () => { try { await call(`/api/apps/${id}/undo`, { body: {} }); closeSheet(); await loadApps(); renderApp(id); toast("Back to the previous version"); } catch (err) { handleError(err); } } } }, "Undo last change") : null,
-      h("button", { class: "btn ghost", on: { click: async () => { await call(`/api/apps/${id}`, { method: "PATCH", body: { pinned: !a.pinned } }); closeSheet(); loadApps(); } } }, a.pinned ? "Unpin" : "Pin to top"),
+      h("button", { class: "btn ghost", on: { click: async () => { await call(`/api/apps/${id}`, { method: "PATCH", body: { pinned: !a.pinned } }); closeSheet(); toast(a.pinned ? "Taken off Home" : "Pinned to Home"); } } }, a.pinned ? "Remove from Home" : "Pin to Home"),
+      a.pinned ? h("button", { class: "btn ghost", on: { click: async () => { await call(`/api/apps/${id}`, { method: "PATCH", body: { size: a.size === "tall" ? "small" : "tall" } }); closeSheet(); } } }, a.size === "tall" ? "Make it smaller on Home" : "Make it bigger on Home") : null,
       h("button", { class: "btn ghost", on: { click: async () => { await call(`/api/apps/${id}/state`, { method: "PUT", body: { state: null } }); closeSheet(); renderApp(id); toast("Progress reset"); } } }, "Reset my progress"),
       h("button", { class: "btn danger", on: { click: async () => { if (!confirm(`Delete ${a.title}?`)) return; await call(`/api/apps/${id}`, { method: "DELETE" }); closeSheet(); location.hash = ""; } } }, "Delete app")),
   ]);

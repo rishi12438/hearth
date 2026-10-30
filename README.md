@@ -46,13 +46,15 @@ The orchestrator gives jobs a `dependsOn` only when one needs another's result; 
 
 Results like weather, places, checklists and numbers show as tiles: fixed components the app draws from data, never generated code. Scripts print `@tile {json}`; teammates use a `tile` action. Asking to change a tile ("show hourly", "in Fahrenheit") saves options on the skill, so it sticks.
 
-### Mini apps
+### Mini apps (and shaping your Home)
 
 Ask for something you'll *use* and a teammate builds it right there: "make me a flashcard reader for these words", "a packing checklist for Lisbon", "a habit tracker for the gym". It shows up in the chat as an app card, and under **Apps** on Home.
 
 - **Code and content are separate.** An app is one HTML file plus its data (the cards). "Add 8 food words" changes only the data; your progress (which cards you know) is saved separately and kept.
 - **Make one from anything.** Tap **Make an app** under a teammate's answer, or **+** next to Apps on Home.
 - **Change it by asking.** Inside the app, tap the title: ask for a change, undo the last code change (the last 10 versions are kept), pin, reset progress or delete.
+- **Your Home is theirs to shape.** Teammates can pin apps to Home, where they run live: "pin my flashcards", "put a countdown to Lisbon up top", "show my week at the top". There's no fixed list of widgets; they build what fits and pin it. A hook can refresh an app's data on a schedule to keep it current. Apps know whether they're full screen or a small/tall Home widget (`hearth.view`) and draw to fit.
+- **Apps can talk back.** `hearth.ask("quiz me")` messages the teammate who made it (shown in your DM with them, rate-limited).
 - **Sandboxed.** Apps run in a frame with no network and no access to your hub; see [SECURITY.md](SECURITY.md).
 
 ### Workflows you keep, and a cleanup

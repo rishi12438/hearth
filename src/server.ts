@@ -255,15 +255,22 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
         break;
       }
       case "apps": {
-        const meta = (a: MiniApp) => ({ id: a.id, name: a.name, title: a.title, description: a.description, teammateId: a.teammateId, threadId: a.threadId, pinned: a.pinned, createdAt: a.createdAt, updatedAt: a.updatedAt, versions: a.versions.length });
+        const meta = (a: MiniApp) => ({ id: a.id, name: a.name, title: a.title, description: a.description, teammateId: a.teammateId, threadId: a.threadId, pinned: a.pinned, size: a.size || "small", order: a.order, createdAt: a.createdAt, updatedAt: a.updatedAt, versions: a.versions.length });
         if (method === "GET" && !id) return json((await hub.apps.list()).map(meta).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))));
         const a = id ? await store.get<MiniApp>("apps", id) : null;
         if (!a) break;
         if (method === "GET" && !seg[3]) return json({ ...meta(a), data: a.data });
-        if (method === "POST" && seg[3] === "open") return json({ url: `/app-frame/${hub.apps.ticket(a.id)}` });
+        if (method === "POST" && seg[3] === "open") return json({ url: `/app-frame/${hub.apps.ticket(a.id, (await body(req)).view)}` });
         if (method === "PUT" && seg[3] === "state") { const r = await hub.apps.setState(a.id, (await body(req)).state); if (r.error) throw new HttpError(413, r.error); return json({ ok: true }); }
         if (method === "POST" && seg[3] === "undo") { const r = await hub.apps.undo(a.id); if (!r) throw new HttpError(400, "There's no earlier version."); hub.emit("apps"); return json(meta(r)); }
-        if (method === "PATCH" && !seg[3]) { const b = await body(req); await store.put<MiniApp>("apps", { ...a, pinned: b.pinned === undefined ? a.pinned : !!b.pinned, title: typeof b.title === "string" && b.title.trim() ? b.title.trim().slice(0, 60) : a.title }); hub.emit("apps"); return json({ ok: true }); }
+        if (method === "POST" && seg[3] === "ask") { const r = await hub.askFromApp(a.id, String((await body(req)).text || "")); if (r.error) throw new HttpError(429, r.error); return json({ ok: true }); }
+        if (method === "PATCH" && !seg[3]) {
+          const b = await body(req);
+          if (b.pinned !== undefined || b.size !== undefined) await hub.apps.pin(a.name, b.pinned === undefined ? a.pinned : !!b.pinned, b.size);
+          if (typeof b.title === "string" && b.title.trim()) await store.put<MiniApp>("apps", { ...(await store.get<MiniApp>("apps", a.id))!, title: b.title.trim().slice(0, 60) });
+          hub.emit("apps");
+          return json({ ok: true });
+        }
         if (method === "DELETE" && !seg[3]) { await hub.apps.remove(a.id); hub.emit("apps"); return json({ ok: true }); }
         break;
       }

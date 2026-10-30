@@ -479,3 +479,9 @@ a.place:active { background: var(--surface-2); }
 .appframe { position: absolute; inset: 0; padding-top: calc(var(--safe-t) + 68px); display: flex; }
 .appframe iframe { flex: 1; width: 100%; border: 0; background: #1a1d21; }
 .appframe p { margin: auto; }
+.pin { margin: 12px 14px 4px; border-radius: 18px; overflow: hidden; background: var(--surface); border: 1px solid var(--line); }
+.pinhead { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; text-align: left; font-size: 15px; border-bottom: 1px solid var(--line); }
+.pinbody { height: 260px; display: flex; }
+.pin.tall .pinbody { height: 460px; }
+.pinbody iframe { flex: 1; width: 100%; border: 0; background: #1a1d21; }
+.pinbody p { margin: auto; }

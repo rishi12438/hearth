@@ -246,7 +246,10 @@ export type MiniApp = Doc & {
   teammateId?: string;
   threadId?: string;
   jobId?: string;
+  /** Shown live on Home, in this order and size. */
   pinned: boolean;
+  size?: "small" | "tall";
+  order?: number;
 };
 /** What an app saved for itself (flashcard progress, ticked boxes). */
 export type AppState = Doc & { state: unknown };

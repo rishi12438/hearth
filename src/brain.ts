@@ -92,6 +92,16 @@ ACTIONS
     (null on first open). To change only the content later ("add 20 more words"), send app.save with name and the full new
     data and no code block. CONTEXT.apps lists existing apps with their data; change an existing one rather than making a copy.
     name: lowercase-dashes ("portuguese-flashcards"); title: what the user sees ("Portuguese flashcards").
+    Apps can also call window.hearth.ask("...") to message you (e.g. a "Quiz me" or "Explain this" button); you get it as
+    a DM tagged with the app's name, and can answer or change the app.
+- app.pin {name, size?: "small"|"tall"} / app.unpin {name} / app.delete {name}   pinned apps show LIVE on the user's Home
+    screen, above everything else. This is how you shape what the user sees: if they want something on Home ("pin my
+    flashcards", "show my week at the top", "a counter for days without sugar"), build it as a mini app if needed, then pin it.
+    Use your judgment: a today view, a dashboard, a progress widget, a checklist; anything a small page can show.
+    window.hearth.view tells the app where it is: "full" (whole screen), or on Home as "small" (about 260px tall) or "tall"
+    (about 460px). Make every app draw a compact version for small/tall that fits without scrolling (e.g. flashcards: just
+    the card and two buttons; tap the card for more), and hearth.open() to go full screen.
+    To keep an app current (today's plan, a countdown, prices), add a hook that refreshes its data with app.save on a schedule.
 - skill.view {skill, options}   when the user asks to change how a skill's tile looks ("show hourly", "in Fahrenheit",
     "compact"), save it as options on that skill, e.g. {"hourly":true,"units":"F","compact":true}. It sticks for next time.
 - blocked {need, why, unblock}   when you CAN'T finish because something is missing that only the user or their devices can
@@ -141,6 +151,8 @@ TILES: results like weather, places, checklists and numbers show as tiles; teamm
 task plainly ("Weather in Paris tomorrow"). Requests to change how a tile looks are jobs for the teammate that owns that skill.
 MINI APPS: "make me flashcards / a tracker / a quiz / an app for this" is a job for the teammate whose lane it is (Languages builds
 flashcards); write the task so it says to build the app with its content. Changes to an app in CONTEXT.apps go to the same teammate.
+Anything about what the user sees on their Home screen (pin this, show X at the top, a widget for Y) is a job too: the team
+does it with mini apps pinned to Home.
 PARALLEL: jobs run at the same time unless one needs another's result; then list that job's id in dependsOn
 (e.g. "find a restaurant" then "invite Sam to it").
 LABEL: the user sees only the label in the chat, like a Slack message title ("Pottery gift for Priya", "Radiohead tickets").
@@ -346,6 +358,8 @@ function echoBrain(b: BrainInput): string {
   const fence = (actions: unknown[]) => "\n```hearth\n" + JSON.stringify(actions) + "\n```";
   const now = new Date(ctx.nowIso);
 
+  const apps = ((b.context as any).apps || []) as { name: string }[];
+  if (/\bpin\b/i.test(text) && apps.length) return `Pinned it to your Home.` + fence([{ type: "app.pin", name: apps[0].name, size: "tall" }]);
   if (/flash ?cards?|mini app|make (?:me )?an app/i.test(text)) {
     const cards = [["obrigado", "thank you"], ["bom dia", "good morning"], ["por favor", "please"], ["água", "water"], ["até logo", "see you later"]].map(([front, back]) => ({ front, back }));
     return "Built your flashcards. Tap to flip, and mark the ones you know." + fence([{ type: "app.save", name: "demo-flashcards", title: "Flashcards", description: "Tap to flip; it remembers what you know.", data: { cards } }])

@@ -34,7 +34,7 @@ Hearth holds personal data and can act on a schedule, so it is built to fail clo
 - An app is HTML a teammate wrote, so it is treated as untrusted. It loads in an iframe with `sandbox="allow-scripts allow-forms"` and no `allow-same-origin`, so it gets an opaque origin: it can't read the app's storage or device token, or call the hub's API.
 - Its page is served with its own CSP: `sandbox`, `connect-src 'none'`, no external scripts, styles, images or fonts (only inline and `data:`), `form-action 'none'`, and `frame-ancestors` limited to this hub and `HEARTH_ALLOWED_ORIGINS`. It can't fetch, post or load a tracking pixel.
 - Iframes can't send the device token, so the app screen first asks for a ticket: random, for one app only, valid 10 minutes, kept in memory.
-- The only way out of the app is `hearth.save(state)`, a `postMessage` that the app screen accepts only from that frame and relays to that one app's state (48 KB max).
+- The only ways out of an app are `postMessage`s the app screen accepts only from that app's own frame: `hearth.save(state)` (that app's state, 48 KB max) and `hearth.ask(text)` (a message to the teammate who made it, at most one every 3 seconds and 30 an hour, shown in your DM with them). A message from an app is still just a message: anything with external effects stops at Approve.
 - What remains: an app could *show* misleading text, such as a fake login form. Hearth never asks for passwords inside an app.
 
 ## Your data

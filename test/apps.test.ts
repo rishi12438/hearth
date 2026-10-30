@@ -71,3 +71,19 @@ test("asking for flashcards in a ramble builds an app the job points to", async 
   expect(job.did?.some((d) => d.kind === "app" && d.id === app.id)).toBe(true);
   expect(((await hub.context("flashcards", "job")) as any).apps[0].name).toBe("demo-flashcards");
 });
+
+test("teammates can pin apps to Home and take them off; apps can message their teammate, rate-limited", async () => {
+  const a = (await hub.apps.save({ name: "cards", title: "Cards", html: "<p>x</p>" }, { teammateId: "scout" })).value!;
+  const r = await hub.applyActions([{ type: "app.pin", name: "cards", size: "tall" }], "pin my cards");
+  expect(r.done.some((d: any) => d.label.startsWith("Pinned to Home"))).toBe(true);
+  let now = (await hub.apps.byName("cards"))!;
+  expect([now.pinned, now.size]).toEqual([true, "tall"]);
+  await hub.applyActions([{ type: "app.unpin", name: "cards" }], "");
+  expect((await hub.apps.byName("cards"))!.pinned).toBe(false);
+  expect((await hub.askFromApp(a.id, "quiz me")).error).toBeUndefined();
+  expect((await hub.askFromApp(a.id, "again")).error).toBeTruthy(); // too soon
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done"));
+  const job = (await store.all<Job>("jobs"))[0];
+  expect(job.teammateId).toBe("scout");
+  expect(job.task).toContain('mini app "Cards"');
+});

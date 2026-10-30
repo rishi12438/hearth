@@ -9,7 +9,7 @@ import { parseReply } from "./reply.ts";
 import { validateHook, computeNextAt, describeTrigger, isUserReminder } from "./hooks.ts";
 import { recall, isActive, validateFact } from "./memory.ts";
 import { describeLocal, inQuietHours, quietEndsAt, localDate, distanceMeters } from "./time.ts";
-import type { StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
+import type { MiniApp, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
 import { Library, validateSkill, validateWorkflow, fill } from "./library.ts";
 import { cleanTile, cleanOptions, extractTiles, type Tile } from "./tiles.ts";
 import { Files, extractFiles } from "./files.ts";
@@ -165,7 +165,7 @@ export class Hub {
       library: mode === "review" ? undefined : await this.searchLibrary(query),
       apps: mode === "review" ? undefined : (await this.apps.list()).map((a) => {
         const data = JSON.stringify(a.data ?? null);
-        return { name: a.name, title: a.title, does: a.description, data: data.length > 6000 ? `${data.slice(0, 6000)}… (truncated; send the full data when you change it)` : a.data };
+        return { name: a.name, title: a.title, does: a.description, onHome: a.pinned ? (a.size || "small") : false, data: data.length > 6000 ? `${data.slice(0, 6000)}… (truncated; send the full data when you change it)` : a.data };
       }),
     };
   }
@@ -955,6 +955,19 @@ export class Hub {
             this.emit("apps");
             break;
           }
+          case "app.pin":
+          case "app.unpin": {
+            if (where.recipe) break;
+            const app = await this.apps.pin(String(a.name || ""), a.type === "app.pin", a.size);
+            if (app) { done.push({ kind: "app", label: `${a.type === "app.pin" ? "Pinned to Home" : "Took off Home"}: ${app.title}`, id: app.id }); this.emit("apps"); }
+            break;
+          }
+          case "app.delete": {
+            if (where.recipe) break;
+            const app = await this.apps.byName(String(a.name || ""));
+            if (app && (await this.apps.remove(app.id))) { done.push({ kind: "note", label: `Deleted ${app.title}` }); this.emit("apps"); }
+            break;
+          }
           case "tile": {
             const t = cleanTile({ ...a, type: a.tile });
             if (t && tiles.length < 4) tiles.push(t);
@@ -1165,6 +1178,19 @@ export class Hub {
     for (const [i, t] of DEFAULT_TEAMMATES.entries()) {
       await this.store.put<Teammate>("teammates", { ...t, builtIn: true, createdAt: new Date(t0 + i * 1000).toISOString() });
     }
+  }
+
+  private appAsks = new Map<string, number[]>();
+
+  /** A mini app's hearth.ask(text): a message to the teammate who made it, in your DM with them. Rate-limited per app. */
+  async askFromApp(id: string, text: string) {
+    const app = await this.store.get<MiniApp>("apps", id);
+    if (!app) return { error: "No such app." };
+    const now = Date.now();
+    const recent = (this.appAsks.get(id) || []).filter((t) => now - t < 60 * 60_000);
+    if (recent.length >= 30 || (recent.length && now - recent[recent.length - 1] < 3000)) return { error: "That app is asking too often. Try again in a moment." };
+    this.appAsks.set(id, [...recent, now]);
+    return this.askTeammate(app.teammateId || "hearth", `[from the mini app "${app.title}" (${app.name})] ${String(text).trim().slice(0, 2000)}`);
   }
 
   /** Message one teammate directly: no orchestrator, the job goes straight to them in their own thread. */

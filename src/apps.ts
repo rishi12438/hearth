@@ -6,8 +6,8 @@ import type { MiniApp, AppState } from "./types.ts";
 // Mini apps: small single-file pages a teammate builds for you (flashcards, a habit tracker, a packing list).
 //  - Code (html) and data (the cards) are separate, so "add 20 words" changes data without touching code.
 //  - Each app runs in a sandboxed frame with an opaque origin and no network (connect-src 'none'), so it can't
-//    read your hub token, call the API or send anything anywhere. The only way out is window.hearth.save(state),
-//    which the app screen relays to the hub for that one app.
+//    read your hub token, call the API or send anything anywhere. The only ways out are hearth.save(state) (its own
+//    progress) and hearth.ask(text) (a message to the teammate who made it, rate-limited, shown in your DM with them).
 //  - Every code change keeps the previous version (last 10), so Undo is one tap.
 
 export const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
@@ -17,12 +17,14 @@ export const MAX_STATE = 48_000;
 const KEEP_VERSIONS = 10;
 const TICKET_MS = 10 * 60_000;
 
-/** The bridge every app gets: window.hearth = { data, state, save(state), ready(cb) }. */
-function bridge(data: unknown, state: unknown) {
+/** The bridge every app gets: window.hearth = { data, state, view, save(state), ask(text), open(), ready(cb) }. */
+function bridge(data: unknown, state: unknown, view: "full" | "small" | "tall") {
   const j = (v: unknown) => JSON.stringify(v ?? null).replace(/</g, "\\u003c").replace(/\u2028|\u2029/g, " ");
   return `<script>
-window.hearth = { data: ${j(data)}, state: ${j(state)},
+window.hearth = { data: ${j(data)}, state: ${j(state)}, view: ${j(view)},
   save(s) { this.state = s; parent.postMessage({ hearth: "save", state: s }, "*"); },
+  ask(text) { parent.postMessage({ hearth: "ask", text: String(text).slice(0, 2000) }, "*"); },
+  open() { parent.postMessage({ hearth: "open" }, "*"); },
   ready(cb) { document.readyState === "loading" ? document.addEventListener("DOMContentLoaded", cb) : cb(); } };
 </script>`;
 }
@@ -36,7 +38,7 @@ export function appCsp(frameAncestors: string) {
 }
 
 export class Apps {
-  private tickets = new Map<string, { appId: string; exp: number }>();
+  private tickets = new Map<string, { appId: string; exp: number; view: "full" | "small" | "tall" }>();
 
   constructor(private store: Store) {}
 
@@ -85,6 +87,14 @@ export class Apps {
     return this.store.put<MiniApp>("apps", { ...a, html: last.html, sha256: last.sha256, versions: a.versions.slice(0, -1), updatedAt: new Date().toISOString() });
   }
 
+  /** Put an app on Home (live), or take it off. */
+  async pin(name: string, on: boolean, size?: unknown) {
+    const a = await this.byName(name);
+    if (!a) return null;
+    const top = Math.max(0, ...(await this.list()).filter((x) => x.pinned).map((x) => x.order || 0));
+    return this.store.put<MiniApp>("apps", { ...a, pinned: on, size: size === "tall" ? "tall" : size === "small" ? "small" : a.size || "small", order: on ? (a.pinned ? a.order : top + 1) : undefined });
+  }
+
   async remove(id: string) {
     await this.store.remove("appState", id);
     return this.store.remove("apps", id);
@@ -100,11 +110,11 @@ export class Apps {
   }
 
   /** A short-lived, single-app link the frame loads (iframes can't send the device token). */
-  ticket(appId: string) {
+  ticket(appId: string, view: unknown = "full") {
     const now = Date.now();
     for (const [k, v] of this.tickets) if (v.exp < now) this.tickets.delete(k);
     const t = randomBytes(24).toString("base64url");
-    this.tickets.set(t, { appId, exp: now + TICKET_MS });
+    this.tickets.set(t, { appId, exp: now + TICKET_MS, view: view === "small" || view === "tall" ? view : "full" });
     return t;
   }
 
@@ -114,7 +124,7 @@ export class Apps {
     if (!t || t.exp < Date.now()) return null;
     const a = await this.store.get<MiniApp>("apps", t.appId);
     if (!a) return null;
-    const head = `<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">${bridge(a.data, await this.state(a.id))}`;
+    const head = `<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">${bridge(a.data, await this.state(a.id), t.view)}`;
     return /<head[^>]*>/i.test(a.html) ? a.html.replace(/<head[^>]*>/i, (m) => m + head) : head + a.html;
   }
 }
