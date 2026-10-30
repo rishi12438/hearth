@@ -230,7 +230,9 @@ test("rambles are numbered temporary channels that archive an hour after they're
   const watch = (await hub.addHook({ title: "Tickets", trigger: { type: "at", at: new Date(later).toISOString() }, action: { type: "notify", text: "On sale" } }, "you", { threadId: b.value!.thread.id })).value!;
   await hub.fire(watch, "test");
   expect((await hub.listThreads()).find((t: any) => t.id === b.value!.thread.id)!.archived).toBe(true);
-  expect((await store.all<any>("messages")).some((m) => m.text === "On sale" && m.threadId.startsWith("tm-"))).toBe(true);
+  const dm = (await store.all<any>("messages")).find((m) => m.text === "On sale")!;
+  expect([dm.threadId.startsWith("tm-"), dm.fromThreadId]).toEqual([true, b.value!.thread.id]); // links back to the ramble
+  expect((await hub.roster()).some((t: any) => t.lastDmAt === dm.createdAt)).toBe(true); // for the unread dot
   // Posting in an archived ramble brings it back.
   await hub.ramble("one more thing", a.value!.thread.id);
   const back = (await hub.listThreads()).find((t: any) => t.id === a.value!.thread.id);

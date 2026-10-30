@@ -393,8 +393,8 @@ function drawHome() {
       appIcon(a, 30), h("span", { class: "grow" }, a.title), h("small", null, mate(a.teammateId).name)))
       : [h("p", { class: "hempty" }, "Little apps your teammates build for you: flashcards, trackers, a today view. Ask for one anywhere, or say \"pin it to Home\".")],
       h("button", { class: "chev", "aria-label": "New app", on: { click: newApp } }, icon("plus", 20))),
-    section("dms", "Direct messages", team.map((t) => h("button", { class: `hrow ${t.needsYou || t.busy ? "unread" : ""}`, on: { click: () => { location.hash = `#t/${t.id}`; } } },
-      face(t, 30, t.state), h("span", { class: "grow" }, t.name), t.needsYou ? h("em", { class: "badge" }, String(t.needsYou)) : null))),
+    section("dms", "Direct messages", team.map((t) => h("button", { class: `hrow ${t.needsYou || t.busy || unreadDm(t) ? "unread" : ""}`, on: { click: () => { location.hash = `#t/${t.id}`; } } },
+      face(t, 30, t.state), h("span", { class: "grow" }, t.name), t.needsYou ? h("em", { class: "badge" }, String(t.needsYou)) : unreadDm(t) ? h("i", { class: "udot", "aria-label": "New message" }) : null))),
     archived.length ? section("archived", `Archived (${archived.length})`, archived.slice(0, 30).map((t) => h("button", { class: "hrow dim", on: { click: () => { location.hash = `#c/${t.id}`; } } },
       h("span", { class: "hicon" }, "#"), h("span", { class: "grow" }, channelName(t)), h("small", null, t.title)))) : null,
   );
@@ -414,7 +414,7 @@ function drawDms() {
   const team = [...(S.roster.length ? S.roster : S.teammates)].sort((a, b) => (b.at || "").localeCompare(a.at || ""));
   clear(el, team.map((t) => h("button", { class: "dmrow", on: { click: () => { location.hash = `#t/${t.id}`; } } },
     face(t, 44, t.state || "idle"),
-    h("span", { class: "grow" }, h("span", { class: "l1" }, h("b", null, t.name), t.at ? h("time", null, shortAgo(t.at)) : null),
+    h("span", { class: "grow" }, h("span", { class: "l1" }, h("b", null, t.name), unreadDm(t) ? h("i", { class: "udot" }) : null, t.at ? h("time", null, shortAgo(t.at)) : null),
       h("small", { class: t.needsYou ? "warn" : "" }, t.status || role(t))))),
     h("button", { class: "dmrow", on: { click: () => openTeammates() } }, h("span", { class: "uavatar ghost", style: "--s:44px" }, icon("plus", 18)), h("span", { class: "grow" }, h("b", null, "Add a teammate"))));
 }
@@ -581,7 +581,9 @@ function withMentions(text: string) {
 
 function plainMessage(m: any, grouped = false) {
   if (m.role === "user") return row(youWho(), m.createdAt, [h("div", { class: "mtext" }, m.text), (m.fileIds || []).map(fileCard)], grouped);
-  const body: (Node | null)[] = [m.proactive ? h("div", { class: "proline" }, icon("bell", 13), m.proactive.title) : null, richText(m.text)];
+  const from = m.fromThreadId ? S.threads.find((t) => t.id === m.fromThreadId) : null;
+  const body: (Node | null)[] = [m.proactive ? h("div", { class: "proline" }, icon("bell", 13), m.proactive.title) : null, richText(m.text),
+    from ? h("button", { class: "fromchip", on: { click: () => { location.hash = `#c/${from.id}`; } } }, `From #${channelName(from)}`, icon("chevron", 13)) : null];
   if (m.proactive) {
     const why = h("div", { class: "why", hidden: true }, m.proactive.why);
     body.push(h("button", { class: "whybtn", on: { click: () => { why.hidden = !why.hidden; } } }, "Why did I get this?"), why);
@@ -730,8 +732,16 @@ function chatMenu() {
 
 // ---------------- a DM with one teammate ----------------
 
+// When you last opened each DM (this device), for the unread dot.
+const seen: Record<string, string> = JSON.parse(localStorage.getItem("hearth.seen") || "{}");
+function markSeen(teammateId: string) {
+  seen[teammateId] = new Date().toISOString();
+  localStorage.setItem("hearth.seen", JSON.stringify(seen));
+}
+const unreadDm = (t: any) => !!t.lastDmAt && t.lastDmAt > (seen[t.id] || "");
+
 async function loadDm(id: string) {
-  try { S.dm = await call(`/api/teammates/${id}`); drawDm(); }
+  try { S.dm = await call(`/api/teammates/${id}`); markSeen(id); drawDm(); }
   catch (e) { if (e instanceof ApiError && e.status === 404) { location.hash = ""; return; } handleError(e); }
 }
 
@@ -1093,7 +1103,7 @@ function drawSkills() {
       h("span", { class: "grow" }, h("b", null, w.name, w.status === "proposed" ? h("span", { class: "tag" }, "proposed") : null, w.pinned ? h("span", { class: "tag" }, "pinned") : null),
         h("small", { class: "sub" }, w.description), h("small", { class: "sub" }, w.steps.map((x: any) => x.skill || x.teammate || "task").join(" → "))),
       w.status === "proposed" ? h("button", { class: "btn small primary", on: { click: async () => { await call(`/api/workflows/${w.id}/activate`, { body: {} }); toast("Switched on"); } } }, "Switch on")
-        : h("button", { class: "btn small primary", on: { click: async () => { closeSheet(); const r = await call("/api/threads", { body: { text: `Run my "${w.name}" workflow` } }); location.hash = `#chat/${r.thread.id}`; } } }, "Run"),
+        : h("button", { class: "btn small primary", on: { click: async () => { closeSheet(); const r = await call("/api/threads", { body: { text: `Run my "${w.name}" workflow` } }); location.hash = `#c/${r.thread.id}`; } } }, "Run"),
       h("button", { class: `star ${w.pinned ? "on" : ""}`, "aria-label": w.pinned ? "Unpin" : "Pin (never clean up)", on: { click: async () => { await call(`/api/workflows/${w.id}`, { method: "PATCH", body: { pinned: !w.pinned } }); } } }, icon("pin", 16)),
       h("button", { class: "iconbtn", "aria-label": "Delete workflow", on: { click: () => confirmSheet(`Delete ${w.name}?`, "The skills it uses stay.", "Delete", async () => { await call(`/api/workflows/${w.id}`, { method: "DELETE" }); }) } }, icon("trash", 16)))))] : null);
 }

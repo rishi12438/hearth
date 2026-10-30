@@ -35,13 +35,13 @@ sw.addEventListener("push", (e) => {
   let data: any = {};
   try { data = e.data?.json() ?? {}; } catch { data = { title: "Hearth", body: e.data?.text() }; }
   e.waitUntil(sw.registration.showNotification(data.title || "Hearth", {
-    body: data.body || "", tag: data.tag, icon: "/icon-192.png", badge: "/icon-192.png", data: { url: data.url || "/#chat" },
+    body: data.body || "", tag: data.tag, icon: "/icon-192.png", badge: "/icon-192.png", data: { url: data.url || "/" },
   }));
 });
 
 sw.addEventListener("notificationclick", (e) => {
   e.notification.close();
-  const target = e.notification.data?.url || "/#chat";
+  const target = e.notification.data?.url || "/";
   e.waitUntil((async () => {
     const wins = await sw.clients.matchAll({ type: "window", includeUncontrolled: true });
     const w = wins[0] as WindowClient | undefined;

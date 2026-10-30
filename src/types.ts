@@ -11,6 +11,8 @@ export type Message = Doc & {
   text: string;
   /** Set on messages the assistant sent first. */
   proactive?: { hookId: string; title: string; trigger: string; why: string };
+  /** A DM about an archived ramble (e.g. its watch fired): which ramble, so the app can link back. */
+  fromThreadId?: string;
   /** What the brain changed while answering. */
   did?: Done[];
   /** Memory ids the brain says it relied on. */

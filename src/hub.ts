@@ -831,7 +831,7 @@ export class Hub {
     }
     await this.log("approval.requested", ap.summary);
     this.emit("approval", ap);
-    await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: ap.threadId ? `/#chat/${ap.threadId}` : "/" });
+    await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: ap.threadId ? threadLink(ap.threadId) : "/" });
     return { value: ap };
   }
 
@@ -1002,7 +1002,7 @@ export class Hub {
             }
             done.push({ kind: "blocked", label: `Blocked: ${b.need}` });
             await this.log("job.blocked", `${b.need} (${b.unblock})`);
-            await this.push?.send({ title: "I'm stuck", body: `${b.need}. ${b.unblock}`, tag: where.jobId, url: where.threadId ? `/#chat/${where.threadId}` : "/" });
+            await this.push?.send({ title: "I'm stuck", body: `${b.need}. ${b.unblock}`, tag: where.jobId, url: where.threadId ? threadLink(where.threadId) : "/" });
             break;
           }
           case "approval.request": {
@@ -1222,6 +1222,13 @@ export class Hub {
     const hooks = (await this.store.all<Hook>("hooks")).filter((h) => h.status === "active" && h.nextAt && h.source !== "system").sort((a, b) => a.nextAt!.localeCompare(b.nextAt!));
     const first = (t: string) => t.split("\n").map((x) => x.replace(/^[-*•#\s]+/, "").trim()).find(Boolean) || "";
     const clip = (t: string, n = 90) => (t.length > n ? t.slice(0, n - 1) + "…" : t);
+    // When each teammate last wrote in your DM, so the app can show an unread dot.
+    const lastDm = new Map<string, string>();
+    for (const m of await this.store.all<Message>("messages")) {
+      if (m.role !== "assistant" || !m.threadId?.startsWith("tm-")) continue;
+      const id = m.threadId.slice(3);
+      if ((lastDm.get(id) || "") < m.createdAt) lastDm.set(id, m.createdAt);
+    }
     return team.map((t) => {
       const mine = jobs.filter((j) => j.teammateId === t.id);
       const pick = (...st: Job["status"][]) => mine.filter((j) => st.includes(j.status));
@@ -1243,7 +1250,7 @@ export class Hub {
         status = next ? `Next: ${next.title}, ${new Date(next.nextAt!).toLocaleString("en-US", { timeZone: prefs.tz, weekday: "short", hour: "numeric", minute: "2-digit" })}` : t.description;
       }
       return { id: t.id, name: t.name, color: t.color, description: t.description, builtIn: t.builtIn, state, status: clip(status), at,
-        busy: working.length + queued.length, needsYou: waiting.length + blocked.length };
+        busy: working.length + queued.length, needsYou: waiting.length + blocked.length, lastDmAt: lastDm.get(t.id) };
     });
   }
 
@@ -1507,12 +1514,12 @@ export class Hub {
       const home = h.threadId ? await this.store.get<Thread>("threads", h.threadId) : null;
       const threadId = home && !home.archivedAt ? home.id : teammate ? (await this.dmThread(teammate.id)).id : await this.updatesThread();
       const msg = await this.addMessage({
-        role: "assistant", teammateId: teammate?.id, threadId, text: late ? `${text}\n\n(Late: the hub was offline when this was due.)` : text,
+        role: "assistant", teammateId: teammate?.id, threadId, fromThreadId: home && home.id !== threadId ? home.id : undefined, text: late ? `${text}\n\n(Late: the hub was offline when this was due.)` : text,
         proactive: { hookId: h.id, title: h.title, trigger: reason, why: h.why }, did: did.length ? did : undefined,
       });
       await this.touchThread(msg.threadId!, { preview: msg.text.slice(0, 120) });
       await this.log("hook.fired", `${h.title}: sent`);
-      await this.push?.send({ title: h.title, body: msg.text.slice(0, 180), tag: h.id, url: `/#chat/${msg.threadId}` });
+      await this.push?.send({ title: h.title, body: msg.text.slice(0, 180), tag: h.id, url: threadLink(msg.threadId!) });
     } catch (err: any) {
       await this.log("hook.failed", `${h.title}: ${err.message}`);
     } finally {
@@ -1549,3 +1556,6 @@ export function shortLabel(label: unknown, task: string) {
   const out = words.slice(0, 7).join(" ");
   return (out.charAt(0).toUpperCase() + out.slice(1)).slice(0, 60) + (words.length > 7 ? "…" : "");
 }
+
+/** Where a notification about a thread opens in the app: a DM (#t/<teammate>) or a ramble (#c/<id>). */
+export const threadLink = (threadId: string) => (threadId.startsWith("tm-") ? `/#t/${threadId.slice(3)}` : `/#c/${threadId}`);

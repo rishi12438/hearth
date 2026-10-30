@@ -154,6 +154,8 @@ code { font-family: var(--mono); font-size: .86em; background: var(--surface-2);
 .hrow .hicon { width: 30px; text-align: center; font-size: 26px; font-weight: 500; color: var(--ink-2); flex: none; line-height: 1; }
 .hrow.unread { color: var(--ink); font-weight: 800; }
 .hrow.unread .hicon { color: var(--ink); font-weight: 700; }
+.udot { width: 9px; height: 9px; border-radius: 50%; background: var(--badge); flex: none; align-self: center; }
+.fromchip { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); font-size: 13px; font-weight: 600; }
 .hrow .grow { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hrow small { color: var(--muted); font-size: 13px; font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
 .hrow.dim { color: var(--muted); }
