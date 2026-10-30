@@ -255,7 +255,7 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
         break;
       }
       case "apps": {
-        const meta = (a: MiniApp) => ({ id: a.id, name: a.name, title: a.title, description: a.description, teammateId: a.teammateId, threadId: a.threadId, pinned: a.pinned, size: a.size || "small", order: a.order, createdAt: a.createdAt, updatedAt: a.updatedAt, versions: a.versions.length });
+        const meta = (a: MiniApp) => ({ id: a.id, name: a.name, title: a.title, description: a.description, teammateId: a.teammateId, threadId: a.threadId, pinned: a.pinned, size: a.size === ("tall" as string) ? "large" : a.size || "small", order: a.order, createdAt: a.createdAt, updatedAt: a.updatedAt, versions: a.versions.length });
         if (method === "GET" && !id) return json((await hub.apps.list()).map(meta).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))));
         const a = id ? await store.get<MiniApp>("apps", id) : null;
         if (!a) break;

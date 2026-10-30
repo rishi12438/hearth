@@ -13,7 +13,7 @@ import type { MiniApp, StoredFile, Activity, Approval, Done, Fact, Hook, Job, Lo
 import { Library, validateSkill, validateWorkflow, fill } from "./library.ts";
 import { cleanTile, cleanOptions, extractTiles, type Tile } from "./tiles.ts";
 import { Files, extractFiles } from "./files.ts";
-import { Apps } from "./apps.ts";
+import { Apps, appSize } from "./apps.ts";
 
 const DEFAULT_PREFS: Prefs = {
   userName: "", tz: "UTC", quietStart: "23:00", quietEnd: "07:30",
@@ -165,7 +165,7 @@ export class Hub {
       library: mode === "review" ? undefined : await this.searchLibrary(query),
       apps: mode === "review" ? undefined : (await this.apps.list()).map((a) => {
         const data = JSON.stringify(a.data ?? null);
-        return { name: a.name, title: a.title, does: a.description, onHome: a.pinned ? (a.size || "small") : false, data: data.length > 6000 ? `${data.slice(0, 6000)}… (truncated; send the full data when you change it)` : a.data };
+        return { name: a.name, title: a.title, does: a.description, onHome: a.pinned ? appSize(a.size) : false, data: data.length > 6000 ? `${data.slice(0, 6000)}… (truncated; send the full data when you change it)` : a.data };
       }),
     };
   }
@@ -1502,8 +1502,12 @@ export class Hub {
         return;
       }
       await this.countProactive(h);
+      // A hook made in a ramble talks there while the ramble is open. Once it's archived, it talks in the
+      // teammate's DM instead, so a background watch doesn't keep pulling an old ramble back into Active.
+      const home = h.threadId ? await this.store.get<Thread>("threads", h.threadId) : null;
+      const threadId = home && !home.archivedAt ? home.id : teammate ? (await this.dmThread(teammate.id)).id : await this.updatesThread();
       const msg = await this.addMessage({
-        role: "assistant", teammateId: teammate?.id, threadId: h.threadId || (await this.updatesThread()), text: late ? `${text}\n\n(Late: the hub was offline when this was due.)` : text,
+        role: "assistant", teammateId: teammate?.id, threadId, text: late ? `${text}\n\n(Late: the hub was offline when this was due.)` : text,
         proactive: { hookId: h.id, title: h.title, trigger: reason, why: h.why }, did: did.length ? did : undefined,
       });
       await this.touchThread(msg.threadId!, { preview: msg.text.slice(0, 120) });

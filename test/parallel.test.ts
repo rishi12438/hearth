@@ -226,6 +226,11 @@ test("rambles are numbered temporary channels that archive an hour after they're
   hub.clock = () => new Date(later);
   await hub.archiveQuietRambles();
   expect((await hub.listThreads()).every((t: any) => t.archived)).toBe(true);
+  // A background watch made in an archived ramble talks in the DM instead of pulling the ramble back.
+  const watch = (await hub.addHook({ title: "Tickets", trigger: { type: "at", at: new Date(later).toISOString() }, action: { type: "notify", text: "On sale" } }, "you", { threadId: b.value!.thread.id })).value!;
+  await hub.fire(watch, "test");
+  expect((await hub.listThreads()).find((t: any) => t.id === b.value!.thread.id)!.archived).toBe(true);
+  expect((await store.all<any>("messages")).some((m) => m.text === "On sale" && m.threadId.startsWith("tm-"))).toBe(true);
   // Posting in an archived ramble brings it back.
   await hub.ramble("one more thing", a.value!.thread.id);
   const back = (await hub.listThreads()).find((t: any) => t.id === a.value!.thread.id);

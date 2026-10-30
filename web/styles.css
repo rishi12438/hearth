@@ -479,9 +479,14 @@ a.place:active { background: var(--surface-2); }
 .appframe { position: absolute; inset: 0; padding-top: calc(var(--safe-t) + 68px); display: flex; }
 .appframe iframe { flex: 1; width: 100%; border: 0; background: #1a1d21; }
 .appframe p { margin: auto; }
-.pin { margin: 12px 14px 4px; border-radius: 18px; overflow: hidden; background: var(--surface); border: 1px solid var(--line); }
-.pinhead { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; text-align: left; font-size: 15px; border-bottom: 1px solid var(--line); }
-.pinbody { height: 260px; display: flex; }
-.pin.tall .pinbody { height: 460px; }
-.pinbody iframe { flex: 1; width: 100%; border: 0; background: #1a1d21; }
-.pinbody p { margin: auto; }
+/* Pinned apps: iPhone-style widgets under the shortcut tiles. The app fills the rounded box; its title sits underneath. */
+.widgets { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 14px; padding: 4px 16px 18px; border-bottom: 1px solid var(--line); container-type: inline-size; }
+#htiles:has(+ #pins .widgets) .tiles { border-bottom: 0; padding-bottom: 14px; }
+.widget { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.widget.wide, .widget.large { grid-column: 1 / -1; }
+.wbody { aspect-ratio: 1; border-radius: 22px; overflow: hidden; background: var(--surface); display: flex; }
+.widget.wide .wbody { aspect-ratio: auto; height: calc((100cqw - 14px) / 2); }
+.widget.large .wbody { aspect-ratio: auto; height: min(100cqw, 380px); }
+.wbody iframe { flex: 1; width: 100%; height: 100%; border: 0; background: transparent; }
+.wbody p { margin: auto; font-size: 13px; }
+.wcap { font-size: 12.5px; font-weight: 600; color: var(--muted); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 4px; }

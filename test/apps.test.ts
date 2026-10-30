@@ -77,7 +77,7 @@ test("teammates can pin apps to Home and take them off; apps can message their t
   const r = await hub.applyActions([{ type: "app.pin", name: "cards", size: "tall" }], "pin my cards");
   expect(r.done.some((d: any) => d.label.startsWith("Pinned to Home"))).toBe(true);
   let now = (await hub.apps.byName("cards"))!;
-  expect([now.pinned, now.size]).toEqual([true, "tall"]);
+  expect([now.pinned, now.size]).toEqual([true, "large"]); // "tall" is the old name
   await hub.applyActions([{ type: "app.unpin", name: "cards" }], "");
   expect((await hub.apps.byName("cards"))!.pinned).toBe(false);
   expect((await hub.askFromApp(a.id, "quiz me")).error).toBeUndefined();

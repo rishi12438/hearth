@@ -94,13 +94,17 @@ ACTIONS
     name: lowercase-dashes ("portuguese-flashcards"); title: what the user sees ("Portuguese flashcards").
     Apps can also call window.hearth.ask("...") to message you (e.g. a "Quiz me" or "Explain this" button); you get it as
     a DM tagged with the app's name, and can answer or change the app.
-- app.pin {name, size?: "small"|"tall"} / app.unpin {name} / app.delete {name}   pinned apps show LIVE on the user's Home
-    screen, above everything else. This is how you shape what the user sees: if they want something on Home ("pin my
+- app.pin {name, size?: "small"|"wide"|"large"} / app.unpin {name} / app.delete {name}   pinned apps show LIVE on the user's Home
+    screen, as widgets under the shortcut tiles. This is how you shape what the user sees: if they want something on Home ("pin my
     flashcards", "show my week at the top", "a counter for days without sugar"), build it as a mini app if needed, then pin it.
     Use your judgment: a today view, a dashboard, a progress widget, a checklist; anything a small page can show.
-    window.hearth.view tells the app where it is: "full" (whole screen), or on Home as "small" (about 260px tall) or "tall"
-    (about 460px). Make every app draw a compact version for small/tall that fits without scrolling (e.g. flashcards: just
-    the card and two buttons; tap the card for more), and hearth.open() to go full screen.
+    Widgets look like iPhone widgets. window.hearth.view tells the app where it is: "full" (whole screen), or on Home as
+    "small" (a half-width square, about 170x170px), "wide" (full width, about 360x170px) or "large" (full width, about
+    360x340px). Prefer small or wide; large only for something like a today view. In widget views draw ONE glanceable thing
+    with no scrolling, no header (Home shows the title under it) and no card or border of your own: the widget already has
+    rounded corners, so fill it edge to edge with your background, ~14px padding, text sized to fit (e.g. countdown: the
+    number and one line; flashcards: just the card, tap to flip, a small arrow for next). Use window.innerWidth/innerHeight
+    to fit. Anything more goes in "full"; hearth.open() opens it full screen.
     To keep an app current (today's plan, a countdown, prices), add a hook that refreshes its data with app.save on a schedule.
 - skill.view {skill, options}   when the user asks to change how a skill's tile looks ("show hourly", "in Fahrenheit",
     "compact"), save it as options on that skill, e.g. {"hourly":true,"units":"F","compact":true}. It sticks for next time.
@@ -359,7 +363,7 @@ function echoBrain(b: BrainInput): string {
   const now = new Date(ctx.nowIso);
 
   const apps = ((b.context as any).apps || []) as { name: string }[];
-  if (/\bpin\b/i.test(text) && apps.length) return `Pinned it to your Home.` + fence([{ type: "app.pin", name: apps[0].name, size: "tall" }]);
+  if (/\bpin\b/i.test(text) && apps.length) return `Pinned it to your Home.` + fence([{ type: "app.pin", name: apps[0].name, size: "wide" }]);
   if (/flash ?cards?|mini app|make (?:me )?an app/i.test(text)) {
     const cards = [["obrigado", "thank you"], ["bom dia", "good morning"], ["por favor", "please"], ["água", "water"], ["até logo", "see you later"]].map(([front, back]) => ({ front, back }));
     return "Built your flashcards. Tap to flip, and mark the ones you know." + fence([{ type: "app.save", name: "demo-flashcards", title: "Flashcards", description: "Tap to flip; it remembers what you know.", data: { cards } }])

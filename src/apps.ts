@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { sha256 } from "./auth.ts";
 import type { Store } from "./store/index.ts";
-import type { MiniApp, AppState } from "./types.ts";
+import type { MiniApp, AppState, AppSize } from "./types.ts";
 
 // Mini apps: small single-file pages a teammate builds for you (flashcards, a habit tracker, a packing list).
 //  - Code (html) and data (the cards) are separate, so "add 20 words" changes data without touching code.
@@ -16,9 +16,15 @@ export const MAX_DATA = 256_000;
 export const MAX_STATE = 48_000;
 const KEEP_VERSIONS = 10;
 const TICKET_MS = 10 * 60_000;
+type View = "full" | AppSize;
+
+/** A size from the model or the app ("tall" is the old name for large). */
+export function appSize(v: unknown, fallback: AppSize = "small"): AppSize {
+  return v === "small" || v === "wide" || v === "large" ? v : v === "tall" ? "large" : fallback;
+}
 
 /** The bridge every app gets: window.hearth = { data, state, view, save(state), ask(text), open(), ready(cb) }. */
-function bridge(data: unknown, state: unknown, view: "full" | "small" | "tall") {
+function bridge(data: unknown, state: unknown, view: View) {
   const j = (v: unknown) => JSON.stringify(v ?? null).replace(/</g, "\\u003c").replace(/\u2028|\u2029/g, " ");
   return `<script>
 window.hearth = { data: ${j(data)}, state: ${j(state)}, view: ${j(view)},
@@ -38,7 +44,7 @@ export function appCsp(frameAncestors: string) {
 }
 
 export class Apps {
-  private tickets = new Map<string, { appId: string; exp: number; view: "full" | "small" | "tall" }>();
+  private tickets = new Map<string, { appId: string; exp: number; view: View }>();
 
   constructor(private store: Store) {}
 
@@ -92,7 +98,7 @@ export class Apps {
     const a = await this.byName(name);
     if (!a) return null;
     const top = Math.max(0, ...(await this.list()).filter((x) => x.pinned).map((x) => x.order || 0));
-    return this.store.put<MiniApp>("apps", { ...a, pinned: on, size: size === "tall" ? "tall" : size === "small" ? "small" : a.size || "small", order: on ? (a.pinned ? a.order : top + 1) : undefined });
+    return this.store.put<MiniApp>("apps", { ...a, pinned: on, size: size === undefined ? appSize(a.size) : appSize(size, appSize(a.size)), order: on ? (a.pinned ? a.order : top + 1) : undefined });
   }
 
   async remove(id: string) {
@@ -114,7 +120,7 @@ export class Apps {
     const now = Date.now();
     for (const [k, v] of this.tickets) if (v.exp < now) this.tickets.delete(k);
     const t = randomBytes(24).toString("base64url");
-    this.tickets.set(t, { appId, exp: now + TICKET_MS, view: view === "small" || view === "tall" ? view : "full" });
+    this.tickets.set(t, { appId, exp: now + TICKET_MS, view: view === "full" || view === undefined ? "full" : appSize(view) });
     return t;
   }
 

@@ -353,7 +353,7 @@ function toggleSection(id: string) {
 }
 
 function renderHome() {
-  frame({ header: h("div"), body: h("div", null, h("div", { id: "pins" }), h("div", { id: "home" })), fab: true, purple: true });
+  frame({ header: h("div"), body: h("div", null, h("div", { id: "htiles" }), h("div", { id: "pins" }), h("div", { id: "home" })), fab: true, purple: true });
   pinsKey = "";
   drawPins();
   drawHeader();
@@ -361,8 +361,8 @@ function renderHome() {
 }
 
 function drawHome() {
-  const el = document.getElementById("home");
-  if (!el) return;
+  const el = document.getElementById("home"), top = document.getElementById("htiles");
+  if (!el || !top) return;
   const active = S.threads.filter((t) => !t.archived);
   const archived = S.threads.filter((t) => t.archived);
   const team = (S.roster.length ? S.roster : S.teammates.map((t) => ({ ...t, state: "idle", status: t.description })));
@@ -383,9 +383,9 @@ function drawHome() {
   const channelRow = (t: any) => h("button", { class: `hrow ${t.working || t.needsYou ? "unread" : ""}`, on: { click: () => { location.hash = `#c/${t.id}`; } } },
     h("span", { class: "hicon" }, "#"), h("span", { class: "grow" }, channelName(t)),
     t.needsYou ? h("em", { class: "badge" }, String(t.needsYou)) : t.working ? h("i", { class: "spin" }) : null);
+  clear(top, h("div", { class: "tiles" }, tiles.map(([ic, title, sub, fn, hot]) =>
+    h("button", { class: `tilebtn ${hot ? "hot" : ""}`, on: { click: fn } }, h("span", { class: "ti" }, icon(ic, 22), hot ? h("i", { class: "dot" }) : null), h("b", null, title), h("small", null, sub)))));
   clear(el,
-    h("div", { class: "tiles" }, tiles.map(([ic, title, sub, fn, hot]) =>
-      h("button", { class: `tilebtn ${hot ? "hot" : ""}`, on: { click: fn } }, h("span", { class: "ti" }, icon(ic, 22), hot ? h("i", { class: "dot" }) : null), h("b", null, title), h("small", null, sub)))),
     section("rambles", "Active rambles", active.length ? active.map(channelRow)
       : [h("p", { class: "hempty" }, "Tap + and ramble. Each ramble becomes a channel; it archives itself an hour after everything's done.")],
       h("button", { class: "chev", "aria-label": "New ramble", on: { click: () => { location.hash = "#c/new"; } } }, icon("plus", 20))),
@@ -1664,14 +1664,16 @@ window.addEventListener("message", (e: MessageEvent) => {
 });
 
 /** A sandboxed frame for an app (opaque origin, no network), registered so its messages are accepted. */
-async function appFrame(id: string, title: string, view: "full" | "small" | "tall" = "full") {
+async function appFrame(id: string, title: string, view: "full" | "small" | "wide" | "large" = "full") {
   const { url } = await call(`/api/apps/${id}/open`, { body: { view } });
   const f = h("iframe", { sandbox: "allow-scripts allow-forms", src: activeHub()!.url + url, title }) as HTMLIFrameElement;
   f.addEventListener("load", () => { for (const [w, x] of appFrames) if (x === id && !w.parent) appFrames.delete(w); if (f.contentWindow) appFrames.set(f.contentWindow, id); });
   return f;
 }
 
-/** Pinned mini apps run live at the top of Home. Redrawn only when the pins change, so they don't reload. */
+const pinSize = (a: any): "small" | "wide" | "large" => a.size === "wide" || a.size === "large" ? a.size : a.size === "tall" ? "large" : "small";
+
+/** Pinned mini apps run live on Home as widgets, under the shortcut tiles. Redrawn only when the pins change, so they don't reload. */
 let pinsKey = "";
 async function drawPins() {
   const el = document.getElementById("pins");
@@ -1680,13 +1682,13 @@ async function drawPins() {
   const key = pins.map((a) => `${a.id}:${a.size}:${a.updatedAt}`).join("|");
   if (key === pinsKey) return;
   pinsKey = key;
-  clear(el, pins.map((a) => {
-    const box = h("div", { class: "pinbody" });
-    appFrame(a.id, a.title, a.size === "tall" ? "tall" : "small").then((f) => clear(box, f)).catch(() => clear(box, h("p", { class: "muted center" }, "Couldn't open")));
-    return h("section", { class: `pin ${a.size === "tall" ? "tall" : ""}` },
-      h("button", { class: "pinhead", on: { click: () => { location.hash = `#a/${a.id}`; } } }, appIcon(a, 22), h("b", { class: "grow" }, a.title), icon("chevron", 16)),
-      box);
-  }));
+  clear(el, pins.length ? h("div", { class: "widgets" }, pins.map((a) => {
+    const size = pinSize(a);
+    const box = h("div", { class: "wbody" });
+    appFrame(a.id, a.title, size).then((f) => { f.setAttribute("scrolling", "no"); clear(box, f); }).catch(() => clear(box, h("p", { class: "muted center" }, "Couldn't open")));
+    return h("div", { class: `widget ${size}` }, box,
+      h("button", { class: "wcap", on: { click: () => { location.hash = `#a/${a.id}`; } } }, a.title));
+  })) : null);
 }
 
 /** Full screen: the app in a sandboxed frame (no network, no hub access), with a glass back button and menu. */
@@ -1720,7 +1722,7 @@ function appMenu(id: string) {
     h("div", { class: "stack" },
       a.versions ? h("button", { class: "btn ghost", on: { click: async () => { try { await call(`/api/apps/${id}/undo`, { body: {} }); closeSheet(); await loadApps(); renderApp(id); toast("Back to the previous version"); } catch (err) { handleError(err); } } } }, "Undo last change") : null,
       h("button", { class: "btn ghost", on: { click: async () => { await call(`/api/apps/${id}`, { method: "PATCH", body: { pinned: !a.pinned } }); closeSheet(); toast(a.pinned ? "Taken off Home" : "Pinned to Home"); } } }, a.pinned ? "Remove from Home" : "Pin to Home"),
-      a.pinned ? h("button", { class: "btn ghost", on: { click: async () => { await call(`/api/apps/${id}`, { method: "PATCH", body: { size: a.size === "tall" ? "small" : "tall" } }); closeSheet(); } } }, a.size === "tall" ? "Make it smaller on Home" : "Make it bigger on Home") : null,
+      a.pinned ? h("div", { class: "segmented" }, (["small", "wide", "large"] as const).map((z) => h("button", { class: pinSize(a) === z ? "on" : "", on: { click: async () => { await call(`/api/apps/${id}`, { method: "PATCH", body: { size: z } }); closeSheet(); } } }, z[0].toUpperCase() + z.slice(1)))) : null,
       h("button", { class: "btn ghost", on: { click: async () => { await call(`/api/apps/${id}/state`, { method: "PUT", body: { state: null } }); closeSheet(); renderApp(id); toast("Progress reset"); } } }, "Reset my progress"),
       h("button", { class: "btn danger", on: { click: async () => { if (!confirm(`Delete ${a.title}?`)) return; await call(`/api/apps/${id}`, { method: "DELETE" }); closeSheet(); location.hash = ""; } } }, "Delete app")),
   ]);

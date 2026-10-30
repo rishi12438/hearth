@@ -235,6 +235,8 @@ export type StoredFile = Doc & {
 };
 
 /** A mini app a teammate built: one html file plus its data. Runs sandboxed with no network. */
+/** How big an app is on Home: small = half-width square (~170px), wide = full width ~170px tall, large = full width ~340px. */
+export type AppSize = "small" | "wide" | "large";
 export type MiniApp = Doc & {
   name: string;
   title: string;
@@ -248,7 +250,7 @@ export type MiniApp = Doc & {
   jobId?: string;
   /** Shown live on Home, in this order and size. */
   pinned: boolean;
-  size?: "small" | "tall";
+  size?: AppSize;
   order?: number;
 };
 /** What an app saved for itself (flashcard progress, ticked boxes). */
