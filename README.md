@@ -30,9 +30,12 @@ Run one hub on an always-on box so routines fire while your laptop sleeps. Run a
 3. Teammates are a name plus a role prompt. If no teammate fits, the orchestrator creates one, which you can see and delete in the app.
 4. Voice: the app records audio and the hub transcribes it with Deepgram (`HEARTH_DEEPGRAM_API_KEY`), so the key never reaches the phone. Speech-to-text is an interface in [src/voice.ts](src/voice.ts), so other providers can be added.
 
-### How it looks
+### How it looks (like Slack)
 
-Inspired by Grok Bot and Muse. Home is a **roster of teammates**, not a list of chats. Each teammate has a face (a simple shape with expressive eyes) that acts out what it's doing: blinking when idle, glancing around while thinking, busy while working, looking at you with a warm ring when it needs your OK, sleepy when stuck, happy when done. Next to the face is a one-line status in the teammate's own voice. Hearth, the chief of staff, is pinned on top. You talk to Hearth in **one long conversation**: it hands the work out, "on it" rows turn into results and tiles, and approvals arrive as cards. Tap Hearth's face for the activity log. Tap any teammate to see everything it did, its routines, or to message it directly.
+- **Home** works like Slack's sidebar: a **Jump to…** search (⌘K) that finds teammates, chats and individual tasks, then your **group chats** and **direct messages** with each teammate. Each teammate has a face that acts out what it's doing (idle, thinking, working, waiting for you, stuck, done) and a one-line status in its own voice.
+- **Each ramble becomes a group chat.** Hearth posts each task as its own message ("@Scout find pottery studios near Priya"). Under each task you watch that teammate work, then see their reply, a tile preview and "1 reply". Approve and Try again sit right there.
+- **Tap a task to open its thread**, full screen on a phone and beside the chat on a wide screen. Read the full answer and reply to that teammate; follow-ups keep the thread as context.
+- **Direct messages** go straight to one teammate, skipping the orchestrator, and show its routines and the tasks it has in group chats.
 
 ### Parallel jobs
 

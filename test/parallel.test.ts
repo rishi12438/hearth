@@ -99,8 +99,8 @@ test("a second ramble mid-run is handled immediately", async () => {
   await Bun.sleep(100);
   const t0 = Date.now();
   plan([{ task: "quick", teammate: "Hearth" }]);
-  await hub.ramble("second");
-  await until(async () => (await store.all<any>("messages")).filter((m) => m.role === "assistant").length === 2, 3000);
+  const second = await hub.ramble("second");
+  await until(async () => (await store.all<any>("messages")).some((m) => m.role === "assistant" && m.threadId === second.value!.thread.id), 3000);
   expect(Date.now() - t0).toBeLessThan(700); // the orchestrator didn't queue behind running jobs
 });
 
@@ -147,4 +147,25 @@ test("the brain's tile action becomes a tile on the job", async () => {
   const r = await hub.applyActions([{ type: "tile", tile: "places", title: "Studios", data: { items: [{ name: "Mudlark", detail: "Sat" }] } }, { type: "tile", tile: "nope", data: {} }], "");
   expect(r.tiles.length).toBe(1);
   expect(r.tiles[0].type).toBe("places");
+});
+
+test("replying in a job's thread goes to the same teammate with the thread as context", async () => {
+  await setup();
+  process.env.FAKE_MS = "50";
+  plan([{ task: "find a restaurant", teammate: "Scout" }]);
+  const r = await hub.ramble("dinner");
+  await until(() => allDone(1));
+  const [root] = await jobs();
+  const rep = await hub.replyToJob(root.id, "anything vegetarian?");
+  expect(rep.value!.job.teammateId).toBe(root.teammateId);
+  expect(rep.value!.message.replyTo).toBe(root.id);
+  await until(() => allDone(2));
+  const follow = (await jobs()).find((j) => j.followsUp === root.id)!;
+  expect(follow.status).toBe("done");
+  expect(follow.result).toContain("used earlier result"); // the fixture sees "done: find a restaurant" in its context
+  // Each ramble is its own group chat, with Hearth's reply and one task message per job.
+  const msgs = (await store.all<any>("messages")).filter((m) => m.threadId === r.value!.thread.id);
+  expect(msgs.filter((m) => m.taskJobId === root.id).length).toBe(1);
+  const r2 = await hub.ramble("something else");
+  expect(r2.value!.thread.id).not.toBe(r.value!.thread.id);
 });

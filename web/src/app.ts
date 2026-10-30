@@ -3,18 +3,19 @@ import { activeHub, call, hubs, pair, removeHub, setActive, stream, normalizeUrl
 
 declare const __BUILD__: string;
 
-// Inspired by Grok Bot and Muse:
-// - Home is a roster of teammates, not a list of chats. Each has a face that acts out what it's doing and a
-//   one-line status in its own voice. Hearth, the chief of staff, is pinned on top.
-// - You ramble into Hearth's one long conversation; it hands the work out and teammates' faces come alive.
-// - Tap a teammate to see everything it did and its routines, or to message it directly.
+// Feels like Slack:
+// - Home is a sidebar: "Jump to…" search, your group chats (one per ramble) and direct messages (one per teammate).
+// - A ramble opens a new group chat. Hearth posts each task as its own message; under each task you watch the
+//   teammate working, then their reply ("1 reply"). Approve / Try again sit right there.
+// - Tap a task to open its thread and reply to that teammate. On a wide screen the thread opens beside the chat.
 // - Everything else (plans, memory, skills, brains, settings) is behind the menu.
 
 const S = {
   state: null as any,
   roster: [] as any[],
-  thread: null as any,          // main conversation: { thread, messages, jobs, approvals }
-  mateView: null as any,        // a teammate's page: { teammate, jobs, messages, routines, approvals }
+  threads: [] as any[],
+  chat: null as any,            // open group chat: { thread, messages, jobs, approvals }
+  dm: null as any,              // open DM: { teammate, jobs, messages, routines, approvals }
   teammates: [] as any[],
   skills: [] as any[],
   workflows: [] as any[],
@@ -24,20 +25,22 @@ const S = {
   plansFilter: "",
   today: null as any,
   conn: "connecting" as "live" | "connecting" | "offline",
-  planning: false,
+  planning: null as null | string, // chat id the orchestrator is reading
   updateReady: false,
   sheetOpen: false,
-  panel: null as null | "plans" | "memory" | "skills" | "activity",
+  panel: null as null | "plans" | "memory" | "skills",
 };
 
 let live: ReturnType<typeof stream> | null = null;
 const app = document.getElementById("app")!;
-type Route = { view: "home" } | { view: "hearth" } | { view: "mate"; id: string };
+type Route = { view: "home" } | { view: "chat"; id: string; job?: string } | { view: "dm"; id: string };
 const route = (): Route => {
-  if (location.hash === "#hearth") return { view: "hearth" };
-  const m = location.hash.match(/^#t\/([\w-]+)/);
-  return m ? { view: "mate", id: m[1] } : { view: "home" };
+  let m = location.hash.match(/^#c\/([\w-]+)(?:\/([\w-]+))?/);
+  if (m) return { view: "chat", id: m[1], job: m[2] };
+  m = location.hash.match(/^#t\/([\w-]+)/);
+  return m ? { view: "dm", id: m[1] } : { view: "home" };
 };
+const wide = () => matchMedia("(min-width: 980px)").matches;
 
 // ---------------- boot ----------------
 
@@ -45,31 +48,39 @@ async function boot() {
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
   const pairCode = new URLSearchParams(location.hash.slice(1)).get("pair");
   if (!activeHub() || pairCode) return renderPairing(pairCode || "");
-  if (/^#chat\//.test(location.hash)) history.replaceState(null, "", "#hearth"); // old links
+  if (/^#(chat\/|hearth)/.test(location.hash)) history.replaceState(null, "", "#"); // old links
   await Promise.all([refreshState(), loadTeammates(), loadSkills()]);
   show();
   connect();
   if (localStorage.getItem("hearth.autoLocation") === "1") shareLocation(true);
   window.addEventListener("hashchange", show);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) { checkForUpdate(); refresh(); live?.restart(); } });
+  document.addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openJump(); } });
   setInterval(checkForUpdate, 5 * 60_000);
-  setInterval(() => { if (route().view === "home") drawRoster(); }, 30_000); // keep "2m ago" honest
+  setInterval(() => { if (route().view === "home") drawHome(); }, 30_000);
 }
 
+let lastLayout = "";
 function show() {
   closeSheet();
   const r = route();
-  if (r.view === "home") renderHome();
-  else if (r.view === "hearth") renderHearth();
-  else renderMate(r.id);
+  // Re-render the skeleton only when the layout changes (opening a thread beside the chat keeps the chat in place).
+  const layout = r.view === "chat" ? `chat:${r.id}:${r.job && !wide() ? "thread" : wide() && r.job ? "split" : "chat"}` : r.view === "dm" ? `dm:${r.id}` : "home";
+  if (layout !== lastLayout) {
+    lastLayout = layout;
+    if (r.view === "home") renderHome();
+    else if (r.view === "dm") renderDm();
+    else renderChatLayout(r);
+  } else if (r.view === "chat") drawChat();
   refresh();
 }
 
 function refresh() {
   const r = route();
-  if (r.view === "home") loadRoster();
-  else if (r.view === "hearth") loadMain();
-  else loadMate(r.id);
+  loadRoster();
+  if (r.view === "home") loadThreads();
+  else if (r.view === "chat") loadChat(r.id);
+  else loadDm(r.id);
 }
 
 function connect() {
@@ -78,35 +89,40 @@ function connect() {
 }
 
 let rosterTimer: ReturnType<typeof setTimeout> | null = null;
-function soonRoster() { if (rosterTimer) return; rosterTimer = setTimeout(() => { rosterTimer = null; loadRoster(); }, 250); }
+function soon() {
+  if (rosterTimer) return;
+  rosterTimer = setTimeout(() => { rosterTimer = null; loadRoster(); if (route().view === "home") loadThreads(); }, 250);
+}
 
 function onEvent(e: { type: string; data?: any }) {
   const r = route();
+  const open = r.view === "chat" ? r.id : null;
   switch (e.type) {
     case "hello": if (e.data?.build && e.data.build !== __BUILD__) markUpdate(); return;
     case "unpaired": toast("This device was signed out of the hub.", "err"); removeHub(activeHub()!.id); location.reload(); return;
-    case "thinking": S.planning = !!e.data; if (r.view === "hearth") drawMain(); soonRoster(); return;
+    case "thinking": S.planning = e.data?.threadId || null; if (open) drawChat(); soon(); return;
     case "message":
-      if (r.view === "hearth" && e.data.threadId === "main" && S.thread) { if (!S.thread.messages.some((m: any) => m.id === e.data.id)) S.thread.messages.push(e.data); drawMain(); }
-      else if (r.view === "mate" && S.mateView && e.data.threadId === `tm-${r.id}`) loadMate(r.id);
-      else if (e.data.proactive && r.view !== "hearth") toast(e.data.proactive.title);
-      soonRoster();
+      if (open && S.chat && e.data.threadId === open) { upsert(S.chat.messages, e.data); drawChat(); }
+      else if (r.view === "dm" && e.data.threadId === `tm-${r.id}`) loadDm(r.id);
+      else if (e.data.proactive) toast(e.data.proactive.title);
+      soon();
       return;
     case "job":
-      if (r.view === "hearth" && S.thread && e.data.threadId === "main") { upsert(S.thread.jobs, e.data); drawMain(false); }
-      if (r.view === "mate" && S.mateView && e.data.teammateId === r.id) { upsert(S.mateView.jobs, e.data); drawMate(false); }
-      soonRoster();
+      if (open && S.chat && e.data.threadId === open) { upsert(S.chat.jobs, e.data); drawChat(false); }
+      if (r.view === "dm" && S.dm && e.data.teammateId === r.id) { upsert(S.dm.jobs, e.data); drawDm(false); }
+      soon();
       return;
     case "approval":
-      if (S.thread) upsert(S.thread.approvals || (S.thread.approvals = []), e.data);
-      if (S.mateView) upsert(S.mateView.approvals, e.data);
-      if (r.view === "hearth") drawMain(false); else if (r.view === "mate") drawMate(false);
-      if (e.data.status === "pending" && r.view === "home") toast(`Needs your OK: ${e.data.summary}`);
-      soonRoster();
+      if (S.chat) upsert(S.chat.approvals || (S.chat.approvals = []), e.data);
+      if (S.dm) upsert(S.dm.approvals, e.data);
+      if (open) drawChat(false); else if (r.view === "dm") drawDm(false);
+      else if (e.data.status === "pending") toast(`Needs your OK: ${e.data.summary}`);
+      soon();
       return;
-    case "teammates": loadTeammates().then(soonRoster); return;
+    case "threads": soon(); if (open && S.chat) call("/api/threads").then((l: any[]) => { const t = l.find((x) => x.id === open); if (t && S.chat) { S.chat.thread.title = t.title; drawHeader(); } }).catch(() => {}); return;
+    case "teammates": loadTeammates().then(soon); return;
     case "skills": loadSkills(); return;
-    case "hooks": if (S.panel === "plans") loadHooks(); if (r.view === "mate") loadMate(r.id); return;
+    case "hooks": if (S.panel === "plans") loadHooks(); if (r.view === "dm") loadDm(r.id); return;
     case "memory": if (S.panel === "memory") loadMemory(); return;
     case "scripts": refreshState(); return;
     case "reset": refresh(); return;
@@ -157,10 +173,416 @@ function markUpdate() {
   drawHeader();
 }
 
-const mate = (id?: string) => S.roster.find((t) => t.id === (id || "hearth")) || S.teammates.find((t) => t.id === (id || "hearth")) || { id: "hearth", name: "Hearth", color: "#F5A524", description: "" };
-
+const mate = (id?: string) => S.roster.find((t) => t.id === (id || "hearth")) || S.teammates.find((t) => t.id === (id || "hearth")) || { id: id || "hearth", name: "Hearth", color: "#F5A524", description: "" };
 const ROLE: Record<string, string> = { hearth: "Chief of staff", planner: "Time, reminders, routines", scout: "Finds things", money: "Bills and spending" };
 const role = (t: any) => ROLE[t.id] || String(t.description || "").split(/[.,:;]/)[0].slice(0, 32);
+const jobState = (j: any) => j.status === "working" ? "working" : j.status === "queued" ? "thinking" : j.status === "waiting" ? "waiting" : j.status === "blocked" ? "blocked" : "idle";
+
+async function loadRoster() {
+  try { S.roster = await call("/api/roster"); if (route().view === "home") drawHome(); else drawHeader(); } catch (e) { handleError(e); }
+}
+
+async function loadThreads() {
+  try { S.threads = await call("/api/threads"); if (route().view === "home") drawHome(); } catch (e) { handleError(e); }
+}
+
+// ---------------- header ----------------
+
+function drawHeader() {
+  const top = document.getElementById("top");
+  if (!top) return;
+  const r = route();
+  const pending = S.state?.pendingScripts || 0;
+  const status = h("i", { class: `status ${S.conn}`, title: S.conn });
+  const jump = h("button", { class: "iconbtn", "aria-label": "Jump to (⌘K)", on: { click: openJump } }, icon("search", 20));
+  if (r.view === "home") {
+    clear(top,
+      h("button", { class: "brand", on: { click: openHubs } }, h("b", null, S.state?.hub?.name || "Hearth"), status),
+      S.updateReady ? h("button", { class: "pill", on: { click: () => location.reload() } }, "Update") : null,
+      h("button", { class: "iconbtn menu", "aria-label": "Menu", on: { click: openMenu } }, icon("menu", 22), pending ? h("i", { class: "badge" }) : null));
+    return;
+  }
+  const back = h("button", { class: "iconbtn", "aria-label": "Back", on: { click: () => { location.hash = r.view === "chat" && r.job && !wide() ? `#c/${r.id}` : ""; } } }, icon("back", 22));
+  if (r.view === "dm") {
+    const t = rosterEntry(r.id);
+    clear(top, back, h("div", { class: "who-head" }, face(t, 30, t.state), h("span", { class: "grow" }, h("b", null, t.name, status), h("small", null, t.status || role(t)))), jump);
+    return;
+  }
+  if (r.job && !wide()) {
+    const j = S.chat?.jobs.find((x: any) => x.id === r.job);
+    clear(top, back, h("div", { class: "who-head" }, h("span", { class: "grow" }, h("b", null, "Thread"), h("small", null, j ? `${mate(j.teammateId).name} · ${S.chat?.thread?.title || ""}` : ""))), jump);
+    return;
+  }
+  const members = [...new Set((S.chat?.jobs || []).filter((j: any) => !j.parentId).map((j: any) => j.teammateId))] as string[];
+  clear(top, back,
+    h("button", { class: "who-head", on: { click: chatMenu } },
+      h("span", { class: "grow" }, h("b", null, "# ", S.chat?.thread?.title || "New ramble", status),
+        h("small", { class: "members" }, members.length ? [h("span", { class: "minis" }, members.slice(0, 5).map((id) => face(mate(id), 16, "idle"))), ` ${members.map((id) => mate(id).name).join(", ")}`] : "You and Hearth"))),
+    jump);
+}
+
+function rosterEntry(id: string) {
+  return S.roster.find((x) => x.id === id) || { ...mate(id), state: "idle", status: "" };
+}
+
+// ---------------- home: Slack-style sidebar ----------------
+
+function renderHome() {
+  clear(app,
+    h("header", { class: "top home-top", id: "top" }),
+    h("main", { class: "sidebar", id: "home" }),
+    h("footer", { class: "dock" }, h("div", { class: "composer-wrap", id: "composerwrap" })),
+  );
+  drawHeader();
+  drawHome();
+  renderComposer();
+}
+
+function drawHome() {
+  const el = document.getElementById("home");
+  if (!el) return;
+  const team = (S.roster.length ? S.roster : S.teammates.map((t) => ({ ...t, state: "idle", status: t.description })));
+  const sortedTeam = [...team].sort((a, b) => (a.id === "hearth" ? -1 : b.id === "hearth" ? 1 : (b.needsYou - a.needsYou) || (b.busy - a.busy)));
+  clear(el,
+    h("button", { class: "jumpbar", on: { click: openJump } }, icon("search", 17), h("span", null, "Jump to a teammate, chat or task…")),
+    h("div", { class: "side-label" }, h("span", null, "Group chats"), h("button", { class: "iconbtn small", "aria-label": "New ramble", on: { click: () => { location.hash = "#c/new"; } } }, icon("plus", 16))),
+    S.threads.length ? S.threads.slice(0, 40).map((t) => h("button", { class: "side-row", on: { click: () => { location.hash = `#c/${t.id}`; } } },
+      h("span", { class: "hash" }, "#"),
+      h("span", { class: "grow" }, h("b", null, t.title), t.preview ? h("small", null, t.preview) : null),
+      t.needsYou ? h("em", { class: "flag" }, `${t.needsYou}`) : t.working ? h("i", { class: "spin" }) : h("time", null, shortAgo(t.updatedAt)),
+      h("span", { class: "minis" }, (t.members || []).slice(0, 3).map((id: string) => face(mate(id), 18, "idle")))))
+      : h("p", { class: "side-empty" }, "Ramble below. Each ramble becomes a group chat with the teammates on it."),
+    h("div", { class: "side-label" }, h("span", null, "Direct messages")),
+    sortedTeam.map((t) => h("button", { class: `side-row dm st-${t.state}`, on: { click: () => { location.hash = `#t/${t.id}`; } } },
+      face(t, 34, t.state),
+      h("span", { class: "grow" }, h("b", null, t.name, h("small", { class: "role" }, role(t))), h("small", { class: t.needsYou ? "warnline" : "" }, t.status)))),
+    h("button", { class: "side-row add", on: { click: () => openTeammates() } }, h("span", { class: "face ghost", style: "--s:34px" }, icon("plus", 16)), h("span", { class: "grow" }, h("b", null, "Add a teammate"))),
+  );
+}
+
+// ---------------- jump to (⌘K) ----------------
+
+function openJump() {
+  const input = h("input", { class: "field", placeholder: "Teammate, chat or task", autocapitalize: "off", autocomplete: "off", spellcheck: false });
+  const results = h("div", { class: "jump-results" });
+  const go = (hash: string) => { closeSheet(); location.hash = hash; };
+  const draw = async () => {
+    const q = input.value.trim().toLowerCase();
+    if (!S.threads.length) S.threads = await call("/api/threads").catch(() => []);
+    const team = (S.roster.length ? S.roster : S.teammates).filter((t: any) => !q || `${t.name} ${t.description}`.toLowerCase().includes(q));
+    const chats = S.threads.filter((t: any) => !q || `${t.title} ${t.preview || ""}`.toLowerCase().includes(q)).slice(0, 8);
+    let tasks: any[] = [];
+    if (q.length >= 2) {
+      const all = await Promise.all(S.threads.slice(0, 15).map((t: any) => call(`/api/threads/${t.id}`).catch(() => null)));
+      tasks = all.filter(Boolean).flatMap((d: any) => d.jobs.filter((j: any) => !j.parentId && !j.followsUp && j.task.toLowerCase().includes(q)).map((j: any) => ({ j, title: d.thread.title }))).slice(0, 8);
+    }
+    clear(results,
+      team.length ? [h("small", null, "Teammates"), team.map((t: any) => h("button", { class: "jump-row", on: { click: () => go(`#t/${t.id}`) } }, face(t, 26, t.state || "idle"), h("span", { class: "grow" }, h("b", null, t.name), h("small", null, t.status || role(t)))))] : null,
+      chats.length ? [h("small", null, "Group chats"), chats.map((t: any) => h("button", { class: "jump-row", on: { click: () => go(`#c/${t.id}`) } }, h("span", { class: "hash" }, "#"), h("span", { class: "grow" }, h("b", null, t.title), h("small", null, shortAgo(t.updatedAt)))))] : null,
+      tasks.length ? [h("small", null, "Tasks"), tasks.map(({ j, title }) => h("button", { class: "jump-row", on: { click: () => go(`#c/${j.threadId}/${j.id}`) } }, face(mate(j.teammateId), 26, jobState(j)), h("span", { class: "grow" }, h("b", null, j.task), h("small", null, `${mate(j.teammateId).name} · # ${title}`))))] : null,
+      !team.length && !chats.length && !tasks.length ? h("p", { class: "muted" }, "Nothing matches.") : null);
+  };
+  let tmr: any;
+  input.addEventListener("input", () => { clearTimeout(tmr); tmr = setTimeout(draw, 120); });
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") (results.querySelector(".jump-row") as HTMLButtonElement | null)?.click(); });
+  openSheet("Jump to", [input, results]);
+  draw();
+  setTimeout(() => input.focus(), 250);
+}
+
+// ---------------- a group chat ----------------
+
+async function loadChat(id: string) {
+  if (id === "new") { S.chat = { thread: { id: "new", title: "New ramble" }, messages: [], jobs: [], approvals: [] }; drawChat(); setTimeout(() => document.getElementById("composer")?.focus(), 80); return; }
+  try { S.chat = await call(`/api/threads/${id}`); drawChat(); }
+  catch (e) { if (e instanceof ApiError && e.status === 404) { location.hash = ""; return; } handleError(e); }
+}
+
+function renderChatLayout(r: { id: string; job?: string }) {
+  S.chat = S.chat?.thread?.id === r.id ? S.chat : null;
+  const threadOnly = !!r.job && !wide();
+  clear(app,
+    h("div", { class: "chatcol" },
+      h("header", { class: "top chat-top", id: "top" }),
+      h("main", { class: "thread", id: threadOnly ? "threadview" : "chat" }),
+      h("footer", { class: "dock" }, h("div", { class: "composer-wrap", id: "composerwrap" }))),
+    wide() && r.job ? h("aside", { class: "threadside" }, h("div", { class: "threadside-head" }, h("b", null, "Thread"), h("button", { class: "iconbtn", "aria-label": "Close thread", on: { click: () => { location.hash = `#c/${r.id}`; } } }, icon("x", 18))),
+      h("div", { class: "thread", id: "threadview" }), h("div", { class: "dock" }, h("div", { class: "composer-wrap", id: "threadcomposer" }))) : null,
+  );
+  app.classList.toggle("split", wide() && !!r.job);
+  drawHeader();
+  renderComposer();
+  if (wide() && r.job) renderComposer("threadcomposer", r.job);
+  if (S.chat) drawChat();
+}
+
+function drawChat(stick = true) {
+  const r = route();
+  if (r.view !== "chat" || !S.chat) return;
+  drawHeader();
+  const chatEl = document.getElementById("chat");
+  if (chatEl) drawChannel(chatEl, stick);
+  const tv = document.getElementById("threadview");
+  if (tv && r.job) drawThread(tv, r.job, stick);
+}
+
+/** The channel: your rambles, Hearth's replies, and one message per task with its live thread preview underneath. */
+function drawChannel(el: HTMLElement, stick: boolean) {
+  const { messages } = S.chat;
+  const top = messages.filter((m: any) => !m.replyTo);
+  if (!top.length) {
+    clear(el, h("div", { class: "hello" },
+      h("h2", null, "Start a ramble"),
+      h("p", null, "Say it however it comes out. Hearth turns it into tasks and hands each to the right teammate."),
+      h("div", { class: "starters" }, [
+        "Remind me at 6 to call mom, find a cheap dinner spot, and text Sam that Tuesday works",
+        "What's the weather in Paris tomorrow, and find pottery studios near Priya in Oakland",
+        "I want to get to the gym 3 times a week, nag me if I don't",
+      ].map((s) => h("button", { on: { click: () => send(s) } }, s)))));
+    return;
+  }
+  const nodes: Node[] = [];
+  let lastDay = "";
+  for (const m of top) {
+    const day = new Date(m.createdAt).toDateString();
+    if (day !== lastDay) { nodes.push(h("div", { class: "day" }, dayLabel(m.createdAt))); lastDay = day; }
+    nodes.push(m.taskJobId ? taskMessage(m) : plainMessage(m));
+  }
+  if (S.planning === S.chat.thread.id) nodes.push(h("div", { class: "msg bot" }, h("div", { class: "who" }, face(mate("hearth"), 22, "thinking"), h("b", null, "Hearth")), h("div", { class: "thinking" }, h("i"), h("i"), h("i"), h("span", null, "turning that into tasks…"))));
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  clear(el, nodes);
+  if (stick || atBottom) requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
+}
+
+function plainMessage(m: any) {
+  if (m.role === "user") return h("div", { class: "msg me" }, h("div", { class: "bubble" }, m.text));
+  const t = mate(m.teammateId);
+  const parts: (Node | null)[] = [h("div", { class: "who" }, face(t, 22, "idle"), h("b", null, t.name), m.proactive ? h("span", { class: "tag" }, icon("bell", 11), m.proactive.title) : null, h("time", null, clockTime(m.createdAt))), richText(m.text)];
+  if (m.proactive) {
+    const why = h("div", { class: "why", hidden: true }, m.proactive.why);
+    parts.push(h("button", { class: "whybtn", on: { click: () => { why.hidden = !why.hidden; } } }, "Why?"), why);
+  }
+  return h("div", { class: `msg bot ${m.error ? "err" : ""}` }, parts);
+}
+
+/** "@Scout find a cheap dinner spot" + the thread preview: who's working, their reply, Approve / Try again, "2 replies". */
+function taskMessage(m: any) {
+  const j = S.chat.jobs.find((x: any) => x.id === m.taskJobId);
+  if (!j) return plainMessage(m);
+  const t = mate(j.teammateId);
+  const follow = S.chat.jobs.filter((x: any) => x.followsUp === j.id);
+  const latest = follow.length ? follow[follow.length - 1] : j;
+  const replies = (j.status === "done" || j.status === "failed" ? 1 : 0) + follow.length * 2;
+  const open = () => { location.hash = `#c/${S.chat.thread.id}/${j.id}`; };
+  const aps = (S.chat.approvals || []).filter((a: any) => (a.jobId === j.id || follow.some((f: any) => f.id === a.jobId)) && a.status === "pending");
+  let preview: Node;
+  if (latest.status === "working" || latest.status === "queued") {
+    preview = h("span", { class: "pv-text" }, h("b", null, t.name), latest.status === "working" ? " is working on it…" : latest.dependsOn?.length ? " is waiting for another task" : " is up next");
+  } else if (latest.status === "waiting") {
+    preview = h("span", { class: "pv-text warn" }, h("b", null, t.name), ` needs your OK: ${aps[0]?.summary || latest.task}`);
+  } else if (latest.status === "blocked") {
+    preview = h("span", { class: "pv-text warn" }, h("b", null, t.name), ` is stuck: ${latest.blocked?.need || ""}. ${latest.blocked?.unblock || ""}`);
+  } else {
+    const first = String(latest.result || "").split("\n").map((x) => x.replace(/^[-*•#\s]+/, "").trim()).find(Boolean) || "Done.";
+    preview = h("span", { class: `pv-text ${latest.status === "failed" ? "err" : ""}` }, h("b", null, t.name), latest.status === "failed" ? ` couldn't: ${first}` : ` ${first}`);
+  }
+  const actions = latest.status === "waiting" ? aps.map((a: any) => h("span", { class: "btns" },
+      h("button", { class: "btn ghost small", on: { click: (e: Event) => { e.stopPropagation(); decide(a.id, false); } } }, "No"),
+      h("button", { class: "btn primary small", on: { click: (e: Event) => { e.stopPropagation(); decide(a.id, true); } } }, "Approve")))
+    : latest.status === "blocked" ? h("button", { class: "btn primary small", on: { click: (e: Event) => { e.stopPropagation(); retry(latest.id); } } }, "Try again") : null;
+  const tiles = latest.status === "done" ? (latest.tiles || []).slice(0, 1) : [];
+  return h("div", { class: "msg bot task" },
+    h("div", { class: "who" }, face(mate("hearth"), 22, "idle"), h("b", null, "Hearth"), h("time", null, clockTime(m.createdAt))),
+    h("div", { class: "tasktext" }, h("span", { class: "mention", style: `--c:${t.color}` }, `@${t.name}`), " ", m.text),
+    h("button", { class: `preview st-${latest.status}`, on: { click: open } },
+      face(t, 24, jobState(latest)), preview,
+      replies ? h("small", { class: "replies" }, `${replies} repl${replies === 1 ? "y" : "ies"}`) : null, icon("chevron", 14)),
+    actions ? h("div", { class: "pv-actions" }, actions) : null,
+    tiles.length ? h("button", { class: "tilelink", on: { click: open } }, tiles.map(tile)) : null);
+}
+
+async function decide(id: string, yes: boolean) { try { await call(`/api/approvals/${id}/${yes ? "approve" : "reject"}`, { body: {} }); } catch (e) { handleError(e); } }
+async function retry(id: string) { try { await call(`/api/jobs/${id}/retry`, { body: {} }); } catch (e) { handleError(e); } }
+
+/** A task's thread: the task, the teammate's answer (tiles, what it did), approvals, then your replies and theirs. */
+function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
+  const j = S.chat.jobs.find((x: any) => x.id === jobId);
+  if (!j) { clear(el, h("p", { class: "muted center" }, "Loading…")); return; }
+  const t = mate(j.teammateId);
+  const follow = S.chat.jobs.filter((x: any) => x.followsUp === j.id);
+  const nodes: (Node | null)[] = [
+    h("div", { class: "thread-root" }, h("div", { class: "who" }, face(mate("hearth"), 22, "idle"), h("b", null, "Hearth")),
+      h("div", { class: "tasktext" }, h("span", { class: "mention", style: `--c:${t.color}` }, `@${t.name}`), " ", j.task)),
+    h("div", { class: "thread-sep" }, (j.status === "done" || j.status === "failed") || follow.length ? `${1 + follow.length * 2} repl${follow.length ? "ies" : "y"}` : ""),
+    answer(j),
+  ];
+  for (const f of follow) {
+    const m = S.chat.messages.find((x: any) => x.id === f.messageId);
+    if (m) nodes.push(h("div", { class: "msg me" }, h("div", { class: "bubble" }, m.text)));
+    nodes.push(answer(f));
+  }
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  clear(el, nodes);
+  if (stick || atBottom) requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
+}
+
+/** One teammate answer inside a thread (or "working…", or the Approve / stuck card). */
+function answer(j: any) {
+  const t = mate(j.teammateId);
+  const head = h("div", { class: "who" }, face(t, 22, jobState(j)), h("b", null, t.name), h("small", { class: "jobmeta" }, j.status === "done" || j.status === "failed" ? metaLine(j) : ""));
+  if (j.status === "queued" || j.status === "working") return h("div", { class: "msg bot" }, head, h("div", { class: "thinking" }, h("i"), h("i"), h("i"), h("span", null, j.status === "working" ? "working on it" : "up next")));
+  if (j.status === "waiting") {
+    const aps = (S.chat.approvals || []).filter((a: any) => a.jobId === j.id);
+    return h("div", { class: "msg bot" }, head, j.result ? richText(j.result) : null, aps.map((a: any) => h("div", { class: `approval-card ${a.status}` },
+      h("div", null, icon("lock", 14), h("b", null, a.summary)), a.details ? h("p", null, a.details) : null,
+      a.status === "pending" ? h("div", { class: "btns" }, h("button", { class: "btn ghost small", on: { click: () => decide(a.id, false) } }, "No"), h("button", { class: "btn primary small", on: { click: () => decide(a.id, true) } }, "Approve"))
+        : h("small", null, a.status === "done" ? "Approved and done" : a.status === "rejected" ? "You said no" : a.status))));
+  }
+  if (j.status === "blocked") return h("div", { class: "msg bot" }, head, h("div", { class: "approval-card" }, h("div", null, h("b", null, j.blocked?.need)), j.blocked?.why ? h("p", null, j.blocked.why) : null,
+    h("div", { class: "btns" }, h("span", { class: "grow" }, j.blocked?.unblock), h("button", { class: "btn primary small", on: { click: () => retry(j.id) } }, "Try again"))));
+  const tiles = j.status === "done" ? (j.tiles || []) : [];
+  const did = (j.did || []).filter((d: any) => ["hook", "memory", "skill", "place"].includes(d.kind)).map((d: any) => d.label);
+  const canSave = j.status === "done" && !j.followsUp && (j.how === "fresh" || j.how === "repaired") && !(j.did || []).some((d: any) => d.kind === "skill");
+  return h("div", { class: `msg bot ${j.status === "failed" ? "err" : ""}` }, head,
+    tiles.length && (j.how === "skill" || j.how === "workflow") ? null : richText(j.status === "failed" ? `Couldn't do it: ${j.result || "it failed"}` : j.result || "Done."),
+    tiles.map(tile),
+    did.length ? h("div", { class: "did-line" }, icon("check", 12), did.join(" · ")) : null,
+    canSave ? h("button", { class: "link small", on: { click: async (e: Event) => {
+      const b = e.currentTarget as HTMLButtonElement; b.disabled = true;
+      try { const sk = await call(`/api/jobs/${j.id}/save-skill`, { body: {} }); toast(`Saved skill ${sk.name}`); b.textContent = "Saved as skill"; loadSkills(); } catch (err) { b.disabled = false; handleError(err); }
+    } } }, "Save as skill") : null);
+}
+
+function metaLine(j: any) {
+  if (j.how === "skill" || j.how === "workflow") {
+    const n = (j.skillId ? S.skills.find((x) => x.id === j.skillId) : S.workflows.find((x) => x.id === j.workflowId))?.name;
+    return `${n ? `used ${n} · ` : ""}${secs(j.durationMs)} · ${money(j.costUsd)}`;
+  }
+  return [j.escalated ? "escalated" : null, secs(j.durationMs), money(j.costUsd)].filter(Boolean).join(" · ");
+}
+
+function chatMenu() {
+  const t = S.chat?.thread;
+  if (!t || t.id === "new") return;
+  const doneAll = S.chat.jobs.length && S.chat.jobs.filter((j: any) => !j.parentId && !j.followsUp).every((j: any) => j.status === "done");
+  const lastRamble = [...S.chat.messages].reverse().find((m: any) => m.jobIds?.length && !m.replyTo);
+  openSheet(`# ${t.title}`, [
+    h("div", { class: "stack" },
+      doneAll && lastRamble ? h("button", { class: "btn ghost", on: { click: async () => {
+        try { const wf = await call("/api/workflows/from-ramble", { body: { messageId: lastRamble.id } }); toast(`Saved workflow ${wf.name}. Say “run ${wf.name}” any time.`); closeSheet(); loadSkills(); } catch (e) { handleError(e); }
+      } } }, icon("repeat", 16), "Save as workflow") : null,
+      h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet("Delete this chat?", "Its messages and results are deleted. Reminders it set keep working.", "Delete", async () => { await call(`/api/threads/${t.id}`, { method: "DELETE" }); location.hash = ""; }) } }, icon("trash", 16), "Delete chat")),
+  ]);
+}
+
+// ---------------- a direct message with one teammate ----------------
+
+async function loadDm(id: string) {
+  try { S.dm = await call(`/api/teammates/${id}`); drawDm(); }
+  catch (e) { if (e instanceof ApiError && e.status === 404) { location.hash = ""; return; } handleError(e); }
+}
+
+function renderDm() {
+  S.dm = null;
+  clear(app,
+    h("header", { class: "top chat-top", id: "top" }),
+    h("main", { class: "thread", id: "dm" }),
+    h("footer", { class: "dock" }, h("div", { class: "composer-wrap", id: "composerwrap" })),
+  );
+  drawHeader();
+  renderComposer();
+}
+
+function drawDm(stick = true) {
+  const el = document.getElementById("dm");
+  const d = S.dm;
+  if (!el || !d) return;
+  drawHeader();
+  const t = rosterEntry(d.teammate.id);
+  const direct = new Set(d.messages.map((m: any) => m.id));
+  const items: { at: string; nodes: Node[] }[] = [];
+  for (const m of d.messages) if (!d.jobs.some((j: any) => j.messageId === m.id)) items.push({ at: m.createdAt, nodes: [plainMessage(m)] });
+  for (const j of d.jobs.filter((j: any) => direct.has(j.messageId))) {
+    const m = d.messages.find((x: any) => x.id === j.messageId);
+    S.chat = S.chat || { approvals: [], jobs: [], messages: [] };
+    items.push({ at: j.createdAt, nodes: [h("div", { class: "msg me" }, h("div", { class: "bubble" }, m.text)), answerIn(d, j)] });
+  }
+  items.sort((a, b) => a.at.localeCompare(b.at));
+  const elsewhere = d.jobs.filter((j: any) => !direct.has(j.messageId) && !j.followsUp).slice(-6).reverse();
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  clear(el,
+    h("div", { class: "mate-hero" }, face(t, 64, t.state), h("h2", null, t.name), h("p", null, t.description || role(t)),
+      d.routines.length ? h("div", { class: "routines" }, h("small", null, "Routines"), d.routines.map((r: any) =>
+        h("button", { class: `routine ${r.status}`, on: { click: () => openHook(r) } }, icon(r.trigger.type === "at" ? "clock" : "repeat", 14), h("span", null, r.title), h("small", null, r.status === "paused" ? "paused" : r.when)))) : null,
+      elsewhere.length ? h("div", { class: "routines" }, h("small", null, "In group chats"), elsewhere.map((j: any) =>
+        h("button", { class: "routine", on: { click: () => { location.hash = `#c/${j.threadId}/${j.id}`; } } }, face(t, 18, jobState(j)), h("span", null, j.task), h("small", null, j.status === "done" ? shortAgo(j.finishedAt || j.updatedAt) : j.status)))) : null),
+    items.length ? items.flatMap((x) => x.nodes) : h("p", { class: "muted center" }, `Message ${t.name} directly, or ramble and Hearth will hand things over.`));
+  if (stick || atBottom) requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
+}
+
+/** answer() reads approvals from the open chat; in a DM, use the DM's. */
+function answerIn(d: any, j: any) {
+  const saved = S.chat;
+  S.chat = { ...(saved || {}), approvals: d.approvals, jobs: d.jobs, messages: d.messages };
+  try { return answer(j); } finally { S.chat = saved; }
+}
+
+// ---------------- composer ----------------
+
+function renderComposer(targetId = "composerwrap", threadJob?: string) {
+  const wrap = document.getElementById(targetId);
+  if (!wrap) return;
+  const r = route();
+  const inThread = threadJob || (r.view === "chat" && r.job && !wide() ? r.job : undefined);
+  const placeholder = S.conn === "offline" ? "Hub is offline"
+    : inThread ? "Reply in thread…"
+    : r.view === "dm" ? `Message ${mate(r.id).name}`
+    : r.view === "chat" && r.id !== "new" ? "Add to this chat…"
+    : "Ramble. Hearth will hand it out…";
+  const draftKey = `hearth.draft.${targetId}`;
+  const box = h("textarea", { rows: 1, value: sessionStorage.getItem(draftKey) || "", placeholder, enterKeyHint: "send",
+    on: {
+      input: () => { autosize(box); sessionStorage.setItem(draftKey, box.value); swap(); },
+      keydown: (e: KeyboardEvent) => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); submit(); } },
+    } }) as HTMLTextAreaElement;
+  if (targetId === "composerwrap") box.id = "composer";
+  const submit = () => { const v = box.value; box.value = ""; sessionStorage.removeItem(draftKey); box.dispatchEvent(new Event("input")); send(v, inThread); };
+  const action = h("button", { class: "act", "aria-label": "Hold to talk" });
+  const swap = () => {
+    const hasText = !!box.value.trim();
+    action.classList.toggle("send", hasText);
+    clear(action, icon(hasText ? "send" : "mic", 20));
+    action.setAttribute("aria-label", hasText ? "Send" : "Hold to talk");
+  };
+  action.addEventListener("pointerdown", (e) => { if (box.value.trim()) return; e.preventDefault(); micTarget = inThread; onMicDown(); });
+  action.addEventListener("pointerup", () => { if (recording) onMicUp(); });
+  action.addEventListener("pointerleave", () => { if (recording && Date.now() - pressAt > 350) onMicUp(); });
+  action.addEventListener("click", () => { if (box.value.trim()) submit(); });
+  clear(wrap, h("div", { class: "rec", id: targetId === "composerwrap" ? "rec" : undefined, hidden: true }), h("div", { class: "composer", id: targetId === "composerwrap" ? "composerbox" : undefined }, box, action));
+  swap();
+  autosize(box);
+}
+
+let micTarget: string | undefined;
+
+async function send(text: string, threadJob?: string) {
+  const t = text.trim();
+  if (!t) return;
+  const r = route();
+  try {
+    if (threadJob) { await call(`/api/jobs/${threadJob}/reply`, { body: { text: t } }); if (r.view === "chat") loadChat(r.id); return; }
+    if (r.view === "dm") { await call(`/api/teammates/${r.id}/messages`, { body: { text: t } }); loadDm(r.id); return; }
+    const inChat = r.view === "chat" && r.id !== "new";
+    const res = inChat ? await call(`/api/threads/${r.id}/messages`, { body: { text: t } }) : await call("/api/threads", { body: { text: t } });
+    S.planning = res.thread.id;
+    if (!inChat) { S.chat = { thread: res.thread, messages: [res.message], jobs: [], approvals: [] }; location.hash = `#c/${res.thread.id}`; return; }
+    upsert(S.chat.messages, res.message);
+    drawChat();
+  } catch (e) {
+    toast(`Not sent: ${(e as Error).message}`, "err");
+    handleError(e);
+  }
+}
 
 // ---------------- faces: simple shapes, expressive eyes; the face acts out the state ----------------
 
@@ -178,183 +600,6 @@ function face(t: any, size = 44, state = "idle") {
     h("span", { class: "eyes" }, h("i", { class: "eye" }), h("i", { class: "eye" })));
 }
 
-// ---------------- header ----------------
-
-function drawHeader() {
-  const top = document.getElementById("top");
-  if (!top) return;
-  const r = route();
-  const pending = S.state?.pendingScripts || 0;
-  const status = h("i", { class: `status ${S.conn}`, title: S.conn });
-  if (r.view === "home") {
-    clear(top,
-      h("button", { class: "brand", on: { click: openHubs } }, h("b", null, S.state?.hub?.name || "Hearth"), status),
-      S.updateReady ? h("button", { class: "pill", on: { click: () => location.reload() } }, "Update") : null,
-      h("button", { class: "iconbtn menu", "aria-label": "Menu", on: { click: openMenu } }, icon("menu", 22), pending ? h("i", { class: "badge" }) : null));
-    return;
-  }
-  const t = r.view === "hearth" ? rosterEntry("hearth") : rosterEntry(r.id);
-  const snippet = r.view === "hearth" ? hearthSnippet() : t.status;
-  clear(top,
-    h("button", { class: "iconbtn", "aria-label": "Back", on: { click: () => { location.hash = ""; } } }, icon("back", 22)),
-    h("button", { class: "who-head", on: { click: r.view === "hearth" ? openWork : () => {} } },
-      face(t, 34, t.state), h("span", { class: "grow" }, h("b", null, t.name, status), h("small", null, snippet || role(t)))),
-    r.view === "hearth" ? h("button", { class: "iconbtn", "aria-label": "Activity", on: { click: openWork } }, icon("eye", 20)) : h("span", { class: "iconbtn" }));
-}
-
-function rosterEntry(id: string) {
-  return S.roster.find((x) => x.id === id) || { ...mate(id), state: "idle", status: "" };
-}
-
-function hearthSnippet() {
-  if (S.planning) return "Sorting out who does what…";
-  const busy = S.roster.filter((t) => t.busy).length;
-  const needs = S.roster.reduce((n, t) => n + (t.needsYou || 0), 0);
-  if (needs) return `${needs} thing${needs > 1 ? "s" : ""} need${needs > 1 ? "" : "s"} you`;
-  if (busy) return `${busy} teammate${busy > 1 ? "s" : ""} working`;
-  return "Chief of staff";
-}
-
-// ---------------- home: the roster ----------------
-
-async function loadRoster() {
-  try { S.roster = await call("/api/roster"); if (route().view === "home") drawRoster(); else drawHeader(); } catch (e) { handleError(e); }
-}
-
-function renderHome() {
-  clear(app,
-    h("header", { class: "top home-top", id: "top" }),
-    h("main", { class: "roster-wrap" },
-      h("div", { class: "greet" }, h("h1", null, greeting(S.state?.prefs?.userName)), h("p", null, "Tell Hearth anything. It hands the work to the right teammate.")),
-      h("div", { class: "roster", id: "roster" })),
-    h("footer", { class: "dock" }, h("div", { class: "composer-wrap", id: "composerwrap" })),
-  );
-  drawHeader();
-  drawRoster();
-  renderComposer();
-}
-
-function drawRoster() {
-  const el = document.getElementById("roster");
-  if (!el) return;
-  const list = S.roster.length ? S.roster : S.teammates.map((t) => ({ ...t, state: "idle", status: t.description }));
-  const [hearth, ...rest] = [...list].sort((a, b) => (a.id === "hearth" ? -1 : b.id === "hearth" ? 1 : 0));
-  const order = (t: any) => (t.needsYou ? 0 : t.busy ? 1 : t.state === "done" ? 2 : 3);
-  rest.sort((a, b) => order(a) - order(b) || (b.at || "").localeCompare(a.at || ""));
-  const row = (t: any, big = false) => h("button", { class: `mate-row ${big ? "big" : ""} st-${t.state}`, on: { click: () => { location.hash = t.id === "hearth" ? "#hearth" : `#t/${t.id}`; } } },
-    face(t, big ? 58 : 48, t.state),
-    h("span", { class: "grow" },
-      h("span", { class: "line1" }, h("b", null, t.name), h("small", { class: "role" }, role(t)), t.at ? h("time", null, shortAgo(t.at)) : null),
-      h("span", { class: `line2 ${t.needsYou ? "warnline" : ""}` }, t.id === "hearth" ? (hearthSnippetFor(list) || t.status) : t.status)));
-  clear(el,
-    hearth ? row(hearth, true) : null,
-    h("div", { class: "roster-label" }, "Team"),
-    rest.map((t) => row(t)),
-    h("button", { class: "mate-row add", on: { click: () => openTeammates() } }, h("span", { class: "face ghost", style: "--s:48px" }, icon("plus", 18)), h("span", { class: "grow" }, h("b", null, "Add a teammate"), h("span", { class: "line2" }, "Or just ask. Hearth adds one when nobody fits."))));
-}
-
-function hearthSnippetFor(list: any[]) {
-  const needs = list.reduce((n, t) => n + (t.needsYou || 0), 0);
-  const busy = list.filter((t) => t.busy).map((t) => t.name);
-  if (S.planning) return "Sorting out who does what…";
-  if (needs) return `${needs} thing${needs > 1 ? "s" : ""} need${needs > 1 ? "" : "s"} you`;
-  if (busy.length) return `${busy.slice(0, 3).join(", ")} ${busy.length > 1 ? "are" : "is"} on it`;
-  return "";
-}
-
-// ---------------- Hearth: the one main conversation ----------------
-
-async function loadMain() {
-  try {
-    const [d] = await Promise.all([call("/api/threads/main").catch(async (e) => { if (e instanceof ApiError && e.status === 404) return { thread: { id: "main", title: "Hearth" }, messages: [], jobs: [], approvals: [] }; throw e; }), loadRoster()]);
-    S.thread = d;
-    drawMain();
-  } catch (e) { handleError(e); }
-}
-
-function renderHearth() {
-  clear(app,
-    h("header", { class: "top chat-top", id: "top" }),
-    h("main", { class: "thread", id: "thread" }),
-    h("footer", { class: "dock" }, h("div", { class: "composer-wrap", id: "composerwrap" })),
-  );
-  drawHeader();
-  renderComposer();
-}
-
-/** One timeline: what you said, Hearth's reply, live "on it" rows that become results, and approval cards. */
-function drawMain(stick = true) {
-  const el = document.getElementById("thread");
-  if (!el || !S.thread) return;
-  drawHeader();
-  const { messages } = S.thread;
-  const jobs = (S.thread.jobs || []).filter((j: any) => !j.parentId);
-  if (!messages.length) {
-    clear(el, h("div", { class: "hello" },
-      h("div", { class: "bigface" }, face(mate("hearth"), 84, "idle")),
-      h("h2", null, "What's on your mind?"),
-      h("p", null, "Ramble. Several things at once is fine; I'll hand them out."),
-      h("div", { class: "starters" }, [
-        "Remind me at 6 to call mom, and find somewhere cheap for dinner tonight",
-        "What's the weather in Paris tomorrow?",
-        "I want to get to the gym 3 times a week, nag me if I don't",
-      ].map((s) => h("button", { on: { click: () => send(s) } }, s)))));
-    return;
-  }
-  type Item = { at: string; node: Node };
-  const items: Item[] = [];
-  for (const m of messages) items.push({ at: m.createdAt, node: message(m) });
-  for (const j of jobs) items.push({ at: j.finishedAt || j.startedAt || j.createdAt, node: jobItem(j) });
-  items.sort((a, b) => a.at.localeCompare(b.at));
-  const nodes: Node[] = [];
-  let lastDay = "";
-  for (const it of items) {
-    const day = new Date(it.at).toDateString();
-    if (day !== lastDay) { nodes.push(h("div", { class: "day" }, dayLabel(it.at))); lastDay = day; }
-    nodes.push(it.node);
-  }
-  if (S.planning) nodes.push(h("div", { class: "event" }, face(mate("hearth"), 22, "thinking"), h("span", null, "Hearth is sorting out who does what…")));
-  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-  clear(el, nodes);
-  if (stick || atBottom) requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
-}
-
-function message(m: any) {
-  if (m.role === "user") return h("div", { class: "msg me" }, h("div", { class: "bubble" }, m.text));
-  const t = mate(m.teammateId);
-  const parts: (Node | null)[] = [h("div", { class: "who" }, face(t, 22, "idle"), h("b", null, t.name), m.proactive ? h("span", { class: "tag" }, icon("bell", 11), m.proactive.title) : null), richText(m.text)];
-  if (m.proactive) {
-    const why = h("div", { class: "why", hidden: true }, m.proactive.why);
-    parts.push(h("button", { class: "whybtn", on: { click: () => { why.hidden = !why.hidden; } } }, "Why?"), why);
-  }
-  return h("div", { class: `msg bot ${m.error ? "err" : ""}` }, parts);
-}
-
-/** A job in the timeline: a live "on it" row while it works, the teammate's result when done, a card if it needs you. */
-function jobItem(j: any) {
-  const t = mate(j.teammateId);
-  if (j.status === "queued" || j.status === "working") {
-    return h("button", { class: "event live", on: { click: () => { location.hash = `#t/${t.id}`; } } }, face(t, 22, j.status === "working" ? "working" : "thinking"),
-      h("span", null, h("b", null, t.name), j.status === "working" ? " is on it: " : (j.dependsOn?.length ? " is waiting for another job: " : " is up next: "), j.task));
-  }
-  if (j.status === "waiting" || j.status === "blocked") return needsYou(j);
-  const tiles = j.status === "done" ? (j.tiles || []) : [];
-  const did = (j.did || []).filter((d: any) => ["hook", "memory", "skill", "place"].includes(d.kind)).map((d: any) => d.label);
-  return h("div", { class: `msg bot ${j.status === "failed" ? "err" : ""}` },
-    h("div", { class: "who" }, face(t, 22, "idle"), h("b", null, t.name), h("small", { class: "jobmeta" }, metaLine(j))),
-    tiles.length && (j.how === "skill" || j.how === "workflow") ? null : richText(j.status === "failed" ? `Couldn't do “${j.task}”: ${j.result || "it failed"}` : j.result || "Done."),
-    tiles.map(tile),
-    did.length ? h("div", { class: "did-line" }, icon("check", 12), did.join(" · ")) : null);
-}
-
-function metaLine(j: any) {
-  if (j.how === "skill" || j.how === "workflow") {
-    const n = (j.skillId ? S.skills.find((x) => x.id === j.skillId) : S.workflows.find((x) => x.id === j.workflowId))?.name;
-    return `${n ? `used ${n} · ` : ""}${secs(j.durationMs)} · ${money(j.costUsd)}`;
-  }
-  return [j.escalated ? "escalated" : null, secs(j.durationMs), money(j.costUsd)].filter(Boolean).join(" · ");
-}
-
 function secs(ms?: number) {
   if (!ms) return "";
   return ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))}s` : `${Math.round(ms / 60_000)}m`;
@@ -362,124 +607,6 @@ function secs(ms?: number) {
 
 function money(c: number | null | undefined) {
   return c === null || c === undefined ? "$?" : c === 0 ? "$0" : c < 0.01 ? "<$0.01" : `$${c.toFixed(2)}`;
-}
-
-/** Muse-style: tap Hearth's face for the activity log of the main conversation. */
-function openWork() {
-  S.panel = "activity";
-  openSheet("Activity", h("div", { id: "agents-body" }), { onClose: () => { S.panel = null; } });
-  drawAgents();
-}
-
-// ---------------- a teammate's page ----------------
-
-async function loadMate(id: string) {
-  try {
-    const [d] = await Promise.all([call(`/api/teammates/${id}`), loadRoster()]);
-    S.mateView = d;
-    drawMate();
-  } catch (e) { if (e instanceof ApiError && e.status === 404) { location.hash = ""; return; } handleError(e); }
-}
-
-function renderMate(id: string) {
-  S.mateView = null;
-  clear(app,
-    h("header", { class: "top chat-top", id: "top" }),
-    h("main", { class: "thread", id: "thread" }),
-    h("footer", { class: "dock" }, h("div", { class: "composer-wrap", id: "composerwrap" })),
-  );
-  drawHeader();
-  renderComposer();
-}
-
-function drawMate(stick = true) {
-  const el = document.getElementById("thread");
-  const d = S.mateView;
-  if (!el || !d) return;
-  drawHeader();
-  const t = rosterEntry(d.teammate.id);
-  // Each piece of work reads top to bottom: who asked, then what came of it.
-  const items: { at: string; node: Node[] }[] = [];
-  const direct = new Set(d.messages.map((m: any) => m.id));
-  for (const m of d.messages) if (!d.jobs.some((j: any) => j.messageId === m.id)) items.push({ at: m.createdAt, node: [message(m)] });
-  for (const j of d.jobs) {
-    const ask = direct.has(j.messageId)
-      ? message(d.messages.find((m: any) => m.id === j.messageId))
-      : h("div", { class: "event asked" }, face(mate("hearth"), 18, "idle"), h("span", null, h("b", null, "Hearth"), " asked: ", j.task));
-    items.push({ at: j.createdAt, node: [ask, j.status === "queued" && !direct.has(j.messageId) ? null : jobItem(j)].filter(Boolean) as Node[] });
-  }
-  items.sort((a, b) => a.at.localeCompare(b.at));
-  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-  clear(el,
-    h("div", { class: "mate-hero" }, face(t, 72, t.state), h("h2", null, t.name), h("p", null, t.description || role(t)),
-      d.routines.length ? h("div", { class: "routines" }, h("small", null, "Routines"), d.routines.map((r: any) =>
-        h("button", { class: `routine ${r.status}`, on: { click: () => openHook(r) } }, icon(r.trigger.type === "at" ? "clock" : "repeat", 14), h("span", null, r.title), h("small", null, r.status === "paused" ? "paused" : r.when)))) : null),
-    items.length ? items.flatMap((x) => x.node) : h("p", { class: "muted center" }, `Nothing yet. Message ${t.name} directly, or ramble to Hearth and it'll hand things over.`));
-  if (stick || atBottom) requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
-}
-
-function chatMenu() {
-  openSheet("Hearth", [
-    h("p", { class: "muted" }, "Clearing the conversation deletes its messages and results. Reminders and routines keep working."),
-    h("div", { class: "stack" },
-      h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet("Clear the conversation?", "Messages and job results are deleted.", "Clear", async () => { await call(`/api/threads/main`, { method: "DELETE" }); location.hash = ""; }) } }, icon("trash", 16), "Clear conversation")),
-  ]);
-}
-
-// ---------------- composer & voice ----------------
-
-function renderComposer() {
-  const wrap = document.getElementById("composerwrap");
-  if (!wrap) return;
-  const r = route();
-  const who = r.view === "mate" ? mate(r.id).name : "Hearth";
-  const placeholder = S.conn === "offline" ? "Hub is offline" : r.view === "mate" ? `Message ${who}` : "Tell Hearth anything…";
-  const box = h("textarea", { id: "composer", rows: 1, value: sessionStorage.getItem("hearth.draft") || "", placeholder, enterKeyHint: "send",
-    on: {
-      input: () => { autosize(box); sessionStorage.setItem("hearth.draft", box.value); swap(); },
-      keydown: (e: KeyboardEvent) => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); send(box.value); } },
-    } });
-  const action = h("button", { class: "act", id: "act", "aria-label": "Hold to talk" });
-  const swap = () => {
-    const hasText = !!box.value.trim();
-    action.classList.toggle("send", hasText);
-    clear(action, icon(hasText ? "send" : "mic", 20));
-    action.setAttribute("aria-label", hasText ? "Send" : "Hold to talk");
-  };
-  action.addEventListener("pointerdown", (e) => { if (box.value.trim()) return; e.preventDefault(); onMicDown(); });
-  action.addEventListener("pointerup", () => { if (recording) onMicUp(); });
-  action.addEventListener("pointerleave", () => { if (recording && Date.now() - pressAt > 350) onMicUp(); });
-  action.addEventListener("click", () => { if (box.value.trim()) send(box.value); });
-  clear(wrap, h("div", { class: "rec", id: "rec", hidden: true }), h("div", { class: "composer", id: "composerbox" }, box, action));
-  swap();
-  autosize(box);
-}
-
-async function send(text: string) {
-  const t = text.trim();
-  if (!t) return;
-  const box = document.getElementById("composer") as HTMLTextAreaElement | null;
-  if (box) { box.value = ""; box.dispatchEvent(new Event("input")); }
-  sessionStorage.removeItem("hearth.draft");
-  const r = route();
-  try {
-    if (r.view === "mate") {
-      await call(`/api/teammates/${r.id}/messages`, { body: { text: t } });
-      loadMate(r.id);
-      return;
-    }
-    const res = await call("/api/threads/main/messages", { body: { text: t } }).catch(async (e) => {
-      if (e instanceof ApiError && e.status === 400 && /No such chat/.test(e.message)) return call("/api/threads", { body: { text: t } });
-      throw e;
-    });
-    S.planning = true;
-    if (r.view !== "hearth") { location.hash = "#hearth"; return; }
-    if (S.thread && !S.thread.messages.some((m: any) => m.id === res.message.id)) S.thread.messages.push(res.message);
-    drawMain();
-  } catch (e) {
-    if (box) { box.value = t; box.dispatchEvent(new Event("input")); }
-    handleError(e);
-  }
 }
 
 // ---- tiles: fixed, good-looking components fed with data; options come from the skill ("hourly", "units") ----
@@ -514,86 +641,6 @@ function tile(t: any) {
   }
   return null;
 }
-
-/** One compact row for anything waiting on you: an Approve, or "I'm stuck". */
-function needsYou(j: any) {
-  const t = mate(j.teammateId);
-  if (j.status === "blocked" && j.blocked) {
-    return h("div", { class: "needs" },
-      h("div", { class: "who" }, face(t, 22, j.status === "blocked" ? "blocked" : "waiting"), h("b", null, t.name), h("span", { class: "tag warn" }, "stuck")),
-      h("p", null, h("b", null, j.blocked.need), j.blocked.why ? ` · ${j.blocked.why}` : ""),
-      h("div", { class: "needsrow" }, h("span", null, j.blocked.unblock),
-        h("button", { class: "btn primary small", on: { click: async () => { try { await call(`/api/jobs/${j.id}/retry`, { body: {} }); } catch (e) { handleError(e); } } } }, "Try again")));
-  }
-  const aps = [...(S.thread?.approvals || []), ...(S.mateView?.approvals || [])].filter((a: any) => a.jobId === j.id && a.status === "pending");
-  return h("div", { class: "needs" },
-    h("div", { class: "who" }, face(t, 22, j.status === "blocked" ? "blocked" : "waiting"), h("b", null, t.name), h("span", { class: "tag warn" }, "needs your OK")),
-    aps.map((a: any) => {
-      const decide = async (yes: boolean) => { try { await call(`/api/approvals/${a.id}/${yes ? "approve" : "reject"}`, { body: {} }); } catch (e) { handleError(e); } };
-      return h("div", { class: "needsrow" }, h("span", null, a.summary),
-        h("span", { class: "btns" }, h("button", { class: "btn ghost small", on: { click: () => decide(false) } }, "No"), h("button", { class: "btn primary small", on: { click: () => decide(true) } }, "Approve")));
-    }));
-}
-
-/** The side panel: every agent on this chat, live. */
-function drawAgents() {
-  const targets = [document.getElementById("agents-body")].filter(Boolean) as HTMLElement[];
-  if (!targets.length || !S.thread) return;
-  const all = S.thread.jobs || [];
-  const top = all.filter((j: any) => !j.parentId);
-  const groups: [string, any[]][] = [
-    ["Working", top.filter((j: any) => j.status === "working" || j.status === "queued")],
-    ["Needs you", top.filter((j: any) => j.status === "waiting" || j.status === "blocked")],
-    ["Done", top.filter((j: any) => j.status === "done" || j.status === "failed")],
-  ];
-  const spent = top.reduce((n: number, j: any) => n + (j.costUsd || 0), 0);
-  for (const el of targets) {
-    clear(el,
-      h("div", { class: "agentshead" }, h("b", null, "What everyone is doing"), top.length ? h("small", null, `${top.length} jobs · ${money(spent)}`) : null,
-        null),
-      !top.length ? h("p", { class: "muted small" }, "When you ramble, the jobs and who's on them show up here.") : null,
-      groups.filter(([, list]) => list.length).map(([title, list]) => [h("h4", null, title), list.map((j) => agentRow(j, all.filter((x: any) => x.parentId === j.id)))]),
-      saveWorkflowButton(top),
-      h("button", { class: "link danger", on: { click: chatMenu } }, "Clear conversation"));
-  }
-}
-
-/** When a ramble's jobs are all done, save the whole thing as a workflow for next time (no model). */
-function saveWorkflowButton(top: any[]) {
-  const last = [...(S.thread?.messages || [])].reverse().find((m: any) => m.jobIds?.length);
-  if (!last) return null;
-  const mine = top.filter((j: any) => last.jobIds.includes(j.id));
-  if (!mine.length || !mine.every((j: any) => j.status === "done")) return null;
-  return h("button", { class: "btn ghost", on: { click: async (e: Event) => {
-    const b = e.currentTarget as HTMLButtonElement; b.disabled = true;
-    try { const wf = await call("/api/workflows/from-ramble", { body: { messageId: last.id } }); toast(`Saved workflow ${wf.name}. Say “run ${wf.name}” any time.`); loadSkills(); b.textContent = "Saved as workflow"; }
-    catch (err) { b.disabled = false; handleError(err); }
-  } } }, icon("repeat", 16), "Save as workflow");
-}
-
-function agentRow(j: any, subs: any[]) {
-  const t = mate(j.teammateId);
-  const st = j.status;
-  const skill = j.skillId ? S.skills.find((x) => x.id === j.skillId) : null;
-  const wf = j.workflowId ? S.workflows.find((x) => x.id === j.workflowId) : null;
-  const status = st === "working" ? (j.tier === "heavy" ? "working · heavy" : "working") : st === "queued" ? (j.dependsOn?.length ? "waiting for another job" : "queued")
-    : st === "waiting" ? "needs your OK" : st === "blocked" ? "stuck" : st === "failed" ? "failed"
-    : j.how === "skill" || j.how === "workflow" ? `used ${(skill || wf)?.name || j.how} · ${secs(j.durationMs)} · ${money(j.costUsd)}`
-    : `${j.how === "repaired" ? "fixed a skill · " : ""}${j.escalated ? "escalated · " : ""}${secs(j.durationMs)} · ${money(j.costUsd)}`;
-  const canSave = st === "done" && (j.how === "fresh" || j.how === "repaired") && !(j.did || []).some((d: any) => d.kind === "skill");
-  return h("div", { class: `agent ${st}` },
-    h("div", { class: "agentline" }, face(t, 30, st === "working" ? "working" : st === "queued" ? "thinking" : st === "waiting" ? "waiting" : st === "blocked" ? "blocked" : "idle"),
-      h("span", { class: "grow" }, h("b", null, t.name), h("small", null, status)),
-      st === "working" || st === "queued" ? h("i", { class: "spin" }) : st === "done" ? h("span", { class: "ok" }, icon("check", 14)) : null),
-    h("div", { class: "agenttask" }, j.task),
-    subs.length ? h("div", { class: "subs" }, subs.map((x: any) => h("div", { class: "sub" }, face(mate(x.teammateId), 16, x.status === "working" ? "working" : "idle"), h("span", null, x.task), x.status === "done" ? icon("check", 12) : h("i", { class: "spin small" })))) : null,
-    canSave ? h("button", { class: "link", on: { click: async (e: Event) => {
-      const b = e.currentTarget as HTMLButtonElement; b.disabled = true; b.textContent = "Saving…";
-      try { const sk = await call(`/api/jobs/${j.id}/save-skill`, { body: {} }); toast(`Saved skill ${sk.name}`); b.textContent = "Saved as skill"; loadSkills(); }
-      catch (err) { b.disabled = false; b.textContent = "Save as skill"; handleError(err); }
-    } } }, "Save as skill") : null);
-}
-
 
 // ---------------- voice ----------------
 
@@ -649,16 +696,16 @@ function stopRecording(sendIt: boolean) {
     r.stream.getTracks().forEach((t) => t.stop());
     if (!sendIt || !chunks.length) return;
     const blob = new Blob(chunks, { type: (r.mimeType || "audio/webm").split(";")[0] });
-    const box = document.getElementById("composer") as HTMLTextAreaElement;
+    const box = (document.getElementById("composer") as HTMLTextAreaElement | null) || document.createElement("textarea");
     box.placeholder = "Transcribing…";
     try {
       const hub = activeHub()!;
       const res = await fetch(hub.url + "/api/transcribe", { method: "POST", headers: { Authorization: `Bearer ${hub.token}`, "Content-Type": blob.type }, body: blob });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Transcription failed");
-      if (data.text) send(data.text); else toast("I didn't catch that", "err");
+      if (data.text) send(data.text, micTarget); else toast("I didn't catch that", "err");
     } catch (e) { handleError(e); }
-    finally { box.placeholder = "Ramble. I'll sort it out."; }
+    finally { box.placeholder = "Ramble. Hearth will hand it out…"; }
   };
   r.stop();
 }
@@ -675,7 +722,7 @@ function openMenu() {
       h("span", { class: "grow" }, h("b", null, st?.hub?.name || "Hub"), h("small", null, `${st?.hub?.storage || "?"}${st?.voice ? " · voice on" : ""}`)),
       h("i", { class: `status ${S.conn}` })),
     h("nav", null,
-      item("chat", "Talk to Hearth", "The main conversation", () => { location.hash = "#hearth"; }),
+      item("search", "Jump to…", "Find a teammate, chat or task (⌘K)", openJump),
       item("bell", "Plans", "Reminders, routines, watches", openPlans),
       item("brain", "Memory", "What I know about you", openMemory),
       item("users", "Teammates", "Who the orchestrator can hand work to", openTeammates),

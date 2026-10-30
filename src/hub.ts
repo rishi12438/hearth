@@ -224,8 +224,18 @@ export class Hub {
 
   // ---------- rambles: you talk, the orchestrator hands out jobs ----------
 
+  /** Group chats (one per ramble), newest first, with who's in them and whether anything is running or needs you. */
   async listThreads() {
-    return (await this.store.all<Thread>("threads")).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const jobs = (await this.store.all<Job>("jobs")).filter((j) => !j.parentId);
+    return (await this.store.all<Thread>("threads"))
+      .filter((t) => !t.id.startsWith("tm-") && t.id !== "main")
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .map((t) => {
+        const mine = jobs.filter((j) => j.threadId === t.id);
+        return { ...t, members: [...new Set(mine.map((j) => j.teammateId))],
+          working: mine.filter((j) => j.status === "working" || j.status === "queued").length,
+          needsYou: mine.filter((j) => j.status === "waiting" || j.status === "blocked").length };
+      });
   }
 
   async threadDetail(id: string) {
@@ -251,22 +261,28 @@ export class Hub {
     this.emit("threads");
   }
 
-  /** Hearth's one long main conversation (Muse-style). Rambles and proactive messages land here. */
-  async mainThread() {
-    const t = await this.store.get<Thread>("threads", "main");
+  /** Your direct messages with a teammate (Slack DM). Proactive messages from hooks born outside a chat land in Hearth's. */
+  async dmThread(teammateId: string) {
+    const id = `tm-${teammateId}`;
+    const t = await this.store.get<Thread>("threads", id);
     if (t) return t;
     const now = this.clock().toISOString();
-    return this.store.put<Thread>("threads", { id: "main", createdAt: now, updatedAt: now, title: "Hearth" });
+    return this.store.put<Thread>("threads", { id, createdAt: now, updatedAt: now, title: (await this.teammate(teammateId))?.name || "Hearth" });
   }
 
-  private async updatesThread() { return (await this.mainThread()).id; }
+  private async updatesThread() { return (await this.dmThread("hearth")).id; }
 
   /** Stores what you said right away; the orchestrator and teammates work in the background. */
   async ramble(text: string, threadId?: string) {
     const clean = text.trim().slice(0, 8000);
     if (!clean) return { error: "Say something first." };
-    const thread = threadId ? await this.store.get<Thread>("threads", threadId) : await this.mainThread();
-    if (!thread) return { error: "No such chat." };
+    // Every new ramble starts its own group chat (Slack-style); a ramble inside a chat continues it.
+    let thread = threadId ? await this.store.get<Thread>("threads", threadId) : null;
+    if (threadId && !thread) return { error: "No such chat." };
+    if (!thread) {
+      const now = this.clock().toISOString();
+      thread = await this.store.put<Thread>("threads", { id: randomUUID(), createdAt: now, updatedAt: now, title: clean.split(/\s+/).slice(0, 6).join(" ") });
+    }
     const m = await this.addMessage({ role: "user", text: clean, threadId: thread.id });
     await this.setPrefs({ lastUserAt: m.createdAt });
     await this.touchThread(thread.id, { preview: clean.slice(0, 120) });
@@ -327,7 +343,10 @@ export class Hub {
     }
     for (const w of (Array.isArray(plan.newWorkflows) ? plan.newWorkflows : []).slice(0, 2)) await this.proposeWorkflow(w);
 
+    if (plan.title && !thread.id.startsWith("tm-") && thread.title === m.text.split(/\s+/).slice(0, 6).join(" ")) await this.touchThread(thread.id, { title: String(plan.title).slice(0, 60) });
+    // Hearth's short reply, then one message per task; each task's thread (the teammate working, replies) hangs under it.
     await this.addMessage({ role: "assistant", teammateId: "hearth", threadId: thread.id, text: String(plan.reply || "On it.").slice(0, 1000), jobIds: jobs.map((j) => j.id) });
+    for (const j of jobs) await this.addMessage({ role: "assistant", teammateId: "hearth", threadId: thread.id, text: j.task, taskJobId: j.id });
     for (const j of jobs) this.emit("job", j);
     this.pump(m.id); // runs in the background; a new ramble is handled right away
   }
@@ -352,7 +371,8 @@ export class Hub {
       }
       if (deps.every((d) => d.status === "done")) {
         this.started.add(j.id);
-        const earlier = deps.map((d) => `## ${d.task}\n${d.result || ""}`).join("\n\n");
+        let earlier = deps.map((d) => `## ${d.task}\n${d.result || ""}`).join("\n\n");
+        if (j.followsUp) earlier = await this.threadContext(j.followsUp, j.id);
         this.runJob(j, msg?.text || j.task, earlier).finally(() => this.started.delete(j.id));
       }
     }
@@ -430,6 +450,27 @@ export class Hub {
     } catch (err: any) {
       await finish({ status: "failed", how: "fresh", tier, escalated, result: err.message });
     }
+  }
+
+  /** Reply inside a job's thread: the same teammate picks it up, with the thread so far as context. */
+  async replyToJob(rootId: string, text: string) {
+    const root = await this.store.get<Job>("jobs", rootId);
+    const clean = text.trim().slice(0, 4000);
+    if (!root || root.followsUp || root.parentId) return { error: "No such thread." };
+    if (!clean) return { error: "Say something first." };
+    const m = await this.addMessage({ role: "user", text: clean, threadId: root.threadId, replyTo: root.id, teammateId: root.teammateId });
+    await this.setPrefs({ lastUserAt: m.createdAt });
+    const job = await this.store.put<Job>("jobs", { ...this.doc({}), threadId: root.threadId, messageId: m.id, task: clean, teammateId: root.teammateId, status: "queued", effort: root.effort, followsUp: root.id } as Job);
+    await this.store.put<Message>("messages", { ...m, jobIds: [job.id] });
+    this.emit("job", job);
+    this.pump(m.id);
+    return { value: { message: m, job } };
+  }
+
+  /** The thread so far (root job, earlier replies and answers), for a follow-up. */
+  private async threadContext(rootId: string, beforeJobId: string) {
+    const jobs = (await this.store.all<Job>("jobs")).filter((j) => (j.id === rootId || j.followsUp === rootId) && j.id !== beforeJobId);
+    return jobs.map((j) => `## ${j.followsUp ? "User followed up" : "Original job"}: ${j.task}\n${j.result || "(no answer yet)"}`).join("\n\n");
   }
 
   /** A heavy job's sub-agents: run in parallel (under the same caps), then the heavy model merges their results. */
@@ -1047,9 +1088,7 @@ export class Hub {
     const clean = text.trim().slice(0, 4000);
     if (!mate) return { error: "No such teammate." };
     if (!clean) return { error: "Say something first." };
-    const tid = `tm-${mate.id}`;
-    const now = this.clock().toISOString();
-    if (!(await this.store.get<Thread>("threads", tid))) await this.store.put<Thread>("threads", { id: tid, createdAt: now, updatedAt: now, title: mate.name });
+    const tid = (await this.dmThread(mate.id)).id;
     const m = await this.addMessage({ role: "user", text: clean, threadId: tid, teammateId: mate.id });
     await this.setPrefs({ lastUserAt: m.createdAt });
     const job = await this.store.put<Job>("jobs", { ...this.doc({}), threadId: tid, messageId: m.id, task: clean, teammateId: mate.id, status: "queued", effort: "light" } as Job);

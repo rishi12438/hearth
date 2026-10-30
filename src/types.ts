@@ -21,6 +21,12 @@ export type Message = Doc & {
   threadId?: string;
   /** Jobs the orchestrator handed out for this ramble. */
   jobIds?: string[];
+  /** Set on Hearth's task messages in a group chat: the job this message hands out (its thread lives under it). */
+  taskJobId?: string;
+  /** Files you attached to this message. */
+  fileIds?: string[];
+  /** A reply inside a job's thread (Slack-style); the value is the thread's root job id. */
+  replyTo?: string;
   error?: boolean;
 };
 
@@ -77,6 +83,10 @@ export type Job = Doc & {
   /** Model spend for this job, when the harness reports it (Claude does; Codex doesn't). */
   costUsd?: number | null;
   approvalIds?: string[];
+  /** A follow-up you asked in a job's thread; the value is the root job id. */
+  followsUp?: string;
+  /** Files the teammate made for this job. */
+  fileIds?: string[];
   /** Jobs this one needs results from; it starts when they're done. */
   dependsOn?: string[];
   /** Results shown as tiles (weather, places, checklist…). */
@@ -207,4 +217,16 @@ export type Approval = Doc & {
   status: "pending" | "approved" | "rejected" | "done" | "failed";
   result?: string;
   decidedAt?: string;
+};
+
+/** A file on the hub: one you attached, or one a teammate or script made. Bytes live in <data>/files/<id>. */
+export type StoredFile = Doc & {
+  name: string;
+  mime: string;
+  size: number;
+  sha256: string;
+  source: "you" | "teammate" | "script";
+  threadId?: string;
+  jobId?: string;
+  teammateId?: string;
 };
