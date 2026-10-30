@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store, Collection } from "./store/index.ts";
-import type { Brain, BrainInput, BrainProfile, Brains } from "./brain.ts";
+import type { Brain, BrainInput, BrainProfile, Brains, Meter } from "./brain.ts";
 import { QUIET, ESCALATE, HARNESSES, MODEL_RE, availableHarnesses } from "./brain.ts";
 import type { Scripts } from "./scripts.ts";
 import type { Push } from "./push.ts";
@@ -9,7 +9,8 @@ import { parseReply } from "./reply.ts";
 import { validateHook, computeNextAt, describeTrigger, isUserReminder } from "./hooks.ts";
 import { recall, isActive, validateFact } from "./memory.ts";
 import { describeLocal, inQuietHours, quietEndsAt, localDate, distanceMeters } from "./time.ts";
-import type { Activity, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Teammate, Thread } from "./types.ts";
+import type { Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
+import { Library, validateSkill, validateWorkflow, fill } from "./library.ts";
 
 const DEFAULT_PREFS: Prefs = {
   userName: "", tz: "UTC", quietStart: "23:00", quietEnd: "07:30",
@@ -29,7 +30,7 @@ export const DEFAULT_TEAMMATES: Pick<Teammate, "id" | "name" | "color" | "descri
 const REVIEW_MARKER = "[[memory-review]]";
 const LOCATION_KEEP_DAYS = 7;
 
-type TurnOpts = { teammate?: Teammate | null; threadId?: string; extra?: string; profile?: BrainProfile };
+type TurnOpts = { teammate?: Teammate | null; threadId?: string; jobId?: string; extra?: string; profile?: BrainProfile; meter?: Meter; allowedScripts?: string[] };
 const label = (p: BrainProfile) => `${p.harness}${p.model ? `/${p.model}` : ""}`;
 
 /** The orchestrator answers with JSON; tolerate a code fence or prose around it. */
@@ -51,6 +52,7 @@ export class Hub {
   constructor(
     readonly config: Config, readonly store: Store, readonly brain: Brain,
     readonly scripts: Scripts, readonly push: Push | null,
+    readonly library: Library = new Library(null),
   ) {}
 
   // ---------- plumbing ----------
@@ -132,6 +134,7 @@ export class Hub {
       hooks: hooks.map((h) => ({ id: h.id, title: h.title, when: describeTrigger(h.trigger, prefs.tz), does: h.action.type, why: h.why, status: h.status })),
       scripts: (await this.scripts.list()).filter((s) => s.status !== "rejected").map((s) => ({ name: s.name, description: s.description, status: s.status })),
       recentMessages: history.map((m) => ({ role: m.role, at: m.createdAt, text: m.text.slice(0, 600) })),
+      library: mode === "review" ? undefined : await this.searchLibrary(query),
     };
   }
 
@@ -140,21 +143,31 @@ export class Hub {
   async turn(mode: BrainInput["mode"], input: string, evidence: string, opts: TurnOpts = {}) {
     const { teammate, extra } = opts;
     const profile = opts.profile || (await this.brains()).workhorse;
-    const where = { teammateId: teammate?.id, threadId: opts.threadId };
+    const where = { teammateId: teammate?.id, threadId: opts.threadId, jobId: opts.jobId, recipe: opts.allowedScripts };
     const ctx = await this.context(input, mode, teammate);
-    const first = parseReply(await this.brain.think({ mode, context: ctx, input, toolResults: extra }, profile));
+    const first = parseReply(await this.brain.think({ mode, context: ctx, input, toolResults: extra }, profile, opts.meter));
     if (first.text.includes(ESCALATE)) return { text: ESCALATE, did: [] as Done[], used: [] as string[] };
     const applied = await this.applyActions(first.actions, evidence, where);
     if (!applied.runs.length) return { text: first.text, did: applied.done, used: applied.used };
 
     const results: string[] = [];
     for (const r of applied.runs.slice(0, 3)) {
+      if (opts.allowedScripts && !opts.allowedScripts.includes(r.name)) {
+        results.push(`## ${r.name}\nNot allowed: this recipe may only use ${opts.allowedScripts.join(", ") || "no scripts"}.`);
+        continue;
+      }
       const out = await this.scripts.run(r.name, r.args);
+      if (out.needsApproval) {
+        const ap = await this.requestApproval({ summary: `Run ${r.name} ${r.args.join(" ")}`.trim(), script: r.name, args: r.args }, where);
+        applied.done.push({ kind: "approval", label: `Waiting for your Approve: ${r.name}`, id: ap.value?.id });
+        results.push(`## ${r.name}\nThis changes something outside the hub, so it is waiting for the user's Approve. Tell them.`);
+        continue;
+      }
       applied.done.push({ kind: "script", label: `Ran ${r.name}${out.ok ? "" : " (failed)"}` });
       results.push(`## ${r.name}\n${out.output}`);
     }
     const ctx2 = await this.context(input, mode, teammate);
-    const second = parseReply(await this.brain.think({ mode, context: ctx2, input, toolResults: [extra, ...results].filter(Boolean).join("\n\n") }, profile));
+    const second = parseReply(await this.brain.think({ mode, context: ctx2, input, toolResults: [extra, ...results].filter(Boolean).join("\n\n") }, profile, opts.meter));
     const applied2 = await this.applyActions(second.actions.filter((a: any) => a?.type !== "script.run"), evidence, where);
     return { text: second.text || first.text, did: [...applied.done, ...applied2.done], used: [...applied.used, ...applied2.used] };
   }
@@ -269,11 +282,17 @@ export class Hub {
         if (r.value) { mate = r.value; team.push(mate); await this.log("teammate.created", `${mate.name} joined: ${mate.description}`); }
       }
       mate = mate || team.find((t) => t.id === "hearth")!;
+      const use = j.use && typeof j.use === "object" ? j.use : null;
+      const skill = use?.skill ? await this.skillByName(String(use.skill)) : null;
+      const workflow = use?.workflow ? (await this.store.all<Workflow>("workflows")).find((w) => w.name === String(use.workflow) && w.status === "active") : null;
+      const inputs = use?.inputs && typeof use.inputs === "object" ? Object.fromEntries(Object.entries(use.inputs).slice(0, 8).map(([k, v]) => [k, String(v).slice(0, 400)])) : undefined;
       jobs.push(await this.store.put<Job>("jobs", {
         ...this.doc({}), threadId: thread.id, messageId: m.id, task: j.task.trim().slice(0, 1000), teammateId: mate.id,
         status: "queued", effort: j.effort === "heavy" ? "heavy" : "light",
+        skillId: skill?.status === "active" ? skill.id : undefined, workflowId: workflow?.id, inputs,
       } as Job));
     }
+    for (const w of (Array.isArray(plan.newWorkflows) ? plan.newWorkflows : []).slice(0, 2)) await this.proposeWorkflow(w);
     if (plan.title && thread.title === m.text.split(/\s+/).slice(0, 6).join(" ")) await this.touchThread(thread.id, { title: String(plan.title).slice(0, 60) });
     await this.addMessage({ role: "assistant", teammateId: "hearth", threadId: thread.id, text: String(plan.reply || "On it.").slice(0, 1000), jobIds: jobs.map((j) => j.id) });
     for (const j of jobs) this.emit("job", j);
@@ -281,14 +300,49 @@ export class Hub {
     if (jobs.length) await this.touchThread(thread.id, {});
   }
 
-  /** Light jobs go to the workhorse; heavy ones, and anything it can't do, go to the heavy model. */
+  /**
+   * Reuse first: a job matched to a skill or workflow runs that directly (scripts need no model at all).
+   * Otherwise it's worked out fresh: light jobs on the workhorse, heavy ones (and escalations) on heavy.
+   * If a skill fails, the job is solved fresh and the teammate is asked to save a fixed version.
+   */
   private async runJob(job: Job, ramble: string) {
-    const brains = await this.brains();
+    const started = Date.now();
+    const meter: Meter = { costUsd: 0, unknown: false };
     const mate = await this.teammate(job.teammateId);
-    const input = `${job.task}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")`;
+    let cur: Job = await this.saveJob({ ...job, status: "working" });
+    const finish = async (patch: Partial<Job>) => {
+      const pending = (await this.store.all<Approval>("approvals")).some((a) => a.jobId === job.id && a.status === "pending");
+      const blocked = (await this.store.get<Job>("jobs", job.id))?.blocked;
+      const status = patch.status === "failed" ? "failed" : blocked ? "blocked" : pending ? "waiting" : "done";
+      cur = await this.saveJob({
+        ...cur, ...patch, blocked, status,
+        durationMs: Date.now() - started, costUsd: meter.unknown ? null : +meter.costUsd.toFixed(4),
+        finishedAt: status === "done" || status === "failed" ? this.clock().toISOString() : undefined,
+      });
+    };
+
+    let failedSkill: { name: string; error: string } | null = null;
+    if (job.skillId || job.workflowId) {
+      try {
+        const r = job.workflowId
+          ? await this.runWorkflow(job.workflowId, job.inputs || {}, { job, mate, meter })
+          : await this.runSkill(job.skillId!, job.inputs || {}, { job, mate, meter });
+        return await finish({ how: job.workflowId ? "workflow" : "skill", tier: r.usedModel ? "workhorse" : undefined, result: r.output.slice(0, 4000), did: r.did });
+      } catch (err: any) {
+        const sk = job.skillId ? await this.store.get<Skill>("skills", job.skillId) : null;
+        failedSkill = { name: sk?.name || "workflow", error: err.message };
+        await this.log("skill.failed", `${failedSkill.name}: ${err.message}`);
+      }
+    }
+
+    const brains = await this.brains();
+    const repairNote = failedSkill
+      ? `\n\nThe saved skill "${failedSkill.name}" failed with: ${failedSkill.error}\nSolve the job fresh. Then, if you can, save a fixed version with skill.save using the same name. A recipe fix may only use scripts the old one used.`
+      : "\n\nIf this job is likely to come back and you had to work it out, save it with skill.save.";
+    const input = `${job.task}${repairNote}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")`;
     const attempt = async (tier: "workhorse" | "heavy") => {
-      await this.saveJob({ ...job, status: "working", tier });
-      return this.turn("job", input, job.task, { teammate: mate, threadId: job.threadId, profile: brains[tier] });
+      cur = await this.saveJob({ ...cur, status: "working", tier });
+      return this.turn("job", input, job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains[tier], meter });
     };
     let tier: "workhorse" | "heavy" = job.effort === "heavy" ? "heavy" : "workhorse";
     let escalated = false;
@@ -300,10 +354,199 @@ export class Hub {
         r = await attempt("heavy");
       }
       if (!r || r.text.includes(ESCALATE)) throw new Error("Nobody could do this one.");
-      await this.saveJob({ ...job, status: "done", tier, escalated, result: r.text.slice(0, 4000), did: r.did, finishedAt: this.clock().toISOString() });
+      await finish({ how: failedSkill ? "repaired" : "fresh", tier, escalated, result: r.text.slice(0, 4000), did: r.did });
     } catch (err: any) {
-      await this.saveJob({ ...job, status: "failed", tier, escalated, result: err.message, finishedAt: this.clock().toISOString() });
+      await finish({ status: "failed", how: "fresh", tier, escalated, result: err.message });
     }
+  }
+
+  /** You unblocked it (opened the laptop, logged in, tapped Allow): run the job again from the top. */
+  async retryJob(id: string) {
+    const job = await this.store.get<Job>("jobs", id);
+    if (!job || !["blocked", "failed"].includes(job.status)) return { error: "Only blocked or failed jobs can be retried." };
+    const msg = await this.store.get<Message>("messages", job.messageId);
+    const fresh = await this.saveJob({ ...job, blocked: undefined, status: "queued", result: undefined, did: undefined });
+    await this.log("job.retry", job.task.slice(0, 80));
+    this.runJob(fresh, msg?.text || job.task);
+    return { value: fresh };
+  }
+
+  // ---------- skills & workflows ----------
+
+  async searchLibrary(query: string) {
+    if (!query.trim()) return [];
+    const [skills, workflows, scripts] = await Promise.all([this.store.all<Skill>("skills"), this.store.all<Workflow>("workflows"), this.scripts.list()]);
+    return this.library.search(query, skills, workflows, scripts);
+  }
+
+  async skillByName(name: string) {
+    return (await this.store.all<Skill>("skills")).find((s) => s.name === name.toLowerCase()) || null;
+  }
+
+  /** Runs a saved skill. Script skills need no model; recipes are followed by the workhorse, limited to their scripts. */
+  async runSkill(skillId: string, inputs: Record<string, string>, ctx: { job?: Job; mate?: Teammate | null; meter?: Meter }) {
+    const sk = await this.store.get<Skill>("skills", skillId);
+    if (!sk || sk.status !== "active") throw new Error("That skill isn't active.");
+    const started = Date.now();
+    try {
+      let output = "", did: Done[] = [], usedModel = false;
+      if (sk.kind === "script") {
+        const args = sk.inputs.map((i) => inputs[i.name] ?? "");
+        const out = await this.scripts.run(sk.script!, args);
+        if (out.needsApproval) {
+          const ap = await this.requestApproval({ summary: `${sk.description} (${args.filter(Boolean).join(", ")})`, script: sk.script!, args }, { threadId: ctx.job?.threadId, jobId: ctx.job?.id });
+          if (ap.error) throw new Error(ap.error);
+          output = "Waiting for your Approve.";
+          did = [{ kind: "approval", label: `Waiting for your Approve: ${sk.name}`, id: ap.value!.id }];
+        } else if (!out.ok) throw new Error(out.output.slice(0, 300));
+        else output = out.output;
+      } else {
+        usedModel = true;
+        const recipe = [`Follow this saved recipe exactly ("${sk.name}": ${sk.description}).`,
+          ...sk.steps!.map((x, i) => `${i + 1}. ${x}`),
+          `Inputs: ${JSON.stringify(inputs)}`, `You may only run these scripts: ${(sk.uses || []).join(", ") || "none"}. Don't write new code.`].join("\n");
+        const r = await this.turn("job", recipe, ctx.job?.task || sk.name, { teammate: ctx.mate, threadId: ctx.job?.threadId, jobId: ctx.job?.id, meter: ctx.meter, allowedScripts: sk.uses || [] });
+        if (!r.text.trim() || r.text.includes(ESCALATE)) throw new Error("The recipe didn't work this time.");
+        output = r.text; did = r.did;
+      }
+      const ms = Date.now() - started;
+      await this.store.put<Skill>("skills", { ...sk, runs: sk.runs + 1, lastUsedAt: this.clock().toISOString(), avgMs: Math.round(((sk.avgMs || ms) * sk.runs + ms) / (sk.runs + 1)) });
+      this.emit("skills");
+      return { output, did, usedModel };
+    } catch (err) {
+      await this.store.put<Skill>("skills", { ...sk, failures: sk.failures + 1, lastUsedAt: this.clock().toISOString() });
+      this.emit("skills");
+      throw err;
+    }
+  }
+
+  async runWorkflow(workflowId: string, inputs: Record<string, string>, ctx: { job?: Job; mate?: Teammate | null; meter?: Meter }) {
+    const wf = await this.store.get<Workflow>("workflows", workflowId);
+    if (!wf || wf.status !== "active") throw new Error("That workflow isn't switched on.");
+    let prev = "", did: Done[] = [], usedModel = false;
+    const outputs: string[] = [];
+    for (const step of wf.steps) {
+      const sk = await this.skillByName(step.skill);
+      if (!sk) throw new Error(`Workflow step "${step.skill}" doesn't exist any more.`);
+      const stepInputs = Object.fromEntries(Object.entries(step.inputs).map(([k, v]) => [k, fill(v, inputs, prev)]));
+      const r = await this.runSkill(sk.id, stepInputs, ctx);
+      prev = r.output; did = [...did, ...r.did]; usedModel ||= r.usedModel;
+      outputs.push(`**${sk.name}**: ${r.output}`);
+      if (r.did.some((d) => d.kind === "approval")) break; // stop the chain until you approve
+    }
+    await this.store.put<Workflow>("workflows", { ...wf, runs: wf.runs + 1, lastUsedAt: this.clock().toISOString() });
+    return { output: outputs.join("\n\n"), did, usedModel };
+  }
+
+  /** Saves or fixes a skill. Code goes through script approval; recipes may only use approved scripts. */
+  async saveSkill(a: any, teammateId?: string) {
+    const v = validateSkill(a);
+    if (!v.value) return { error: v.error! };
+    const scripts = await this.scripts.list();
+    const approved = new Set(scripts.filter((s) => s.status === "approved").map((s) => s.name));
+    const prev = await this.skillByName(v.value.name);
+    let status: Skill["status"] = "active";
+    if (v.value.kind === "script") {
+      if (typeof a.code === "string" && a.code.trim()) {
+        const r = await this.scripts.propose({ name: v.value.script, description: v.value.description, code: a.code });
+        if (r.error) return { error: r.error };
+        this.emit("scripts");
+      }
+      const sc = (await this.scripts.list()).find((s) => s.name === v.value!.script);
+      if (!sc) return { error: `No script called ${v.value.script}.` };
+      status = sc.status === "approved" ? "active" : "proposed";
+    } else {
+      const uses: string[] = v.value.uses;
+      const missing = uses.filter((u) => !approved.has(u));
+      if (missing.length) return { error: `A recipe can only use approved scripts (not ${missing.join(", ")}).` };
+      if (prev?.kind === "recipe" && uses.some((u) => !(prev.uses || []).includes(u))) return { error: "A fixed recipe can't use scripts the old one didn't." };
+    }
+    const now = this.clock().toISOString();
+    const sk = await this.store.put<Skill>("skills", {
+      ...(prev || { ...this.doc({}), runs: 0, failures: 0, version: 0 }),
+      ...v.value, status, teammateId: prev?.teammateId || teammateId,
+      version: (prev?.version || 0) + 1, lastFixedAt: prev ? now : undefined, updatedAt: now,
+    } as Skill);
+    if (!prev) await this.addFact({ fact: `For "${sk.description}", the team uses the skill ${sk.name}.`, notebook: "skills", importance: 1 }, "assistant");
+    await this.log(prev ? "skill.fixed" : "skill.saved", `${sk.name}${status === "proposed" ? " (waiting for script approval)" : ""}`);
+    this.emit("skills");
+    return { value: sk };
+  }
+
+  async proposeWorkflow(a: any) {
+    const v = validateWorkflow(a);
+    if (!v.value) return { error: v.error! };
+    for (const st of v.value.steps) if (!(await this.skillByName(st.skill))) return { error: `No skill called ${st.skill}.` };
+    const prev = (await this.store.all<Workflow>("workflows")).find((w) => w.name === v.value!.name);
+    const wf = await this.store.put<Workflow>("workflows", { ...(prev || { ...this.doc({}), runs: 0 }), ...v.value, status: "proposed", updatedAt: this.clock().toISOString() } as Workflow);
+    await this.log("workflow.proposed", wf.name);
+    this.emit("skills");
+    return { value: wf };
+  }
+
+  /** When you approve a script, skills built on it switch on. */
+  async scriptApproved(name: string) {
+    for (const sk of await this.store.all<Skill>("skills")) {
+      if (sk.kind === "script" && sk.script === name && sk.status === "proposed") await this.store.put<Skill>("skills", { ...sk, status: "active" });
+    }
+    this.emit("skills");
+  }
+
+  /** "Save as skill?" on a job that was worked out fresh. */
+  async saveJobAsSkill(jobId: string) {
+    const job = await this.store.get<Job>("jobs", jobId);
+    if (!job || job.status !== "done") return { error: "Only finished jobs can become skills." };
+    const mate = await this.teammate(job.teammateId);
+    const before = new Set((await this.store.all<Skill>("skills")).map((s) => s.id));
+    await this.turn("job", `Turn this finished job into a reusable skill. Reply with one short line and a single skill.save action.\nJOB: ${job.task}\nWHAT YOU DID: ${job.result || ""}\nACTIONS: ${JSON.stringify(job.did || [])}`,
+      job.task, { teammate: mate, threadId: job.threadId });
+    const created = (await this.store.all<Skill>("skills")).find((s) => !before.has(s.id) || s.updatedAt && s.updatedAt > job.createdAt);
+    return created ? { value: created } : { error: "Your teammate didn't think this one is reusable." };
+  }
+
+  // ---------- approvals: the hub, not the model, decides what can touch the outside world ----------
+
+  async requestApproval(a: any, where: { threadId?: string; jobId?: string }) {
+    const script = String(a?.script || "");
+    const sc = (await this.scripts.list()).find((s) => s.name === script);
+    if (!sc) return { error: `No script called ${script}.` };
+    const ap = await this.store.put<Approval>("approvals", {
+      ...this.doc({}), threadId: where.threadId, jobId: where.jobId,
+      summary: String(a.summary || `Run ${script}`).slice(0, 200), details: a.details ? String(a.details).slice(0, 1000) : undefined,
+      action: { type: "script", script, args: (Array.isArray(a.args) ? a.args : []).slice(0, 8).map(String) },
+      status: "pending",
+    } as Approval);
+    if (where.jobId) {
+      const job = await this.store.get<Job>("jobs", where.jobId);
+      if (job) await this.saveJob({ ...job, approvalIds: [...(job.approvalIds || []), ap.id] });
+    }
+    await this.log("approval.requested", ap.summary);
+    this.emit("approval", ap);
+    await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: ap.threadId ? `/#chat/${ap.threadId}` : "/" });
+    return { value: ap };
+  }
+
+  async decideApproval(id: string, yes: boolean) {
+    const ap = await this.store.get<Approval>("approvals", id);
+    if (!ap || ap.status !== "pending") return { error: "Already decided." };
+    let next: Approval = { ...ap, status: yes ? "approved" : "rejected", decidedAt: this.clock().toISOString() };
+    await this.store.put("approvals", next);
+    if (yes) {
+      const out = await this.scripts.run(ap.action.script, ap.action.args, { approvedRun: true });
+      next = { ...next, status: out.ok ? "done" : "failed", result: out.output.slice(0, 2000) };
+      await this.store.put("approvals", next);
+    }
+    await this.log(yes ? "approval.approved" : "approval.rejected", ap.summary);
+    this.emit("approval", next);
+    if (ap.jobId) {
+      const job = await this.store.get<Job>("jobs", ap.jobId);
+      if (job) {
+        const still = (await this.store.all<Approval>("approvals")).some((a) => a.jobId === job.id && a.status === "pending");
+        const note = yes ? `\n\n${next.status === "done" ? "Done" : "Failed"}: ${ap.summary}${next.result ? `\n${next.result.slice(0, 600)}` : ""}` : `\n\nYou said no: ${ap.summary}`;
+        await this.saveJob({ ...job, status: still ? "waiting" : "done", result: `${job.result || ""}${note}`.trim(), finishedAt: still ? undefined : this.clock().toISOString() });
+      }
+    }
+    return { value: next };
   }
 
   private async saveJob(j: Job) {
@@ -326,7 +569,7 @@ export class Hub {
 
   // ---------- actions proposed by the brain ----------
 
-  async applyActions(actions: any[], evidence: string, where: { teammateId?: string; threadId?: string } = {}) {
+  async applyActions(actions: any[], evidence: string, where: { teammateId?: string; threadId?: string; jobId?: string; recipe?: string[] } = {}) {
     const done: Done[] = [];
     const used: string[] = [];
     const runs: { name: string; args: string[] }[] = [];
@@ -384,7 +627,37 @@ export class Hub {
           case "script.run":
             if (typeof a.name === "string") runs.push({ name: a.name, args: Array.isArray(a.args) ? a.args.slice(0, 8).map(String) : [] });
             break;
+          case "blocked": {
+            const b = { need: String(a.need || "Something from you").slice(0, 200), why: String(a.why || "").slice(0, 300), unblock: String(a.unblock || "Tap Try again when it's sorted").slice(0, 200) };
+            if (where.jobId) {
+              const job = await this.store.get<Job>("jobs", where.jobId);
+              if (job) await this.saveJob({ ...job, blocked: b });
+            }
+            done.push({ kind: "blocked", label: `Blocked: ${b.need}` });
+            await this.log("job.blocked", `${b.need} (${b.unblock})`);
+            await this.push?.send({ title: "I'm stuck", body: `${b.need}. ${b.unblock}`, tag: where.jobId, url: where.threadId ? `/#chat/${where.threadId}` : "/" });
+            break;
+          }
+          case "approval.request": {
+            if (where.recipe && !where.recipe.includes(String(a.script))) break; // recipes can't reach new scripts
+            const r = await this.requestApproval(a, where);
+            done.push({ kind: "approval", label: r.value ? `Waiting for your Approve: ${r.value.summary}` : `Couldn't ask: ${r.error}`, id: r.value?.id });
+            break;
+          }
+          case "skill.save": {
+            if (where.recipe) break;
+            const r = await this.saveSkill(a, where.teammateId);
+            done.push({ kind: "skill", label: r.value ? `${r.value.version > 1 ? "Fixed" : "Saved"} skill: ${r.value.name}${r.value.status === "proposed" ? " (approve its script to use it)" : ""}` : `Couldn't save skill: ${r.error}`, id: r.value?.id });
+            break;
+          }
+          case "workflow.propose": {
+            if (where.recipe) break;
+            const r = await this.proposeWorkflow(a);
+            if (r.value) done.push({ kind: "skill", label: `Proposed workflow: ${r.value.name}`, id: r.value.id });
+            break;
+          }
           case "script.propose": {
+            if (where.recipe) break;
             const r = await this.scripts.propose(a);
             if (r.value) { done.push({ kind: "script", label: `Wrote script ${r.value.name}: waiting for your approval`, id: r.value.id }); this.emit("scripts"); }
             else await this.log("action.rejected", `script.propose: ${r.error}`);
@@ -706,7 +979,10 @@ export class Hub {
         text = r.text; did = r.did;
       } else if (a.type === "script") {
         const out = await this.scripts.run(a.script, a.args);
-        if (a.then === "notify" || !out.ok) text = out.ok ? out.output.slice(0, 1500) : `${h.title}: ${out.output}`;
+        if (out.needsApproval) {
+          const ap = await this.requestApproval({ summary: `${h.title}: run ${a.script}`, script: a.script, args: a.args }, { threadId: h.threadId });
+          text = `${h.title} wants to ${ap.value?.summary ?? `run ${a.script}`}. Tap Approve to let it.`;
+        } else if (a.then === "notify" || !out.ok) text = out.ok ? out.output.slice(0, 1500) : `${h.title}: ${out.output}`;
         else { const r = await this.turn("hook", `${h.title}\nInterpret the output of script ${a.script} for the user.`, `hook: ${h.title}`, { teammate, threadId: h.threadId, extra: `## ${a.script}\n${out.output}` }); text = r.text; did = r.did; }
       }
 
@@ -733,14 +1009,14 @@ export class Hub {
 
   async exportAll() {
     const out: Record<string, unknown> = { exportedAt: this.clock().toISOString(), hub: this.config.name, storage: this.store.kind };
-    for (const col of ["threads", "messages", "jobs", "teammates", "hooks", "memory", "notebooks", "places", "locations", "activity", "scripts"] as const) out[col] = await this.store.all(col);
+    for (const col of ["threads", "messages", "jobs", "teammates", "skills", "workflows", "approvals", "hooks", "memory", "notebooks", "places", "locations", "activity", "scripts"] as const) out[col] = await this.store.all(col);
     out.devices = (await this.store.all<any>("devices")).map(({ tokenHash, ...d }) => d);
     out.prefs = await this.prefs();
     return out;
   }
 
   async wipePersonal() {
-    for (const col of ["threads", "messages", "jobs", "hooks", "memory", "notebooks", "places", "locations", "activity"] as const) await this.store.clear(col);
+    for (const col of ["threads", "messages", "jobs", "approvals", "hooks", "memory", "notebooks", "places", "locations", "activity"] as const) await this.store.clear(col);
     await this.ensureSystemHooks();
     await this.ensureTeammates();
     await this.log("data.wiped", "All personal data deleted from this hub.");

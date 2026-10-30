@@ -199,3 +199,117 @@ test("the app can only pick harnesses the hub has", async () => {
   expect((await hub.setBrains({ heavy: { harness: "rm", model: "" } })).error).toBeTruthy();
   expect((await hub.setBrains({ heavy: { harness: "echo", model: "x; rm -rf /" } })).error).toBeTruthy();
 });
+
+// ---- approve-before-send, skills, search-before-create, self-repair ----
+
+async function approvedScript(name: string, code: string) {
+  const { sha256 } = await import("../src/auth.ts");
+  const p = await hub.scripts.propose({ name, code });
+  await hub.scripts.approve(p.value!.id, sha256(code));
+  await hub.scriptApproved(name);
+}
+
+test("scripts that send or post can't run without a per-run Approve, even when approved", async () => {
+  await approvedScript("email-sam", 'await fetch("https://example.invalid", { method: "POST", body: "hi" }); console.log("sent")');
+  const s = (await hub.scripts.list()).find((x) => x.name === "email-sam")!;
+  expect(s.effects).toBe("external");
+  const out = await hub.scripts.run("email-sam", []);
+  expect(out.needsApproval).toBe(true);
+
+  // The brain asking to run it turns into an approval card, not a run.
+  await hub.ensureTeammates();
+  (hub.brain as any).think = async (b: any) => b.mode === "orchestrate"
+    ? JSON.stringify({ reply: "On it", jobs: [{ task: "Email Sam that Tuesday works", teammate: "Hearth", effort: "light" }] })
+    : 'Drafted it.\n```hearth\n[{"type":"script.run","name":"email-sam","args":[]}]\n```';
+  await hub.ramble("tell sam tuesday works");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "waiting"));
+  const [ap] = await store.all<any>("approvals");
+  expect(ap.status).toBe("pending");
+
+  // Reject: nothing runs, job closes.
+  await hub.decideApproval(ap.id, false);
+  const [job] = await store.all<Job>("jobs");
+  expect(job.status).toBe("done");
+  expect(job.result).toContain("You said no");
+  expect((await hub.decideApproval(ap.id, true)).error).toBeTruthy(); // can't flip a decision
+});
+
+test("a job matched to a script skill runs with no model at all", async () => {
+  await hub.ensureTeammates();
+  await approvedScript("echo-city", 'console.log("weather in " + process.argv[2])');
+  const saved = await hub.saveSkill({ name: "city-weather", description: "Weather for a city", kind: "script", script: "echo-city", inputs: [{ name: "city", description: "City" }] });
+  expect(saved.value!.status).toBe("active");
+  const modes: string[] = [];
+  (hub.brain as any).think = async (b: any) => {
+    modes.push(b.mode);
+    expect(b.context.library.some((l: any) => l.name === "city-weather")).toBe(true); // search before create
+    return JSON.stringify({ reply: "Checking", jobs: [{ task: "weather in Paris", teammate: "Scout", effort: "light", use: { skill: "city-weather", inputs: { city: "Paris" } } }] });
+  };
+  await hub.ramble("what's the weather in paris");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done"));
+  const [job] = await store.all<Job>("jobs");
+  expect(job.how).toBe("skill");
+  expect(job.result).toBe("weather in Paris");
+  expect(job.costUsd).toBe(0);
+  expect(modes).toEqual(["orchestrate"]); // only the plan used a model
+  expect((await store.all<any>("memory")).some((f) => f.fact.includes("city-weather"))).toBe(true);
+});
+
+test("a failing skill falls back to solving fresh and gets repaired", async () => {
+  await hub.ensureTeammates();
+  await approvedScript("flaky", 'process.exit(1)');
+  await approvedScript("solid", 'console.log("ok")');
+  await hub.saveSkill({ name: "get-thing", description: "Gets the thing", kind: "recipe", steps: ["Run flaky"], uses: ["flaky"] });
+  (hub.brain as any).think = async (b: any) => {
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "get the thing", teammate: "Hearth", effort: "light", use: { skill: "get-thing", inputs: {} } }] });
+    if (b.input.startsWith("Follow this saved recipe")) return "";
+    // Fresh solve, then tries to "fix" the recipe with a new script (not allowed) and with the old one (allowed).
+    return 'Got it.\n```hearth\n[{"type":"skill.save","name":"get-thing","description":"Gets the thing","kind":"recipe","steps":["Run solid"],"uses":["solid"]},{"type":"skill.save","name":"get-thing","description":"Gets the thing, v2","kind":"recipe","steps":["Run flaky twice"],"uses":["flaky"]}]\n```';
+  };
+  await hub.ramble("get the thing");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done"));
+  const [job] = await store.all<Job>("jobs");
+  expect(job.how).toBe("repaired");
+  expect(job.did!.map((d) => d.label)).toEqual(["Couldn't save skill: A fixed recipe can't use scripts the old one didn't.", "Fixed skill: get-thing"]);
+  const sk = (await hub.skillByName("get-thing"))!;
+  expect(sk.failures).toBe(1);
+  expect(sk.version).toBe(2);
+  expect(sk.lastFixedAt).toBeTruthy();
+});
+
+test("recipes can't use unapproved scripts, and workflows chain skills", async () => {
+  expect((await hub.saveSkill({ name: "sneaky", description: "x", kind: "recipe", steps: ["do"], uses: ["not-approved"] })).error).toBeTruthy();
+  await approvedScript("upper", 'console.log(process.argv[2].toUpperCase())');
+  await approvedScript("exclaim", 'console.log(process.argv[2] + "!")');
+  await hub.saveSkill({ name: "shout", description: "Uppercase", kind: "script", script: "upper", inputs: [{ name: "text", description: "" }] });
+  await hub.saveSkill({ name: "bang", description: "Add !", kind: "script", script: "exclaim", inputs: [{ name: "text", description: "" }] });
+  const wf = (await hub.proposeWorkflow({ name: "yell", description: "Shout and bang", inputs: [{ name: "words" }], steps: [{ skill: "shout", inputs: { text: "$input.words" } }, { skill: "bang", inputs: { text: "$prev" } }] })).value!;
+  await expect(hub.runWorkflow(wf.id, { words: "hi" }, {})).rejects.toThrow(); // proposals don't run
+  await store.put("workflows", { ...wf, status: "active" });
+  const r = await hub.runWorkflow(wf.id, { words: "hi" }, {});
+  expect(r.output).toContain("HI!");
+});
+
+test("a job that can't go on says it's blocked, parks, and resumes when you unblock it", async () => {
+  await hub.ensureTeammates();
+  let laptopOnline = false;
+  (hub.brain as any).think = async (b: any) => {
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "Download my Chase statement", teammate: "Money", effort: "light" }] });
+    return laptopOnline ? "Downloaded October's statement." :
+      'I need your laptop for the bank login.\n```hearth\n[{"type":"blocked","need":"Your laptop online","why":"The bank login lives in your laptop browser","unblock":"Open your laptop, then tap Try again"}]\n```';
+  };
+  await hub.ramble("get my chase statement");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "blocked"));
+  let [job] = await store.all<Job>("jobs");
+  expect(job.blocked!.unblock).toContain("Open your laptop");
+  expect(job.result).not.toContain("Downloaded"); // never pretends
+  await Bun.sleep(30);
+  expect((await store.all<Job>("jobs"))[0].status).toBe("blocked"); // no retry loop
+
+  laptopOnline = true;
+  await hub.retryJob(job.id);
+  await until(async () => (await store.all<Job>("jobs"))[0].status === "done");
+  [job] = await store.all<Job>("jobs");
+  expect(job.result).toBe("Downloaded October's statement.");
+  expect(job.blocked).toBeUndefined();
+});

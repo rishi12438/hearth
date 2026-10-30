@@ -7,7 +7,7 @@ import type { SpeechToText } from "./voice.ts";
 import { availableHarnesses } from "./brain.ts";
 import { isActive, search } from "./memory.ts";
 import { isValidTimeZone } from "./time.ts";
-import type { Device, Fact, Hook, LocationFix, Message, Notebook, Place, Prefs, Teammate } from "./types.ts";
+import type { Approval, Device, Fact, Hook, LocationFix, Message, Notebook, Place, Prefs, Skill, Teammate, Workflow } from "./types.ts";
 import pkg from "../package.json" with { type: "json" };
 
 const WEB = resolve(import.meta.dir, "../web");
@@ -172,10 +172,45 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
       }
       case "threads": {
         if (method === "GET" && !id) return json(await hub.listThreads());
-        if (method === "GET" && id) { const d = await hub.threadDetail(id); if (!d) break; return json(d); }
+        if (method === "GET" && id) { const d = await hub.threadDetail(id); if (!d) break; return json({ ...d, approvals: (await store.all<Approval>("approvals")).filter((a) => a.threadId === id) }); }
         if (method === "POST" && !id) { const r = await hub.ramble(String((await body(req)).text || "")); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "POST" && seg[3] === "messages") { const r = await hub.ramble(String((await body(req)).text || ""), id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "DELETE" && id) return json({ ok: await hub.removeThread(id) });
+        break;
+      }
+      case "skills": {
+        if (method === "GET") {
+          const [skills, workflows] = await Promise.all([store.all<Skill>("skills"), store.all<Workflow>("workflows")]);
+          return json({ skills, workflows, search: hub.library.mode });
+        }
+        if (method === "PATCH" && id) {
+          const sk = await store.get<Skill>("skills", id);
+          if (!sk) break;
+          const b = await body(req);
+          const r = await hub.saveSkill({ ...sk, description: b.description ?? sk.description, steps: Array.isArray(b.steps) ? b.steps : sk.steps });
+          if (r.error) throw new HttpError(400, r.error);
+          return json(r.value);
+        }
+        if (method === "DELETE" && id) { const ok = await store.remove("skills", id); hub.emit("skills"); return json({ ok }); }
+        break;
+      }
+      case "workflows": {
+        if (method === "POST" && seg[3] === "activate") { const w = await store.get<Workflow>("workflows", id); if (!w) break; await store.put("workflows", { ...w, status: "active" }); hub.emit("skills"); return json({ ok: true }); }
+        if (method === "DELETE" && id) { const ok = await store.remove("workflows", id); hub.emit("skills"); return json({ ok }); }
+        break;
+      }
+      case "approvals": {
+        if (method === "GET") return json((await store.all<Approval>("approvals")).filter((a) => !url.searchParams.get("thread") || a.threadId === url.searchParams.get("thread")));
+        if (method === "POST" && (seg[3] === "approve" || seg[3] === "reject")) {
+          const r = await hub.decideApproval(id, seg[3] === "approve");
+          if (r.error) throw new HttpError(409, r.error);
+          return json(r.value);
+        }
+        break;
+      }
+      case "jobs": {
+        if (method === "POST" && seg[3] === "retry") { const r = await hub.retryJob(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "POST" && seg[3] === "save-skill") { const r = await hub.saveJobAsSkill(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         break;
       }
       case "brains": {
@@ -238,9 +273,9 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
       }
       case "scripts": {
         if (method === "GET") return json((await hub.scripts.list()).map((s) => { const code = hub.scripts.code(s); return { ...s, code, codeSha256: sha256(code) }; }));
-        if (method === "POST" && seg[3] === "approve") { const r = await hub.scripts.approve(id, String((await body(req)).sha256 || "")); if (r.error) throw new HttpError(409, r.error); await hub.log("script.approved", r.value!.name); hub.emit("scripts"); return json(r.value); }
+        if (method === "POST" && seg[3] === "approve") { const r = await hub.scripts.approve(id, String((await body(req)).sha256 || "")); if (r.error) throw new HttpError(409, r.error); await hub.log("script.approved", r.value!.name); await hub.scriptApproved(r.value!.name); hub.emit("scripts"); return json(r.value); }
         if (method === "POST" && seg[3] === "reject") { const r = await hub.scripts.reject(id); if (r.error) throw new HttpError(404, r.error); hub.emit("scripts"); return json(r.value); }
-        if (method === "POST" && seg[3] === "run") { const s = await store.get<any>("scripts", id); if (!s) break; return json(await hub.scripts.run(s.name, [])); }
+        if (method === "POST" && seg[3] === "run") { const s = await store.get<any>("scripts", id); if (!s) break; return json(await hub.scripts.run(s.name, [], { approvedRun: true })); } // tapping Test run is your approval for this run
         break;
       }
       case "prefs": {

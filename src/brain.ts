@@ -59,6 +59,24 @@ ACTIONS
 - script.run {name, args}   run an approved script now; you'll be called again with its output
 - script.propose {name, description, code}   write a new Bun/TypeScript script (stdout = result; use fetch, no secrets,
     no file writes outside the working dir). It will NOT run until the user approves it in the app. Say so.
+- approval.request {summary, details, script, args}   ANYTHING that sends, posts, pays, books, deletes or changes something
+    outside the hub goes through this: the user sees an Approve card and the hub runs it only after their tap.
+    Scripts that do such things refuse to run any other way. Write summary as what will happen ("Email Sam: Tuesday works").
+- skill.save {name, description, inputs:[{name,description}], kind, ...}   save how you did this so nobody works it out again:
+    kind "recipe": steps:[...] in plain language, uses:[approved script names it needs]  (a recipe can't use anything else)
+    kind "script": script:"<approved or just-proposed script name>"  (runs directly, no model, inputs become args in order)
+    Save one only when the job is likely to come back and you had to work it out. Reuse an existing name to fix a skill.
+- workflow.propose {name, description, inputs, steps:[{skill, inputs:{...}}]}   chain existing skills; "$input.x" is a
+    workflow input and "$prev" the previous step's output. Saved as a proposal the user switches on.
+
+- blocked {need, why, unblock}   when you CAN'T finish because something is missing that only the user or their devices can
+    give (a login, their laptop being on, a permission, a file): call this instead of failing, guessing or waiting.
+    need: what's missing; why: what it's for; unblock: the one thing the user should do ("Open your laptop", "Tap Allow").
+    The job parks and resumes when they unblock it. Never pretend it worked; never retry in a loop.
+
+LIBRARY (search before you create)
+- CONTEXT.library lists existing skills, workflows and scripts that look relevant. If one fits, use it (script.run, or follow
+  the recipe's steps). Only write a new script or skill when nothing there does the job.
 
 BEING PROACTIVE
 - Notice future-dated things (trips, deadlines, appointments, "I'll do X tomorrow") and offer a hook, or create one if
@@ -85,7 +103,12 @@ You are the orchestrator of a personal assistant team that lives on the user's o
 
 Reply with ONLY a JSON object, no prose, no code fence:
 {"title":"3-6 word chat title","reply":"...","facts":[{"fact":"...","notebook":"...","importance":1|2|3}],
- "jobs":[{"task":"...","teammate":"<existing name>","effort":"light|heavy"} | {"task":"...","teammate":"<new name>","effort":"light|heavy","newTeammate":{"name":"...","description":"..."}}]}
+ "jobs":[{"task":"...","teammate":"<existing name>","effort":"light|heavy","use":{"skill|workflow":"<library name>","inputs":{...}}?}
+       | {"task":"...","teammate":"<new name>","effort":"light|heavy","newTeammate":{"name":"...","description":"..."}}],
+ "newWorkflows":[{"name","description","inputs","steps":[{"skill","inputs"}]}]?}
+SEARCH BEFORE CREATE: CONTEXT.library lists skills and workflows the team already has. If one does a job, set "use" with its name and
+the inputs filled from the ramble; it then runs without anyone working it out again. If the ramble needs several existing skills
+in a row that will recur, you may propose a new workflow in newWorkflows (the user switches it on).
 effort: "light" for quick, well-defined jobs (set a reminder, save a note, a simple lookup). "heavy" for jobs that need judgment,
 research across sources, planning, or careful writing. When unsure, choose light; it escalates on its own if needed.
 `.trim();
@@ -123,6 +146,8 @@ function agentEnv() {
 
 /** Which harness runs a turn, and with which model. "" model = the harness's default. */
 export type BrainProfile = { harness: string; model: string };
+/** Collects model spend across calls. `unknown` flips when a harness can't report cost. */
+export type Meter = { costUsd: number; unknown: boolean };
 /** The orchestrator plans; the workhorse does light jobs; heavy does hard ones and anything the workhorse escalates. */
 export type Brains = { orchestrator: BrainProfile; workhorse: BrainProfile; heavy: BrainProfile };
 export const HARNESSES = ["claude", "codex", "echo", "custom"] as const;
@@ -164,14 +189,14 @@ export class Brain {
   get label() { return this.config.agent === "custom" ? (this.config.agentCmd?.[0] ?? "custom") : this.config.agent; }
 
   /** One turn at a time, so hooks, rambles and jobs never race each other. */
-  think(b: BrainInput, profile?: BrainProfile): Promise<string> {
+  think(b: BrainInput, profile?: BrainProfile, meter?: Meter): Promise<string> {
     const p = profile || this.defaults().workhorse;
-    const run = this.queue.then(() => this.run(b, p));
+    const run = this.queue.then(() => this.run(b, p, meter));
     this.queue = run.catch(() => {});
     return run;
   }
 
-  private async run(b: BrainInput, profile: BrainProfile): Promise<string> {
+  private async run(b: BrainInput, profile: BrainProfile, meter?: Meter): Promise<string> {
     const { harness } = profile;
     const model = MODEL_RE.test(profile.model) ? profile.model : "";
     if (harness === "echo") return b.mode === "orchestrate" ? echoOrchestrator(b) : echoBrain(b);
@@ -182,7 +207,7 @@ export class Brain {
     let cmd: string[];
     switch (harness) {
       case "claude":
-        cmd = ["claude", "-p", "--output-format", "text", "--no-session-persistence", ...(model ? ["--model", model] : []),
+        cmd = ["claude", "-p", "--output-format", "json", "--no-session-persistence", ...(model ? ["--model", model] : []),
           ...(planning ? [] : ["--allowedTools", "WebSearch", "WebFetch"]),
           "--disallowedTools", "Bash", "Edit", "Write", "Read", "Glob", "Grep", "NotebookEdit", "Task", ...(planning ? ["WebSearch", "WebFetch"] : [])];
         break;
@@ -208,6 +233,14 @@ export class Brain {
     clearTimeout(timer);
     if (timedOut) throw new Error(`${name} took longer than ${this.config.agentTimeoutMs / 1000}s.`);
     let reply = out;
+    if (harness === "claude") {
+      try {
+        const j = JSON.parse(out);
+        reply = String(j.result ?? "");
+        if (meter && typeof j.total_cost_usd === "number") meter.costUsd += j.total_cost_usd;
+        else if (meter) meter.unknown = true;
+      } catch { if (meter) meter.unknown = true; }
+    } else if (meter) meter.unknown = true;
     if (outFile) { try { reply = readFileSync(outFile, "utf8"); } catch {} rmSync(outFile, { force: true }); }
     if (code !== 0 && !reply.trim()) throw new Error(`${name} exited with ${code}: ${err.trim().slice(-300)}`);
     return reply.trim();
@@ -221,8 +254,11 @@ function echoOrchestrator(b: BrainInput): string {
   const route = (t: string) => /remind|every|tomorrow|at \d|schedule|plan/i.test(t) ? "Planner" : /find|where|weather|best|cheap|search|look up/i.test(t) ? "Scout"
     : /pay|bill|rent|spend|money|subscription/i.test(t) ? "Money" : /gym|workout|run|sleep|exercise/i.test(t) ? "Coach" : "Hearth";
   const facts = parts.filter((p) => /^remember|^my |i (hate|love|like|prefer)/i.test(p));
+  const library = ((b.context as any).library || []) as { kind: string; name: string; score: number }[];
   const jobs = parts.filter((p) => !facts.includes(p)).map((task) => {
     const teammate = route(task);
+    const hit = library.find((l) => (l.kind === "skill" || l.kind === "workflow") && task.toLowerCase().includes(l.name.split("-")[0]));
+    if (hit) return { task, teammate, effort: "light", use: { [hit.kind]: hit.name, inputs: {} } };
     return teammate === "Coach" ? { task, teammate, effort: "light", newTeammate: { name: "Coach", description: "Workouts, sleep and habits. Checks in if you slip." } } : { task, teammate, effort: /plan|research|compare/i.test(task) ? "heavy" : "light" };
   });
   return JSON.stringify({

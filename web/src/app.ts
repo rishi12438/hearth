@@ -12,6 +12,8 @@ const S = {
   threads: [] as any[],
   thread: null as any,          // { thread, messages, jobs } when a chat is open
   teammates: [] as any[],
+  skills: [] as any[],
+  workflows: [] as any[],
   hooks: [] as any[],
   memory: null as any,
   memoryQuery: "",
@@ -21,7 +23,7 @@ const S = {
   planning: null as null | string, // thread id the orchestrator is reading
   updateReady: false,
   sheetOpen: false,
-  panel: null as null | "plans" | "memory",
+  panel: null as null | "plans" | "memory" | "skills",
 };
 
 let live: ReturnType<typeof stream> | null = null;
@@ -34,7 +36,7 @@ async function boot() {
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
   const pairCode = new URLSearchParams(location.hash.slice(1)).get("pair");
   if (!activeHub() || pairCode) return renderPairing(pairCode || "");
-  await Promise.all([refreshState(), loadTeammates()]);
+  await Promise.all([refreshState(), loadTeammates(), loadSkills()]);
   await show();
   connect();
   if (localStorage.getItem("hearth.autoLocation") === "1") shareLocation(true);
@@ -79,6 +81,15 @@ function onEvent(e: { type: string; data?: any }) {
       else call("/api/threads").then((list: any[]) => { const t = list.find((x) => x.id === open); if (t && S.thread) { S.thread.thread.title = t.title; renderTop(); } }).catch(() => {});
       return;
     case "teammates": loadTeammates(); return;
+    case "skills": loadSkills(); return;
+    case "approval":
+      if (open && e.data.threadId === open) {
+        const list = S.thread.approvals || (S.thread.approvals = []);
+        const i = list.findIndex((a: any) => a.id === e.data.id);
+        if (i >= 0) list[i] = e.data; else list.push(e.data);
+        renderMessages(false);
+      } else if (e.data.status === "pending") toast(`Needs your OK: ${e.data.summary}`);
+      return;
     case "hooks": if (S.panel === "plans") loadHooks(); return;
     case "memory": if (S.panel === "memory") loadMemory(); return;
     case "scripts": refreshState(); return;
@@ -88,6 +99,10 @@ function onEvent(e: { type: string; data?: any }) {
 
 async function refreshState() {
   try { S.state = await call("/api/state"); renderTop(); } catch (e) { handleError(e); }
+}
+
+async function loadSkills() {
+  try { const r = await call("/api/skills"); S.skills = r.skills; S.workflows = r.workflows; if (S.panel === ("skills" as any)) drawSkills(); } catch {}
 }
 
 async function loadTeammates() {
@@ -243,16 +258,61 @@ function message(m: any, jobs: any[]) {
   return h("div", { class: `msg bot ${m.error ? "err" : ""}` }, parts);
 }
 
+function secs(ms?: number) {
+  if (!ms) return "";
+  return ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))}s` : `${Math.round(ms / 60_000)}m`;
+}
+
+function money(c: number | null | undefined) {
+  return c === null || c === undefined ? "$?" : c === 0 ? "$0" : c < 0.01 ? "<$0.01" : `$${c.toFixed(2)}`;
+}
+
 function jobCard(j: any) {
   const t = mate(j.teammateId);
-  const state = j.status === "done" ? h("span", { class: "st done" }, icon("check", 14)) : j.status === "failed" ? h("span", { class: "st failed" }, icon("x", 14)) : h("span", { class: `st ${j.status}` }, h("i"));
-  const tierLabel = j.escalated ? "escalated to heavy" : j.tier === "heavy" ? "heavy" : j.status === "queued" ? "queued" : j.status === "working" ? "working…" : "";
-  const body = j.result && j.status !== "working" ? h("div", { class: "result" }, richText(j.result)) : null;
-  return h("div", { class: `card ${j.status}` },
-    h("div", { class: "cardhead" }, dot(t, 22), h("span", { class: "grow" }, h("b", null, t.name), tierLabel ? h("em", null, tierLabel) : null), state),
+  const st = j.status;
+  const state = st === "done" ? h("span", { class: "st done" }, icon("check", 14))
+    : st === "failed" ? h("span", { class: "st failed" }, icon("x", 14))
+    : st === "waiting" ? h("span", { class: "st waiting" }, icon("lock", 13))
+    : st === "blocked" ? h("span", { class: "st blocked" }, icon("pause", 13))
+    : h("span", { class: `st ${st}` }, h("i"));
+  const label = st === "queued" ? "queued" : st === "working" ? (j.tier === "heavy" ? "working (heavy)…" : "working…")
+    : st === "waiting" ? "needs your OK" : st === "blocked" ? "stuck, needs you" : j.escalated ? "escalated to heavy" : "";
+  const approvals = (S.thread?.approvals || []).filter((a: any) => a.jobId === j.id);
+  const skill = j.skillId ? S.skills.find((x) => x.id === j.skillId) : null;
+  const wf = j.workflowId ? S.workflows.find((x) => x.id === j.workflowId) : null;
+  const savedSkill = (j.did || []).some((d: any) => d.kind === "skill");
+  const meta = st === "done" || st === "failed" || st === "waiting" ? (
+    j.how === "skill" || j.how === "workflow"
+      ? `Used ${j.how} ${(skill || wf)?.name || ""} · ${secs(j.durationMs)} · ${money(j.costUsd)}`
+      : j.how === "repaired" ? `Skill failed, worked it out · ${secs(j.durationMs)} · ${money(j.costUsd)}`
+      : `Worked it out · ${secs(j.durationMs)} · ${money(j.costUsd)}`) : "";
+  return h("div", { class: `card ${st}` },
+    h("div", { class: "cardhead" }, dot(t, 22), h("span", { class: "grow" }, h("b", null, t.name), label ? h("em", null, label) : null), state),
     h("div", { class: "task" }, j.task),
-    body,
-    j.did?.length ? h("div", { class: "chips" }, j.did.map((d: any) => h("span", { class: "chip" }, icon(d.label.includes("waiting") ? "lock" : "check", 12), d.label))) : null);
+    j.result && st !== "working" ? h("div", { class: "result" }, richText(j.result)) : null,
+    j.blocked ? h("div", { class: "blocked" },
+      h("b", null, j.blocked.need), j.blocked.why ? h("p", null, j.blocked.why) : null, h("p", { class: "unblock" }, icon("chevron", 14), j.blocked.unblock),
+      h("button", { class: "btn primary small", on: { click: async () => { try { await call(`/api/jobs/${j.id}/retry`, { body: {} }); } catch (e) { handleError(e); } } } }, "Try again")) : null,
+    approvals.map(approvalBox),
+    j.did?.length ? h("div", { class: "chips" }, j.did.filter((d: any) => d.kind !== "approval" && d.kind !== "blocked").map((d: any) => h("span", { class: "chip" }, icon(d.kind === "skill" ? "sparkle" : d.kind === "blocked" ? "pause" : "check", 12), d.label))) : null,
+    meta ? h("div", { class: "meta" }, h("span", null, meta),
+      st === "done" && (j.how === "fresh" || j.how === "repaired") && !savedSkill
+        ? h("button", { class: "link", on: { click: async (e: Event) => {
+            const b = e.currentTarget as HTMLButtonElement; b.disabled = true; b.textContent = "Saving…";
+            try { const sk = await call(`/api/jobs/${j.id}/save-skill`, { body: {} }); toast(`Saved skill ${sk.name}`); b.textContent = "Saved"; loadSkills(); }
+            catch (err) { b.disabled = false; b.textContent = "Save as skill?"; handleError(err); }
+          } } }, "Save as skill?") : null) : null);
+}
+
+function approvalBox(a: any) {
+  const decide = async (yes: boolean) => { try { await call(`/api/approvals/${a.id}/${yes ? "approve" : "reject"}`, { body: {} }); } catch (e) { handleError(e); } };
+  return h("div", { class: `approval ${a.status}` },
+    h("div", { class: "aphead" }, icon("lock", 14), h("b", null, a.summary)),
+    a.details ? h("p", null, a.details) : null,
+    h("small", null, `Runs ${a.action.script}${a.action.args.length ? ` ${a.action.args.join(" ")}` : ""}`),
+    a.status === "pending"
+      ? h("div", { class: "apbtns" }, h("button", { class: "btn ghost small", on: { click: () => decide(false) } }, "No"), h("button", { class: "btn primary small", on: { click: () => decide(true) } }, "Approve"))
+      : h("div", { class: "apdone" }, a.status === "done" ? "Approved and done" : a.status === "failed" ? `Approved, but it failed: ${a.result || ""}` : a.status === "rejected" ? "You said no" : "Running…"));
 }
 
 function chatMenu() {
@@ -393,7 +453,8 @@ function openMenu() {
       item("bell", "Plans", "Reminders, routines, watches", openPlans),
       item("brain", "Memory", "What I know about you", openMemory),
       item("users", "Teammates", "Who the orchestrator can hand work to", openTeammates),
-      item("sparkle", "Brains", "Which harness and model does what", openBrains),
+      item("sparkle", "Skills", "What the team already knows how to do", openSkills),
+      item("brain", "Brains", "Which harness and model does what", openBrains),
       item("code", "Scripts", "What I can run", openScripts, st?.pendingScripts ? `${st.pendingScripts} to approve` : undefined),
       item("settings", "Settings", "Notifications, location, data", openSettings)),
     h("p", { class: "foot" }, `Hearth · open source · ${__BUILD__}`),
@@ -464,6 +525,57 @@ async function openBrains() {
     h("button", { class: "btn primary big", on: { click: async () => {
       try { await call("/api/brains", { method: "PATCH", body: state }); toast("Saved"); closeSheet(); } catch (e) { handleError(e); }
     } } }, "Save"),
+  ]);
+}
+
+// ---------------- skills ----------------
+
+function openSkills() {
+  S.panel = "skills";
+  openSheet("Skills", h("div", { id: "skills" }), { onClose: () => { S.panel = null; } });
+  drawSkills();
+  loadSkills();
+}
+
+function drawSkills() {
+  const el = document.getElementById("skills");
+  if (!el) return;
+  const wfs = S.workflows;
+  clear(el,
+    h("p", { class: "muted" }, "When a teammate works something out, it saves how, so next time it's instant. Skills with code need your approval first."),
+    S.skills.length ? h("div", { class: "list" }, S.skills.map((sk) => h("button", { class: "item", on: { click: () => openSkill(sk) } },
+      h("span", { class: "hicon" }, icon(sk.kind === "script" ? "code" : "sparkle", 16)),
+      h("span", { class: "grow" },
+        h("b", null, sk.name, sk.status === "proposed" ? h("span", { class: "tag" }, "needs approval") : null),
+        h("small", { class: "sub" }, sk.description),
+        h("small", { class: "sub" }, [`${sk.runs} use${sk.runs === 1 ? "" : "s"}`, sk.lastUsedAt ? `last ${shortAgo(sk.lastUsedAt)}` : null, sk.lastFixedAt ? `fixed ${shortAgo(sk.lastFixedAt)}` : null, sk.avgMs ? `~${secs(sk.avgMs)}` : null].filter(Boolean).join(" · "))))))
+      : h("p", { class: "empty" }, "No skills yet. They appear as your team finishes jobs."),
+    wfs.length ? [h("h4", null, "Workflows"), h("div", { class: "list" }, wfs.map((w) => h("div", { class: "item" },
+      h("span", { class: "grow" }, h("b", null, w.name, w.status === "proposed" ? h("span", { class: "tag" }, "proposed") : null),
+        h("small", { class: "sub" }, w.description), h("small", { class: "sub" }, w.steps.map((x: any) => x.skill).join(" → "))),
+      w.status === "proposed" ? h("button", { class: "btn small primary", on: { click: async () => { await call(`/api/workflows/${w.id}/activate`, { body: {} }); toast("Switched on"); } } }, "Switch on") : null,
+      h("button", { class: "iconbtn", "aria-label": "Delete workflow", on: { click: () => confirmSheet(`Delete ${w.name}?`, "The skills it uses stay.", "Delete", async () => { await call(`/api/workflows/${w.id}`, { method: "DELETE" }); }) } }, icon("trash", 16)))))] : null);
+}
+
+function openSkill(sk: any) {
+  const desc = h("textarea", { class: "field", rows: 2, value: sk.description, maxLength: 240 });
+  const steps = sk.kind === "recipe" ? h("textarea", { class: "field", rows: Math.min(10, (sk.steps || []).length + 1), value: (sk.steps || []).join("\n") }) : null;
+  openSheet(sk.name, [
+    h("dl", { class: "facts" },
+      h("dt", null, "Kind"), h("dd", null, sk.kind === "script" ? `Runs the script ${sk.script} directly, no model` : "A recipe a light model follows"),
+      sk.inputs?.length ? [h("dt", null, "Inputs"), h("dd", null, sk.inputs.map((i: any) => i.name).join(", "))] : null,
+      sk.uses?.length ? [h("dt", null, "May use"), h("dd", null, sk.uses.join(", "))] : null,
+      h("dt", null, "Used"), h("dd", null, `${sk.runs}× · ${sk.failures} failure${sk.failures === 1 ? "" : "s"} · v${sk.version}`),
+      sk.teammateId ? [h("dt", null, "Made by"), h("dd", null, mate(sk.teammateId).name)] : null),
+    h("label", null, h("span", null, "Description"), desc),
+    steps ? h("label", null, h("span", null, "Steps (one per line)"), steps) : null,
+    h("div", { class: "stack" },
+      h("button", { class: "btn primary", on: { click: async () => {
+        try { await call(`/api/skills/${sk.id}`, { method: "PATCH", body: { description: desc.value, steps: steps ? steps.value.split("\n").map((x) => x.trim()).filter(Boolean) : undefined } }); toast("Saved"); closeSheet(); }
+        catch (e) { handleError(e); }
+      } } }, "Save changes"),
+      sk.kind === "script" ? h("button", { class: "btn ghost", on: { click: async () => { const list = await call("/api/scripts"); const sc = list.find((x: any) => x.name === sk.script); if (sc) openScript(sc); } } }, icon("code", 16), "View the code") : null,
+      h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet(`Delete ${sk.name}?`, "The team will work it out again next time.", "Delete", async () => { await call(`/api/skills/${sk.id}`, { method: "DELETE" }); toast("Deleted"); }) } }, icon("trash", 16), "Delete")),
   ]);
 }
 

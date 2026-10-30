@@ -64,8 +64,19 @@ export type Job = Doc & {
   messageId: string;
   task: string;
   teammateId: string;
-  status: "queued" | "working" | "done" | "failed";
+  status: "queued" | "working" | "waiting" | "blocked" | "done" | "failed";
+  /** Set when the job can't go on without you (a login, your laptop, a permission). It parks until you unblock it. */
+  blocked?: { need: string; why: string; unblock: string };
   effort: "light" | "heavy";
+  /** How it was done: reused a skill/workflow, or worked out fresh by a model. */
+  how?: "skill" | "workflow" | "fresh" | "repaired";
+  skillId?: string;
+  workflowId?: string;
+  inputs?: Record<string, string>;
+  durationMs?: number;
+  /** Model spend for this job, when the harness reports it (Claude does; Codex doesn't). */
+  costUsd?: number | null;
+  approvalIds?: string[];
   tier?: "workhorse" | "heavy";
   escalated?: boolean;
   result?: string;
@@ -110,6 +121,8 @@ export type LocationFix = Doc & { lat: number; lon: number; accuracy?: number; s
 export type Script = Doc & {
   name: string;
   description: string;
+  /** "external" scripts can send, post, pay or change things outside the hub; every run needs your Approve. */
+  effects: "read" | "external";
   origin: "repo" | "assistant";
   status: "proposed" | "approved" | "rejected";
   sha256: string;
@@ -129,4 +142,53 @@ export type Prefs = {
   lastUserAt?: string;
   placeState: Record<string, boolean>;
   brains?: import("./brain.ts").Brains;
+};
+
+// ---- Skills: things the team already knows how to do, so it doesn't work them out again. ----
+
+export type SkillInput = { name: string; description: string };
+
+export type Skill = Doc & {
+  name: string;
+  description: string;
+  inputs: SkillInput[];
+  /** script: run an approved script directly, no model. recipe: a light model follows the steps. */
+  kind: "script" | "recipe";
+  script?: string;
+  steps?: string[];
+  /** Approved scripts a recipe may use. A recipe can never reach beyond these. */
+  uses?: string[];
+  status: "active" | "proposed";
+  teammateId?: string;
+  runs: number;
+  failures: number;
+  lastUsedAt?: string;
+  lastFixedAt?: string;
+  avgMs?: number;
+  version: number;
+};
+
+export type WorkflowStep = { skill: string; inputs: Record<string, string> };
+
+/** A saved chain of skills. "$input.x" is a workflow input, "$prev" the previous step's output. */
+export type Workflow = Doc & {
+  name: string;
+  description: string;
+  inputs: SkillInput[];
+  steps: WorkflowStep[];
+  status: "active" | "proposed";
+  runs: number;
+  lastUsedAt?: string;
+};
+
+/** Anything that would send, post, pay or change something outside the hub waits here for your tap. */
+export type Approval = Doc & {
+  threadId?: string;
+  jobId?: string;
+  summary: string;
+  details?: string;
+  action: { type: "script"; script: string; args: string[] };
+  status: "pending" | "approved" | "rejected" | "done" | "failed";
+  result?: string;
+  decidedAt?: string;
 };

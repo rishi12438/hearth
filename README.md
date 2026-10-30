@@ -30,6 +30,18 @@ Run one hub on an always-on box so routines fire while your laptop sleeps. Run a
 3. Teammates are a name plus a role prompt. If no teammate fits, the orchestrator creates one, which you can see and delete in the app.
 4. Voice: the app records audio and the hub transcribes it with Deepgram (`HEARTH_DEEPGRAM_API_KEY`), so the key never reaches the phone. Speech-to-text is an interface in [src/voice.ts](src/voice.ts), so other providers can be added.
 
+### Approve before send
+
+Anything that would send, post, pay, book, delete or change something outside the hub stops at an **Approve** card, and the hub enforces it, not the model. Each script is classified when it's saved: an `// effects: external` header, write-style HTTP calls or known senders mark it *external*. External scripts refuse to run unless you tapped Approve for that specific run. That holds even after you've approved the script's code, inside recipes and workflows, and when a hook fires.
+
+### Skills: don't work it out twice
+
+- **Search before create.** Every ramble and job gets a shortlist from the library of skills, workflows and approved scripts. The shortlist uses embeddings when `HEARTH_FIREWORKS_API_KEY` is set and keyword matching otherwise; the model makes the final pick. The orchestrator can route a job straight to a skill.
+- **Skills** are either a *script* (runs directly, no model, $0) or a *recipe* (steps a light model follows, limited to the approved scripts the recipe lists). Teammates save skills after solving something likely to come back, or you tap **Save as skill?** on a job card. Memory records "for X, the team uses skill Y".
+- **Workflows** chain skills (`$input.x`, `$prev`). The orchestrator can propose new ones; you switch them on.
+- **Self-repair.** If a skill fails, the job is solved fresh and the teammate saves a fixed version. A fixed recipe can't use any script the old one didn't; fixed code goes back through your approval.
+- **Blocked, not stuck.** If a job needs something only you can give (a login, your laptop, a permission), it parks with an "Unblock me" card and a push notification, and never pretends it worked.
+
 ### Hooks: how it speaks first
 
 | Trigger | Example |

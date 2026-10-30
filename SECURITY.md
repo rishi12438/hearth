@@ -20,6 +20,11 @@ Hearth holds personal data and can act on a schedule, so it is built to fail clo
 - Approval sends the SHA-256 of the code you were shown. If the file changed in between, approval fails. If the file changes after approval, it won't run until you approve it again.
 - Scripts run with Bun, a 60-second timeout and 8 KB of captured output, with an environment of only `PATH`, `HOME` (a scratch folder), `LANG` and `TZ`. They still run as the hub's OS user with network access, so read them before approving. The systemd unit in `deploy/` limits the filesystem the hub can write to.
 
+## Approve before send
+- Scripts are classified *read* or *external* when saved. External ones (an `// effects: external` header, POST/PUT/PATCH/DELETE calls, mail/SMS/payment libraries, spawning processes, file writes) only run after you tap Approve for that run. Approving the code is not enough. Recipes, workflows and hooks go through the same gate.
+- The classification is a guard rail, not a proof: a script could still leak data through a GET request. Reading the code before you approve it is the real gate, which is why code always needs your review.
+- Recipes may only run the approved scripts they list. A repaired recipe can't add new ones.
+
 ## Your data
 - SQLite files and the data folder are created with mode `0700`. Use a Postgres or MySQL user with access only to the Hearth tables.
 - Web Push VAPID keys are generated on first run and kept with your data; nothing is hard-coded. Push payloads go from your hub to your browser's push service, encrypted end to end per the Web Push standard.

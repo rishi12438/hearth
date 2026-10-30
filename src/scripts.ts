@@ -15,6 +15,18 @@ import type { Script } from "./types.ts";
 export const NAME_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const OUTPUT_CAP = 8000;
 
+/**
+ * Does this code look like it sends, posts, pays or changes something outside the hub?
+ * A guard rail, not a proof: an explicit "// effects: external" header, or write-style HTTP calls / known senders.
+ * The real gate is you reading the code before approving it.
+ */
+export function detectEffects(code: string): "read" | "external" {
+  if (/^\s*\/\/\s*effects:\s*external/m.test(code)) return "external";
+  if (/method\s*:\s*["'`](POST|PUT|PATCH|DELETE)["'`]/i.test(code)) return "external";
+  if (/\b(sendmail|nodemailer|smtp|twilio|stripe|child_process|Bun\.spawn|spawnSync|execSync|writeFile|unlink|rmSync)\b/.test(code)) return "external";
+  return "read";
+}
+
 export function describeScript(code: string) {
   const m = code.match(/^\s*\/\/\s*(?:description:\s*)?(.+)$/m);
   return (m?.[1] || "No description").trim().slice(0, 200);
@@ -47,7 +59,7 @@ export class Scripts {
       const prev = existing.find((s) => s.name === name && s.origin === "repo");
       await this.store.put<Script>("scripts", {
         ...(prev || { id: randomUUID(), createdAt: new Date().toISOString() }),
-        name, origin: "repo", status: "approved", sha256: sha256(code), description: describeScript(code),
+        name, origin: "repo", status: "approved", sha256: sha256(code), description: describeScript(code), effects: detectEffects(code),
       });
     }
   }
@@ -75,7 +87,7 @@ export class Scripts {
     const description = typeof input.description === "string" ? input.description.slice(0, 200) : describeScript(code);
     const s = await this.store.put<Script>("scripts", {
       ...(existing || { id: randomUUID(), createdAt: new Date().toISOString() }),
-      name, origin: "assistant", status: "proposed", sha256: sha256(code), description,
+      name, origin: "assistant", status: "proposed", sha256: sha256(code), description, effects: detectEffects(code),
     });
     return { value: s };
   }
@@ -95,10 +107,18 @@ export class Scripts {
     return { value: await this.store.put("scripts", { ...s, status: "rejected" as const }) };
   }
 
-  async run(name: string, args: string[] = [], timeoutMs = 60_000): Promise<{ ok: boolean; output: string }> {
+  /**
+   * Runs an approved script. Scripts with external effects only run with `approvedRun` set, which the hub
+   * sets only after you tap Approve on that specific run.
+   */
+  async run(name: string, args: string[] = [], opts: { approvedRun?: boolean; timeoutMs?: number } = {}): Promise<{ ok: boolean; output: string; needsApproval?: boolean }> {
+    const timeoutMs = opts.timeoutMs ?? 60_000;
     const s = await this.byName(name);
     if (!s) return { ok: false, output: `No script called ${name}.` };
     if (s.status !== "approved") return { ok: false, output: `Script ${name} is waiting for your approval.` };
+    if ((s.effects ?? "external") === "external" && !opts.approvedRun) {
+      return { ok: false, needsApproval: true, output: `Script ${name} can change things outside the hub, so it needs your Approve for this run.` };
+    }
     const file = this.fileFor(s);
     const code = existsSync(file) ? readFileSync(file) : null;
     if (!code || sha256(code) !== s.sha256) {
