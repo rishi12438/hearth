@@ -94,6 +94,8 @@ ACTIONS
     name: lowercase-dashes ("portuguese-flashcards"); title: what the user sees ("Portuguese flashcards").
     Apps can also call window.hearth.ask("...") to message you (e.g. a "Quiz me" or "Explain this" button); you get it as
     a DM tagged with the app's name, and can answer or change the app.
+- teammate.update {name, emoji?, description?}   change a teammate's badge (one emoji) or what it does, when the user asks
+    ("give Fitness a volleyball", "make Travel's badge a globe") or a lane clearly changed.
 - app.pin {name, size?: "small"|"wide"|"large"} / app.unpin {name} / app.delete {name}   pinned apps show LIVE on the user's Home
     screen, as widgets under the shortcut tiles. This is how you shape what the user sees: if they want something on Home ("pin my
     flashcards", "show my week at the top", "a counter for days without sugar"), build it as a mini app if needed, then pin it.
@@ -147,11 +149,13 @@ NAMING a new teammate: the user should know what it does from the name alone, li
 - Make the lane wide enough to come back to: "Gifts", not "Priya's Birthday Gift"; "Travel", not "Paris Weather".
 - Don't add one whose lane overlaps an existing teammate; give that teammate the job instead.
 - description: one line saying what it handles, e.g. "Workouts, sleep and habits; checks in if you slip."
+- emoji: ONE emoji for its lane, shown as the badge on its avatar: 🏋️ Fitness, ✈️ Travel, 🎁 Gifts, 🍳 Meal Plans, 🗣️ Languages.
+  Pick one no other teammate in CONTEXT.teammates has.
 
 Reply with ONLY a JSON object, no prose, no code fence:
 {"title":"3-6 word chat title","reply":"...","facts":[{"fact":"...","notebook":"...","importance":1|2|3}],
  "jobs":[{"id":"j1","label":"2-6 words the user sees","task":"...","teammate":"<existing name>","effort":"light|heavy","dependsOn":["<earlier job id>"]?,"use":{"skill|workflow":"<library name>","inputs":{...}}?}
-       | {"label":"...","task":"...","teammate":"<new name>","effort":"light|heavy","newTeammate":{"name":"...","description":"..."}}],
+       | {"label":"...","task":"...","teammate":"<new name>","effort":"light|heavy","newTeammate":{"name":"...","description":"...","emoji":"🏋️"}}],
  "newWorkflows":[{"name","description","inputs","steps":[{"skill","inputs"}]}]?}
 TILES: results like weather, places, checklists and numbers show as tiles; teammates and skills handle that, so write each
 task plainly ("Weather in Paris tomorrow"). Requests to change how a tile looks are jobs for the teammate that owns that skill.
@@ -357,7 +361,7 @@ function echoOrchestrator(b: BrainInput): string {
     const teammate = route(task);
     const hit = library.find((l) => (l.kind === "skill" || l.kind === "workflow") && task.toLowerCase().includes(l.name.split("-")[0]));
     if (hit) return { task, teammate, effort: "light", use: { [hit.kind]: hit.name, inputs: {} } };
-    return teammate === "Fitness" ? { task, teammate, effort: "light", newTeammate: { name: "Fitness", description: "Workouts, sleep and habits. Checks in if you slip." } } : { task, teammate, effort: /plan|research|compare/i.test(task) ? "heavy" : "light" };
+    return teammate === "Fitness" ? { task, teammate, effort: "light", newTeammate: { name: "Fitness", description: "Workouts, sleep and habits. Checks in if you slip.", emoji: "🏋️" } } : { task, teammate, effort: /plan|research|compare/i.test(task) ? "heavy" : "light" };
   });
   return JSON.stringify({
     title: b.input.split(/\s+/).slice(0, 5).join(" "),

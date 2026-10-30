@@ -439,18 +439,17 @@ textarea.field { resize: vertical; line-height: 1.4; }
 /* The prop: a little badge with what the teammate does. Now and then it shows off; while working it goes for it. */
 .prop {
   position: absolute; right: calc(var(--s) * -.16); bottom: calc(var(--s) * -.16); width: calc(var(--s) * .56); height: calc(var(--s) * .56);
-  border-radius: 50%; display: grid; place-items: center; color: #fff;
-  background: radial-gradient(circle at 35% 30%, color-mix(in srgb, var(--c) 70%, #fff), color-mix(in srgb, var(--c) 55%, #000));
+  border-radius: 50%; display: grid; place-items: center; background: var(--surface-2);
   box-shadow: 0 0 0 2px var(--bg), 0 2px 6px rgba(0, 0, 0, .35); overflow: hidden;
 }
-.prop .icon { stroke-width: 2.6; animation: var(--pa, none) 5s ease-in-out infinite; transform-origin: 50% 60%; }
-.face.working .prop .icon, .face.thinking .prop .icon { animation-duration: 1.1s; }
+.prop .em { font-size: calc(var(--s) * .34); line-height: 1; display: block; animation: var(--pa, none) 5s ease-in-out infinite; transform-origin: 50% 60%;
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif; }
+.face.working .prop .em, .face.thinking .prop .em { animation-duration: 1.1s; }
 .face.blocked .prop { filter: grayscale(1); }
-.face.blocked .prop .icon, .face.waiting .prop .icon { animation: none; }
-.p-dumbbell { --pa: lift; } .p-search { --pa: sweep; } .p-plane { --pa: fly; } .p-coin { --pa: flip; } .p-bell { --pa: ring; }
-.p-book { --pa: flick; } .p-flame { --pa: flicker; } .p-note { --pa: hop; } .p-heart { --pa: beat; } .p-paw { --pa: hop; }
-.p-food, .p-gift, .p-wrench, .p-case, .p-home { --pa: wiggle; }
-.p-flame .icon { animation-duration: 1.6s; }
+.face.blocked .prop .em, .face.waiting .prop .em { animation: none; }
+.m-lift { --pa: lift; } .m-sweep { --pa: sweep; } .m-fly { --pa: fly; } .m-flip { --pa: flip; } .m-ring { --pa: ring; }
+.m-flick { --pa: flick; } .m-flicker { --pa: flicker; } .m-hop { --pa: hop; } .m-beat { --pa: beat; } .m-wiggle { --pa: wiggle; }
+.m-flicker .em { animation-duration: 1.6s; }
 @keyframes lift { 0%, 34%, 100% { transform: translateY(14%) rotate(0); } 8%, 12% { transform: translateY(-22%) rotate(-8deg); } 20%, 24% { transform: translateY(-22%) rotate(8deg); } }
 @keyframes sweep { 0%, 40%, 100% { transform: translate(0, 0); } 10% { transform: translate(-14%, -12%); } 20% { transform: translate(14%, -12%); } 30% { transform: translate(10%, 12%); } }
 @keyframes fly { 0%, 45%, 100% { transform: translate(0, 0); opacity: 1; } 20% { transform: translate(90%, -90%); opacity: 0; } 21% { transform: translate(-90%, 90%); opacity: 0; } 35% { transform: translate(0, 0); opacity: 1; } }
@@ -461,7 +460,7 @@ textarea.field { resize: vertical; line-height: 1.4; }
 @keyframes hop { 0%, 30%, 100% { transform: translateY(0); } 10% { transform: translateY(-24%); } 20% { transform: translateY(0); } 25% { transform: translateY(-8%); } }
 @keyframes beat { 0%, 30%, 100% { transform: scale(1); } 8% { transform: scale(1.22); } 16% { transform: scale(1); } 22% { transform: scale(1.15); } }
 @keyframes wiggle { 0%, 30%, 100% { transform: rotate(0); } 8% { transform: rotate(-14deg); } 16% { transform: rotate(12deg); } 24% { transform: rotate(-6deg); } }
-@media (prefers-reduced-motion: reduce) { .prop .icon { animation: none !important; } }
+@media (prefers-reduced-motion: reduce) { .prop .em { animation: none !important; } }
 @keyframes blink { 0%, 93%, 100% { transform: scaleY(1); } 95% { transform: scaleY(.1); } }
 
 .face.thinking .eyes { animation: glance 2.6s ease-in-out infinite; }
@@ -548,3 +547,10 @@ a.place:active { background: var(--surface-2); }
 .banner.show { transform: translateY(0); opacity: 1; }
 .banner b { display: block; font-size: 15px; }
 .banner small { display: block; color: var(--muted); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.facebtn { padding: 0; border-radius: 30%; }
+.badgepreview { display: grid; place-items: center; padding: 8px 0 18px; }
+.emojigrid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; margin-bottom: 14px; }
+.emojibtn { font-size: 24px; aspect-ratio: 1; border-radius: 12px; background: var(--surface); display: grid; place-items: center; }
+.emojibtn:active { background: var(--surface-2); transform: scale(.94); }
+.emojifield { font-size: 26px; text-align: center; }

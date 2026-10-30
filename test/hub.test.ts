@@ -313,3 +313,16 @@ test("a job that can't go on says it's blocked, parks, and resumes when you unbl
   expect(job.result).toBe("Downloaded October's statement.");
   expect(job.blocked).toBeUndefined();
 });
+
+test("teammates wear an emoji badge the orchestrator or the user can set; only real emoji are accepted", async () => {
+  await hub.ensureTeammates();
+  expect((await hub.teammate("scout"))!.emoji).toBe("🔍");
+  const t = (await hub.addTeammate({ name: "Volleyball", description: "Games, practice and your knees.", emoji: "🏐" })).value!;
+  expect(t.emoji).toBe("🏐");
+  expect((await hub.updateTeammate("Volleyball", { emoji: "<img src=x>" })).error).toBeTruthy();
+  expect((await hub.updateTeammate("Volleyball", { emoji: "ab" })).error).toBeTruthy();
+  expect((await hub.updateTeammate("volleyball", { emoji: "🏋️‍♀️" })).value!.emoji).toBe("🏋️‍♀️"); // ZWJ sequence is one emoji
+  const r = await hub.applyActions([{ type: "teammate.update", name: "Volleyball", emoji: "🇵🇹" }], "give it a flag");
+  expect(r.done.some((d: any) => d.label.includes("Volleyball updated"))).toBe(true);
+  expect((await hub.teammate(t.id))!.emoji).toBe("🇵🇹");
+});

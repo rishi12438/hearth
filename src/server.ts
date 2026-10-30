@@ -292,6 +292,7 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
         if (method === "POST" && id && seg[3] === "messages") { const r = await hub.askTeammate(id, String((await body(req)).text || "")); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "GET") return json(await store.all<Teammate>("teammates"));
         if (method === "POST") { const r = await hub.addTeammate(await body(req)); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "PATCH" && id) { const r = await hub.updateTeammate(id, await body(req)); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "DELETE" && id) return json({ ok: await hub.removeTeammate(id) });
         break;
       }

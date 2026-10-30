@@ -930,25 +930,30 @@ function shapeOf(id: string) {
 }
 
 /** state: idle | thinking | working | waiting | blocked | done */
-// What each teammate holds, from its name (then its description): Fitness lifts a dumbbell, Research sweeps a magnifier…
-const PROPS: [RegExp, string][] = [
-  [/fit|gym|workout|exercise|training|sport|run|yoga/i, "dumbbell"], [/health|doctor|medic|wellness|sleep/i, "heart"],
-  [/research|search|find|scout|news/i, "search"], [/travel|trip|flight|vacation/i, "plane"],
-  [/bill|money|financ|budget|tax|invest|expense|pay/i, "coin"], [/remind|plan|calendar|schedul|errand/i, "bell"],
-  [/language|learn|study|school|flashcard|read|book|tutor/i, "book"], [/meal|food|cook|recipe|diet|grocer|nutrition/i, "food"],
-  [/gift|shop|buy/i, "gift"], [/repair|fix|maintenance|car|diy/i, "wrench"], [/home|house|apartment|rent|landlord/i, "home"],
-  [/music|song|playlist|concert|ticket/i, "note"], [/job|career|work|interview|resume/i, "case"], [/pet|dog|cat|vet/i, "paw"],
+// The badge on each avatar: the teammate's emoji (the orchestrator picks one; you can change it). Older teammates
+// without one get one from their name or description.
+const LANE_EMOJI: [RegExp, string][] = [
+  [/fit|gym|workout|exercise|training|sport|run|yoga/i, "🏋️"], [/health|doctor|medic|wellness|sleep/i, "❤️"],
+  [/research|search|find|scout|news/i, "🔍"], [/travel|trip|flight|vacation/i, "✈️"], [/bill|money|financ|budget|tax|invest|expense|pay/i, "💸"],
+  [/remind|plan|calendar|schedul|errand/i, "🔔"], [/language|learn|study|school|flashcard|tutor/i, "🗣️"], [/read|book/i, "📚"],
+  [/meal|food|cook|recipe|diet|grocer|nutrition/i, "🍳"], [/gift|shop|buy/i, "🎁"], [/repair|fix|maintenance|car|diy/i, "🔧"],
+  [/home|house|apartment|rent|landlord/i, "🏠"], [/music|song|playlist|concert|ticket/i, "🎵"], [/job|career|work|interview|resume/i, "💼"],
+  [/pet|dog|cat|vet/i, "🐾"],
 ];
-function propOf(t: any) {
-  if (t.id === "hearth") return "flame";
-  return PROPS.find(([re]) => re.test(t.name || ""))?.[1] || PROPS.find(([re]) => re.test(t.description || ""))?.[1] || null;
-}
+const badgeOf = (t: any): string | null => t.emoji || (t.id === "hearth" ? "🔥" : null) || LANE_EMOJI.find(([re]) => re.test(t.name || ""))?.[1] || LANE_EMOJI.find(([re]) => re.test(t.description || ""))?.[1] || null;
+// How the badge moves, from the emoji: dumbbells lift, planes fly off and back, coins flip, bells ring… anything else wiggles.
+const MOVES: [RegExp, string][] = [
+  [/🏋|💪|🤸|🏃|🚴|⛹|🏐|⚽|🏀|🎾/u, "lift"], [/🔍|🔎|🧭|🗺/u, "sweep"], [/✈|🛫|🚀|🌍|🌎|🌏|🧳|🚗|🚆/u, "fly"],
+  [/💸|💰|🪙|💵|💳|🏦|📈/u, "flip"], [/🔔|⏰|📅|🗓|⏳/u, "ring"], [/📚|📖|🗣|📝|✏|🎓|💬/u, "flick"], [/🔥|🕯|⚡/u, "flicker"],
+  [/🎵|🎶|🎸|🐾|🐶|🐱/u, "hop"], [/❤|💚|💙|🩺|💊|🧘/u, "beat"],
+];
+const moveOf = (e: string) => MOVES.find(([re]) => re.test(e))?.[1] || "wiggle";
 
 function face(t: any, size = 44, state = "idle") {
-  const prop = size >= 26 ? propOf(t) : null;
+  const badge = size >= 26 ? badgeOf(t) : null;
   return h("span", { class: `face ${shapeOf(t.id)} ${state}`, style: `--c:${t.color};--s:${size}px`, role: "img", "aria-label": `${t.name}, ${state}` },
     h("span", { class: "eyes" }, h("i", { class: "eye" }), h("i", { class: "eye" })),
-    prop ? h("span", { class: `prop p-${prop}` }, icon(`p-${prop}`, Math.round(size * 0.36))) : null);
+    badge ? h("span", { class: `prop m-${moveOf(badge)}`, "aria-hidden": "true" }, h("span", { class: "em" }, badge)) : null);
 }
 
 const jobStatus = new Map<string, string>();
@@ -1117,7 +1122,8 @@ function openTeammates() {
   openSheet("Teammates", [
     h("p", { class: "muted" }, "You never have to pick one. The orchestrator hands each job to the right teammate, and adds a new one when nobody fits."),
     h("div", { class: "list" }, S.teammates.map((t) => h("div", { class: "item" },
-      face(t, 34, "idle"), h("span", { class: "grow" }, h("b", null, t.name), h("small", { class: "sub" }, t.description)),
+      h("button", { class: "facebtn", "aria-label": `Change ${t.name}'s badge`, on: { click: () => openBadge(t) } }, face(t, 34, "idle")),
+      h("span", { class: "grow" }, h("b", null, t.name), h("small", { class: "sub" }, t.description)),
       !t.builtIn ? h("button", { class: "iconbtn", "aria-label": `Remove ${t.name}`, on: { click: () => confirmSheet(`Remove ${t.name}?`, "Past work stays.", "Remove", async () => { await call(`/api/teammates/${t.id}`, { method: "DELETE" }); toast("Removed"); }) } }, icon("trash", 16)) : null))),
     h("h4", null, "Add one yourself"),
     h("label", null, h("span", null, "Name"), name),
@@ -1127,6 +1133,22 @@ function openTeammates() {
       try { const t = await call("/api/teammates", { body: { name: name.value, description: what.value } }); closeSheet(); toast(`${t.name} joined`); loadTeammates(); }
       catch (e) { handleError(e); }
     } } }, "Add teammate"),
+  ]);
+}
+
+/** Pick a teammate's badge: any emoji (type it or use the phone's emoji keyboard), or one of a few suggestions. */
+function openBadge(t: any) {
+  const input = h("input", { class: "field emojifield", value: badgeOf(t) || "", maxLength: 16, "aria-label": "Emoji", inputMode: "text" });
+  const save = async (emoji: string) => {
+    try { await call(`/api/teammates/${t.id}`, { method: "PATCH", body: { emoji } }); closeSheet(); toast(`${t.name} updated`); loadTeammates(); }
+    catch (e) { handleError(e); }
+  };
+  const ideas = ["🏋️", "🏐", "🧘", "✈️", "🧭", "🔍", "💸", "📈", "🔔", "📅", "🗣️", "📚", "🍳", "🎁", "🔧", "🏠", "🎵", "💼", "🐾", "❤️", "🌱", "🎨", "📸", "🧠"];
+  openSheet(`${t.name}'s badge`, [
+    h("div", { class: "badgepreview" }, face({ ...t, emoji: input.value || t.emoji }, 72, "idle")),
+    h("div", { class: "emojigrid" }, ideas.map((e) => h("button", { class: "emojibtn", on: { click: () => save(e) } }, e))),
+    h("label", null, h("span", null, "Or any emoji"), input),
+    h("button", { class: "btn primary big", on: { click: () => save(input.value.trim()) } }, "Save"),
   ]);
 }
 

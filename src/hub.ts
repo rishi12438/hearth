@@ -20,14 +20,14 @@ const DEFAULT_PREFS: Prefs = {
   maxProactivePerDay: 6, proactiveToday: { date: "", n: 0 }, placeState: {},
 };
 // Teammates are named after their job ("Reminders", "Research"), so "@Research is on it" explains itself.
-export const DEFAULT_TEAMMATES: Pick<Teammate, "id" | "name" | "color" | "description" | "prompt">[] = [
-  { id: "hearth", name: "Hearth", color: "#F5A524", description: "Your front desk. Handles anything and remembers everything.",
+export const DEFAULT_TEAMMATES: Pick<Teammate, "id" | "name" | "color" | "description" | "prompt" | "emoji">[] = [
+  { id: "hearth", name: "Hearth", emoji: "🔥", color: "#F5A524", description: "Your front desk. Handles anything and remembers everything.",
     prompt: "You are Hearth, the user's main assistant. Handle anything; be brief and warm." },
-  { id: "planner", name: "Reminders", color: "#5B8CFF", description: "Reminders, routines, your day and week.",
+  { id: "planner", name: "Reminders", emoji: "🔔", color: "#5B8CFF", description: "Reminders, routines, your day and week.",
     prompt: "You are Reminders. You own the user's time: reminders, routines, follow-ups, planning the day and week. Prefer creating hooks." },
-  { id: "scout", name: "Research", color: "#2FBF71", description: "Looks things up: places, products, prices, answers from the web.",
+  { id: "scout", name: "Research", emoji: "🔍", color: "#2FBF71", description: "Looks things up: places, products, prices, answers from the web.",
     prompt: "You are Research. You find things: places to eat, products, facts, prices. Search the web, give 3 good options with one line each." },
-  { id: "money", name: "Bills", color: "#E36BD6", description: "Bills, subscriptions, spending, saving.",
+  { id: "money", name: "Bills", emoji: "💸", color: "#E36BD6", description: "Bills, subscriptions, spending, saving.",
     prompt: "You are Bills. You track bills, subscriptions and spending and nudge the user before due dates. Never move money; offer reminders and drafts." },
 ];
 /** Names the built-in teammates had before they were named after their job; renamed on start. */
@@ -149,7 +149,7 @@ export class Hub {
     const team = await this.store.all<Teammate>("teammates");
     return {
       you: teammate ? { name: teammate.name, role: teammate.prompt } : { name: "Hearth", role: "The user's main assistant." },
-      teammates: team.map((t) => ({ name: t.name, does: t.description })),
+      teammates: team.map((t) => ({ name: t.name, does: t.description, emoji: t.emoji })),
       hub: this.config.name,
       nowIso: now.toISOString(),
       now: describeLocal(now, prefs.tz),
@@ -1015,6 +1015,12 @@ export class Hub {
             if (app) { done.push({ kind: "app", label: `${a.type === "app.pin" ? "Pinned to Home" : "Took off Home"}: ${app.title}`, id: app.id }); this.emit("apps"); }
             break;
           }
+          case "teammate.update": {
+            if (where.recipe) break;
+            const r = await this.updateTeammate(String(a.name || ""), { emoji: a.emoji, description: a.description, color: a.color });
+            if (r.value) done.push({ kind: "note", label: `${r.value.emoji ? `${r.value.emoji} ` : ""}${r.value.name} updated` });
+            break;
+          }
           case "app.delete": {
             if (where.recipe) break;
             const app = await this.apps.byName(String(a.name || ""));
@@ -1224,7 +1230,8 @@ export class Hub {
     const have = await this.store.all<Teammate>("teammates");
     for (const t of have) {
       const def = DEFAULT_TEAMMATES.find((d) => d.id === t.id);
-      if (def && t.builtIn && OLD_NAMES[t.id] === t.name) await this.store.put<Teammate>("teammates", { ...t, name: def.name, description: def.description, prompt: def.prompt });
+      if (def && t.builtIn && OLD_NAMES[t.id] === t.name) await this.store.put<Teammate>("teammates", { ...t, name: def.name, description: def.description, prompt: def.prompt, emoji: def.emoji });
+      else if (def && t.builtIn && !t.emoji) await this.store.put<Teammate>("teammates", { ...t, emoji: def.emoji });
     }
     if (have.length) return;
     const t0 = Date.parse("2026-01-01T00:00:00Z");
@@ -1302,7 +1309,7 @@ export class Hub {
         const next = hooks.find((h) => h.teammateId === t.id);
         status = next ? `Next: ${next.title}, ${new Date(next.nextAt!).toLocaleString("en-US", { timeZone: prefs.tz, weekday: "short", hour: "numeric", minute: "2-digit" })}` : t.description;
       }
-      return { id: t.id, name: t.name, color: t.color, description: t.description, builtIn: t.builtIn, state, status: clip(status), at,
+      return { id: t.id, name: t.name, color: t.color, emoji: t.emoji, description: t.description, builtIn: t.builtIn, state, status: clip(status), at,
         busy: working.length + queued.length, needsYou: waiting.length + blocked.length, lastDmAt: lastDm.get(t.id) };
     });
   }
@@ -1354,11 +1361,25 @@ export class Hub {
     if (same) return { value: same };
     const color = /^#[0-9a-f]{6}$/i.test(input.color || "") ? input.color : ["#F97066", "#36BFFA", "#FDB022", "#9E77ED", "#32D583"][Math.floor(Math.random() * 5)];
     const t = await this.store.put<Teammate>("teammates", this.doc({
-      name, color, description, builtIn: false,
+      name, color, description, builtIn: false, emoji: cleanEmoji(input.emoji),
       prompt: `You are ${name}. ${description} Stay in that lane; hand anything else back to Hearth.`,
     }));
     this.emit("teammates");
     return { value: t };
+  }
+
+  /** Change a teammate's badge, description or color (the user from the app, or a teammate via teammate.update). */
+  async updateTeammate(idOrName: string, patch: { emoji?: unknown; description?: unknown; color?: unknown }) {
+    const team = await this.store.all<Teammate>("teammates");
+    const t = team.find((x) => x.id === idOrName || x.name.toLowerCase() === String(idOrName).toLowerCase());
+    if (!t) return { error: "No such teammate." };
+    const emoji = patch.emoji === undefined ? t.emoji : cleanEmoji(patch.emoji);
+    if (patch.emoji !== undefined && patch.emoji !== "" && !emoji) return { error: "The badge has to be a single emoji." };
+    const description = typeof patch.description === "string" && patch.description.trim() ? patch.description.trim().slice(0, 200) : t.description;
+    const color = typeof patch.color === "string" && /^#[0-9a-f]{6}$/i.test(patch.color) ? patch.color : t.color;
+    const saved = await this.store.put<Teammate>("teammates", { ...t, emoji, description, color });
+    this.emit("teammates");
+    return { value: saved };
   }
 
   async removeTeammate(id: string) {
@@ -1612,3 +1633,12 @@ export function shortLabel(label: unknown, task: string) {
 
 /** Where a notification about a thread opens in the app: a DM (#t/<teammate>) or a ramble (#c/<id>). */
 export const threadLink = (threadId: string) => (threadId.startsWith("tm-") ? `/#t/${threadId.slice(3)}` : `/#c/${threadId}`);
+
+/** One emoji (with its skin-tone/variation/ZWJ parts), or undefined. Nothing else can become a badge. */
+export function cleanEmoji(v: unknown) {
+  const s = typeof v === "string" ? v.trim() : "";
+  if (!s || s.length > 16) return undefined;
+  const parts = [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(s)];
+  const flag = /^[\u{1F1E6}-\u{1F1FF}]{2}$/u.test(s);
+  return parts.length === 1 && (flag || (/\p{Extended_Pictographic}/u.test(s) && !/[\p{L}\p{N}\s<>&"']/u.test(s))) ? s : undefined;
+}

@@ -114,6 +114,8 @@ export type Teammate = Doc & {
   description: string;
   prompt: string;
   builtIn: boolean;
+  /** The badge on its avatar: one emoji for its lane (🏋️ Fitness, ✈️ Travel). */
+  emoji?: string;
 };
 
 // ---- Memory ----
