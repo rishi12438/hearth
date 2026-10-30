@@ -239,3 +239,24 @@ test("rambles are numbered temporary channels that archive an hour after they're
   expect(back!.archived).toBe(false);
   expect(b.value).toBeTruthy();
 });
+
+test("saying more about a task that's still running restarts it with the whole brief instead of adding another", async () => {
+  await setup();
+  process.env.FAKE_MS = "1500";
+  plan([{ label: "Knee before volleyball", task: "help with left knee pain before volleyball", teammate: "Hearth" }]);
+  const r = await hub.ramble("my left knee hurts and I play volleyball saturday");
+  const thread = r.value!.thread.id;
+  await until(async () => (await jobs()).some((j) => j.status === "working"));
+  const first = (await jobs())[0];
+  await Bun.sleep(300); // the model process is running
+  process.env.FAKE_MS = "50";
+  plan([{ addTo: first.id, label: "Knee, volleyball and lower body", task: "also a lower-body plan so it doesn't happen again" }]);
+  await hub.ramble("I also want to strengthen my lower body to prevent this", thread);
+  await until(() => allDone(1));
+  const all = await jobs();
+  expect(all.length).toBe(1); // still one task, one answer
+  expect(all[0].status).toBe("done");
+  expect(all[0].task).toContain("The user added: also a lower-body plan");
+  expect(all[0].label).toBe("Knee, volleyball and lower body");
+  expect(readFileSync(log, "utf8").split("\n").filter((l) => l.startsWith("end")).length).toBe(1); // the first run was stopped
+});

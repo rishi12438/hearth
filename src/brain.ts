@@ -157,6 +157,12 @@ MINI APPS: "make me flashcards / a tracker / a quiz / an app for this" is a job 
 flashcards); write the task so it says to build the app with its content. Changes to an app in CONTEXT.apps go to the same teammate.
 Anything about what the user sees on their Home screen (pin this, show X at the top, a widget for Y) is a job too: the team
 does it with mini apps pinned to Home.
+FOLLOW-UPS: CONTEXT.openTasks are tasks in this ramble that are still queued or being worked on. If the new message adds to,
+corrects or narrows one of them (same topic, or it belongs in the same answer), DON'T make a new job. Use
+{"addTo":"<open task id>","task":"what the user added, as an instruction","label":"new label if the scope grew"}; that teammate
+restarts with the whole brief and gives ONE answer. E.g. open "Left knee pain before volleyball" + "I also want to strengthen my
+lower body so it doesn't happen again" -> addTo it, label "Knee, volleyball and lower body". Only make a new job for something
+separate. Keep the reply to one short line when you only added to a task ("Added that to Fitness's knee plan.").
 PARALLEL: jobs run at the same time unless one needs another's result; then list that job's id in dependsOn
 (e.g. "find a restaurant" then "invite Sam to it").
 LABEL: the user sees only the label in the chat, like a Slack message title ("Pottery gift for Priya", "Radiohead tickets").
@@ -202,7 +208,8 @@ function agentEnv() {
 /** Which harness runs a turn, and with which model. "" model = the harness's default. */
 export type BrainProfile = { harness: string; model: string };
 /** Collects model spend across calls. `unknown` flips when a harness can't report cost. */
-export type Meter = { costUsd: number; unknown: boolean };
+/** Spend for one job; signal stops its model process when the user changes the job mid-run. */
+export type Meter = { costUsd: number; unknown: boolean; signal?: AbortSignal };
 /** The orchestrator plans; the workhorse does light jobs; heavy does hard ones and anything the workhorse escalates. */
 export type Brains = { orchestrator: BrainProfile; workhorse: BrainProfile; heavy: BrainProfile };
 export const HARNESSES = ["claude", "codex", "echo", "custom"] as const;
@@ -274,7 +281,10 @@ export class Brain {
     await this.global.acquire();
     await own?.acquire();
     this.running++;
-    try { return await this.run(b, p, meter); }
+    try {
+      if (meter?.signal?.aborted) throw new Error("Restarted with your new message.");
+      return await this.run(b, p, meter);
+    }
     finally { this.running--; own?.release(); this.global.release(); }
   }
 
@@ -310,9 +320,13 @@ export class Brain {
     });
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; proc.kill(); }, this.config.agentTimeoutMs);
+    const stop = () => proc.kill();
+    meter?.signal?.addEventListener("abort", stop);
     const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
     const code = await proc.exited;
     clearTimeout(timer);
+    meter?.signal?.removeEventListener("abort", stop);
+    if (meter?.signal?.aborted) throw new Error("Restarted with your new message.");
     if (timedOut) throw new Error(`${name} took longer than ${this.config.agentTimeoutMs / 1000}s.`);
     let reply = out;
     if (harness === "claude") {

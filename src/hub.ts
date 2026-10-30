@@ -68,6 +68,8 @@ export class Hub {
   private prefsLock = new Lock();
   private memoryLock = new Lock();
   private started = new Set<string>();   // job ids already handed to runJob
+  private stops = new Map<string, AbortController>(); // running jobs, so a new message can restart one
+  private additions = new Map<string, string[]>();    // what the user added to a running job, applied when it restarts
   private inflight = 0;                   // orchestrations, splits and retries still running
   private rambleSpend = new Map<string, number>(); // message id -> USD
 
@@ -333,9 +335,13 @@ export class Hub {
     try {
       const brains = await this.brains();
       const ctx = await this.context(m.text, "orchestrate", null);
+      const team0 = await this.store.all<Teammate>("teammates");
+      const openTasks = (await this.store.all<Job>("jobs"))
+        .filter((j) => j.threadId === thread.id && !j.parentId && !j.followsUp && (j.status === "queued" || j.status === "working"))
+        .map((j) => ({ id: j.id, label: j.label || shortLabel(undefined, j.task), teammate: team0.find((t) => t.id === j.teammateId)?.name, status: j.status, task: j.task.slice(0, 400) }));
       const history = (await this.store.all<Message>("messages")).filter((x) => x.threadId === thread.id && x.id !== m.id).slice(-10)
         .map((x) => ({ role: x.role, text: x.text.slice(0, 500) }));
-      const raw = await this.brain.think({ mode: "orchestrate", context: { ...ctx, thisChat: history }, input: m.text + (await this.attachmentNote(m.fileIds)) }, brains.orchestrator);
+      const raw = await this.brain.think({ mode: "orchestrate", context: { ...ctx, thisChat: history, openTasks }, input: m.text + (await this.attachmentNote(m.fileIds)) }, brains.orchestrator);
       plan = parsePlan(raw);
     } catch (err: any) {
       await this.log("orchestrator.failed", err.message);
@@ -351,6 +357,7 @@ export class Hub {
     const wants = new Map<string, string[]>();
     for (const j of (plan.jobs || []).slice(0, 8)) {
       if (typeof j?.task !== "string" || !j.task.trim()) continue;
+      if (typeof j.addTo === "string" && (await this.addToJob(j.addTo, thread.id, j.task, j.label))) continue;
       const wanted = String(j.teammate || "Hearth").toLowerCase();
       let mate = team.find((t) => t.name.toLowerCase() === wanted || t.id === wanted);
       if (!mate && j.newTeammate) {
@@ -408,7 +415,10 @@ export class Hub {
         this.started.add(j.id);
         let earlier = deps.map((d) => `## ${d.task}\n${d.result || ""}`).join("\n\n");
         if (j.followsUp) earlier = await this.threadContext(j.followsUp, j.id);
-        this.runJob(j, msg?.text || j.task, earlier).finally(() => this.started.delete(j.id));
+        this.runJob(j, msg?.text || j.task, earlier).finally(async () => {
+          this.started.delete(j.id);
+          if ((await this.store.get<Job>("jobs", j.id))?.status === "queued") this.pump(messageId); // restarted with more to do
+        });
       }
     }
   }
@@ -418,12 +428,45 @@ export class Hub {
    * Otherwise it's worked out fresh: light jobs on the workhorse, heavy ones (and escalations) on heavy.
    * If a skill fails, the job is solved fresh and the teammate is asked to save a fixed version.
    */
+  /**
+   * The user said more about a task that hasn't finished ("…and I want to strengthen my lower body too"). A queued task
+   * just gets the addition; a running one is stopped and starts over with the whole brief, so there's one answer.
+   */
+  private async addToJob(id: string, threadId: string, addition: string, label?: unknown) {
+    const j = await this.store.get<Job>("jobs", id);
+    if (!j || j.threadId !== threadId || j.parentId || j.followsUp || !["queued", "working"].includes(j.status)) return false;
+    const text = addition.trim().slice(0, 1000);
+    const newLabel = typeof label === "string" && label.trim() ? shortLabel(label, j.task) : j.label;
+    const stop = this.stops.get(id);
+    if (stop) {
+      this.additions.set(id, [...(this.additions.get(id) || []), text]);
+      if (newLabel !== j.label) this.additions.set(`${id}:label`, [newLabel || ""]);
+      stop.abort();
+    } else {
+      await this.saveJob({ ...j, task: `${j.task}\n\nThe user added: ${text}`.slice(0, 3000), label: newLabel });
+    }
+    await this.log("job.added", `${(newLabel || j.task).slice(0, 60)}: ${text.slice(0, 80)}`);
+    return true;
+  }
+
   private async runJob(job: Job, ramble: string, earlier = "") {
     const started = Date.now();
-    const meter: Meter = { costUsd: 0, unknown: false };
+    const stop = new AbortController();
+    this.stops.set(job.id, stop);
+    const meter: Meter = { costUsd: 0, unknown: false, signal: stop.signal };
     const mate = await this.teammate(job.teammateId);
     let cur: Job = await this.saveJob({ ...job, status: "working", startedAt: this.clock().toISOString() });
     const finish = async (patch: Partial<Job>) => {
+      this.stops.delete(job.id);
+      if (stop.signal.aborted) {
+        // Stopped for a restart: back in the queue with what the user added; pump picks it up again.
+        const more = this.additions.get(job.id) || [];
+        const label = this.additions.get(`${job.id}:label`)?.[0];
+        this.additions.delete(job.id); this.additions.delete(`${job.id}:label`);
+        await this.addSpend(job.messageId, meter.costUsd);
+        cur = await this.saveJob({ ...cur, status: "queued", task: [cur.task, ...more.map((x) => `The user added: ${x}`)].join("\n\n").slice(0, 3000), label: label || cur.label, startedAt: undefined, tier: undefined });
+        return;
+      }
       const pending = (await this.store.all<Approval>("approvals")).some((a) => a.jobId === job.id && a.status === "pending");
       const blocked = (await this.store.get<Job>("jobs", job.id))?.blocked;
       const status = patch.status === "failed" ? "failed" : blocked ? "blocked" : pending ? "waiting" : "done";
@@ -473,6 +516,7 @@ export class Hub {
     if (await overCap()) return finish({ how: "fresh" });
     try {
       let r = await attempt(tier).catch((err) => (tier === "workhorse" ? null : Promise.reject(err)));
+      if (stop.signal.aborted) throw new Error("Restarted with your new message.");
       if (tier === "workhorse" && (!r || r.text.includes(ESCALATE) || !r.text.trim())) {
         escalated = true; tier = "heavy";
         await this.log("job.escalated", `${job.task.slice(0, 80)} → ${label(brains.heavy)}`);
