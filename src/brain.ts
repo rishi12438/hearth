@@ -79,6 +79,19 @@ ACTIONS
 - file.create {name, content}   make a text file for the user to view or download: an itinerary (.md), a calendar invite
     (.ics), a table (.csv), notes (.txt), data (.json). Use when they'd want to keep, open elsewhere or share the result.
     Scripts can also write files in their working folder and print "@file <name>" to hand them over.
+- app.save {name, title, description, data?}   build or change a MINI APP the user can open and use: flashcards, a quiz,
+    a habit tracker, a packing checklist, a budget calculator, a timer. Do it right away when they ask for something to *use*
+    (or "make an app/reader/tracker for these"); no need to ask first. Send the code in its own block right after the hearth block:
+      \`\`\`app <name>
+      <!doctype html><html><head><style>...</style></head><body>...<script>...</script></body></html>
+      \`\`\`
+    Rules: one self-contained file, inline CSS and JS only, no external URLs, no fetch (it runs sandboxed with no network),
+    no alert/prompt, no triple backticks inside. Mobile first, big tap targets, dark: background #1a1d21, text #e8e8e8,
+    accent #8b5cf6, system font, 16px radius. Put content in data (e.g. {"cards":[{"front","back"}]}), not in the code, and read
+    it from window.hearth.data. Keep the user's progress with window.hearth.save(obj); read it back from window.hearth.state
+    (null on first open). To change only the content later ("add 20 more words"), send app.save with name and the full new
+    data and no code block. CONTEXT.apps lists existing apps with their data; change an existing one rather than making a copy.
+    name: lowercase-dashes ("portuguese-flashcards"); title: what the user sees ("Portuguese flashcards").
 - skill.view {skill, options}   when the user asks to change how a skill's tile looks ("show hourly", "in Fahrenheit",
     "compact"), save it as options on that skill, e.g. {"hourly":true,"units":"F","compact":true}. It sticks for next time.
 - blocked {need, why, unblock}   when you CAN'T finish because something is missing that only the user or their devices can
@@ -126,6 +139,8 @@ Reply with ONLY a JSON object, no prose, no code fence:
  "newWorkflows":[{"name","description","inputs","steps":[{"skill","inputs"}]}]?}
 TILES: results like weather, places, checklists and numbers show as tiles; teammates and skills handle that, so write each
 task plainly ("Weather in Paris tomorrow"). Requests to change how a tile looks are jobs for the teammate that owns that skill.
+MINI APPS: "make me flashcards / a tracker / a quiz / an app for this" is a job for the teammate whose lane it is (Languages builds
+flashcards); write the task so it says to build the app with its content. Changes to an app in CONTEXT.apps go to the same teammate.
 PARALLEL: jobs run at the same time unless one needs another's result; then list that job's id in dependsOn
 (e.g. "find a restaurant" then "invite Sam to it").
 LABEL: the user sees only the label in the chat, like a Slack message title ("Pottery gift for Priya", "Radiohead tickets").
@@ -331,6 +346,12 @@ function echoBrain(b: BrainInput): string {
   const fence = (actions: unknown[]) => "\n```hearth\n" + JSON.stringify(actions) + "\n```";
   const now = new Date(ctx.nowIso);
 
+  if (/flash ?cards?|mini app|make (?:me )?an app/i.test(text)) {
+    const cards = [["obrigado", "thank you"], ["bom dia", "good morning"], ["por favor", "please"], ["água", "water"], ["até logo", "see you later"]].map(([front, back]) => ({ front, back }));
+    return "Built your flashcards. Tap to flip, and mark the ones you know." + fence([{ type: "app.save", name: "demo-flashcards", title: "Flashcards", description: "Tap to flip; it remembers what you know.", data: { cards } }])
+      + "\n```app demo-flashcards\n" + DEMO_FLASHCARDS + "\n```";
+  }
+
   let m = text.match(/remind me in (\d+)\s*(m|min|mins|minutes?|h|hours?)\s+(?:to\s+)?(.+)/i);
   if (m) {
     const mins = Number(m[1]) * (/^h/i.test(m[2]) ? 60 : 1);
@@ -361,3 +382,39 @@ function echoBrain(b: BrainInput): string {
   }
   return "I'm the demo brain, so I only know a few tricks. Try:\n• remind me in 2 minutes to stretch\n• remind me at 6pm to call mom\n• remember my sister's birthday is 12 Dec\n• what's the weather\n\nSet HEARTH_AGENT=claude (or codex) on the hub for the real thing.";
 }
+
+/** The demo brain's mini app: flashcards that read hearth.data and save progress with hearth.save. */
+const DEMO_FLASHCARDS = `<!doctype html><html><head><style>
+body{margin:0;background:#1a1d21;color:#e8e8e8;font:17px -apple-system,system-ui,sans-serif;display:flex;flex-direction:column;height:100vh}
+.top{padding:16px 20px;color:#9a9a9a;font-size:14px;display:flex;justify-content:space-between}
+.card{flex:1;margin:8px 20px;border-radius:20px;background:#26292e;border:1px solid #33363c;display:grid;place-items:center;text-align:center;padding:24px;font-size:34px;font-weight:700;cursor:pointer}
+.card small{display:block;font-size:14px;color:#9a9a9a;font-weight:500;margin-top:10px}
+.row{display:flex;gap:12px;padding:16px 20px 28px}
+button{flex:1;padding:16px;border-radius:16px;border:0;font:700 17px system-ui;color:#fff;background:#33363c}
+button.ok{background:#7c3085}
+</style></head><body>
+<div class="top"><span id="pos"></span><span id="known"></span></div>
+<div class="card" id="card"></div>
+<div class="row"><button id="again">Again</button><button class="ok" id="got">Got it</button></div>
+<script>
+hearth.ready(() => {
+  const cards = (hearth.data && hearth.data.cards) || [];
+  const st = hearth.state || { known: {}, i: 0 };
+  let flipped = false;
+  const el = (id) => document.getElementById(id);
+  const left = () => cards.filter((c) => !st.known[c.front]);
+  function draw() {
+    const l = left();
+    el("known").textContent = (cards.length - l.length) + "/" + cards.length + " known";
+    if (!l.length) { el("card").innerHTML = "All done!<small>Tap to start over</small>"; el("pos").textContent = ""; return; }
+    const c = l[st.i % l.length];
+    el("pos").textContent = "Card " + ((st.i % l.length) + 1) + " of " + l.length;
+    el("card").textContent = flipped ? c.back : c.front;
+    const s = document.createElement("small"); s.textContent = flipped ? c.front : "Tap to flip"; el("card").appendChild(s);
+  }
+  el("card").onclick = () => { if (!left().length) { st.known = {}; st.i = 0; } else flipped = !flipped; draw(); hearth.save(st); };
+  el("again").onclick = () => { st.i++; flipped = false; draw(); hearth.save(st); };
+  el("got").onclick = () => { const l = left(); if (l.length) st.known[l[st.i % l.length].front] = true; flipped = false; draw(); hearth.save(st); };
+  draw();
+});
+</script></body></html>`;

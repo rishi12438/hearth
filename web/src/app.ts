@@ -19,6 +19,7 @@ const S = {
   inbox: [] as any[],           // Activity tab
   teammates: [] as any[],
   files: new Map<string, any>(),
+  apps: [] as any[],
   skills: [] as any[],
   workflows: [] as any[],
   hooks: [] as any[],
@@ -35,12 +36,14 @@ const S = {
 
 let live: ReturnType<typeof stream> | null = null;
 const app = document.getElementById("app")!;
-type Route = { view: "home" } | { view: "dms" } | { view: "activity" } | { view: "chat"; id: string; job?: string } | { view: "dm"; id: string };
+type Route = { view: "home" } | { view: "dms" } | { view: "activity" } | { view: "chat"; id: string; job?: string } | { view: "dm"; id: string } | { view: "app"; id: string };
 const route = (): Route => {
   if (location.hash === "#dms") return { view: "dms" };
   if (location.hash === "#activity") return { view: "activity" };
   let m = location.hash.match(/^#c\/([\w-]+)(?:\/([\w-]+))?/);
   if (m) return { view: "chat", id: m[1], job: m[2] };
+  m = location.hash.match(/^#a\/([\w-]+)/);
+  if (m) return { view: "app", id: m[1] };
   m = location.hash.match(/^#t\/([\w-]+)/);
   return m ? { view: "dm", id: m[1] } : { view: "home" };
 };
@@ -53,7 +56,7 @@ async function boot() {
   const pairCode = new URLSearchParams(location.hash.slice(1)).get("pair");
   if (!activeHub() || pairCode) return renderPairing(pairCode || "");
   if (/^#(chat\/|hearth)/.test(location.hash)) history.replaceState(null, "", "#"); // old links
-  await Promise.all([refreshState(), loadTeammates(), loadSkills(), loadFiles()]);
+  await Promise.all([refreshState(), loadTeammates(), loadSkills(), loadFiles(), loadApps()]);
   show();
   connect();
   if (localStorage.getItem("hearth.autoLocation") === "1") shareLocation(true);
@@ -76,6 +79,7 @@ function show() {
     else if (r.view === "dms") renderDms();
     else if (r.view === "activity") renderActivity();
     else if (r.view === "dm") renderDm();
+    else if (r.view === "app") renderApp(r.id);
     else renderChatLayout(r);
   } else if (r.view === "chat") drawChat();
   refresh();
@@ -132,6 +136,7 @@ function onEvent(e: { type: string; data?: any }) {
     case "threads": soon(); if (open && S.chat) call("/api/threads").then((l: any[]) => { const t = l.find((x) => x.id === open); if (t && S.chat) { S.chat.thread.title = t.title; drawHeader(); } }).catch(() => {}); return;
     case "teammates": loadTeammates().then(soon); return;
     case "skills": loadSkills(); return;
+    case "apps": loadApps().then(() => { const r2 = route(); if (r2.view === "app") { toast("Updated"); renderApp(r2.id); } else if (r2.view === "home") drawHome(); else if (r2.view === "chat") drawChat(false); else if (r2.view === "dm") drawDm(false); }); return;
     case "files": loadFiles().then(() => { const r2 = route(); if (r2.view === "chat") drawChat(false); else if (r2.view === "dm") drawDm(false); }); return;
     case "hooks": if (S.panel === "plans") loadHooks(); if (r.view === "dm") loadDm(r.id); return;
     case "memory": if (S.panel === "memory") loadMemory(); return;
@@ -187,6 +192,10 @@ function markUpdate() {
 const mate = (id?: string) => S.roster.find((t) => t.id === (id || "hearth")) || S.teammates.find((t) => t.id === (id || "hearth")) || { id: id || "hearth", name: "Hearth", color: "#F5A524", description: "" };
 const role = (t: any) => String(t.description || "").split(/[.,:;]/)[0].slice(0, 32);
 const jobState = (j: any) => j.status === "working" ? "working" : j.status === "queued" ? "thinking" : j.status === "waiting" ? "waiting" : j.status === "blocked" ? "blocked" : "idle";
+
+async function loadApps() {
+  try { S.apps = await call("/api/apps"); } catch {}
+}
 
 async function loadFiles() {
   try { for (const f of await call("/api/files")) S.files.set(f.id, f); } catch {}
@@ -378,6 +387,10 @@ function drawHome() {
     section("rambles", "Active rambles", active.length ? active.map(channelRow)
       : [h("p", { class: "hempty" }, "Tap + and ramble. Each ramble becomes a channel; it archives itself an hour after everything's done.")],
       h("button", { class: "chev", "aria-label": "New ramble", on: { click: () => { location.hash = "#c/new"; } } }, icon("plus", 20))),
+    section("apps", "Apps", S.apps.length ? [...S.apps].sort((a, b) => Number(b.pinned) - Number(a.pinned)).map((a) => h("button", { class: "hrow", on: { click: () => { location.hash = `#a/${a.id}`; } } },
+      appIcon(a, 30), h("span", { class: "grow" }, a.title), h("small", null, mate(a.teammateId).name)))
+      : [h("p", { class: "hempty" }, "Little apps your teammates build for you: flashcards, trackers, checklists. Tap + or just ask in a ramble.")],
+      h("button", { class: "chev", "aria-label": "New app", on: { click: newApp } }, icon("plus", 20))),
     section("dms", "Direct messages", team.map((t) => h("button", { class: `hrow ${t.needsYou || t.busy ? "unread" : ""}`, on: { click: () => { location.hash = `#t/${t.id}`; } } },
       face(t, 30, t.state), h("span", { class: "grow" }, t.name), t.needsYou ? h("em", { class: "badge" }, String(t.needsYou)) : null))),
     archived.length ? section("archived", `Archived (${archived.length})`, archived.slice(0, 30).map((t) => h("button", { class: "hrow dim", on: { click: () => { location.hash = `#c/${t.id}`; } } },
@@ -618,6 +631,7 @@ function taskMessage(m: any) {
       ...((latest.fileIds || []).length ? [`${latest.fileIds.length} file${latest.fileIds.length === 1 ? "" : "s"}`] : []),
     ];
     body.push(
+      appCards(latest),
       h("button", { class: "clamp short", on: { click: open } }, plain(st === "failed" ? `Couldn't do it: ${latest.result || "it failed"}` : latest.result || "Done.")),
       small.length ? h("button", { class: "tilelink", on: { click: open } }, small.map(tile)) : null,
       more.length ? h("button", { class: "chips", on: { click: open } }, more.map((x) => h("span", { class: "chipx" }, x))) : null);
@@ -671,12 +685,17 @@ function answer(j: any) {
   return row({ ...who, badge: h("small", { class: "jobmeta" }, metaLine(j)) }, at, [
     tiles.length && (j.how === "skill" || j.how === "workflow") ? null : richText(j.status === "failed" ? `Couldn't do it: ${j.result || "it failed"}` : j.result || "Done."),
     tiles.map(tile),
+    appCards(j),
     (j.fileIds || []).map(fileCard),
     did.length ? h("div", { class: "did-line" }, icon("check", 12), did.join(" · ")) : null,
     canSave ? h("button", { class: "linkbtn", on: { click: async (e: Event) => {
       const b = e.currentTarget as HTMLButtonElement; b.disabled = true;
       try { const sk = await call(`/api/jobs/${j.id}/save-skill`, { body: {} }); toast(`Saved skill ${sk.name}`); b.textContent = "Saved as skill"; loadSkills(); } catch (err) { b.disabled = false; handleError(err); }
     } } }, "Save as skill") : null,
+    j.status === "done" && !(j.did || []).some((d: any) => d.kind === "app") ? h("button", { class: "linkbtn", on: { click: async (e: Event) => {
+      (e.currentTarget as HTMLButtonElement).disabled = true;
+      try { await call(`/api/jobs/${j.followsUp || j.id}/reply`, { body: { text: "Turn this into a mini app I can use, with this content in it." } }); } catch (err) { handleError(err); }
+    } } }, icon("sparkle", 14), "Make an app") : null,
   ], false, j.status === "failed" ? "err" : "");
 }
 
@@ -1592,3 +1611,86 @@ function openHubs() {
 }
 
 boot();
+
+// ---------------- mini apps ----------------
+
+function appIcon(a: any, size = 30) {
+  const el = h("span", { class: "appicon", style: `--s:${size}px` }, String(a.title || a.name || "?").trim()[0].toUpperCase());
+  el.style.setProperty("--c", mate(a.teammateId).color || "#8b5cf6");
+  return el;
+}
+
+/** "Built Portuguese flashcards" in a job becomes a card you tap to open the app. */
+function appCards(j: any) {
+  const ids = [...new Set((j.did || []).filter((d: any) => d.kind === "app" && d.id).map((d: any) => d.id))] as string[];
+  return ids.map((id) => S.apps.find((x) => x.id === id)).filter(Boolean).map((a: any) => {
+    return h("button", { class: "appcard", on: { click: (e: Event) => { e.stopPropagation(); location.hash = `#a/${a.id}`; } } },
+      appIcon(a, 40), h("span", { class: "grow" }, h("b", null, a.title), h("small", null, a.description || "Tap to open")), h("span", { class: "openpill" }, "Open"));
+  });
+}
+
+function newApp() {
+  const what = h("textarea", { class: "field", rows: 3, maxLength: 1000, placeholder: "Flashcards for the Portuguese words from my lesson, and quiz me on the ones I miss" });
+  openSheet("New app", [
+    h("p", { class: "muted" }, "Say what it should do. The right teammate builds it, and you can ask for changes any time."),
+    what,
+    h("button", { class: "btn primary big", on: { click: async (e: Event) => {
+      const text = (what as HTMLTextAreaElement).value.trim();
+      if (!text) return;
+      (e.currentTarget as HTMLButtonElement).disabled = true;
+      try { const r = await call("/api/threads", { body: { text: `Build me a mini app: ${text}` } }); closeSheet(); location.hash = `#c/${r.thread.id}`; }
+      catch (err) { (e.currentTarget as HTMLButtonElement).disabled = false; handleError(err); }
+    } } }, icon("sparkle", 16), "Build it"),
+  ]);
+  setTimeout(() => what.focus(), 50);
+}
+
+let appListener: ((e: MessageEvent) => void) | null = null;
+
+/** Full screen: the app in a sandboxed frame (no network, no hub access), with a glass back button and menu. */
+async function renderApp(id: string) {
+  if (appListener) window.removeEventListener("message", appListener);
+  const box = h("div", { class: "appframe" }, h("p", { class: "muted center" }, "Opening…"));
+  const title = h("b", null, S.apps.find((x) => x.id === id)?.title || "App");
+  clear(app, h("div", { class: "screen appscreen" },
+    box,
+    h("header", { class: "chrome-top" }, h("div", { class: "toprow" },
+      h("button", { class: "circle glass", "aria-label": "Back", on: { click: () => { history.length > 1 ? history.back() : (location.hash = ""); } } }, icon("back", 24)),
+      h("button", { class: "titlepill glass", on: { click: () => appMenu(id) } }, h("span", { class: "grow" }, title, h("small", null, "Tap for changes, undo and more"))),
+      h("button", { class: "circle glass", "aria-label": "Reload", on: { click: () => renderApp(id) } }, icon("repeat", 20))))));
+  try {
+    const { url } = await call(`/api/apps/${id}/open`, { body: {} });
+    const frame = h("iframe", { sandbox: "allow-scripts allow-forms", src: activeHub()!.url + url, title: title.textContent || "App" }) as HTMLIFrameElement;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    appListener = (e: MessageEvent) => {
+      if (e.source !== frame.contentWindow || e.data?.hearth !== "save") return;
+      if (timer) clearTimeout(timer);
+      const state = e.data.state;
+      timer = setTimeout(() => call(`/api/apps/${id}/state`, { method: "PUT", body: { state } }).catch(handleError), 400);
+    };
+    window.addEventListener("message", appListener);
+    clear(box, frame);
+  } catch (err) { clear(box, h("p", { class: "muted center" }, "That app is gone.")); handleError(err); }
+}
+
+function appMenu(id: string) {
+  const a = S.apps.find((x) => x.id === id);
+  if (!a) return;
+  const ask = h("textarea", { class: "field", rows: 2, maxLength: 1000, placeholder: "Add 20 more words · show the Portuguese side first · bigger text" });
+  openSheet(a.title, [
+    h("p", { class: "muted" }, `${a.description ? a.description + " " : ""}Made by ${mate(a.teammateId).name}, updated ${shortAgo(a.updatedAt || a.createdAt)}. Runs on its own with no internet access.`),
+    ask,
+    h("button", { class: "btn primary big", on: { click: async (e: Event) => {
+      const text = (ask as HTMLTextAreaElement).value.trim();
+      if (!text) return;
+      (e.currentTarget as HTMLButtonElement).disabled = true;
+      try { await call(`/api/teammates/${a.teammateId || "hearth"}/messages`, { body: { text: `Change the app "${a.title}" (${a.name}): ${text}` } }); closeSheet(); toast(`${mate(a.teammateId).name} is on it. It updates here when done.`); }
+      catch (err) { (e.currentTarget as HTMLButtonElement).disabled = false; handleError(err); }
+    } } }, icon("sparkle", 16), "Ask for a change"),
+    h("div", { class: "stack" },
+      a.versions ? h("button", { class: "btn ghost", on: { click: async () => { try { await call(`/api/apps/${id}/undo`, { body: {} }); closeSheet(); await loadApps(); renderApp(id); toast("Back to the previous version"); } catch (err) { handleError(err); } } } }, "Undo last change") : null,
+      h("button", { class: "btn ghost", on: { click: async () => { await call(`/api/apps/${id}`, { method: "PATCH", body: { pinned: !a.pinned } }); closeSheet(); loadApps(); } } }, a.pinned ? "Unpin" : "Pin to top"),
+      h("button", { class: "btn ghost", on: { click: async () => { await call(`/api/apps/${id}/state`, { method: "PUT", body: { state: null } }); closeSheet(); renderApp(id); toast("Progress reset"); } } }, "Reset my progress"),
+      h("button", { class: "btn danger", on: { click: async () => { if (!confirm(`Delete ${a.title}?`)) return; await call(`/api/apps/${id}`, { method: "DELETE" }); closeSheet(); location.hash = ""; } } }, "Delete app")),
+  ]);
+}

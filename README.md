@@ -46,6 +46,15 @@ The orchestrator gives jobs a `dependsOn` only when one needs another's result; 
 
 Results like weather, places, checklists and numbers show as tiles: fixed components the app draws from data, never generated code. Scripts print `@tile {json}`; teammates use a `tile` action. Asking to change a tile ("show hourly", "in Fahrenheit") saves options on the skill, so it sticks.
 
+### Mini apps
+
+Ask for something you'll *use* and a teammate builds it right there: "make me a flashcard reader for these words", "a packing checklist for Lisbon", "a habit tracker for the gym". It shows up in the chat as an app card, and under **Apps** on Home.
+
+- **Code and content are separate.** An app is one HTML file plus its data (the cards). "Add 8 food words" changes only the data; your progress (which cards you know) is saved separately and kept.
+- **Make one from anything.** Tap **Make an app** under a teammate's answer, or **+** next to Apps on Home.
+- **Change it by asking.** Inside the app, tap the title: ask for a change, undo the last code change (the last 10 versions are kept), pin, reset progress or delete.
+- **Sandboxed.** Apps run in a frame with no network and no access to your hub; see [SECURITY.md](SECURITY.md).
+
 ### Workflows you keep, and a cleanup
 
 Tap **Save as workflow** on a finished ramble to keep it, or say "save this as my …". "Run my …" replays it, reusing skills where it can. A nightly cleanup, with no model, removes skills and workflows unused for `HEARTH_PURGE_UNUSED_DAYS` (default 45), ones that keep failing, proposals never switched on, and assistant scripts nothing uses. Pinned items are never removed, and everything removed is logged.

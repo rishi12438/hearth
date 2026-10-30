@@ -233,3 +233,20 @@ export type StoredFile = Doc & {
   jobId?: string;
   teammateId?: string;
 };
+
+/** A mini app a teammate built: one html file plus its data. Runs sandboxed with no network. */
+export type MiniApp = Doc & {
+  name: string;
+  title: string;
+  description: string;
+  html: string;
+  sha256: string;
+  data: unknown;
+  versions: { html: string; sha256: string; at: string; by?: string }[];
+  teammateId?: string;
+  threadId?: string;
+  jobId?: string;
+  pinned: boolean;
+};
+/** What an app saved for itself (flashcard progress, ticked boxes). */
+export type AppState = Doc & { state: unknown };

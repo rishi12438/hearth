@@ -6,9 +6,10 @@ import type { Hub } from "./hub.ts";
 import type { SpeechToText } from "./voice.ts";
 import { availableHarnesses } from "./brain.ts";
 import { MAX_FILE_BYTES } from "./files.ts";
+import { appCsp } from "./apps.ts";
 import { isActive, search } from "./memory.ts";
 import { isValidTimeZone } from "./time.ts";
-import type { StoredFile, Approval, Device, Fact, Hook, LocationFix, Message, Notebook, Place, Prefs, Skill, Teammate, Workflow } from "./types.ts";
+import type { StoredFile, Approval, Device, Fact, Hook, LocationFix, MiniApp, Message, Notebook, Place, Prefs, Skill, Teammate, Workflow } from "./types.ts";
 import pkg from "../package.json" with { type: "json" };
 
 const WEB = resolve(import.meta.dir, "../web");
@@ -72,7 +73,7 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
       "Permissions-Policy": "geolocation=(self), camera=(), microphone=(self), payment=()",
       "Content-Security-Policy": [
         "default-src 'self'", "script-src 'self'", "style-src 'self'", "img-src 'self' data: blob:", "media-src 'self' blob:",
-        `connect-src 'self' ${config.allowedOrigins.join(" ")}`.trim(), "manifest-src 'self'", "worker-src 'self'",
+        `connect-src 'self' ${config.allowedOrigins.join(" ")}`.trim(), "manifest-src 'self'", "worker-src 'self'", `frame-src 'self' ${config.allowedOrigins.join(" ")}`.trim(),
         "frame-ancestors 'none'", "base-uri 'none'", "form-action 'none'", "object-src 'none'",
       ].join("; "),
     };
@@ -253,6 +254,19 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
         }
         break;
       }
+      case "apps": {
+        const meta = (a: MiniApp) => ({ id: a.id, name: a.name, title: a.title, description: a.description, teammateId: a.teammateId, threadId: a.threadId, pinned: a.pinned, createdAt: a.createdAt, updatedAt: a.updatedAt, versions: a.versions.length });
+        if (method === "GET" && !id) return json((await hub.apps.list()).map(meta).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))));
+        const a = id ? await store.get<MiniApp>("apps", id) : null;
+        if (!a) break;
+        if (method === "GET" && !seg[3]) return json({ ...meta(a), data: a.data });
+        if (method === "POST" && seg[3] === "open") return json({ url: `/app-frame/${hub.apps.ticket(a.id)}` });
+        if (method === "PUT" && seg[3] === "state") { const r = await hub.apps.setState(a.id, (await body(req)).state); if (r.error) throw new HttpError(413, r.error); return json({ ok: true }); }
+        if (method === "POST" && seg[3] === "undo") { const r = await hub.apps.undo(a.id); if (!r) throw new HttpError(400, "There's no earlier version."); hub.emit("apps"); return json(meta(r)); }
+        if (method === "PATCH" && !seg[3]) { const b = await body(req); await store.put<MiniApp>("apps", { ...a, pinned: b.pinned === undefined ? a.pinned : !!b.pinned, title: typeof b.title === "string" && b.title.trim() ? b.title.trim().slice(0, 60) : a.title }); hub.emit("apps"); return json({ ok: true }); }
+        if (method === "DELETE" && !seg[3]) { await hub.apps.remove(a.id); hub.emit("apps"); return json({ ok: true }); }
+        break;
+      }
       case "jobs": {
         if (method === "POST" && seg[3] === "reply") { const r = await hub.replyToJob(id, String((await body(req)).text || "")); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "POST" && seg[3] === "retry") { const r = await hub.retryJob(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
@@ -384,8 +398,8 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
       const host = req.headers.get("x-forwarded-host") || req.headers.get("host");
       const sameOrigin = !origin || (() => { try { return new URL(origin).host === host; } catch { return false; } })();
       const headers = security(origin, sameOrigin);
-      // A response that brings its own CSP (file downloads: sandboxed) keeps it.
-      const finish = (res: Response) => { for (const [k, v] of Object.entries(headers)) if (!(k === "Content-Security-Policy" && res.headers.has(k))) res.headers.set(k, v); return res; };
+      // A response that brings its own CSP or frame rules (sandboxed downloads, mini apps) keeps them.
+      const finish = (res: Response) => { for (const [k, v] of Object.entries(headers)) if (!((k === "Content-Security-Policy" || k === "X-Frame-Options") && res.headers.has(k))) res.headers.set(k, v); return res; };
 
       if (url.pathname.startsWith("/api/")) {
         if (req.method === "OPTIONS") return finish(new Response(null, { status: 204 }));
@@ -398,6 +412,15 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
         }
       }
       if (req.method !== "GET" && req.method !== "HEAD") return finish(new Response("Method not allowed", { status: 405 }));
+      // A mini app, by short-lived ticket: sandboxed (opaque origin), no network, framable only by the app itself.
+      if (url.pathname.startsWith("/app-frame/")) {
+        const page = await hub.apps.page(url.pathname.slice("/app-frame/".length));
+        if (!page) return finish(new Response("This app link expired. Close it and open the app again.", { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8" } }));
+        return finish(new Response(page, { headers: {
+          "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Frame-Options": "SAMEORIGIN",
+          "Content-Security-Policy": appCsp(["'self'", ...config.allowedOrigins].join(" ")),
+        } }));
+      }
       const asset = web.assets.get(url.pathname) || (url.pathname.includes(".") ? null : web.assets.get("/"));
       if (!asset) return finish(new Response("Not found", { status: 404 }));
       const cache = url.pathname === "/sw.js" || asset.type.startsWith("text/html") ? "no-cache" : "public, max-age=300";

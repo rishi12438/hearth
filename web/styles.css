@@ -466,3 +466,16 @@ a.place:active { background: var(--surface-2); }
 .face, .face.round, .face.squircle, .face.blob, .face.tall, .face.wide, .face.leaf { border-radius: 22%; }
 .face.waiting { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--warn); }
 .tile { border-radius: 12px; }
+
+/* ---------- mini apps ---------- */
+.appicon { width: var(--s); height: var(--s); flex: none; display: inline-grid; place-items: center; border-radius: calc(var(--s) * .28);
+  background: linear-gradient(145deg, color-mix(in srgb, var(--c) 92%, #fff), color-mix(in srgb, var(--c) 70%, #000)); color: #fff; font-weight: 800; font-size: calc(var(--s) * .45); }
+.appcard { display: flex; align-items: center; gap: 12px; width: 100%; max-width: 420px; margin: 6px 0 2px; padding: 10px 12px; text-align: left;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px; }
+.appcard b { display: block; font-size: 16px; }
+.appcard small { display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; color: var(--muted); font-size: 13px; }
+.openpill { flex: none; padding: 6px 14px; border-radius: 999px; background: #7c3085; color: #fff; font-weight: 700; font-size: 14px; }
+.appscreen { background: #1a1d21; }
+.appframe { position: absolute; inset: 0; padding-top: calc(var(--safe-t) + 68px); display: flex; }
+.appframe iframe { flex: 1; width: 100%; border: 0; background: #1a1d21; }
+.appframe p { margin: auto; }

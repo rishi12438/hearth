@@ -3,7 +3,7 @@
 
 export const COLLECTIONS = [
   "devices", "pairing", "messages", "hooks", "memory", "places",
-  "locations", "activity", "pushSubs", "settings", "notebooks", "scripts", "teammates", "threads", "jobs", "skills", "workflows", "approvals", "files",
+  "locations", "activity", "pushSubs", "settings", "notebooks", "scripts", "teammates", "threads", "jobs", "skills", "workflows", "approvals", "files", "apps", "appState",
 ] as const;
 export type Collection = (typeof COLLECTIONS)[number];
 

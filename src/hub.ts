@@ -13,6 +13,7 @@ import type { StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix
 import { Library, validateSkill, validateWorkflow, fill } from "./library.ts";
 import { cleanTile, cleanOptions, extractTiles, type Tile } from "./tiles.ts";
 import { Files, extractFiles } from "./files.ts";
+import { Apps } from "./apps.ts";
 
 const DEFAULT_PREFS: Prefs = {
   userName: "", tz: "UTC", quietStart: "23:00", quietEnd: "07:30",
@@ -75,6 +76,7 @@ export class Hub {
     readonly scripts: Scripts, readonly push: Push | null,
     readonly library: Library = new Library(null),
     readonly files: Files = new Files(store, config.dataDir),
+    readonly apps: Apps = new Apps(store),
   ) {}
 
   // ---------- plumbing ----------
@@ -161,6 +163,10 @@ export class Hub {
       scripts: (await this.scripts.list()).filter((s) => s.status !== "rejected").map((s) => ({ name: s.name, description: s.description, status: s.status })),
       recentMessages: history.map((m) => ({ role: m.role, at: m.createdAt, text: m.text.slice(0, 600) })),
       library: mode === "review" ? undefined : await this.searchLibrary(query),
+      apps: mode === "review" ? undefined : (await this.apps.list()).map((a) => {
+        const data = JSON.stringify(a.data ?? null);
+        return { name: a.name, title: a.title, does: a.description, data: data.length > 6000 ? `${data.slice(0, 6000)}… (truncated; send the full data when you change it)` : a.data };
+      }),
     };
   }
 
@@ -940,6 +946,15 @@ export class Hub {
             if (r.value) { fileIds.push(r.value.id); done.push({ kind: "file", label: `Made ${r.value.name}`, id: r.value.id }); this.emit("files"); }
             break;
           }
+          case "app.save": {
+            if (where.recipe) break;
+            const r = await this.apps.save(a, where);
+            if (r.error) { await this.log("action.rejected", `app.save: ${r.error}`); done.push({ kind: "note", label: `Couldn't build the app: ${r.error}` }); break; }
+            const app = r.value!;
+            done.push({ kind: "app", label: `${r.created ? "Built" : r.changedCode ? "Updated" : "Updated content of"} ${app.title}`, id: app.id });
+            this.emit("apps");
+            break;
+          }
           case "tile": {
             const t = cleanTile({ ...a, type: a.tile });
             if (t && tiles.length < 4) tiles.push(t);
@@ -1479,7 +1494,7 @@ export class Hub {
 
   async exportAll() {
     const out: Record<string, unknown> = { exportedAt: this.clock().toISOString(), hub: this.config.name, storage: this.store.kind };
-    for (const col of ["threads", "messages", "jobs", "teammates", "skills", "workflows", "approvals", "hooks", "memory", "notebooks", "places", "locations", "activity", "scripts"] as const) out[col] = await this.store.all(col);
+    for (const col of ["threads", "messages", "jobs", "teammates", "skills", "workflows", "approvals", "hooks", "memory", "notebooks", "places", "locations", "activity", "scripts", "apps", "appState"] as const) out[col] = await this.store.all(col);
     out.devices = (await this.store.all<any>("devices")).map(({ tokenHash, ...d }) => d);
     out.prefs = await this.prefs();
     return out;
@@ -1487,7 +1502,7 @@ export class Hub {
 
   async wipePersonal() {
     for (const f of await this.store.all<StoredFile>("files")) await this.files.remove(f.id);
-    for (const col of ["threads", "messages", "jobs", "approvals", "hooks", "memory", "notebooks", "places", "locations", "activity"] as const) await this.store.clear(col);
+    for (const col of ["threads", "messages", "jobs", "approvals", "hooks", "memory", "notebooks", "places", "locations", "activity", "apps", "appState"] as const) await this.store.clear(col);
     await this.ensureSystemHooks();
     await this.ensureTeammates();
     await this.log("data.wiped", "All personal data deleted from this hub.");

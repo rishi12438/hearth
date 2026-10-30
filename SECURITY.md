@@ -30,6 +30,13 @@ Hearth holds personal data and can act on a schedule, so it is built to fail clo
 - Downloads need a device token and are served with `Content-Security-Policy: sandbox` and `nosniff`. Only images, PDFs, plain text, audio and video may display inline; HTML, SVG and everything else download as `application/octet-stream`.
 - A script can only hand over files from its own working folder, by name.
 
+## Mini apps
+- An app is HTML a teammate wrote, so it is treated as untrusted. It loads in an iframe with `sandbox="allow-scripts allow-forms"` and no `allow-same-origin`, so it gets an opaque origin: it can't read the app's storage or device token, or call the hub's API.
+- Its page is served with its own CSP: `sandbox`, `connect-src 'none'`, no external scripts, styles, images or fonts (only inline and `data:`), `form-action 'none'`, and `frame-ancestors` limited to this hub and `HEARTH_ALLOWED_ORIGINS`. It can't fetch, post or load a tracking pixel.
+- Iframes can't send the device token, so the app screen first asks for a ticket: random, for one app only, valid 10 minutes, kept in memory.
+- The only way out of the app is `hearth.save(state)`, a `postMessage` that the app screen accepts only from that frame and relays to that one app's state (48 KB max).
+- What remains: an app could *show* misleading text, such as a fake login form. Hearth never asks for passwords inside an app.
+
 ## Your data
 - SQLite files and the data folder are created with mode `0700`. Use a Postgres or MySQL user with access only to the Hearth tables.
 - Web Push VAPID keys are generated on first run and kept with your data; nothing is hard-coded. Push payloads go from your hub to your browser's push service, encrypted end to end per the Web Push standard.
