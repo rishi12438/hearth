@@ -251,25 +251,22 @@ export class Hub {
     this.emit("threads");
   }
 
-  /** Where proactive messages go when the hook wasn't born in a chat. */
-  private async updatesThread() {
-    const t = await this.store.get<Thread>("threads", "updates");
-    if (t) return t.id;
+  /** Hearth's one long main conversation (Muse-style). Rambles and proactive messages land here. */
+  async mainThread() {
+    const t = await this.store.get<Thread>("threads", "main");
+    if (t) return t;
     const now = this.clock().toISOString();
-    await this.store.put<Thread>("threads", { id: "updates", createdAt: now, updatedAt: now, title: "Updates" });
-    return "updates";
+    return this.store.put<Thread>("threads", { id: "main", createdAt: now, updatedAt: now, title: "Hearth" });
   }
+
+  private async updatesThread() { return (await this.mainThread()).id; }
 
   /** Stores what you said right away; the orchestrator and teammates work in the background. */
   async ramble(text: string, threadId?: string) {
     const clean = text.trim().slice(0, 8000);
     if (!clean) return { error: "Say something first." };
-    let thread = threadId ? await this.store.get<Thread>("threads", threadId) : null;
-    if (threadId && !thread) return { error: "No such chat." };
-    if (!thread) {
-      const now = this.clock().toISOString();
-      thread = await this.store.put<Thread>("threads", { id: randomUUID(), createdAt: now, updatedAt: now, title: clean.split(/\s+/).slice(0, 6).join(" ") });
-    }
+    const thread = threadId ? await this.store.get<Thread>("threads", threadId) : await this.mainThread();
+    if (!thread) return { error: "No such chat." };
     const m = await this.addMessage({ role: "user", text: clean, threadId: thread.id });
     await this.setPrefs({ lastUserAt: m.createdAt });
     await this.touchThread(thread.id, { preview: clean.slice(0, 120) });
@@ -329,7 +326,7 @@ export class Hub {
       if (deps.length) jobs[i] = await this.store.put<Job>("jobs", { ...job, dependsOn: deps });
     }
     for (const w of (Array.isArray(plan.newWorkflows) ? plan.newWorkflows : []).slice(0, 2)) await this.proposeWorkflow(w);
-    if (plan.title && thread.title === m.text.split(/\s+/).slice(0, 6).join(" ")) await this.touchThread(thread.id, { title: String(plan.title).slice(0, 60) });
+
     await this.addMessage({ role: "assistant", teammateId: "hearth", threadId: thread.id, text: String(plan.reply || "On it.").slice(0, 1000), jobIds: jobs.map((j) => j.id) });
     for (const j of jobs) this.emit("job", j);
     this.pump(m.id); // runs in the background; a new ramble is handled right away
@@ -1042,6 +1039,74 @@ export class Hub {
     for (const [i, t] of DEFAULT_TEAMMATES.entries()) {
       await this.store.put<Teammate>("teammates", { ...t, builtIn: true, createdAt: new Date(t0 + i * 1000).toISOString() });
     }
+  }
+
+  /** Message one teammate directly: no orchestrator, the job goes straight to them in their own thread. */
+  async askTeammate(id: string, text: string) {
+    const mate = await this.teammate(id);
+    const clean = text.trim().slice(0, 4000);
+    if (!mate) return { error: "No such teammate." };
+    if (!clean) return { error: "Say something first." };
+    const tid = `tm-${mate.id}`;
+    const now = this.clock().toISOString();
+    if (!(await this.store.get<Thread>("threads", tid))) await this.store.put<Thread>("threads", { id: tid, createdAt: now, updatedAt: now, title: mate.name });
+    const m = await this.addMessage({ role: "user", text: clean, threadId: tid, teammateId: mate.id });
+    await this.setPrefs({ lastUserAt: m.createdAt });
+    const job = await this.store.put<Job>("jobs", { ...this.doc({}), threadId: tid, messageId: m.id, task: clean, teammateId: mate.id, status: "queued", effort: "light" } as Job);
+    await this.store.put<Message>("messages", { ...m, jobIds: [job.id] });
+    this.emit("job", job);
+    this.pump(m.id);
+    return { value: { message: m, job } };
+  }
+
+  /**
+   * The roster (Grok Bot-style home): each teammate with its state, for the avatar to act out, and a one-line
+   * status in its own voice.
+   */
+  async roster() {
+    const now = this.clock().getTime();
+    const team = await this.store.all<Teammate>("teammates");
+    const jobs = (await this.store.all<Job>("jobs")).filter((j) => !j.parentId).sort((a, b) => (b.updatedAt || b.createdAt).localeCompare(a.updatedAt || a.createdAt));
+    const approvals = await this.store.all<Approval>("approvals");
+    const prefs = await this.prefs();
+    const hooks = (await this.store.all<Hook>("hooks")).filter((h) => h.status === "active" && h.nextAt && h.source !== "system").sort((a, b) => a.nextAt!.localeCompare(b.nextAt!));
+    const first = (t: string) => t.split("\n").map((x) => x.replace(/^[-*•#\s]+/, "").trim()).find(Boolean) || "";
+    const clip = (t: string, n = 90) => (t.length > n ? t.slice(0, n - 1) + "…" : t);
+    return team.map((t) => {
+      const mine = jobs.filter((j) => j.teammateId === t.id);
+      const pick = (...st: Job["status"][]) => mine.filter((j) => st.includes(j.status));
+      const working = pick("working"), queued = pick("queued"), waiting = pick("waiting"), blocked = pick("blocked");
+      const last = mine.find((j) => j.status === "done" || j.status === "failed");
+      const recent = last && now - new Date(last.finishedAt || last.updatedAt || last.createdAt).getTime() < 3 * 60_000;
+      let state = "idle", status = "", at = last?.finishedAt || last?.updatedAt;
+      if (t.id === "hearth" && this.thinking) { state = "thinking"; status = "Sorting out who does what…"; at = this.clock().toISOString(); }
+      else if (blocked.length) { state = "blocked"; status = `Stuck: ${blocked[0].blocked?.need || blocked[0].task}`; at = blocked[0].updatedAt; }
+      else if (waiting.length) {
+        const ap = approvals.find((a) => a.jobId === waiting[0].id && a.status === "pending");
+        state = "waiting"; status = `Need your OK: ${ap?.summary || waiting[0].task}`; at = waiting[0].updatedAt;
+      }
+      else if (working.length) { state = "working"; status = `${working.length > 1 ? `${working.length} things. ` : ""}On it: ${working[0].task}`; at = working[0].startedAt; }
+      else if (queued.length) { state = "thinking"; status = `Up next: ${queued[0].task}`; at = queued[0].createdAt; }
+      else if (last) { state = recent ? "done" : "idle"; status = last.status === "failed" ? `Couldn't: ${last.task}` : first(last.result || "") || `Done: ${last.task}`; }
+      if (!status) {
+        const next = hooks.find((h) => h.teammateId === t.id);
+        status = next ? `Next: ${next.title}, ${new Date(next.nextAt!).toLocaleString("en-US", { timeZone: prefs.tz, weekday: "short", hour: "numeric", minute: "2-digit" })}` : t.description;
+      }
+      return { id: t.id, name: t.name, color: t.color, description: t.description, builtIn: t.builtIn, state, status: clip(status), at,
+        busy: working.length + queued.length, needsYou: waiting.length + blocked.length };
+    });
+  }
+
+  /** Everything one teammate has done, across chats, plus its routines and direct messages. */
+  async teammateDetail(id: string) {
+    const teammate = await this.teammate(id);
+    if (!teammate) return null;
+    const jobs = (await this.store.all<Job>("jobs")).filter((j) => j.teammateId === id && !j.parentId).slice(-40);
+    const messages = (await this.store.all<Message>("messages")).filter((m) => m.threadId === `tm-${id}`).slice(-60);
+    const prefs = await this.prefs();
+    const routines = (await this.store.all<Hook>("hooks")).filter((h) => h.teammateId === id && h.status !== "done").map((h) => ({ ...h, when: describeTrigger(h.trigger, prefs.tz) }));
+    const approvals = (await this.store.all<Approval>("approvals")).filter((a) => jobs.some((j) => j.id === a.jobId));
+    return { teammate, jobs, messages, routines, approvals };
   }
 
   async teammate(id?: string | null) {

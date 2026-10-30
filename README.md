@@ -30,9 +30,13 @@ Run one hub on an always-on box so routines fire while your laptop sleeps. Run a
 3. Teammates are a name plus a role prompt. If no teammate fits, the orchestrator creates one, which you can see and delete in the app.
 4. Voice: the app records audio and the hub transcribes it with Deepgram (`HEARTH_DEEPGRAM_API_KEY`), so the key never reaches the phone. Speech-to-text is an interface in [src/voice.ts](src/voice.ts), so other providers can be added.
 
-### Parallel, with a side panel
+### How it looks
 
-The orchestrator gives jobs a `dependsOn` only when one needs another's result; everything else runs at once (`HEARTH_MAX_PARALLEL`, default 4, plus `HEARTH_MAX_PARALLEL_CLAUDE` / `_CODEX` per harness). Each job is its own agent process. A new ramble is read immediately even while jobs run. Heavy jobs may split into 2-4 sub-agents (one level deep) whose results are merged. Spend caps per ramble and per day (`HEARTH_COST_CAP_RAMBLE_USD`, `HEARTH_COST_CAP_DAY_USD`) park jobs instead of running them. In the app the chat stays a conversation (teammates post their results, and only Approve or "stuck" rows ask for you), while running agents live in a side panel.
+Inspired by Grok Bot and Muse. Home is a **roster of teammates**, not a list of chats. Each teammate has a face (a simple shape with expressive eyes) that acts out what it's doing: blinking when idle, glancing around while thinking, busy while working, looking at you with a warm ring when it needs your OK, sleepy when stuck, happy when done. Next to the face is a one-line status in the teammate's own voice. Hearth, the chief of staff, is pinned on top. You talk to Hearth in **one long conversation**: it hands the work out, "on it" rows turn into results and tiles, and approvals arrive as cards. Tap Hearth's face for the activity log. Tap any teammate to see everything it did, its routines, or to message it directly.
+
+### Parallel jobs
+
+The orchestrator gives jobs a `dependsOn` only when one needs another's result; everything else runs at once (`HEARTH_MAX_PARALLEL`, default 4, plus `HEARTH_MAX_PARALLEL_CLAUDE` / `_CODEX` per harness). Each job is its own agent process. A new ramble is read immediately even while jobs run. Heavy jobs may split into 2-4 sub-agents (one level deep) whose results are merged. Spend caps per ramble and per day (`HEARTH_COST_CAP_RAMBLE_USD`, `HEARTH_COST_CAP_DAY_USD`) park jobs instead of running them. In the app, teammates post their results in the conversation, and only Approve or "stuck" rows ask for you.
 
 ### Tiles
 
