@@ -27,7 +27,7 @@ beforeEach(async () => {
   await hub.setPrefs({ tz: TZ });
 });
 
-afterEach(async () => { hub.stop(); await Bun.sleep(20); await store.close(); });
+afterEach(async () => { hub.stop(); await hub.idle(20_000); await store.close(); });
 
 const messages = () => store.all<Message>("messages");
 const until = async (fn: () => Promise<boolean>) => { for (let i = 0; i < 100 && !(await fn()); i++) await Bun.sleep(10); };

@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync, chmodSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { sha256 } from "./auth.ts";
@@ -99,6 +99,14 @@ export class Scripts {
     const current = sha256(this.code(s));
     if (current !== seenSha) return { error: "The script changed since you opened it. Reload and review again." };
     return { value: await this.store.put("scripts", { ...s, status: "approved" as const, sha256: current, updatedAt: new Date().toISOString() }) };
+  }
+
+  /** Deletes an assistant-written script (file and record). Repo scripts are yours and are never removed. */
+  async remove(id: string) {
+    const s = await this.store.get<Script>("scripts", id);
+    if (!s || s.origin === "repo") return false;
+    rmSync(this.fileFor(s), { force: true });
+    return this.store.remove("scripts", id);
   }
 
   async reject(id: string) {

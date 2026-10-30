@@ -48,7 +48,7 @@ if (cmd === "pair") {
     const { code, expiresInMin } = await newPairingCode(store);
     printPair(code, expiresInMin);
   }
-  const shutdown = async () => { hub.stop(); server.stop(); await store.close(); process.exit(0); };
+  const shutdown = async () => { hub.stop(); server.stop(); await hub.idle(20_000); await store.close(); process.exit(0); };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 } else {

@@ -11,6 +11,7 @@ import { recall, isActive, validateFact } from "./memory.ts";
 import { describeLocal, inQuietHours, quietEndsAt, localDate, distanceMeters } from "./time.ts";
 import type { Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
 import { Library, validateSkill, validateWorkflow, fill } from "./library.ts";
+import { cleanTile, cleanOptions, extractTiles, type Tile } from "./tiles.ts";
 
 const DEFAULT_PREFS: Prefs = {
   userName: "", tz: "UTC", quietStart: "23:00", quietEnd: "07:30",
@@ -28,6 +29,7 @@ export const DEFAULT_TEAMMATES: Pick<Teammate, "id" | "name" | "color" | "descri
 ];
 
 const REVIEW_MARKER = "[[memory-review]]";
+const PURGE_MARKER = "[[library-purge]]";
 const LOCATION_KEEP_DAYS = 7;
 
 type TurnOpts = { teammate?: Teammate | null; threadId?: string; jobId?: string; extra?: string; profile?: BrainProfile; meter?: Meter; allowedScripts?: string[] };
@@ -40,6 +42,16 @@ export function parsePlan(raw: string): any | null {
   try { const p = JSON.parse(m[0]); return p && typeof p === "object" && Array.isArray(p.jobs ?? []) ? p : null; } catch { return null; }
 }
 
+/** Runs async critical sections one at a time (read-modify-write on shared docs). */
+class Lock {
+  private tail: Promise<unknown> = Promise.resolve();
+  run<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.tail.then(fn, fn);
+    this.tail = next.catch(() => {});
+    return next;
+  }
+}
+
 export type HubEvent = { type: string; data?: unknown };
 
 export class Hub {
@@ -48,6 +60,11 @@ export class Hub {
   private firing = new Set<string>();
   private timer: ReturnType<typeof setInterval> | null = null;
   thinking = false;
+  private prefsLock = new Lock();
+  private memoryLock = new Lock();
+  private started = new Set<string>();   // job ids already handed to runJob
+  private inflight = 0;                   // orchestrations, splits and retries still running
+  private rambleSpend = new Map<string, number>(); // message id -> USD
 
   constructor(
     readonly config: Config, readonly store: Store, readonly brain: Brain,
@@ -70,7 +87,11 @@ export class Hub {
     return { ...DEFAULT_PREFS, ...(p || {}) };
   }
 
-  async setPrefs(patch: Partial<Prefs>) {
+  setPrefs(patch: Partial<Prefs>) {
+    return this.prefsLock.run(() => this.setPrefsNow(patch));
+  }
+
+  private async setPrefsNow(patch: Partial<Prefs>) {
     const cur = await this.prefs();
     const next = { ...cur, ...patch, id: "prefs", createdAt: "1970-01-01T00:00:00.000Z" };
     await this.store.put("settings", next);
@@ -148,7 +169,8 @@ export class Hub {
     const first = parseReply(await this.brain.think({ mode, context: ctx, input, toolResults: extra }, profile, opts.meter));
     if (first.text.includes(ESCALATE)) return { text: ESCALATE, did: [] as Done[], used: [] as string[] };
     const applied = await this.applyActions(first.actions, evidence, where);
-    if (!applied.runs.length) return { text: first.text, did: applied.done, used: applied.used };
+    if (!applied.runs.length) return { text: first.text, did: applied.done, used: applied.used, split: applied.split, tiles: applied.tiles };
+    const scriptTiles: Tile[] = [];
 
     const results: string[] = [];
     for (const r of applied.runs.slice(0, 3)) {
@@ -164,12 +186,15 @@ export class Hub {
         continue;
       }
       applied.done.push({ kind: "script", label: `Ran ${r.name}${out.ok ? "" : " (failed)"}` });
-      results.push(`## ${r.name}\n${out.output}`);
+      const ex = extractTiles(out.output);
+      scriptTiles.push(...ex.tiles);
+      results.push(`## ${r.name}\n${ex.text}${ex.tiles.length ? `\n(${ex.tiles.length} tile(s) already shown to the user)` : ""}`);
     }
     const ctx2 = await this.context(input, mode, teammate);
     const second = parseReply(await this.brain.think({ mode, context: ctx2, input, toolResults: [extra, ...results].filter(Boolean).join("\n\n") }, profile, opts.meter));
     const applied2 = await this.applyActions(second.actions.filter((a: any) => a?.type !== "script.run"), evidence, where);
-    return { text: second.text || first.text, did: [...applied.done, ...applied2.done], used: [...applied.used, ...applied2.used] };
+    const tiles = [...applied.tiles, ...applied2.tiles, ...scriptTiles].slice(0, 4);
+    return { text: second.text || first.text, did: [...applied.done, ...applied2.done], used: [...applied.used, ...applied2.used], split: applied.split ?? applied2.split, tiles };
   }
 
   // ---------- brains: who plans, who works ----------
@@ -248,7 +273,8 @@ export class Hub {
     const m = await this.addMessage({ role: "user", text: clean, threadId: thread.id });
     await this.setPrefs({ lastUserAt: m.createdAt });
     await this.touchThread(thread.id, { preview: clean.slice(0, 120) });
-    this.orchestrate(thread, m);
+    this.inflight++;
+    this.orchestrate(thread, m).finally(() => this.inflight--);
     return { value: { thread, message: m } };
   }
 
@@ -273,6 +299,8 @@ export class Hub {
     for (const f of (plan.facts || []).slice(0, 10)) await this.addFact({ ...f, evidence: m.text.slice(0, 300) }, "assistant");
     const team = await this.store.all<Teammate>("teammates");
     const jobs: Job[] = [];
+    const keyToId = new Map<string, string>();
+    const wants = new Map<string, string[]>();
     for (const j of (plan.jobs || []).slice(0, 8)) {
       if (typeof j?.task !== "string" || !j.task.trim()) continue;
       const wanted = String(j.teammate || "Hearth").toLowerCase();
@@ -291,13 +319,46 @@ export class Hub {
         status: "queued", effort: j.effort === "heavy" ? "heavy" : "light",
         skillId: skill?.status === "active" ? skill.id : undefined, workflowId: workflow?.id, inputs,
       } as Job));
+      const made = jobs[jobs.length - 1];
+      if (typeof j.id === "string") keyToId.set(j.id, made.id);
+      if (Array.isArray(j.dependsOn)) wants.set(made.id, j.dependsOn.map(String));
+    }
+    // Resolve dependsOn keys to job ids; drop anything unknown or pointing forward (keeps it a DAG).
+    for (const [i, job] of jobs.entries()) {
+      const deps = (wants.get(job.id) || []).map((k) => keyToId.get(k)).filter((id): id is string => !!id && jobs.findIndex((x) => x.id === id) < i);
+      if (deps.length) jobs[i] = await this.store.put<Job>("jobs", { ...job, dependsOn: deps });
     }
     for (const w of (Array.isArray(plan.newWorkflows) ? plan.newWorkflows : []).slice(0, 2)) await this.proposeWorkflow(w);
     if (plan.title && thread.title === m.text.split(/\s+/).slice(0, 6).join(" ")) await this.touchThread(thread.id, { title: String(plan.title).slice(0, 60) });
     await this.addMessage({ role: "assistant", teammateId: "hearth", threadId: thread.id, text: String(plan.reply || "On it.").slice(0, 1000), jobIds: jobs.map((j) => j.id) });
     for (const j of jobs) this.emit("job", j);
-    for (const j of jobs) await this.runJob(j, m.text);
-    if (jobs.length) await this.touchThread(thread.id, {});
+    this.pump(m.id); // runs in the background; a new ramble is handled right away
+  }
+
+  /**
+   * The scheduler: starts every queued job whose dependencies are done. Called whenever a job changes, so
+   * approvals, unblocks and retries resume their dependents. A failed dependency skips its dependents only.
+   */
+  async pump(messageId: string) {
+    const jobs = (await this.store.all<Job>("jobs")).filter((j) => j.messageId === messageId && !j.parentId);
+    const byId = new Map(jobs.map((j) => [j.id, j]));
+    const msg = await this.store.get<Message>("messages", messageId);
+    for (const j of jobs) {
+      if (j.status !== "queued" || this.started.has(j.id)) continue;
+      const deps = (j.dependsOn || []).map((id) => byId.get(id)).filter(Boolean) as Job[];
+      const bad = deps.find((d) => d.status === "failed");
+      if (bad) {
+        this.started.add(j.id);
+        try { await this.saveJob({ ...j, status: "failed", result: `Skipped: it needed "${bad.task.slice(0, 80)}", which failed.`, finishedAt: this.clock().toISOString() }); }
+        finally { this.started.delete(j.id); }
+        continue;
+      }
+      if (deps.every((d) => d.status === "done")) {
+        this.started.add(j.id);
+        const earlier = deps.map((d) => `## ${d.task}\n${d.result || ""}`).join("\n\n");
+        this.runJob(j, msg?.text || j.task, earlier).finally(() => this.started.delete(j.id));
+      }
+    }
   }
 
   /**
@@ -305,20 +366,27 @@ export class Hub {
    * Otherwise it's worked out fresh: light jobs on the workhorse, heavy ones (and escalations) on heavy.
    * If a skill fails, the job is solved fresh and the teammate is asked to save a fixed version.
    */
-  private async runJob(job: Job, ramble: string) {
+  private async runJob(job: Job, ramble: string, earlier = "") {
     const started = Date.now();
     const meter: Meter = { costUsd: 0, unknown: false };
     const mate = await this.teammate(job.teammateId);
-    let cur: Job = await this.saveJob({ ...job, status: "working" });
+    let cur: Job = await this.saveJob({ ...job, status: "working", startedAt: this.clock().toISOString() });
     const finish = async (patch: Partial<Job>) => {
       const pending = (await this.store.all<Approval>("approvals")).some((a) => a.jobId === job.id && a.status === "pending");
       const blocked = (await this.store.get<Job>("jobs", job.id))?.blocked;
       const status = patch.status === "failed" ? "failed" : blocked ? "blocked" : pending ? "waiting" : "done";
+      await this.addSpend(job.messageId, meter.costUsd);
       cur = await this.saveJob({
         ...cur, ...patch, blocked, status,
         durationMs: Date.now() - started, costUsd: meter.unknown ? null : +meter.costUsd.toFixed(4),
         finishedAt: status === "done" || status === "failed" ? this.clock().toISOString() : undefined,
       });
+    };
+    const overCap = async () => {
+      const r = await this.spendCheck(job.messageId);
+      if (!r) return false;
+      cur = await this.saveJob({ ...cur, blocked: { need: r, why: "Spending caps keep a ramble from running up a bill.", unblock: "Raise the cap in Brains, or tap Try again later" } });
+      return true;
     };
 
     let failedSkill: { name: string; error: string } | null = null;
@@ -327,7 +395,7 @@ export class Hub {
         const r = job.workflowId
           ? await this.runWorkflow(job.workflowId, job.inputs || {}, { job, mate, meter })
           : await this.runSkill(job.skillId!, job.inputs || {}, { job, mate, meter });
-        return await finish({ how: job.workflowId ? "workflow" : "skill", tier: r.usedModel ? "workhorse" : undefined, result: r.output.slice(0, 4000), did: r.did });
+        return await finish({ how: job.workflowId ? "workflow" : "skill", tier: r.usedModel ? "workhorse" : undefined, result: r.output.slice(0, 4000), did: r.did, tiles: r.tiles });
       } catch (err: any) {
         const sk = job.skillId ? await this.store.get<Skill>("skills", job.skillId) : null;
         failedSkill = { name: sk?.name || "workflow", error: err.message };
@@ -339,13 +407,16 @@ export class Hub {
     const repairNote = failedSkill
       ? `\n\nThe saved skill "${failedSkill.name}" failed with: ${failedSkill.error}\nSolve the job fresh. Then, if you can, save a fixed version with skill.save using the same name. A recipe fix may only use scripts the old one used.`
       : "\n\nIf this job is likely to come back and you had to work it out, save it with skill.save.";
-    const input = `${job.task}${repairNote}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")`;
+    const depNote = earlier ? `\n\nResults from earlier jobs you depend on:\n<untrusted>\n${earlier.slice(0, 6000)}\n</untrusted>` : "";
+    const splitNote = job.effort === "heavy" && !job.depth ? "\n\nThis is a heavy job: if it has 2-4 parts that can be done independently, you may use jobs.split." : "";
+    const input = `${job.task}${depNote}${repairNote}${splitNote}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")`;
     const attempt = async (tier: "workhorse" | "heavy") => {
       cur = await this.saveJob({ ...cur, status: "working", tier });
       return this.turn("job", input, job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains[tier], meter });
     };
     let tier: "workhorse" | "heavy" = job.effort === "heavy" ? "heavy" : "workhorse";
     let escalated = false;
+    if (await overCap()) return finish({ how: "fresh" });
     try {
       let r = await attempt(tier).catch((err) => (tier === "workhorse" ? null : Promise.reject(err)));
       if (tier === "workhorse" && (!r || r.text.includes(ESCALATE) || !r.text.trim())) {
@@ -354,10 +425,55 @@ export class Hub {
         r = await attempt("heavy");
       }
       if (!r || r.text.includes(ESCALATE)) throw new Error("Nobody could do this one.");
-      await finish({ how: failedSkill ? "repaired" : "fresh", tier, escalated, result: r.text.slice(0, 4000), did: r.did });
+      if (r.split && job.effort === "heavy" && !job.depth) {
+        const merged = await this.runSplit(cur, r.split, ramble, meter);
+        return await finish({ how: "fresh", tier, escalated, result: merged.text.slice(0, 4000), did: [...r.did, ...merged.did], tiles: merged.tiles });
+      }
+      await finish({ how: failedSkill ? "repaired" : "fresh", tier, escalated, result: r.text.slice(0, 4000), did: r.did, tiles: r.tiles });
     } catch (err: any) {
       await finish({ status: "failed", how: "fresh", tier, escalated, result: err.message });
     }
+  }
+
+  /** A heavy job's sub-agents: run in parallel (under the same caps), then the heavy model merges their results. */
+  private async runSplit(parent: Job, split: { subtasks: { task: string; teammate?: string }[]; merge: string }, ramble: string, meter: Meter) {
+    const team = await this.store.all<Teammate>("teammates");
+    const subs: Job[] = [];
+    for (const st of split.subtasks) {
+      const mate = team.find((t) => t.name.toLowerCase() === (st.teammate || "").toLowerCase()) || team.find((t) => t.id === parent.teammateId);
+      subs.push(await this.saveJob({ ...this.doc({}), threadId: parent.threadId, messageId: parent.messageId, task: st.task, teammateId: mate?.id || parent.teammateId, status: "queued", effort: "light", parentId: parent.id, depth: 1 } as Job));
+    }
+    await this.log("job.split", `${parent.task.slice(0, 60)} → ${subs.length} sub-agents`);
+    await Promise.all(subs.map((sj) => this.runJob(sj, ramble)));
+    const results = (await Promise.all(subs.map((sj) => this.store.get<Job>("jobs", sj.id)))).filter(Boolean) as Job[];
+    const brains = await this.brains();
+    const mate = await this.teammate(parent.teammateId);
+    const text = results.map((x) => `## ${x.task} (${x.status})\n${x.result || ""}`).join("\n\n");
+    const merged = await this.turn("job", `${parent.task}\n\nYour sub-agents finished. ${split.merge}\nWrite the final answer for the user. Don't split again.`, parent.task,
+      { teammate: mate, threadId: parent.threadId, jobId: parent.id, profile: brains.heavy, meter, extra: text });
+    return merged;
+  }
+
+  /** Records model spend for the day and the ramble. */
+  private async addSpend(messageId: string, usd: number) {
+    if (!usd) return;
+    this.rambleSpend.set(messageId, (this.rambleSpend.get(messageId) || 0) + usd);
+    await this.prefsLock.run(async () => {
+      const p = await this.prefs();
+      const today = localDate(this.clock(), p.tz);
+      const cur = p.spend?.date === today ? p.spend.usd : 0;
+      await this.setPrefsNow({ spend: { date: today, usd: +(cur + usd).toFixed(4) } });
+    });
+  }
+
+  /** Null when there's budget left; otherwise what's over. */
+  async spendCheck(messageId: string) {
+    const p = await this.prefs();
+    const caps = { ramble: p.costCaps?.rambleUsd ?? this.config.costCapRambleUsd, day: p.costCaps?.dayUsd ?? this.config.costCapDayUsd };
+    const today = p.spend?.date === localDate(this.clock(), p.tz) ? p.spend.usd : 0;
+    if (today >= caps.day) return `Today's spending cap ($${caps.day}) is reached`;
+    if ((this.rambleSpend.get(messageId) || 0) >= caps.ramble) return `This ramble's spending cap ($${caps.ramble}) is reached`;
+    return null;
   }
 
   /** You unblocked it (opened the laptop, logged in, tapped Allow): run the job again from the top. */
@@ -367,7 +483,8 @@ export class Hub {
     const msg = await this.store.get<Message>("messages", job.messageId);
     const fresh = await this.saveJob({ ...job, blocked: undefined, status: "queued", result: undefined, did: undefined });
     await this.log("job.retry", job.task.slice(0, 80));
-    this.runJob(fresh, msg?.text || job.task);
+    if (fresh.parentId) { this.inflight++; this.runJob(fresh, msg?.text || job.task).finally(() => this.inflight--); }
+    else await this.pump(fresh.messageId);
     return { value: fresh };
   }
 
@@ -389,7 +506,7 @@ export class Hub {
     if (!sk || sk.status !== "active") throw new Error("That skill isn't active.");
     const started = Date.now();
     try {
-      let output = "", did: Done[] = [], usedModel = false;
+      let output = "", did: Done[] = [], usedModel = false, tiles: Tile[] = [];
       if (sk.kind === "script") {
         const args = sk.inputs.map((i) => inputs[i.name] ?? "");
         const out = await this.scripts.run(sk.script!, args);
@@ -399,7 +516,7 @@ export class Hub {
           output = "Waiting for your Approve.";
           did = [{ kind: "approval", label: `Waiting for your Approve: ${sk.name}`, id: ap.value!.id }];
         } else if (!out.ok) throw new Error(out.output.slice(0, 300));
-        else output = out.output;
+        else { const ex = extractTiles(out.output); output = ex.text; tiles = ex.tiles; }
       } else {
         usedModel = true;
         const recipe = [`Follow this saved recipe exactly ("${sk.name}": ${sk.description}).`,
@@ -407,12 +524,13 @@ export class Hub {
           `Inputs: ${JSON.stringify(inputs)}`, `You may only run these scripts: ${(sk.uses || []).join(", ") || "none"}. Don't write new code.`].join("\n");
         const r = await this.turn("job", recipe, ctx.job?.task || sk.name, { teammate: ctx.mate, threadId: ctx.job?.threadId, jobId: ctx.job?.id, meter: ctx.meter, allowedScripts: sk.uses || [] });
         if (!r.text.trim() || r.text.includes(ESCALATE)) throw new Error("The recipe didn't work this time.");
-        output = r.text; did = r.did;
+        output = r.text; did = r.did; tiles = r.tiles || [];
       }
+      if (sk.view) tiles = tiles.map((t) => ({ ...t, options: { ...(sk.view || {}), ...(t.options || {}) } }));
       const ms = Date.now() - started;
       await this.store.put<Skill>("skills", { ...sk, runs: sk.runs + 1, lastUsedAt: this.clock().toISOString(), avgMs: Math.round(((sk.avgMs || ms) * sk.runs + ms) / (sk.runs + 1)) });
       this.emit("skills");
-      return { output, did, usedModel };
+      return { output, did, usedModel, tiles };
     } catch (err) {
       await this.store.put<Skill>("skills", { ...sk, failures: sk.failures + 1, lastUsedAt: this.clock().toISOString() });
       this.emit("skills");
@@ -425,17 +543,32 @@ export class Hub {
     if (!wf || wf.status !== "active") throw new Error("That workflow isn't switched on.");
     let prev = "", did: Done[] = [], usedModel = false;
     const outputs: string[] = [];
+    const tiles: Tile[] = [];
     for (const step of wf.steps) {
-      const sk = await this.skillByName(step.skill);
-      if (!sk) throw new Error(`Workflow step "${step.skill}" doesn't exist any more.`);
       const stepInputs = Object.fromEntries(Object.entries(step.inputs).map(([k, v]) => [k, fill(v, inputs, prev)]));
-      const r = await this.runSkill(sk.id, stepInputs, ctx);
-      prev = r.output; did = [...did, ...r.did]; usedModel ||= r.usedModel;
-      outputs.push(`**${sk.name}**: ${r.output}`);
+      let r: { output: string; did: Done[]; usedModel: boolean; tiles: Tile[] };
+      let label = step.skill || "step";
+      if (step.skill) {
+        const sk = await this.skillByName(step.skill);
+        if (!sk) throw new Error(`Workflow step "${step.skill}" doesn't exist any more.`);
+        r = await this.runSkill(sk.id, stepInputs, ctx);
+      } else {
+        // A plain task: the named teammate works it out on the workhorse, with the previous output as context.
+        const team = await this.store.all<Teammate>("teammates");
+        const mate = team.find((t) => t.name.toLowerCase() === (step.teammate || "").toLowerCase()) || ctx.mate || null;
+        const task = fill(step.task!, inputs, prev);
+        const t = await this.turn("job", `${task}${prev ? `\n\nPrevious step's result:\n<untrusted>\n${prev.slice(0, 3000)}\n</untrusted>` : ""}`, task,
+          { teammate: mate, threadId: ctx.job?.threadId, jobId: ctx.job?.id, meter: ctx.meter });
+        if (!t.text.trim() || t.text.includes(ESCALATE)) throw new Error(`Step "${task.slice(0, 60)}" didn't work.`);
+        r = { output: t.text, did: t.did, usedModel: true, tiles: t.tiles || [] };
+        label = mate?.name || "step";
+      }
+      prev = r.output; did = [...did, ...r.did]; usedModel ||= r.usedModel; tiles.push(...r.tiles);
+      outputs.push(`**${label}**: ${r.output}`);
       if (r.did.some((d) => d.kind === "approval")) break; // stop the chain until you approve
     }
     await this.store.put<Workflow>("workflows", { ...wf, runs: wf.runs + 1, lastUsedAt: this.clock().toISOString() });
-    return { output: outputs.join("\n\n"), did, usedModel };
+    return { output: outputs.join("\n\n"), did, usedModel, tiles: tiles.slice(0, 4) };
   }
 
   /** Saves or fixes a skill. Code goes through script approval; recipes may only use approved scripts. */
@@ -473,15 +606,89 @@ export class Hub {
     return { value: sk };
   }
 
-  async proposeWorkflow(a: any) {
+  /** Proposals wait for you to switch them on; ones you asked for ("save this as…") are on straight away. */
+  async proposeWorkflow(a: any, status: Workflow["status"] = "proposed") {
     const v = validateWorkflow(a);
     if (!v.value) return { error: v.error! };
-    for (const st of v.value.steps) if (!(await this.skillByName(st.skill))) return { error: `No skill called ${st.skill}.` };
+    for (const st of v.value.steps) if (st.skill && !(await this.skillByName(st.skill))) return { error: `No skill called ${st.skill}.` };
     const prev = (await this.store.all<Workflow>("workflows")).find((w) => w.name === v.value!.name);
-    const wf = await this.store.put<Workflow>("workflows", { ...(prev || { ...this.doc({}), runs: 0 }), ...v.value, status: "proposed", updatedAt: this.clock().toISOString() } as Workflow);
-    await this.log("workflow.proposed", wf.name);
+    const wf = await this.store.put<Workflow>("workflows", { ...(prev || { ...this.doc({}), runs: 0 }), ...v.value, status, updatedAt: this.clock().toISOString() } as Workflow);
+    await this.log(status === "active" ? "workflow.saved" : "workflow.proposed", wf.name);
     this.emit("skills");
     return { value: wf };
+  }
+
+  /** One tap: a finished ramble's jobs become a workflow, in order, reusing skills where they were used. No model. */
+  async saveRambleAsWorkflow(messageId: string, name?: string) {
+    const jobs = (await this.store.all<Job>("jobs")).filter((j) => j.messageId === messageId && !j.parentId);
+    if (jobs.length < 1) return { error: "Nothing to save yet." };
+    const msg = await this.store.get<Message>("messages", messageId);
+    const thread = msg?.threadId ? await this.store.get<Thread>("threads", msg.threadId) : null;
+    const team = await this.store.all<Teammate>("teammates");
+    const skills = await this.store.all<Skill>("skills");
+    // Order: dependencies first, otherwise as planned.
+    const ordered: Job[] = [];
+    const pending = [...jobs];
+    while (pending.length) {
+      const i = pending.findIndex((j) => (j.dependsOn || []).every((d) => ordered.some((o) => o.id === d)));
+      ordered.push(...pending.splice(i < 0 ? 0 : i, 1));
+    }
+    const steps = ordered.map((j) => {
+      const sk = j.skillId ? skills.find((x) => x.id === j.skillId) : null;
+      return sk ? { skill: sk.name, inputs: j.inputs || {} } : { task: j.task, teammate: team.find((t) => t.id === j.teammateId)?.name, inputs: {} };
+    });
+    const base = (name || thread?.title || "my workflow").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 36) || "workflow";
+    if (steps.length === 1) steps.push({ task: "Summarise the result in one line for me.", teammate: "Hearth", inputs: {} });
+    return this.proposeWorkflow({ name: base, description: thread?.title || msg?.text.slice(0, 120) || base, inputs: [], steps }, "active");
+  }
+
+  /**
+   * The purger: keeps the library lean. Removes skills/workflows unused for a long time or that keep failing,
+   * proposals never switched on, and assistant-written scripts nothing uses. Pinned items stay. No model involved.
+   */
+  async purgeLibrary(opts: { unusedDays?: number; proposalDays?: number } = {}) {
+    const now = this.clock().getTime();
+    const unused = (opts.unusedDays ?? Number(process.env.HEARTH_PURGE_UNUSED_DAYS || 45)) * 864e5;
+    const proposalAge = (opts.proposalDays ?? 14) * 864e5;
+    const age = (iso?: string) => now - new Date(iso || 0).getTime();
+    const removed: string[] = [];
+    const skills = await this.store.all<Skill>("skills");
+    const workflows = await this.store.all<Workflow>("workflows");
+    for (const sk of skills) {
+      if (sk.pinned) continue;
+      const stale = age(sk.lastUsedAt || sk.updatedAt || sk.createdAt) > unused;
+      const broken = sk.failures >= 3 && sk.failures > sk.runs;
+      const neverApproved = sk.status === "proposed" && age(sk.createdAt) > proposalAge;
+      if (stale || broken || neverApproved) {
+        await this.store.remove("skills", sk.id);
+        removed.push(`skill ${sk.name} (${broken ? "kept failing" : neverApproved ? "never approved" : "unused"})`);
+      }
+    }
+    const liveSkills = new Set((await this.store.all<Skill>("skills")).map((s) => s.name));
+    for (const wf of workflows) {
+      if (wf.pinned) continue;
+      const stale = age(wf.lastUsedAt || wf.updatedAt || wf.createdAt) > unused;
+      const neverOn = wf.status === "proposed" && age(wf.createdAt) > proposalAge;
+      const orphan = wf.steps.some((s) => s.skill && !liveSkills.has(s.skill));
+      if (stale || neverOn || orphan) {
+        await this.store.remove("workflows", wf.id);
+        removed.push(`workflow ${wf.name} (${orphan ? "a skill it needs is gone" : neverOn ? "never switched on" : "unused"})`);
+      }
+    }
+    const usedScripts = new Set((await this.store.all<Skill>("skills")).flatMap((s) => [s.script, ...(s.uses || [])]).filter(Boolean) as string[]);
+    for (const sc of await this.scripts.list()) {
+      if (sc.origin !== "assistant" || usedScripts.has(sc.name)) continue;
+      if (age(sc.lastRunAt || sc.updatedAt || sc.createdAt) > (sc.status === "approved" ? unused : proposalAge)) {
+        await this.scripts.remove(sc.id);
+        removed.push(`script ${sc.name} (nothing uses it)`);
+      }
+    }
+    for (const m of (await this.store.all<Fact>("memory")).filter((f) => f.notebook === "skills")) {
+      const name = m.fact.match(/skill ([a-z0-9-]+)\.$/)?.[1];
+      if (name && !liveSkills.has(name)) await this.store.remove("memory", m.id);
+    }
+    if (removed.length) { await this.log("library.purged", removed.join("; ")); this.emit("skills"); this.emit("scripts"); }
+    return removed;
   }
 
   /** When you approve a script, skills built on it switch on. */
@@ -552,6 +759,10 @@ export class Hub {
   private async saveJob(j: Job) {
     const saved = await this.store.put<Job>("jobs", { ...j, updatedAt: this.clock().toISOString() });
     this.emit("job", saved);
+    if (!saved.parentId && (saved.status === "done" || saved.status === "failed")) {
+      this.pump(saved.messageId).catch((e) => console.error("pump failed", e));
+      this.touchThread(saved.threadId, {}).catch(() => {});
+    }
     return saved;
   }
 
@@ -573,6 +784,8 @@ export class Hub {
     const done: Done[] = [];
     const used: string[] = [];
     const runs: { name: string; args: string[] }[] = [];
+    let split: { subtasks: { task: string; teammate?: string }[]; merge: string } | null = null;
+    const tiles: Tile[] = [];
     for (const a of actions.slice(0, 12)) {
       if (!a || typeof a !== "object") continue;
       try {
@@ -624,6 +837,29 @@ export class Hub {
             done.push({ kind: "place", label: r.value ? `Saved place: ${r.value.name}` : `Couldn't save place: ${r.error}` });
             break;
           }
+          case "tile": {
+            const t = cleanTile({ ...a, type: a.tile });
+            if (t && tiles.length < 4) tiles.push(t);
+            break;
+          }
+          case "skill.view": {
+            if (where.recipe) break;
+            const sk = await this.skillByName(String(a.skill || ""));
+            const options = cleanOptions(a.options);
+            if (sk && options) {
+              await this.store.put<Skill>("skills", { ...sk, view: { ...(sk.view || {}), ...options } });
+              this.emit("skills");
+              done.push({ kind: "skill", label: `Updated how ${sk.name} looks` });
+            }
+            break;
+          }
+          case "jobs.split": {
+            const subtasks = (Array.isArray(a.subtasks) ? a.subtasks : []).slice(0, 4)
+              .filter((x: any) => typeof x?.task === "string" && x.task.trim())
+              .map((x: any) => ({ task: String(x.task).slice(0, 600), teammate: typeof x.teammate === "string" ? x.teammate : undefined }));
+            if (subtasks.length >= 2) split = { subtasks, merge: String(a.merge || "Combine the results into one answer.").slice(0, 400) };
+            break;
+          }
           case "script.run":
             if (typeof a.name === "string") runs.push({ name: a.name, args: Array.isArray(a.args) ? a.args.slice(0, 8).map(String) : [] });
             break;
@@ -650,10 +886,11 @@ export class Hub {
             done.push({ kind: "skill", label: r.value ? `${r.value.version > 1 ? "Fixed" : "Saved"} skill: ${r.value.name}${r.value.status === "proposed" ? " (approve its script to use it)" : ""}` : `Couldn't save skill: ${r.error}`, id: r.value?.id });
             break;
           }
-          case "workflow.propose": {
+          case "workflow.propose":
+          case "workflow.save": {
             if (where.recipe) break;
-            const r = await this.proposeWorkflow(a);
-            if (r.value) done.push({ kind: "skill", label: `Proposed workflow: ${r.value.name}`, id: r.value.id });
+            const r = await this.proposeWorkflow(a, a.type === "workflow.save" ? "active" : "proposed");
+            if (r.value) done.push({ kind: "skill", label: `${a.type === "workflow.save" ? "Saved" : "Proposed"} workflow: ${r.value.name}`, id: r.value.id });
             break;
           }
           case "script.propose": {
@@ -668,7 +905,7 @@ export class Hub {
         await this.log("action.failed", `${a.type}: ${err.message}`);
       }
     }
-    return { done, used, runs };
+    return { done, used, runs, split, tiles };
   }
 
   // ---------- hooks ----------
@@ -722,7 +959,11 @@ export class Hub {
 
   // ---------- memory ----------
 
-  async addFact(input: any, source: Fact["source"]) {
+  addFact(input: any, source: Fact["source"]) {
+    return this.memoryLock.run(() => this.addFactNow(input, source));
+  }
+
+  private async addFactNow(input: any, source: Fact["source"]) {
     const v = validateFact(input);
     if (!v.value) return { error: v.error! };
     const facts = (await this.store.all<Fact>("memory")).filter((f) => isActive(f));
@@ -734,7 +975,11 @@ export class Hub {
   }
 
   /** Supersede: the old fact stays as history, pointing at the new one. */
-  async updateFact(id: string, input: any) {
+  updateFact(id: string, input: any) {
+    return this.memoryLock.run(() => this.updateFactNow(id, input));
+  }
+
+  private async updateFactNow(id: string, input: any) {
     const old = await this.store.get<Fact>("memory", id);
     if (!old || old.supersededBy) return null;
     const v = validateFact({ ...old, ...input, fact: input.fact ?? old.fact });
@@ -745,7 +990,11 @@ export class Hub {
     return f;
   }
 
-  async mergeFacts(ids: string[], input: any) {
+  mergeFacts(ids: string[], input: any) {
+    return this.memoryLock.run(() => this.mergeFactsNow(ids, input));
+  }
+
+  private async mergeFactsNow(ids: string[], input: any) {
     const olds = (await Promise.all(ids.map((id) => this.store.get<Fact>("memory", id)))).filter((f): f is Fact => !!f && !f.supersededBy);
     if (olds.length < 2) return null;
     const v = validateFact(input);
@@ -756,7 +1005,11 @@ export class Hub {
     return f;
   }
 
-  async forgetFact(id: string) {
+  forgetFact(id: string) {
+    return this.memoryLock.run(() => this.forgetFactNow(id));
+  }
+
+  private async forgetFactNow(id: string) {
     // Forget means gone, including the history chain behind it.
     let cur = await this.store.get<Fact>("memory", id);
     let ok = false;
@@ -878,12 +1131,24 @@ export class Hub {
 
   stop() { if (this.timer) clearInterval(this.timer); }
 
+  /** Resolves when no job or brain call is running (or after `ms`). Used for graceful shutdown. */
+  async idle(ms = 30_000) {
+    const end = Date.now() + ms;
+    while (Date.now() < end && (this.started.size || this.brain.running || this.thinking || this.inflight)) await Bun.sleep(25);
+  }
+
   private async ensureSystemHooks() {
     const hooks = await this.store.all<Hook>("hooks");
     if (!hooks.some((h) => h.source === "system" && h.action.type === "think" && h.action.prompt === REVIEW_MARKER)) {
       await this.addHook({
         title: "Nightly memory review", why: "Keeps memory tidy: merges duplicates, expires stale facts.",
         trigger: { type: "schedule", time: "03:30", days: [] }, action: { type: "think", prompt: REVIEW_MARKER },
+      }, "system");
+    }
+    if (!hooks.some((h) => h.source === "system" && h.action.type === "think" && h.action.prompt === PURGE_MARKER)) {
+      await this.addHook({
+        title: "Nightly library cleanup", why: "Removes skills, workflows and scripts that stopped being useful. Pinned ones stay.",
+        trigger: { type: "schedule", time: "04:00", days: [] }, action: { type: "think", prompt: PURGE_MARKER },
       }, "system");
     }
   }
@@ -946,6 +1211,11 @@ export class Hub {
     const now = this.clock();
     try {
       const isReview = h.source === "system" && h.action.type === "think" && h.action.prompt === REVIEW_MARKER;
+      if (h.source === "system" && h.action.type === "think" && h.action.prompt === PURGE_MARKER) {
+        await this.reschedule(h, now);
+        await this.purgeLibrary();
+        return;
+      }
       const gate = isReview ? "ok" : await this.gate(h, now);
       if (gate !== "ok") {
         const prefs = await this.prefs();

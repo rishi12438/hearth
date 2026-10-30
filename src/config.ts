@@ -13,6 +13,12 @@ export type Config = {
   allowedOrigins: string[];
   contact: string;
   behindProxy: boolean;
+  /** How many brain processes may run at once, overall and per harness. The orchestrator never waits. */
+  maxParallel: number;
+  maxParallelPerHarness: Record<string, number>;
+  /** Spend caps in USD (only harnesses that report cost count). */
+  costCapRambleUsd: number;
+  costCapDayUsd: number;
 };
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
@@ -37,5 +43,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     allowedOrigins: list(env.HEARTH_ALLOWED_ORIGINS),
     contact: env.HEARTH_CONTACT || "mailto:hearth@example.com",
     behindProxy: env.HEARTH_BEHIND_PROXY === "1",
+    maxParallel: Math.max(1, Number(env.HEARTH_MAX_PARALLEL || 4)),
+    maxParallelPerHarness: Object.fromEntries(Object.entries(env)
+      .filter(([k, v]) => /^HEARTH_MAX_PARALLEL_[A-Z]+$/.test(k) && v)
+      .map(([k, v]) => [k.slice("HEARTH_MAX_PARALLEL_".length).toLowerCase(), Math.max(1, Number(v))])),
+    costCapRambleUsd: Number(env.HEARTH_COST_CAP_RAMBLE_USD || 2),
+    costCapDayUsd: Number(env.HEARTH_COST_CAP_DAY_USD || 10),
   };
 }

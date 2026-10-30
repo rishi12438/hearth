@@ -30,6 +30,18 @@ Run one hub on an always-on box so routines fire while your laptop sleeps. Run a
 3. Teammates are a name plus a role prompt. If no teammate fits, the orchestrator creates one, which you can see and delete in the app.
 4. Voice: the app records audio and the hub transcribes it with Deepgram (`HEARTH_DEEPGRAM_API_KEY`), so the key never reaches the phone. Speech-to-text is an interface in [src/voice.ts](src/voice.ts), so other providers can be added.
 
+### Parallel, with a side panel
+
+The orchestrator gives jobs a `dependsOn` only when one needs another's result; everything else runs at once (`HEARTH_MAX_PARALLEL`, default 4, plus `HEARTH_MAX_PARALLEL_CLAUDE` / `_CODEX` per harness). Each job is its own agent process. A new ramble is read immediately even while jobs run. Heavy jobs may split into 2-4 sub-agents (one level deep) whose results are merged. Spend caps per ramble and per day (`HEARTH_COST_CAP_RAMBLE_USD`, `HEARTH_COST_CAP_DAY_USD`) park jobs instead of running them. In the app the chat stays a conversation (teammates post their results, and only Approve or "stuck" rows ask for you), while running agents live in a side panel.
+
+### Tiles
+
+Results like weather, places, checklists and numbers show as tiles: fixed components the app draws from data, never generated code. Scripts print `@tile {json}`; teammates use a `tile` action. Asking to change a tile ("show hourly", "in Fahrenheit") saves options on the skill, so it sticks.
+
+### Workflows you keep, and a cleanup
+
+Tap **Save as workflow** on a finished ramble to keep it, or say "save this as my …". "Run my …" replays it, reusing skills where it can. A nightly cleanup, with no model, removes skills and workflows unused for `HEARTH_PURGE_UNUSED_DAYS` (default 45), ones that keep failing, proposals never switched on, and assistant scripts nothing uses. Pinned items are never removed, and everything removed is logged.
+
 ### Approve before send
 
 Anything that would send, post, pay, book, delete or change something outside the hub stops at an **Approve** card, and the hub enforces it, not the model. Each script is classified when it's saved: an `// effects: external` header, write-style HTTP calls or known senders mark it *external*. External scripts refuse to run unless you tapped Approve for that specific run. That holds even after you've approved the script's code, inside recipes and workflows, and when a hook fires.

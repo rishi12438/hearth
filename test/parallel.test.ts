@@ -1,0 +1,150 @@
+import { test, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createStore, COLLECTIONS, type Store } from "../src/store/index.ts";
+import { Hub } from "../src/hub.ts";
+import { Brain } from "../src/brain.ts";
+import { Scripts } from "../src/scripts.ts";
+import { loadConfig } from "../src/config.ts";
+import { extractTiles } from "../src/tiles.ts";
+import type { Job, Workflow } from "../src/types.ts";
+
+const FIXTURE = join(import.meta.dir, "fixtures/fake-agent.ts");
+let dir: string, store: Store, hub: Hub, log: string;
+
+async function setup(env: Record<string, string> = {}) {
+  dir = mkdtempSync(join(tmpdir(), "hearth-par-"));
+  log = join(dir, "calls.log");
+  store = await createStore(process.env.TEST_DB || "sqlite::memory:", dir);
+  for (const c of COLLECTIONS) await store.clear(c);
+  const config = { ...loadConfig({ HEARTH_AGENT: "custom", HEARTH_AGENT_CMD: JSON.stringify([process.execPath, FIXTURE]), ...env }), dataDir: dir };
+  hub = new Hub(config, store, new Brain(config), new Scripts(store, dir, join(import.meta.dir, "../scripts")), null);
+  await hub.setPrefs({ tz: "UTC" });
+  await hub.ensureTeammates();
+  process.env.FAKE_LOG = log;
+  process.env.FAKE_MS = "400";
+}
+const plan = (jobs: any[]) => { process.env.FAKE_PLAN = JSON.stringify({ title: "t", reply: "On it", jobs }); };
+const jobs = () => store.all<Job>("jobs");
+const until = async (fn: () => Promise<boolean>, ms = 8000) => { const end = Date.now() + ms; while (Date.now() < end && !(await fn())) await Bun.sleep(25); };
+const allDone = async (n: number) => { const j = await jobs(); return j.length === n && j.every((x) => x.status === "done" || x.status === "failed"); };
+
+/** Max number of fake-agent processes that overlapped, from the start/end log. */
+function maxOverlap() {
+  const events = readFileSync(log, "utf8").trim().split("\n").map((l) => { const [k, t] = l.split(" "); return { k, t: Number(t) }; })
+    .sort((a, b) => a.t - b.t || (a.k === "end" ? -1 : 1));
+  let cur = 0, max = 0;
+  for (const e of events) { cur += e.k === "start" ? 1 : -1; max = Math.max(max, cur); }
+  return max;
+}
+
+afterEach(async () => { hub.stop(); await hub.idle(20_000); await store.close(); });
+
+test("independent jobs run at the same time, and the ramble returns right away", async () => {
+  await setup();
+  plan([{ task: "check weather", teammate: "Scout" }, { task: "find a gift", teammate: "Scout" }, { task: "plan the week", teammate: "Planner" }]);
+  const t0 = Date.now();
+  const r = await hub.ramble("three things");
+  expect(Date.now() - t0).toBeLessThan(300); // didn't wait for the jobs
+  expect(r.value).toBeTruthy();
+  await until(() => allDone(3));
+  const elapsed = Date.now() - t0;
+  expect(maxOverlap()).toBe(3);
+  expect(elapsed).toBeLessThan(3 * 400 + 600); // well under sequential
+});
+
+test("a dependent job waits for its input and gets the result passed in", async () => {
+  await setup();
+  plan([{ id: "a", task: "find a restaurant", teammate: "Scout" }, { id: "b", task: "invite Sam to it", teammate: "Hearth", dependsOn: ["a"] }, { id: "c", task: "check weather", teammate: "Scout" }]);
+  await hub.ramble("dinner with sam");
+  await until(() => allDone(3));
+  const [a, b] = [(await jobs()).find((j) => j.task.startsWith("find"))!, (await jobs()).find((j) => j.task.startsWith("invite"))!];
+  expect(new Date(b.startedAt!).getTime()).toBeGreaterThanOrEqual(new Date(a.finishedAt!).getTime());
+  expect(b.result).toContain("used earlier result");
+});
+
+test("the concurrency cap is respected; the rest queue", async () => {
+  await setup({ HEARTH_MAX_PARALLEL: "2" });
+  plan([1, 2, 3, 4, 5].map((i) => ({ task: `job ${i}`, teammate: "Hearth" })));
+  await hub.ramble("five things");
+  await until(() => allDone(5));
+  expect(maxOverlap()).toBe(2);
+});
+
+test("a per-harness cap applies on top of the global one", async () => {
+  await setup({ HEARTH_MAX_PARALLEL: "4", HEARTH_MAX_PARALLEL_CUSTOM: "1" });
+  plan([{ task: "one", teammate: "Hearth" }, { task: "two", teammate: "Hearth" }]);
+  await hub.ramble("two");
+  await until(() => allDone(2));
+  expect(maxOverlap()).toBe(1);
+});
+
+test("a failing job doesn't block its siblings, and skips only its dependents", async () => {
+  await setup();
+  plan([{ id: "x", task: "FAIL this one", teammate: "Hearth" }, { task: "fine one", teammate: "Scout" }, { id: "z", task: "needs x", teammate: "Hearth", dependsOn: ["x"] }]);
+  await hub.ramble("mixed");
+  await until(() => allDone(3), 12000);
+  const all = await jobs();
+  expect(all.find((j) => j.task === "fine one")!.status).toBe("done");
+  expect(all.find((j) => j.task.startsWith("FAIL"))!.status).toBe("failed");
+  expect(all.find((j) => j.task === "needs x")!.result).toContain("Skipped");
+});
+
+test("a second ramble mid-run is handled immediately", async () => {
+  await setup({ HEARTH_MAX_PARALLEL: "1" });
+  process.env.FAKE_MS = "800";
+  plan([{ task: "slow one", teammate: "Hearth" }, { task: "slow two", teammate: "Hearth" }]);
+  await hub.ramble("first");
+  await Bun.sleep(100);
+  const t0 = Date.now();
+  plan([{ task: "quick", teammate: "Hearth" }]);
+  await hub.ramble("second");
+  await until(async () => (await store.all<any>("messages")).filter((m) => m.role === "assistant").length === 2, 3000);
+  expect(Date.now() - t0).toBeLessThan(700); // the orchestrator didn't queue behind running jobs
+});
+
+test("spending cap parks model jobs instead of running them", async () => {
+  await setup({ HEARTH_COST_CAP_DAY_USD: "0" });
+  plan([{ task: "anything", teammate: "Hearth" }]);
+  await hub.ramble("x");
+  await until(async () => (await jobs()).some((j) => j.status === "blocked"));
+  expect((await jobs())[0].blocked!.need).toContain("spending cap");
+  expect(existsSync(log) ? readFileSync(log, "utf8") : "").toBe(""); // no model ran
+});
+
+test("tiles come out of script output; junk is dropped", () => {
+  const r = extractTiles('@tile {"type":"weather","data":{"place":"Paris","temp":11,"hours":[{"t":"12:00","temp":12}]}}\nParis: 11°\n@tile {"type":"evil","data":{}}\n@tile not json');
+  expect(r.text).toBe("Paris: 11°");
+  expect(r.tiles.length).toBe(1);
+  expect(r.tiles[0].data.place).toBe("Paris");
+});
+
+test("a finished ramble saves as a workflow in one tap, and the purger cleans the library", async () => {
+  await setup();
+  plan([{ id: "a", task: "find a restaurant", teammate: "Scout" }, { id: "b", task: "invite Sam to it", teammate: "Hearth", dependsOn: ["a"] }]);
+  const r = await hub.ramble("dinner with sam");
+  await until(() => allDone(2));
+  const wf = (await hub.saveRambleAsWorkflow(r.value!.message.id, "dinner with sam")).value!;
+  expect(wf.status).toBe("active");
+  expect(wf.steps.map((s) => s.task)).toEqual(["find a restaurant", "invite Sam to it"]);
+
+  // Pinned stays; unused and never-approved go.
+  await hub.saveSkill({ name: "old-thing", description: "Old", kind: "recipe", steps: ["x"], uses: [] });
+  await hub.saveSkill({ name: "keeper", description: "Keep", kind: "recipe", steps: ["x"], uses: [] });
+  const keeper = (await hub.skillByName("keeper"))!;
+  await store.put("skills", { ...keeper, pinned: true });
+  await store.put("workflows", { ...wf, pinned: true });
+  hub.clock = () => new Date(Date.now() + 60 * 864e5);
+  const removed = await hub.purgeLibrary();
+  expect(removed.some((x) => x.startsWith("skill old-thing"))).toBe(true);
+  expect(await hub.skillByName("keeper")).toBeTruthy();
+  expect((await store.all<Workflow>("workflows")).length).toBe(1);
+});
+
+test("the brain's tile action becomes a tile on the job", async () => {
+  await setup();
+  const r = await hub.applyActions([{ type: "tile", tile: "places", title: "Studios", data: { items: [{ name: "Mudlark", detail: "Sat" }] } }, { type: "tile", tile: "nope", data: {} }], "");
+  expect(r.tiles.length).toBe(1);
+  expect(r.tiles[0].type).toBe("places");
+});

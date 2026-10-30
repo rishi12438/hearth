@@ -156,8 +156,39 @@ function renderTop() {
     h("button", { class: "title", on: { click: inChat ? () => {} : openHubs } },
       h("i", { class: `status ${S.conn}` }), h("span", null, inChat ? (S.thread?.thread?.title || "…") : (S.state?.hub?.name || activeHub()?.name || "Hearth"))),
     S.updateReady ? h("button", { class: "pill", on: { click: () => location.reload() } }, "Update")
-      : inChat ? h("button", { class: "iconbtn", "aria-label": "Chat options", on: { click: chatMenu } }, icon("more", 20)) : h("span", { class: "iconbtn" }),
+      : inChat ? agentsPill() : h("span", { class: "iconbtn" }),
   );
+}
+
+/** "● 3 working" / "1 needs you" / "✓ 4 done" — opens the agents panel. */
+function agentsPill() {
+  const jobs = (S.thread?.jobs || []).filter((j: any) => !j.parentId);
+  if (!jobs.length) return h("button", { class: "iconbtn", "aria-label": "Chat options", on: { click: chatMenu } }, icon("more", 20));
+  const working = jobs.filter((j: any) => j.status === "working" || j.status === "queued").length;
+  const needs = jobs.filter((j: any) => j.status === "waiting" || j.status === "blocked").length;
+  const label = working ? `${working} working` : needs ? `${needs} need${needs === 1 ? "s" : ""} you` : `${jobs.length} done`;
+  return h("button", { class: `agentspill ${working ? "busy" : needs ? "needs" : "idle"}`, "aria-label": "Show agents", on: { click: toggleAgents } },
+    working ? h("i", { class: "spin" }) : needs ? icon("lock", 13) : icon("check", 13), h("span", null, label));
+}
+
+const wide = () => matchMedia("(min-width: 980px)").matches;
+
+function toggleAgents() {
+  if (wide()) { document.body.classList.toggle("agents-hidden"); return; }
+  const panel = h("aside", { class: "agents-drawer", role: "dialog", "aria-label": "Agents" }, h("div", { id: "agents-body" }));
+  const scrim = h("div", { class: "agents-scrim", id: "agents-scrim", on: { click: (e: Event) => { if (e.target === scrim) closeAgents(); } } }, panel);
+  document.body.appendChild(scrim);
+  S.sheetOpen = true;
+  drawAgents();
+  requestAnimationFrame(() => scrim.classList.add("open"));
+}
+
+function closeAgents() {
+  const s = document.getElementById("agents-scrim");
+  if (!s) return;
+  S.sheetOpen = false;
+  s.classList.remove("open"); s.id = "";
+  setTimeout(() => s.remove(), 220);
 }
 
 // ---------------- home ----------------
@@ -167,6 +198,8 @@ async function loadThreads() {
 }
 
 function renderHome() {
+  app.classList.remove("withside");
+  closeAgents();
   clear(app,
     h("header", { class: "top", id: "top" }),
     h("main", { class: "home" },
@@ -205,10 +238,13 @@ async function loadThread(id: string) {
 
 function renderChat() {
   clear(app,
-    h("header", { class: "top", id: "top" }),
-    h("main", { class: "thread", id: "thread" }),
-    h("footer", { class: "dock" }, h("div", { class: "composer-wrap", id: "composerwrap" })),
+    h("div", { class: "chatcol" },
+      h("header", { class: "top", id: "top" }),
+      h("main", { class: "thread", id: "thread" }),
+      h("footer", { class: "dock" }, h("div", { class: "composer-wrap", id: "composerwrap" }))),
+    h("aside", { class: "agents-side" }, h("div", { id: "agents-side-body" })),
   );
+  app.classList.add("withside");
   renderTop();
   renderComposer();
 }
@@ -216,7 +252,10 @@ function renderChat() {
 function renderMessages(stick = true) {
   const el = document.getElementById("thread");
   if (!el || !S.thread) return;
-  const { messages, jobs } = S.thread;
+  renderTop();
+  drawAgents();
+  const { messages } = S.thread;
+  const jobs = (S.thread.jobs || []).filter((j: any) => !j.parentId);
   if (!messages.length) {
     clear(el, h("div", { class: "hello" },
       h("h2", null, "What's on your mind?"),
@@ -228,34 +267,171 @@ function renderMessages(stick = true) {
       ].map((s) => h("button", { on: { click: () => send(s) } }, s)))));
     return;
   }
+  // One timeline: what was said, then each teammate's result as a message when it lands.
+  type Item = { at: string; node: Node };
+  const items: Item[] = [];
+  for (const m of messages) items.push({ at: m.createdAt, node: message(m, jobs) });
+  for (const j of jobs) {
+    if (j.status === "done" || j.status === "failed") items.push({ at: j.finishedAt || j.updatedAt || j.createdAt, node: jobMessage(j) });
+  }
+  items.sort((a, b) => a.at.localeCompare(b.at));
   const nodes: Node[] = [];
   let lastDay = "";
-  for (const m of messages) {
-    const day = new Date(m.createdAt).toDateString();
-    if (day !== lastDay) { nodes.push(h("div", { class: "day" }, dayLabel(m.createdAt))); lastDay = day; }
-    nodes.push(message(m, jobs));
+  for (const it of items) {
+    const day = new Date(it.at).toDateString();
+    if (day !== lastDay) { nodes.push(h("div", { class: "day" }, dayLabel(it.at))); lastDay = day; }
+    nodes.push(it.node);
   }
-  if (S.planning === S.thread.thread.id) nodes.push(h("div", { class: "msg bot" }, h("div", { class: "who" }, dot(mate("hearth"), 18), h("b", null, "Hearth")), h("div", { class: "thinking" }, h("i"), h("i"), h("i"), h("span", null, "Sorting out who does what…"))));
+  // Things that need you sit at the bottom until you act.
+  for (const j of jobs.filter((j: any) => j.status === "waiting" || j.status === "blocked")) nodes.push(needsYou(j));
+  if (S.planning === S.thread.thread.id) nodes.push(h("div", { class: "msg bot" }, h("div", { class: "who" }, dot(mate("hearth"), 18), h("b", null, "Hearth")), h("div", { class: "thinking" }, h("i"), h("i"), h("i"))));
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   clear(el, nodes);
   if (stick || atBottom) requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
 }
 
 function message(m: any, jobs: any[]) {
-  if (m.role === "user") return h("div", { class: "msg me" }, h("div", { class: "bubble" }, m.text), h("time", null, clockTime(m.createdAt)));
+  if (m.role === "user") return h("div", { class: "msg me" }, h("div", { class: "bubble" }, m.text));
   const t = mate(m.teammateId);
+  const mine = (m.jobIds || []).map((id: string) => jobs.find((j) => j.id === id)).filter(Boolean);
+  const working = mine.filter((j: any) => j.status === "working" || j.status === "queued");
   const parts: (Node | null)[] = [
-    h("div", { class: "who" }, dot(t, 18), h("b", null, t.name), m.proactive ? h("span", { class: "tag" }, icon("bell", 11), m.proactive.title) : null, h("time", null, clockTime(m.createdAt))),
+    h("div", { class: "who" }, dot(t, 18), h("b", null, t.name), m.proactive ? h("span", { class: "tag" }, icon("bell", 11), m.proactive.title) : null),
     richText(m.text),
   ];
   if (m.proactive) {
-    const why = h("div", { class: "why", hidden: true }, m.proactive.why, h("br"), h("small", null, `Trigger: ${m.proactive.trigger}`));
-    parts.push(h("button", { class: "whybtn", on: { click: () => { why.hidden = !why.hidden; } } }, "Why did I get this?"), why);
+    const why = h("div", { class: "why", hidden: true }, m.proactive.why);
+    parts.push(h("button", { class: "whybtn", on: { click: () => { why.hidden = !why.hidden; } } }, "Why?"), why);
   }
-  const mine = (m.jobIds || []).map((id: string) => jobs.find((j) => j.id === id)).filter(Boolean);
-  if (mine.length) parts.push(h("div", { class: "cards" }, mine.map(jobCard)));
-  if (m.did?.length) parts.push(h("div", { class: "chips" }, m.did.map((d: any) => h("span", { class: "chip" }, icon("check", 12), d.label))));
+  if (working.length) parts.push(h("button", { class: "working", on: { click: toggleAgents } },
+    h("span", { class: "minis" }, working.slice(0, 4).map((j: any) => dot(mate(j.teammateId), 16))),
+    `${working.length} working on it`, icon("chevron", 14)));
   return h("div", { class: `msg bot ${m.error ? "err" : ""}` }, parts);
+}
+
+/** A finished job, said by the teammate who did it. */
+function jobMessage(j: any) {
+  const t = mate(j.teammateId);
+  const did = (j.did || []).filter((d: any) => ["hook", "memory", "skill", "place"].includes(d.kind)).map((d: any) => d.label);
+  const tiles = j.status === "done" ? (j.tiles || []) : [];
+  return h("div", { class: `msg bot ${j.status === "failed" ? "err" : ""}` },
+    h("div", { class: "who" }, dot(t, 18), h("b", null, t.name)),
+    // A teammate's caption goes above its tile; a script's text summary just repeats the tile, so it's hidden.
+    tiles.length && (j.how === "skill" || j.how === "workflow") ? null : richText(j.status === "failed" ? `Couldn't do “${j.task}”: ${j.result || "it failed"}` : j.result || "Done."),
+    tiles.map(tile),
+    did.length ? h("div", { class: "did-line" }, icon("check", 12), did.join(" · ")) : null);
+}
+
+// ---- tiles: fixed, good-looking components fed with data; options come from the skill ("hourly", "units") ----
+
+const deg = (c: number | undefined, units: unknown) => c === undefined ? "–" : `${Math.round(units === "F" ? c * 9 / 5 + 32 : c)}°`;
+
+function tile(t: any) {
+  const o = t.options || {};
+  const d = t.data || {};
+  switch (t.type) {
+    case "weather":
+      return h("div", { class: `tile weather ${o.compact ? "compact" : ""}` },
+        h("div", { class: "wtop" },
+          h("div", null, h("small", null, d.place || t.title), h("div", { class: "big" }, deg(d.temp, o.units)), h("div", { class: "wsum" }, d.summary)),
+          h("div", { class: "wside" },
+            d.high !== undefined ? h("span", null, `H ${deg(d.high, o.units)}  L ${deg(d.low, o.units)}`) : null,
+            d.feels !== undefined ? h("span", null, `Feels ${deg(d.feels, o.units)}`) : null,
+            d.rain !== undefined ? h("span", null, `${Math.round(d.rain)}% rain`) : null)),
+        o.hourly !== false && !o.compact && d.hours?.length ? h("div", { class: "hours" }, d.hours.map((x: any) =>
+          h("div", { class: "hour" }, h("small", null, x.t), h("b", null, deg(x.temp, o.units)), x.rain ? h("i", { style: `--r:${Math.min(100, x.rain)}%` }) : h("i", { class: "dry" })))) : null);
+    case "places":
+      return h("div", { class: "tile places" }, t.title ? h("small", { class: "tt" }, t.title) : null, d.items.map((x: any, i: number) =>
+        h(x.url ? "a" : "div", { class: "place", ...(x.url ? { href: x.url, target: "_blank", rel: "noopener noreferrer" } : {}) },
+          h("span", { class: "n" }, String(i + 1)), h("span", { class: "grow" }, h("b", null, x.name), x.detail ? h("small", null, x.detail) : null), x.url ? icon("chevron", 14) : null)));
+    case "checklist":
+      return h("div", { class: "tile checklist" }, t.title ? h("small", { class: "tt" }, t.title) : null, d.items.map((x: any) =>
+        h("div", { class: `ci ${x.done ? "done" : ""}` }, h("span", { class: "box" }, x.done ? icon("check", 12) : null), x.text)));
+    case "stat":
+      return h("div", { class: "tile stat" }, h("small", null, d.label || t.title), h("div", { class: "big" }, d.value), d.sub ? h("span", null, d.sub) : null);
+    case "note":
+      return h("div", { class: "tile note" }, t.title ? h("small", { class: "tt" }, t.title) : null, richText(d.body));
+  }
+  return null;
+}
+
+/** One compact row for anything waiting on you: an Approve, or "I'm stuck". */
+function needsYou(j: any) {
+  const t = mate(j.teammateId);
+  if (j.status === "blocked" && j.blocked) {
+    return h("div", { class: "needs" },
+      h("div", { class: "who" }, dot(t, 18), h("b", null, t.name), h("span", { class: "tag warn" }, "stuck")),
+      h("p", null, h("b", null, j.blocked.need), j.blocked.why ? ` · ${j.blocked.why}` : ""),
+      h("div", { class: "needsrow" }, h("span", null, j.blocked.unblock),
+        h("button", { class: "btn primary small", on: { click: async () => { try { await call(`/api/jobs/${j.id}/retry`, { body: {} }); } catch (e) { handleError(e); } } } }, "Try again")));
+  }
+  const aps = (S.thread?.approvals || []).filter((a: any) => a.jobId === j.id && a.status === "pending");
+  return h("div", { class: "needs" },
+    h("div", { class: "who" }, dot(t, 18), h("b", null, t.name), h("span", { class: "tag warn" }, "needs your OK")),
+    aps.map((a: any) => {
+      const decide = async (yes: boolean) => { try { await call(`/api/approvals/${a.id}/${yes ? "approve" : "reject"}`, { body: {} }); } catch (e) { handleError(e); } };
+      return h("div", { class: "needsrow" }, h("span", null, a.summary),
+        h("span", { class: "btns" }, h("button", { class: "btn ghost small", on: { click: () => decide(false) } }, "No"), h("button", { class: "btn primary small", on: { click: () => decide(true) } }, "Approve")));
+    }));
+}
+
+/** The side panel: every agent on this chat, live. */
+function drawAgents() {
+  const targets = [document.getElementById("agents-side-body"), document.getElementById("agents-body")].filter(Boolean) as HTMLElement[];
+  if (!targets.length || !S.thread) return;
+  const all = S.thread.jobs || [];
+  const top = all.filter((j: any) => !j.parentId);
+  const groups: [string, any[]][] = [
+    ["Working", top.filter((j: any) => j.status === "working" || j.status === "queued")],
+    ["Needs you", top.filter((j: any) => j.status === "waiting" || j.status === "blocked")],
+    ["Done", top.filter((j: any) => j.status === "done" || j.status === "failed")],
+  ];
+  const spent = top.reduce((n: number, j: any) => n + (j.costUsd || 0), 0);
+  for (const el of targets) {
+    clear(el,
+      h("div", { class: "agentshead" }, h("b", null, "Agents"), top.length ? h("small", null, `${top.length} jobs · ${money(spent)}`) : null,
+        el.id === "agents-body" ? h("button", { class: "iconbtn", "aria-label": "Close", on: { click: closeAgents } }, icon("x", 18)) : null),
+      !top.length ? h("p", { class: "muted small" }, "When you ramble, the jobs and who's on them show up here.") : null,
+      groups.filter(([, list]) => list.length).map(([title, list]) => [h("h4", null, title), list.map((j) => agentRow(j, all.filter((x: any) => x.parentId === j.id)))]),
+      saveWorkflowButton(top),
+      S.thread.thread.id !== "new" ? h("button", { class: "link danger", on: { click: chatMenu } }, "Delete this chat") : null);
+  }
+}
+
+/** When a ramble's jobs are all done, save the whole thing as a workflow for next time (no model). */
+function saveWorkflowButton(top: any[]) {
+  const last = [...(S.thread?.messages || [])].reverse().find((m: any) => m.jobIds?.length);
+  if (!last) return null;
+  const mine = top.filter((j: any) => last.jobIds.includes(j.id));
+  if (!mine.length || !mine.every((j: any) => j.status === "done")) return null;
+  return h("button", { class: "btn ghost", on: { click: async (e: Event) => {
+    const b = e.currentTarget as HTMLButtonElement; b.disabled = true;
+    try { const wf = await call("/api/workflows/from-ramble", { body: { messageId: last.id } }); toast(`Saved workflow ${wf.name}. Say “run ${wf.name}” any time.`); loadSkills(); b.textContent = "Saved as workflow"; }
+    catch (err) { b.disabled = false; handleError(err); }
+  } } }, icon("repeat", 16), "Save as workflow");
+}
+
+function agentRow(j: any, subs: any[]) {
+  const t = mate(j.teammateId);
+  const st = j.status;
+  const skill = j.skillId ? S.skills.find((x) => x.id === j.skillId) : null;
+  const wf = j.workflowId ? S.workflows.find((x) => x.id === j.workflowId) : null;
+  const status = st === "working" ? (j.tier === "heavy" ? "working · heavy" : "working") : st === "queued" ? (j.dependsOn?.length ? "waiting for another job" : "queued")
+    : st === "waiting" ? "needs your OK" : st === "blocked" ? "stuck" : st === "failed" ? "failed"
+    : j.how === "skill" || j.how === "workflow" ? `used ${(skill || wf)?.name || j.how} · ${secs(j.durationMs)} · ${money(j.costUsd)}`
+    : `${j.how === "repaired" ? "fixed a skill · " : ""}${j.escalated ? "escalated · " : ""}${secs(j.durationMs)} · ${money(j.costUsd)}`;
+  const canSave = st === "done" && (j.how === "fresh" || j.how === "repaired") && !(j.did || []).some((d: any) => d.kind === "skill");
+  return h("div", { class: `agent ${st}` },
+    h("div", { class: "agentline" }, dot(t, 26),
+      h("span", { class: "grow" }, h("b", null, t.name), h("small", null, status)),
+      st === "working" || st === "queued" ? h("i", { class: "spin" }) : st === "done" ? h("span", { class: "ok" }, icon("check", 14)) : null),
+    h("div", { class: "agenttask" }, j.task),
+    subs.length ? h("div", { class: "subs" }, subs.map((x: any) => h("div", { class: "sub" }, dot(mate(x.teammateId), 14), h("span", null, x.task), x.status === "done" ? icon("check", 12) : h("i", { class: "spin small" })))) : null,
+    canSave ? h("button", { class: "link", on: { click: async (e: Event) => {
+      const b = e.currentTarget as HTMLButtonElement; b.disabled = true; b.textContent = "Saving…";
+      try { const sk = await call(`/api/jobs/${j.id}/save-skill`, { body: {} }); toast(`Saved skill ${sk.name}`); b.textContent = "Saved as skill"; loadSkills(); }
+      catch (err) { b.disabled = false; b.textContent = "Save as skill"; handleError(err); }
+    } } }, "Save as skill") : null);
 }
 
 function secs(ms?: number) {
@@ -265,54 +441,6 @@ function secs(ms?: number) {
 
 function money(c: number | null | undefined) {
   return c === null || c === undefined ? "$?" : c === 0 ? "$0" : c < 0.01 ? "<$0.01" : `$${c.toFixed(2)}`;
-}
-
-function jobCard(j: any) {
-  const t = mate(j.teammateId);
-  const st = j.status;
-  const state = st === "done" ? h("span", { class: "st done" }, icon("check", 14))
-    : st === "failed" ? h("span", { class: "st failed" }, icon("x", 14))
-    : st === "waiting" ? h("span", { class: "st waiting" }, icon("lock", 13))
-    : st === "blocked" ? h("span", { class: "st blocked" }, icon("pause", 13))
-    : h("span", { class: `st ${st}` }, h("i"));
-  const label = st === "queued" ? "queued" : st === "working" ? (j.tier === "heavy" ? "working (heavy)…" : "working…")
-    : st === "waiting" ? "needs your OK" : st === "blocked" ? "stuck, needs you" : j.escalated ? "escalated to heavy" : "";
-  const approvals = (S.thread?.approvals || []).filter((a: any) => a.jobId === j.id);
-  const skill = j.skillId ? S.skills.find((x) => x.id === j.skillId) : null;
-  const wf = j.workflowId ? S.workflows.find((x) => x.id === j.workflowId) : null;
-  const savedSkill = (j.did || []).some((d: any) => d.kind === "skill");
-  const meta = st === "done" || st === "failed" || st === "waiting" ? (
-    j.how === "skill" || j.how === "workflow"
-      ? `Used ${j.how} ${(skill || wf)?.name || ""} · ${secs(j.durationMs)} · ${money(j.costUsd)}`
-      : j.how === "repaired" ? `Skill failed, worked it out · ${secs(j.durationMs)} · ${money(j.costUsd)}`
-      : `Worked it out · ${secs(j.durationMs)} · ${money(j.costUsd)}`) : "";
-  return h("div", { class: `card ${st}` },
-    h("div", { class: "cardhead" }, dot(t, 22), h("span", { class: "grow" }, h("b", null, t.name), label ? h("em", null, label) : null), state),
-    h("div", { class: "task" }, j.task),
-    j.result && st !== "working" ? h("div", { class: "result" }, richText(j.result)) : null,
-    j.blocked ? h("div", { class: "blocked" },
-      h("b", null, j.blocked.need), j.blocked.why ? h("p", null, j.blocked.why) : null, h("p", { class: "unblock" }, icon("chevron", 14), j.blocked.unblock),
-      h("button", { class: "btn primary small", on: { click: async () => { try { await call(`/api/jobs/${j.id}/retry`, { body: {} }); } catch (e) { handleError(e); } } } }, "Try again")) : null,
-    approvals.map(approvalBox),
-    j.did?.length ? h("div", { class: "chips" }, j.did.filter((d: any) => d.kind !== "approval" && d.kind !== "blocked").map((d: any) => h("span", { class: "chip" }, icon(d.kind === "skill" ? "sparkle" : d.kind === "blocked" ? "pause" : "check", 12), d.label))) : null,
-    meta ? h("div", { class: "meta" }, h("span", null, meta),
-      st === "done" && (j.how === "fresh" || j.how === "repaired") && !savedSkill
-        ? h("button", { class: "link", on: { click: async (e: Event) => {
-            const b = e.currentTarget as HTMLButtonElement; b.disabled = true; b.textContent = "Saving…";
-            try { const sk = await call(`/api/jobs/${j.id}/save-skill`, { body: {} }); toast(`Saved skill ${sk.name}`); b.textContent = "Saved"; loadSkills(); }
-            catch (err) { b.disabled = false; b.textContent = "Save as skill?"; handleError(err); }
-          } } }, "Save as skill?") : null) : null);
-}
-
-function approvalBox(a: any) {
-  const decide = async (yes: boolean) => { try { await call(`/api/approvals/${a.id}/${yes ? "approve" : "reject"}`, { body: {} }); } catch (e) { handleError(e); } };
-  return h("div", { class: `approval ${a.status}` },
-    h("div", { class: "aphead" }, icon("lock", 14), h("b", null, a.summary)),
-    a.details ? h("p", null, a.details) : null,
-    h("small", null, `Runs ${a.action.script}${a.action.args.length ? ` ${a.action.args.join(" ")}` : ""}`),
-    a.status === "pending"
-      ? h("div", { class: "apbtns" }, h("button", { class: "btn ghost small", on: { click: () => decide(false) } }, "No"), h("button", { class: "btn primary small", on: { click: () => decide(true) } }, "Approve"))
-      : h("div", { class: "apdone" }, a.status === "done" ? "Approved and done" : a.status === "failed" ? `Approved, but it failed: ${a.result || ""}` : a.status === "rejected" ? "You said no" : "Running…"));
 }
 
 function chatMenu() {
@@ -543,17 +671,21 @@ function drawSkills() {
   const wfs = S.workflows;
   clear(el,
     h("p", { class: "muted" }, "When a teammate works something out, it saves how, so next time it's instant. Skills with code need your approval first."),
+    h("button", { class: "link", on: { click: async () => { const r = await call("/api/library/purge", { body: {} }); toast(r.removed.length ? `Cleaned up ${r.removed.length}: ${r.removed.join(", ")}` : "Nothing to clean up"); } } },
+      "Clean up now (pinned ones stay)"),
     S.skills.length ? h("div", { class: "list" }, S.skills.map((sk) => h("button", { class: "item", on: { click: () => openSkill(sk) } },
       h("span", { class: "hicon" }, icon(sk.kind === "script" ? "code" : "sparkle", 16)),
       h("span", { class: "grow" },
-        h("b", null, sk.name, sk.status === "proposed" ? h("span", { class: "tag" }, "needs approval") : null),
+        h("b", null, sk.name, sk.status === "proposed" ? h("span", { class: "tag" }, "needs approval") : null, sk.pinned ? h("span", { class: "tag" }, "pinned") : null),
         h("small", { class: "sub" }, sk.description),
         h("small", { class: "sub" }, [`${sk.runs} use${sk.runs === 1 ? "" : "s"}`, sk.lastUsedAt ? `last ${shortAgo(sk.lastUsedAt)}` : null, sk.lastFixedAt ? `fixed ${shortAgo(sk.lastFixedAt)}` : null, sk.avgMs ? `~${secs(sk.avgMs)}` : null].filter(Boolean).join(" · "))))))
       : h("p", { class: "empty" }, "No skills yet. They appear as your team finishes jobs."),
     wfs.length ? [h("h4", null, "Workflows"), h("div", { class: "list" }, wfs.map((w) => h("div", { class: "item" },
-      h("span", { class: "grow" }, h("b", null, w.name, w.status === "proposed" ? h("span", { class: "tag" }, "proposed") : null),
-        h("small", { class: "sub" }, w.description), h("small", { class: "sub" }, w.steps.map((x: any) => x.skill).join(" → "))),
-      w.status === "proposed" ? h("button", { class: "btn small primary", on: { click: async () => { await call(`/api/workflows/${w.id}/activate`, { body: {} }); toast("Switched on"); } } }, "Switch on") : null,
+      h("span", { class: "grow" }, h("b", null, w.name, w.status === "proposed" ? h("span", { class: "tag" }, "proposed") : null, w.pinned ? h("span", { class: "tag" }, "pinned") : null),
+        h("small", { class: "sub" }, w.description), h("small", { class: "sub" }, w.steps.map((x: any) => x.skill || x.teammate || "task").join(" → "))),
+      w.status === "proposed" ? h("button", { class: "btn small primary", on: { click: async () => { await call(`/api/workflows/${w.id}/activate`, { body: {} }); toast("Switched on"); } } }, "Switch on")
+        : h("button", { class: "btn small primary", on: { click: async () => { closeSheet(); const r = await call("/api/threads", { body: { text: `Run my "${w.name}" workflow` } }); location.hash = `#chat/${r.thread.id}`; } } }, "Run"),
+      h("button", { class: `star ${w.pinned ? "on" : ""}`, "aria-label": w.pinned ? "Unpin" : "Pin (never clean up)", on: { click: async () => { await call(`/api/workflows/${w.id}`, { method: "PATCH", body: { pinned: !w.pinned } }); } } }, icon("pin", 16)),
       h("button", { class: "iconbtn", "aria-label": "Delete workflow", on: { click: () => confirmSheet(`Delete ${w.name}?`, "The skills it uses stay.", "Delete", async () => { await call(`/api/workflows/${w.id}`, { method: "DELETE" }); }) } }, icon("trash", 16)))))] : null);
 }
 
@@ -574,6 +706,7 @@ function openSkill(sk: any) {
         try { await call(`/api/skills/${sk.id}`, { method: "PATCH", body: { description: desc.value, steps: steps ? steps.value.split("\n").map((x) => x.trim()).filter(Boolean) : undefined } }); toast("Saved"); closeSheet(); }
         catch (e) { handleError(e); }
       } } }, "Save changes"),
+      h("button", { class: "btn ghost", on: { click: async () => { await call(`/api/skills/${sk.id}`, { method: "PATCH", body: { pinned: !sk.pinned } }); toast(sk.pinned ? "Unpinned" : "Pinned: cleanup will never remove it"); closeSheet(); } } }, icon("pin", 16), sk.pinned ? "Unpin" : "Pin (never clean up)"),
       sk.kind === "script" ? h("button", { class: "btn ghost", on: { click: async () => { const list = await call("/api/scripts"); const sc = list.find((x: any) => x.name === sk.script); if (sc) openScript(sc); } } }, icon("code", 16), "View the code") : null,
       h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet(`Delete ${sk.name}?`, "The team will work it out again next time.", "Delete", async () => { await call(`/api/skills/${sk.id}`, { method: "DELETE" }); toast("Deleted"); }) } }, icon("trash", 16), "Delete")),
   ]);

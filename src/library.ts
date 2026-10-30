@@ -57,7 +57,7 @@ export class Library {
     const covered = new Set(skills.map((s) => s.script).filter(Boolean));
     return [
       ...skills.filter((s) => s.status === "active").map((s) => ({ kind: "skill" as const, name: s.name, description: s.description, inputs: s.inputs.map((i) => i.name), how: s.kind })),
-      ...workflows.filter((w) => w.status === "active").map((w) => ({ kind: "workflow" as const, name: w.name, description: w.description, inputs: w.inputs.map((i) => i.name), how: w.steps.map((x) => x.skill).join(" → ") })),
+      ...workflows.filter((w) => w.status === "active").map((w) => ({ kind: "workflow" as const, name: w.name, description: w.description, inputs: w.inputs.map((i) => i.name), how: w.steps.map((x) => x.skill || "task").join(" → ") })),
       ...scripts.filter((s) => s.status === "approved" && !covered.has(s.name)).map((s) => ({ kind: "script" as const, name: s.name, description: s.description, how: s.effects })),
     ];
   }
@@ -123,10 +123,12 @@ export function validateWorkflow(a: any) {
   const description = str(a?.description, 240);
   if (!NAME_RE.test(name) || !description) return { error: "A workflow needs a lowercase-dash name and a description." };
   const steps = (Array.isArray(a.steps) ? a.steps : []).slice(0, 8).map((s: any) => ({
-    skill: String(s?.skill || "").toLowerCase(),
+    skill: s?.skill ? String(s.skill).toLowerCase() : undefined,
+    task: !s?.skill && typeof s?.task === "string" ? s.task.slice(0, 600) : undefined,
+    teammate: typeof s?.teammate === "string" ? s.teammate.slice(0, 24) : undefined,
     inputs: Object.fromEntries(Object.entries(s?.inputs && typeof s.inputs === "object" ? s.inputs : {}).slice(0, 8).map(([k, v]) => [String(k).slice(0, 30), String(v).slice(0, 400)])),
-  })).filter((s: any) => NAME_RE.test(s.skill));
-  if (steps.length < 2) return { error: "A workflow chains at least two skills." };
+  })).filter((s: any) => (s.skill && NAME_RE.test(s.skill)) || s.task);
+  if (steps.length < 2) return { error: "A workflow has at least two steps." };
   return { value: { name, description, steps, inputs: cleanInputs(a.inputs) } };
 }
 

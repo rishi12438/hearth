@@ -187,6 +187,7 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
           const sk = await store.get<Skill>("skills", id);
           if (!sk) break;
           const b = await body(req);
+          if (typeof b.pinned === "boolean") { await store.put("skills", { ...sk, pinned: b.pinned }); hub.emit("skills"); return json({ ok: true }); }
           const r = await hub.saveSkill({ ...sk, description: b.description ?? sk.description, steps: Array.isArray(b.steps) ? b.steps : sk.steps });
           if (r.error) throw new HttpError(400, r.error);
           return json(r.value);
@@ -194,7 +195,13 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
         if (method === "DELETE" && id) { const ok = await store.remove("skills", id); hub.emit("skills"); return json({ ok }); }
         break;
       }
+      case "library": {
+        if (method === "POST" && id === "purge") return json({ removed: await hub.purgeLibrary() });
+        break;
+      }
       case "workflows": {
+        if (method === "POST" && id === "from-ramble") { const b = await body(req); const r = await hub.saveRambleAsWorkflow(String(b.messageId || ""), typeof b.name === "string" ? b.name : undefined); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "PATCH" && id) { const w = await store.get<Workflow>("workflows", id); if (!w) break; const b = await body(req); await store.put("workflows", { ...w, pinned: !!b.pinned }); hub.emit("skills"); return json({ ok: true }); }
         if (method === "POST" && seg[3] === "activate") { const w = await store.get<Workflow>("workflows", id); if (!w) break; await store.put("workflows", { ...w, status: "active" }); hub.emit("skills"); return json({ ok: true }); }
         if (method === "DELETE" && id) { const ok = await store.remove("workflows", id); hub.emit("skills"); return json({ ok }); }
         break;

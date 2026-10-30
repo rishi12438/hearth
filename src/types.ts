@@ -77,6 +77,14 @@ export type Job = Doc & {
   /** Model spend for this job, when the harness reports it (Claude does; Codex doesn't). */
   costUsd?: number | null;
   approvalIds?: string[];
+  /** Jobs this one needs results from; it starts when they're done. */
+  dependsOn?: string[];
+  /** Results shown as tiles (weather, places, checklist…). */
+  tiles?: import("./tiles.ts").Tile[];
+  /** Set on sub-jobs a heavy job split off; depth is 1 for those (never deeper). */
+  parentId?: string;
+  depth?: number;
+  startedAt?: string;
   tier?: "workhorse" | "heavy";
   escalated?: boolean;
   result?: string;
@@ -142,6 +150,8 @@ export type Prefs = {
   lastUserAt?: string;
   placeState: Record<string, boolean>;
   brains?: import("./brain.ts").Brains;
+  spend?: { date: string; usd: number };
+  costCaps?: { rambleUsd: number; dayUsd: number };
 };
 
 // ---- Skills: things the team already knows how to do, so it doesn't work them out again. ----
@@ -166,9 +176,13 @@ export type Skill = Doc & {
   lastFixedAt?: string;
   avgMs?: number;
   version: number;
+  /** How this skill's tiles look ("hourly": true, "units": "F"). Changed by just asking. */
+  view?: import("./tiles.ts").TileOptions;
+  pinned?: boolean;
 };
 
-export type WorkflowStep = { skill: string; inputs: Record<string, string> };
+/** A step either reuses a skill, or is a plain task a teammate works out (light model). */
+export type WorkflowStep = { skill?: string; task?: string; teammate?: string; inputs: Record<string, string> };
 
 /** A saved chain of skills. "$input.x" is a workflow input, "$prev" the previous step's output. */
 export type Workflow = Doc & {
@@ -179,6 +193,8 @@ export type Workflow = Doc & {
   status: "active" | "proposed";
   runs: number;
   lastUsedAt?: string;
+  /** Pinned items are never purged. */
+  pinned?: boolean;
 };
 
 /** Anything that would send, post, pay or change something outside the hub waits here for your tap. */

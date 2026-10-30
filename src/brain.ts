@@ -66,9 +66,18 @@ ACTIONS
     kind "recipe": steps:[...] in plain language, uses:[approved script names it needs]  (a recipe can't use anything else)
     kind "script": script:"<approved or just-proposed script name>"  (runs directly, no model, inputs become args in order)
     Save one only when the job is likely to come back and you had to work it out. Reuse an existing name to fix a skill.
-- workflow.propose {name, description, inputs, steps:[{skill, inputs:{...}}]}   chain existing skills; "$input.x" is a
-    workflow input and "$prev" the previous step's output. Saved as a proposal the user switches on.
+- workflow.propose {name, description, inputs, steps:[{skill, inputs:{...}} | {task, teammate}]}   chain skills and/or plain
+    tasks; "$input.x" is a workflow input and "$prev" the previous step's output. Saved as a proposal the user switches on.
+- workflow.save {...same}   when the USER asks you to save something as a workflow/routine for later. Saved switched on.
 
+- jobs.split {subtasks:[{task, teammate?}], merge}   ONLY for a big job you were told is heavy: split it into 2-4 independent
+    subtasks that sub-agents do in parallel; you'll get their results back to merge per "merge". Don't split small jobs.
+- tile {tile, title?, data}   show a result instead of describing it, when that's clearer. "tile" is one of these, with data:
+    weather {place, temp, feels?, summary, high?, low?, rain? (%), wind?, hours?:[{t:"14:00",temp,rain?}]}
+    places {items:[{name, detail, url?}]}   checklist {items:[{text, done}]}   stat {label, value, sub?}   note {body}
+    Keep your text reply to one line when you send a tile. Scripts can print "@tile {json}" lines (with "type" set to the tile kind) to make tiles themselves.
+- skill.view {skill, options}   when the user asks to change how a skill's tile looks ("show hourly", "in Fahrenheit",
+    "compact"), save it as options on that skill, e.g. {"hourly":true,"units":"F","compact":true}. It sticks for next time.
 - blocked {need, why, unblock}   when you CAN'T finish because something is missing that only the user or their devices can
     give (a login, their laptop being on, a permission, a file): call this instead of failing, guessing or waiting.
     need: what's missing; why: what it's for; unblock: the one thing the user should do ("Open your laptop", "Tap Allow").
@@ -103,9 +112,13 @@ You are the orchestrator of a personal assistant team that lives on the user's o
 
 Reply with ONLY a JSON object, no prose, no code fence:
 {"title":"3-6 word chat title","reply":"...","facts":[{"fact":"...","notebook":"...","importance":1|2|3}],
- "jobs":[{"task":"...","teammate":"<existing name>","effort":"light|heavy","use":{"skill|workflow":"<library name>","inputs":{...}}?}
+ "jobs":[{"id":"j1","task":"...","teammate":"<existing name>","effort":"light|heavy","dependsOn":["<earlier job id>"]?,"use":{"skill|workflow":"<library name>","inputs":{...}}?}
        | {"task":"...","teammate":"<new name>","effort":"light|heavy","newTeammate":{"name":"...","description":"..."}}],
  "newWorkflows":[{"name","description","inputs","steps":[{"skill","inputs"}]}]?}
+TILES: results like weather, places, checklists and numbers show as tiles; teammates and skills handle that, so write each
+task plainly ("Weather in Paris tomorrow"). Requests to change how a tile looks are jobs for the teammate that owns that skill.
+PARALLEL: jobs run at the same time unless one needs another's result; then list that job's id in dependsOn
+(e.g. "find a restaurant" then "invite Sam to it"). Keep chains short; most jobs should be independent.
 SEARCH BEFORE CREATE: CONTEXT.library lists skills and workflows the team already has. If one does a job, set "use" with its name and
 the inputs filled from the ramble; it then runs without anyone working it out again. If the ramble needs several existing skills
 in a row that will recur, you may propose a new workflow in newWorkflows (the user switches it on).
@@ -163,11 +176,28 @@ export function availableHarnesses(config: Config) {
   return out;
 }
 
+export class Semaphore {
+  private waiting: (() => void)[] = [];
+  constructor(private free: number) {}
+  async acquire() {
+    if (this.free > 0) { this.free--; return; }
+    await new Promise<void>((r) => this.waiting.push(r));
+  }
+  release() {
+    const next = this.waiting.shift();
+    if (next) next(); else this.free++;
+  }
+}
+
 export class Brain {
-  private queue: Promise<unknown> = Promise.resolve();
+  private global: Semaphore;
+  private perHarness = new Map<string, Semaphore>();
+  /** Brain processes running right now (for the UI and tests). */
+  running = 0;
   private workDir: string;
 
   constructor(private config: Config) {
+    this.global = new Semaphore(config.maxParallel);
     this.workDir = join(config.dataDir, "brain");
     mkdirSync(this.workDir, { recursive: true, mode: 0o700 });
   }
@@ -189,11 +219,21 @@ export class Brain {
   get label() { return this.config.agent === "custom" ? (this.config.agentCmd?.[0] ?? "custom") : this.config.agent; }
 
   /** One turn at a time, so hooks, rambles and jobs never race each other. */
-  think(b: BrainInput, profile?: BrainProfile, meter?: Meter): Promise<string> {
+  /**
+   * Each call is its own process, so jobs are isolated from each other. Calls share a global cap and a per-harness
+   * cap; the orchestrator skips the queue so a new ramble is always read right away.
+   */
+  async think(b: BrainInput, profile?: BrainProfile, meter?: Meter): Promise<string> {
     const p = profile || this.defaults().workhorse;
-    const run = this.queue.then(() => this.run(b, p, meter));
-    this.queue = run.catch(() => {});
-    return run;
+    if (b.mode === "orchestrate") return this.run(b, p, meter);
+    const cap = this.config.maxParallelPerHarness[p.harness];
+    if (cap && !this.perHarness.has(p.harness)) this.perHarness.set(p.harness, new Semaphore(cap));
+    const own = this.perHarness.get(p.harness);
+    await this.global.acquire();
+    await own?.acquire();
+    this.running++;
+    try { return await this.run(b, p, meter); }
+    finally { this.running--; own?.release(); this.global.release(); }
   }
 
   private async run(b: BrainInput, profile: BrainProfile, meter?: Meter): Promise<string> {
