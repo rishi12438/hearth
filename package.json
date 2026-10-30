@@ -1,0 +1,24 @@
+{
+  "name": "hearth",
+  "version": "0.1.0",
+  "description": "A self-hosted, proactive personal assistant hub. Your data on your box, your coding agent as the brain, your phone talking to it directly.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun src/cli.ts start",
+    "dev": "HEARTH_AGENT=echo bun --watch src/cli.ts start",
+    "pair": "bun src/cli.ts pair",
+    "status": "bun src/cli.ts status",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/web-push": "^3.6.4",
+    "typescript": "^5.6.0"
+  }
+}

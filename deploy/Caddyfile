@@ -1,0 +1,10 @@
+# Caddy gets and renews a real HTTPS certificate for your domain automatically.
+# Point an A record (e.g. hub.example.com) at your box's static IP, then:
+#   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
+
+hub.example.com {
+	encode gzip
+	reverse_proxy 127.0.0.1:8790 {
+		flush_interval -1
+	}
+}
