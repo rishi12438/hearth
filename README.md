@@ -5,7 +5,7 @@
 **A personal assistant that lives on your own server, uses the coding agent you already trust as its brain, and texts you first when it matters.**
 
 - **You own the data.** Everything sits in a database you run: SQLite by default, or your own Postgres, MySQL or MongoDB. Export it all as one JSON file, or wipe it, from the app.
-- **Just ramble.** Tap the big +, then type or hold to talk. An **orchestrator** on a smart model splits what you said into jobs, gives each to the right **teammate** (Planner, Scout, Money… or a new one it creates), and you watch the job cards finish.
+- **Just ramble.** Tap the big +, then type or hold to talk. An **orchestrator** on a smart model splits what you said into jobs, gives each to the right **teammate** (Reminders, Research, Bills… or a new one it creates, always named after its job), and you watch the job cards finish.
 - **Your agent is the brain.** Each job runs headless on `claude -p`, `codex exec` or any CLI you configure. You pick a harness and model for each role: **orchestrator** (plans), **workhorse** (light jobs), **heavy** (hard jobs, and anything the workhorse escalates). The hub stores no model keys.
 - **Proactive by design.** The assistant creates *hooks*, rules for when to speak first. Each one has a reason it can show you, and all of them respect quiet hours and a daily limit.
 - **Direct line.** Your phone pairs with your hub using a one-time code and talks to it over HTTPS. There's no relay, no account and no middleman.
@@ -33,7 +33,7 @@ Run one hub on an always-on box so routines fire while your laptop sleeps. Run a
 ### How it looks (like Slack on your phone)
 
 - **Home** is Slack's Home tab: a purple workspace header; tiles for **Needs you**, **Working**, **Plans** and **Files**; collapsible **Active rambles** (`# ramble-1`, `# ramble-2` with purple badges), **Direct messages** with each teammate and **Archived**; and a purple **+** for a new ramble. A frosted **Home · DMs · Activity** bar and a round search button float at the bottom.
-- **Each ramble is a temporary channel** (`#ramble-N`). Hearth posts each task as a message ("@Scout find pottery studios near Priya") with Slack's thread line under it: "Scout is working on it…", then "**1 reply** Today at 4:05 AM". Approve and Try again sit right there. A ramble **archives itself an hour after everything in it is done**, and posting in it brings it back.
+- **Each ramble is a temporary channel** (`#ramble-N`). Hearth posts each task as a message as a post from the teammate doing it: a short title ("Pottery studios near Priya"), a two-line preview and "Open thread". Lists, files and the full answer live in the thread. Approve and Try again sit right there. A ramble **archives itself an hour after everything in it is done**, and posting in it brings it back.
 - **Tap a thread line** to open the thread: the task, a "1 reply" divider, then the teammate's answer, tiles and files. Reply to keep going with that teammate.
 - **Activity** puts what needs you (approvals, stuck jobs) first, then replies and check-ins. **DMs** go straight to one teammate.
 - Every teammate's avatar is a face that acts out what it's doing.

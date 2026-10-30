@@ -185,8 +185,7 @@ function markUpdate() {
 }
 
 const mate = (id?: string) => S.roster.find((t) => t.id === (id || "hearth")) || S.teammates.find((t) => t.id === (id || "hearth")) || { id: id || "hearth", name: "Hearth", color: "#F5A524", description: "" };
-const ROLE: Record<string, string> = { hearth: "Chief of staff", planner: "Time, reminders, routines", scout: "Finds things", money: "Bills and spending" };
-const role = (t: any) => ROLE[t.id] || String(t.description || "").split(/[.,:;]/)[0].slice(0, 32);
+const role = (t: any) => String(t.description || "").split(/[.,:;]/)[0].slice(0, 32);
 const jobState = (j: any) => j.status === "working" ? "working" : j.status === "queued" ? "thinking" : j.status === "waiting" ? "waiting" : j.status === "blocked" ? "blocked" : "idle";
 
 async function loadFiles() {
@@ -549,7 +548,7 @@ function drawChannel(el: HTMLElement, stick: boolean) {
   if (stick || atBottom) requestAnimationFrame(() => { const s = document.getElementById("scroll")!; s.scrollTop = s.scrollHeight; });
 }
 
-/** Mentions (@Scout) look like Slack's blue mentions. */
+/** Mentions (@Research) look like Slack's blue mentions. */
 function withMentions(text: string) {
   const out: (Node | string)[] = [];
   const re = /@([A-Z][\w-]{1,23})/g;
@@ -991,7 +990,7 @@ function closeDrawer() {
 // ---------------- teammates & brains ----------------
 
 function openTeammates() {
-  const name = h("input", { class: "field", placeholder: "Coach", maxLength: 24 });
+  const name = h("input", { class: "field", placeholder: "Fitness", maxLength: 24 });
   const what = h("textarea", { class: "field", rows: 2, placeholder: "Keeps me honest about workouts and sleep. Checks in if I skip.", maxLength: 200 });
   openSheet("Teammates", [
     h("p", { class: "muted" }, "You never have to pick one. The orchestrator hands each job to the right teammate, and adds a new one when nobody fits."),

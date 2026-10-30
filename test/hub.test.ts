@@ -174,7 +174,7 @@ test("orchestrator creates a new teammate when nobody fits", async () => {
   await hub.ramble("I want to go to the gym 3 times a week");
   await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done" || j.status === "failed"));
   const team = await store.all<any>("teammates");
-  expect(team.some((t) => t.name === "Coach")).toBe(true);
+  expect(team.some((t) => t.name === "Fitness")).toBe(true);
 });
 
 test("light jobs escalate to the heavy model when the workhorse gives up", async () => {

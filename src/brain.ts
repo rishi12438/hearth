@@ -109,9 +109,15 @@ You are the orchestrator of a personal assistant team that lives on the user's o
 1. Pull out durable facts about the user worth remembering.
 2. Split the ramble into separate jobs. Each job is a self-contained instruction a teammate can do without seeing the ramble.
    Merge things that belong together; skip filler. Chit-chat or a question you can answer from context needs no job.
-3. Give each job to the best teammate from CONTEXT.teammates by name. If none fits well, invent a new teammate
-   (short name, one-line description of their lane) and use it for this and future jobs like it.
-4. Write one short, warm reply telling the user what's happening ("On it: Planner's setting the 6pm reminder, Scout's finding dinner.").
+3. Give each job to the best teammate from CONTEXT.teammates by name. If none fits well, add a new teammate
+   (see NAMING) and use it for this and future jobs like it.
+4. Write one short, warm reply telling the user what's happening ("On it: Reminders is setting the 6pm reminder, Research is finding dinner.").
+NAMING a new teammate: the user should know what it does from the name alone, like a Slack channel.
+- Name it after its lane in 1-2 plain words: "Fitness", "Travel", "Gifts", "Home Repairs", "Meal Plans", "Job Search".
+- No people's names, nicknames or metaphors ("Coach", "Scout", "Max", "Atlas", "Buddy"), no "Bot"/"Agent"/"Assistant" suffix.
+- Make the lane wide enough to come back to: "Gifts", not "Priya's Birthday Gift"; "Travel", not "Paris Weather".
+- Don't add one whose lane overlaps an existing teammate; give that teammate the job instead.
+- description: one line saying what it handles, e.g. "Workouts, sleep and habits; checks in if you slip."
 
 Reply with ONLY a JSON object, no prose, no code fence:
 {"title":"3-6 word chat title","reply":"...","facts":[{"fact":"...","notebook":"...","importance":1|2|3}],
@@ -296,15 +302,15 @@ export class Brain {
 
 function echoOrchestrator(b: BrainInput): string {
   const parts = b.input.split(/(?:[.!?;\n]+|,?\s+and also\s+|,?\s+and then\s+|,\s*and\s+)/i).map((x) => x.trim()).filter((x) => x.length > 3);
-  const route = (t: string) => /remind|every|tomorrow|at \d|schedule|plan/i.test(t) ? "Planner" : /find|where|weather|best|cheap|search|look up/i.test(t) ? "Scout"
-    : /pay|bill|rent|spend|money|subscription/i.test(t) ? "Money" : /gym|workout|run|sleep|exercise/i.test(t) ? "Coach" : "Hearth";
+  const route = (t: string) => /remind|every|tomorrow|at \d|schedule|plan/i.test(t) ? "Reminders" : /find|where|weather|best|cheap|search|look up/i.test(t) ? "Research"
+    : /pay|bill|rent|spend|money|subscription/i.test(t) ? "Bills" : /gym|workout|run|sleep|exercise/i.test(t) ? "Fitness" : "Hearth";
   const facts = parts.filter((p) => /^remember|^my |i (hate|love|like|prefer)/i.test(p));
   const library = ((b.context as any).library || []) as { kind: string; name: string; score: number }[];
   const jobs = parts.filter((p) => !facts.includes(p)).map((task) => {
     const teammate = route(task);
     const hit = library.find((l) => (l.kind === "skill" || l.kind === "workflow") && task.toLowerCase().includes(l.name.split("-")[0]));
     if (hit) return { task, teammate, effort: "light", use: { [hit.kind]: hit.name, inputs: {} } };
-    return teammate === "Coach" ? { task, teammate, effort: "light", newTeammate: { name: "Coach", description: "Workouts, sleep and habits. Checks in if you slip." } } : { task, teammate, effort: /plan|research|compare/i.test(task) ? "heavy" : "light" };
+    return teammate === "Fitness" ? { task, teammate, effort: "light", newTeammate: { name: "Fitness", description: "Workouts, sleep and habits. Checks in if you slip." } } : { task, teammate, effort: /plan|research|compare/i.test(task) ? "heavy" : "light" };
   });
   return JSON.stringify({
     title: b.input.split(/\s+/).slice(0, 5).join(" "),

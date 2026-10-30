@@ -18,16 +18,19 @@ const DEFAULT_PREFS: Prefs = {
   userName: "", tz: "UTC", quietStart: "23:00", quietEnd: "07:30",
   maxProactivePerDay: 6, proactiveToday: { date: "", n: 0 }, placeState: {},
 };
+// Teammates are named after their job ("Reminders", "Research"), so "@Research is on it" explains itself.
 export const DEFAULT_TEAMMATES: Pick<Teammate, "id" | "name" | "color" | "description" | "prompt">[] = [
   { id: "hearth", name: "Hearth", color: "#F5A524", description: "Your front desk. Handles anything and remembers everything.",
     prompt: "You are Hearth, the user's main assistant. Handle anything; be brief and warm." },
-  { id: "planner", name: "Planner", color: "#5B8CFF", description: "Reminders, routines, your day and week.",
-    prompt: "You are Planner. You own the user's time: reminders, routines, follow-ups, planning the day and week. Prefer creating hooks." },
-  { id: "scout", name: "Scout", color: "#2FBF71", description: "Finds things: places, products, answers from the web.",
-    prompt: "You are Scout. You find things: places to eat, products, facts, prices. Search the web, give 3 good options with one line each." },
-  { id: "money", name: "Money", color: "#E36BD6", description: "Bills, subscriptions, spending, saving.",
-    prompt: "You are Money. You track bills, subscriptions and spending and nudge the user before due dates. Never move money; offer reminders and drafts." },
+  { id: "planner", name: "Reminders", color: "#5B8CFF", description: "Reminders, routines, your day and week.",
+    prompt: "You are Reminders. You own the user's time: reminders, routines, follow-ups, planning the day and week. Prefer creating hooks." },
+  { id: "scout", name: "Research", color: "#2FBF71", description: "Looks things up: places, products, prices, answers from the web.",
+    prompt: "You are Research. You find things: places to eat, products, facts, prices. Search the web, give 3 good options with one line each." },
+  { id: "money", name: "Bills", color: "#E36BD6", description: "Bills, subscriptions, spending, saving.",
+    prompt: "You are Bills. You track bills, subscriptions and spending and nudge the user before due dates. Never move money; offer reminders and drafts." },
 ];
+/** Names the built-in teammates had before they were named after their job; renamed on start. */
+const OLD_NAMES: Record<string, string> = { planner: "Planner", scout: "Scout", money: "Money" };
 
 const REVIEW_MARKER = "[[memory-review]]";
 const PURGE_MARKER = "[[library-purge]]";
@@ -343,7 +346,7 @@ export class Hub {
     for (const j of (plan.jobs || []).slice(0, 8)) {
       if (typeof j?.task !== "string" || !j.task.trim()) continue;
       const wanted = String(j.teammate || "Hearth").toLowerCase();
-      let mate = team.find((t) => t.name.toLowerCase() === wanted);
+      let mate = team.find((t) => t.name.toLowerCase() === wanted || t.id === wanted);
       if (!mate && j.newTeammate) {
         const r = await this.addTeammate(j.newTeammate);
         if (r.value) { mate = r.value; team.push(mate); await this.log("teammate.created", `${mate.name} joined: ${mate.description}`); }
@@ -1137,7 +1140,12 @@ export class Hub {
   // ---------- teammates ----------
 
   async ensureTeammates() {
-    if ((await this.store.all<Teammate>("teammates")).length) return;
+    const have = await this.store.all<Teammate>("teammates");
+    for (const t of have) {
+      const def = DEFAULT_TEAMMATES.find((d) => d.id === t.id);
+      if (def && t.builtIn && OLD_NAMES[t.id] === t.name) await this.store.put<Teammate>("teammates", { ...t, name: def.name, description: def.description, prompt: def.prompt });
+    }
+    if (have.length) return;
     const t0 = Date.parse("2026-01-01T00:00:00Z");
     for (const [i, t] of DEFAULT_TEAMMATES.entries()) {
       await this.store.put<Teammate>("teammates", { ...t, builtIn: true, createdAt: new Date(t0 + i * 1000).toISOString() });
@@ -1241,6 +1249,8 @@ export class Hub {
     const name = typeof input?.name === "string" ? input.name.trim().slice(0, 24) : "";
     const description = typeof input?.description === "string" ? input.description.trim().slice(0, 200) : "";
     if (!name || !description) return { error: "A teammate needs a name and what they do." };
+    const same = (await this.store.all<Teammate>("teammates")).find((t) => t.name.toLowerCase() === name.toLowerCase());
+    if (same) return { value: same };
     const color = /^#[0-9a-f]{6}$/i.test(input.color || "") ? input.color : ["#F97066", "#36BFFA", "#FDB022", "#9E77ED", "#32D583"][Math.floor(Math.random() * 5)];
     const t = await this.store.put<Teammate>("teammates", this.doc({
       name, color, description, builtIn: false,
