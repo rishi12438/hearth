@@ -13,7 +13,7 @@ Hearth holds personal data and can act on a schedule, so it is built to fail clo
 - It runs as a subprocess in an empty working folder. For Claude the file, shell and edit tools are disabled and only web search and fetch are allowed; Codex runs in its read-only sandbox. `HEARTH_*` variables, including your database URL, are removed from its environment.
 - It can't touch data directly. It *proposes* actions in a fenced block; the hub validates each one against a fixed list (hooks, memory, places, scripts) and drops anything else. Hooks have bounds: watches run at most every 15 minutes, and quiet hours and the daily cap are enforced by the hub.
 - Script output and other fetched content are wrapped as untrusted data in the prompt.
-- It can't send email, spend money or message other people. Nothing in the action list allows it.
+- It can't send, spend or message anyone by itself. The only way out is an approved script with external effects, and each run of one waits for your Approve.
 
 ## Scripts
 - Repo scripts (`scripts/`) are trusted because you put them there. Scripts the brain writes are saved as `proposed` and can't run until you approve them in the app.
