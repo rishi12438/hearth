@@ -3,9 +3,11 @@ import { join, resolve, extname } from "node:path";
 type Server = Bun.Server<unknown>;
 import { sha256, deviceForToken, newPairingCode, redeemPairingCode, RateLimiter } from "./auth.ts";
 import type { Hub } from "./hub.ts";
+import type { SpeechToText } from "./voice.ts";
+import { availableHarnesses } from "./brain.ts";
 import { isActive, search } from "./memory.ts";
 import { isValidTimeZone } from "./time.ts";
-import type { Device, Fact, Hook, LocationFix, Message, Notebook, Place, Prefs } from "./types.ts";
+import type { Device, Fact, Hook, LocationFix, Message, Notebook, Place, Prefs, Teammate } from "./types.ts";
 import pkg from "../package.json" with { type: "json" };
 
 const WEB = resolve(import.meta.dir, "../web");
@@ -47,7 +49,7 @@ export async function buildWeb() {
 
 class HttpError extends Error { constructor(public status: number, msg: string) { super(msg); } }
 
-export async function startServer(hub: Hub) {
+export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
   const { config, store } = hub;
   const web = await buildWeb();
   const pairLimiter = new RateLimiter(5, 10 * 60_000);
@@ -66,7 +68,7 @@ export async function startServer(hub: Hub) {
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "DENY",
       "Cross-Origin-Opener-Policy": "same-origin",
-      "Permissions-Policy": "geolocation=(self), camera=(), microphone=(), payment=()",
+      "Permissions-Policy": "geolocation=(self), camera=(), microphone=(self), payment=()",
       "Content-Security-Policy": [
         "default-src 'self'", "script-src 'self'", "style-src 'self'", "img-src 'self' data:",
         `connect-src 'self' ${config.allowedOrigins.join(" ")}`.trim(), "manifest-src 'self'", "worker-src 'self'",
@@ -135,6 +137,7 @@ export async function startServer(hub: Hub) {
           device: { id: device.id, name: device.name }, prefs: publicPrefs(prefs), thinking: hub.thinking,
           push: { available: !!hub.push, subscribed: hub.push ? await hub.push.hasDevice(device.id) : false },
           pendingScripts: (await hub.scripts.list()).filter((s) => s.status === "proposed").length,
+          voice: stt ? stt.name : null,
         });
       }
       case "stream": {
@@ -167,10 +170,34 @@ export async function startServer(hub: Hub) {
           memoryCount: (await store.all<Fact>("memory")).filter((f) => isActive(f)).length,
         });
       }
-      case "messages": {
-        if (method === "GET") return json(await hub.listMessages(Number(url.searchParams.get("limit") || 50), url.searchParams.get("before") || undefined));
-        if (method === "POST") { const r = await hub.userSays(String((await body(req)).text || "")); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+      case "threads": {
+        if (method === "GET" && !id) return json(await hub.listThreads());
+        if (method === "GET" && id) { const d = await hub.threadDetail(id); if (!d) break; return json(d); }
+        if (method === "POST" && !id) { const r = await hub.ramble(String((await body(req)).text || "")); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "POST" && seg[3] === "messages") { const r = await hub.ramble(String((await body(req)).text || ""), id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "DELETE" && id) return json({ ok: await hub.removeThread(id) });
         break;
+      }
+      case "brains": {
+        if (method === "GET") return json({ current: await hub.brains(), available: availableHarnesses(config) });
+        if (method === "PATCH") { const r = await hub.setBrains(await body(req)); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        break;
+      }
+      case "teammates": {
+        if (method === "GET") return json(await store.all<Teammate>("teammates"));
+        if (method === "POST") { const r = await hub.addTeammate(await body(req)); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "DELETE" && id) return json({ ok: await hub.removeTeammate(id) });
+        break;
+      }
+      case "transcribe": {
+        if (method !== "POST") break;
+        if (!stt) throw new HttpError(503, "Voice isn't set up on this hub. Add HEARTH_DEEPGRAM_API_KEY to its .env.");
+        const type = req.headers.get("content-type") || "";
+        if (!/^audio\//.test(type)) throw new HttpError(415, "Send audio.");
+        const audio = new Uint8Array(await req.arrayBuffer());
+        if (audio.length > 15 * 1024 * 1024) throw new HttpError(413, "Recording too long.");
+        try { return json({ text: await stt.transcribe(audio, type) }); }
+        catch (err: any) { throw new HttpError(502, `Transcription failed: ${err.message}`); }
       }
       case "hooks": {
         if (method === "GET" && !id) return json(await hub.listHooks());

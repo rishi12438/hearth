@@ -3,33 +3,30 @@ import { activeHub, call, hubs, pair, removeHub, setActive, stream, normalizeUrl
 
 declare const __BUILD__: string;
 
-type Tab = "today" | "chat" | "plans" | "memory" | "you";
-const TABS: { id: Tab; label: string; icon: string }[] = [
-  { id: "today", label: "Today", icon: "sun" },
-  { id: "chat", label: "Chat", icon: "chat" },
-  { id: "plans", label: "Plans", icon: "bell" },
-  { id: "memory", label: "Memory", icon: "brain" },
-  { id: "you", label: "You", icon: "user" },
-];
+// Home is one big + and your recent chats. In a chat you ramble (type or hold to talk); the orchestrator
+// splits it into jobs, hands each to the right teammate, and the job cards tick over as they finish.
+// Everything else (plans, memory, teammates, brains, settings) is behind the menu.
 
 const S = {
-  tab: "today" as Tab,
   state: null as any,
-  today: null as any,
-  messages: [] as any[],
+  threads: [] as any[],
+  thread: null as any,          // { thread, messages, jobs } when a chat is open
+  teammates: [] as any[],
   hooks: [] as any[],
   memory: null as any,
   memoryQuery: "",
   plansFilter: "",
+  today: null as any,
   conn: "connecting" as "live" | "connecting" | "offline",
-  thinking: false,
+  planning: null as null | string, // thread id the orchestrator is reading
   updateReady: false,
   sheetOpen: false,
-  hasOlder: true,
+  panel: null as null | "plans" | "memory",
 };
 
 let live: ReturnType<typeof stream> | null = null;
 const app = document.getElementById("app")!;
+const route = () => { const m = location.hash.match(/^#chat\/([\w-]+)/); return m ? m[1] : null; };
 
 // ---------------- boot ----------------
 
@@ -37,43 +34,64 @@ async function boot() {
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
   const pairCode = new URLSearchParams(location.hash.slice(1)).get("pair");
   if (!activeHub() || pairCode) return renderPairing(pairCode || "");
-  S.tab = (TABS.find((t) => `#${t.id}` === location.hash)?.id) || "today";
-  renderShell();
-  await refreshState();
+  await Promise.all([refreshState(), loadTeammates()]);
+  await show();
   connect();
   if (localStorage.getItem("hearth.autoLocation") === "1") shareLocation(true);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) { checkForUpdate(); refreshView(); live?.restart(); } });
+  window.addEventListener("hashchange", show);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { checkForUpdate(); refresh(); live?.restart(); } });
   setInterval(checkForUpdate, 5 * 60_000);
-  window.addEventListener("hashchange", () => { const t = TABS.find((x) => `#${x.id}` === location.hash); if (t) go(t.id); });
-  setInterval(() => { if (S.tab === "today" || S.tab === "plans") renderView(); }, 60_000); // keep "in 5 min" honest
 }
+
+async function show() {
+  const id = route();
+  if (id) { S.thread = null; renderChat(); await loadThread(id); }
+  else { S.thread = null; renderHome(); await loadThreads(); }
+}
+
+function refresh() { const id = route(); if (id) loadThread(id); else loadThreads(); }
 
 function connect() {
   live?.stop();
-  live = stream((e) => onEvent(e), (s) => { S.conn = s; renderTopbar(); if (s === "live") refreshView(); });
+  live = stream(onEvent, (s) => { S.conn = s; renderTop(); });
 }
 
 function onEvent(e: { type: string; data?: any }) {
+  const open = S.thread?.thread?.id;
   switch (e.type) {
-    case "hello": if (e.data?.build && e.data.build !== __BUILD__) markUpdate(); S.thinking = !!e.data?.thinking; break;
+    case "hello": if (e.data?.build && e.data.build !== __BUILD__) markUpdate(); return;
     case "unpaired": toast("This device was signed out of the hub.", "err"); removeHub(activeHub()!.id); location.reload(); return;
+    case "thinking": S.planning = e.data?.threadId || null; if (open) renderMessages(); return;
     case "message":
-      if (!S.messages.some((m) => m.id === e.data.id)) S.messages.push(e.data);
-      if (S.tab === "chat") renderChat(true); else if (e.data.role === "assistant") badge("chat", true);
-      if (e.data.proactive) refreshToday();
+      if (open && e.data.threadId === open) { if (!S.thread.messages.some((m: any) => m.id === e.data.id)) S.thread.messages.push(e.data); renderMessages(); }
+      else if (!open) loadThreads();
+      else if (e.data.proactive) toast(`${e.data.proactive.title}`);
       return;
-    case "thinking": S.thinking = !!e.data; if (S.tab === "chat") renderChat(true); renderTopbar(); return;
-    case "hooks": loadHooks(); refreshToday(); return;
-    case "memory": if (S.tab === "memory") loadMemory(); return;
+    case "job":
+      if (open && e.data.threadId === open) {
+        const i = S.thread.jobs.findIndex((j: any) => j.id === e.data.id);
+        if (i >= 0) S.thread.jobs[i] = e.data; else S.thread.jobs.push(e.data);
+        renderMessages(false);
+      }
+      return;
+    case "threads":
+      if (!open) loadThreads();
+      else call("/api/threads").then((list: any[]) => { const t = list.find((x) => x.id === open); if (t && S.thread) { S.thread.thread.title = t.title; renderTop(); } }).catch(() => {});
+      return;
+    case "teammates": loadTeammates(); return;
+    case "hooks": if (S.panel === "plans") loadHooks(); return;
+    case "memory": if (S.panel === "memory") loadMemory(); return;
     case "scripts": refreshState(); return;
-    case "activity": if (S.tab === "today") refreshToday(); return;
-    case "reset": refreshView(); return;
+    case "reset": refresh(); return;
   }
 }
 
 async function refreshState() {
-  try { S.state = await call("/api/state"); renderTopbar(); if (S.tab === "you" || S.tab === "today") renderView(); }
-  catch (err) { handleError(err); }
+  try { S.state = await call("/api/state"); renderTop(); } catch (e) { handleError(e); }
+}
+
+async function loadTeammates() {
+  try { S.teammates = await call("/api/teammates"); } catch (e) { handleError(e); }
 }
 
 function handleError(err: unknown) {
@@ -83,11 +101,9 @@ function handleError(err: unknown) {
     setTimeout(() => location.reload(), 1200);
     return;
   }
-  if (err instanceof TypeError) { S.conn = "offline"; renderTopbar(); return; }
+  if (err instanceof TypeError) { S.conn = "offline"; renderTop(); return; }
   toast(err instanceof Error ? err.message : "Something went wrong", "err");
 }
-
-// ---------------- updates (like the Enkidu phone app: reload when idle) ----------------
 
 async function checkForUpdate() {
   try {
@@ -99,77 +115,448 @@ async function checkForUpdate() {
 }
 
 function markUpdate() {
-  const busy = S.sheetOpen || !!(document.getElementById("composer") as HTMLTextAreaElement | null)?.value.trim();
-  if (!busy && hubs().length && activeHub()!.url === location.origin) { location.reload(); return; }
+  const busy = S.sheetOpen || recording || !!(document.getElementById("composer") as HTMLTextAreaElement | null)?.value.trim();
+  if (!busy && activeHub()?.url === location.origin) { location.reload(); return; }
   S.updateReady = true;
-  renderTopbar();
+  renderTop();
 }
 
-// ---------------- shell ----------------
+const mate = (id?: string) => S.teammates.find((t) => t.id === (id || "hearth")) || { id: "hearth", name: "Hearth", color: "#F5A524", description: "" };
 
-function renderShell() {
+function dot(t: any, size = 44) {
+  return h("span", { class: "dot", style: `--c:${t.color};--s:${size}px` }, t.name[0]);
+}
+
+// ---------------- top bar ----------------
+
+function renderTop() {
+  const top = document.getElementById("top");
+  if (!top) return;
+  const pending = S.state?.pendingScripts || 0;
+  const inChat = !!route();
+  clear(top,
+    inChat
+      ? h("button", { class: "iconbtn", "aria-label": "Back", on: { click: () => { location.hash = ""; } } }, icon("back", 22))
+      : h("button", { class: "iconbtn menu", "aria-label": "Menu", on: { click: openMenu } }, icon("menu", 22), pending ? h("i", { class: "badge" }) : null),
+    h("button", { class: "title", on: { click: inChat ? () => {} : openHubs } },
+      h("i", { class: `status ${S.conn}` }), h("span", null, inChat ? (S.thread?.thread?.title || "…") : (S.state?.hub?.name || activeHub()?.name || "Hearth"))),
+    S.updateReady ? h("button", { class: "pill", on: { click: () => location.reload() } }, "Update")
+      : inChat ? h("button", { class: "iconbtn", "aria-label": "Chat options", on: { click: chatMenu } }, icon("more", 20)) : h("span", { class: "iconbtn" }),
+  );
+}
+
+// ---------------- home ----------------
+
+async function loadThreads() {
+  try { S.threads = await call("/api/threads"); if (!route()) drawThreads(); } catch (e) { handleError(e); }
+}
+
+function renderHome() {
   clear(app,
-    h("header", { class: "topbar", id: "topbar" }),
-    h("main", { id: "view", class: "view" }),
-    h("nav", { class: "tabs", id: "tabs" }, TABS.map((t) =>
-      h("button", { class: `tab ${S.tab === t.id ? "on" : ""}`, "data-tab": t.id, "aria-label": t.label, on: { click: () => go(t.id) } },
-        icon(t.icon, 22), h("span", null, t.label), h("i", { class: "dot" })),
-    )),
+    h("header", { class: "top", id: "top" }),
+    h("main", { class: "home" },
+      h("div", { class: "hero" },
+        h("h1", null, greeting(S.state?.prefs?.userName)),
+        h("p", null, "Just ramble. I'll sort out who does what."),
+        h("button", { class: "bigplus", "aria-label": "New ramble", on: { click: newRamble } }, icon("plus", 40)),
+        h("div", { class: "team" }, S.teammates.slice(0, 6).map((t) => dot(t, 26)), h("small", null, `${S.teammates.length} teammates ready`))),
+      h("section", { class: "recent", id: "recent" })),
   );
-  renderTopbar();
-  renderView();
+  renderTop();
+  drawThreads();
 }
 
-function go(tab: Tab) {
-  if (S.tab === tab) { document.getElementById("view")!.scrollTo({ top: 0, behavior: "smooth" }); return; }
-  S.tab = tab;
-  history.replaceState(null, "", `#${tab}`);
-  document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("on", (b as HTMLElement).dataset.tab === tab));
-  badge(tab, false);
-  renderView();
-  refreshView();
+function drawThreads() {
+  const el = document.getElementById("recent");
+  if (!el) return;
+  if (!S.threads.length) return clear(el);
+  clear(el, h("h3", null, "Recent"), h("div", { class: "threads" }, S.threads.slice(0, 30).map((t) =>
+    h("button", { class: "thread-row", on: { click: () => { location.hash = `#chat/${t.id}`; } } },
+      h("span", { class: "grow" }, h("b", null, t.title), t.preview ? h("small", null, t.preview) : null),
+      h("time", null, shortAgo(t.updatedAt))))));
 }
 
-function badge(tab: Tab, on: boolean) {
-  document.querySelector(`.tab[data-tab="${tab}"]`)?.classList.toggle("badge", on);
+function newRamble() {
+  location.hash = "#chat/new";
 }
 
-function renderTopbar() {
-  const bar = document.getElementById("topbar");
-  if (!bar) return;
-  const hub = activeHub();
-  const label = S.conn === "live" ? (S.thinking ? "Thinking…" : "Connected") : S.conn === "connecting" ? "Connecting…" : "Hub offline";
-  clear(bar,
-    h("button", { class: "hubpill", on: { click: openHubs }, "aria-label": "Switch hub" },
-      h("i", { class: `status ${S.conn} ${S.thinking ? "thinking" : ""}` }),
-      h("span", { class: "hubname" }, S.state?.hub?.name || hub?.name || "Hub"),
-      icon("chevron", 14)),
-    S.updateReady ? h("button", { class: "update", on: { click: () => location.reload() } }, "Update ready") : h("span", { class: "connlabel" }, label),
+// ---------------- chat ----------------
+
+async function loadThread(id: string) {
+  if (id === "new") { S.thread = { thread: { id: "new", title: "New ramble" }, messages: [], jobs: [] }; renderTop(); renderMessages(); setTimeout(() => document.getElementById("composer")?.focus(), 80); return; }
+  try { S.thread = await call(`/api/threads/${id}`); renderTop(); renderMessages(); }
+  catch (e) { if (e instanceof ApiError && e.status === 404) { location.hash = ""; return; } handleError(e); }
+}
+
+function renderChat() {
+  clear(app,
+    h("header", { class: "top", id: "top" }),
+    h("main", { class: "thread", id: "thread" }),
+    h("footer", { class: "dock" }, h("div", { class: "composer-wrap", id: "composerwrap" })),
   );
+  renderTop();
+  renderComposer();
 }
 
-function refreshView() {
-  if (S.tab === "today") refreshToday();
-  else if (S.tab === "chat") loadMessages();
-  else if (S.tab === "plans") loadHooks();
-  else if (S.tab === "memory") loadMemory();
-  else refreshState();
+function renderMessages(stick = true) {
+  const el = document.getElementById("thread");
+  if (!el || !S.thread) return;
+  const { messages, jobs } = S.thread;
+  if (!messages.length) {
+    clear(el, h("div", { class: "hello" },
+      h("h2", null, "What's on your mind?"),
+      h("p", null, "Say it however it comes out. Several things at once is fine."),
+      h("div", { class: "starters" }, [
+        "Remind me at 6 to call mom, and find somewhere cheap for dinner tonight",
+        "I want to get to the gym 3 times a week, nag me if I don't",
+        "Rent's due on the 1st, remind me 3 days before every month",
+      ].map((s) => h("button", { on: { click: () => send(s) } }, s)))));
+    return;
+  }
+  const nodes: Node[] = [];
+  let lastDay = "";
+  for (const m of messages) {
+    const day = new Date(m.createdAt).toDateString();
+    if (day !== lastDay) { nodes.push(h("div", { class: "day" }, dayLabel(m.createdAt))); lastDay = day; }
+    nodes.push(message(m, jobs));
+  }
+  if (S.planning === S.thread.thread.id) nodes.push(h("div", { class: "msg bot" }, h("div", { class: "who" }, dot(mate("hearth"), 18), h("b", null, "Hearth")), h("div", { class: "thinking" }, h("i"), h("i"), h("i"), h("span", null, "Sorting out who does what…"))));
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  clear(el, nodes);
+  if (stick || atBottom) requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
 }
 
-function renderView() {
-  const v = document.getElementById("view");
-  if (!v) return;
-  v.className = `view view-${S.tab}`;
-  if (S.tab === "today") renderToday();
-  else if (S.tab === "chat") renderChat();
-  else if (S.tab === "plans") renderPlans();
-  else if (S.tab === "memory") renderMemory();
-  else renderYou();
+function message(m: any, jobs: any[]) {
+  if (m.role === "user") return h("div", { class: "msg me" }, h("div", { class: "bubble" }, m.text), h("time", null, clockTime(m.createdAt)));
+  const t = mate(m.teammateId);
+  const parts: (Node | null)[] = [
+    h("div", { class: "who" }, dot(t, 18), h("b", null, t.name), m.proactive ? h("span", { class: "tag" }, icon("bell", 11), m.proactive.title) : null, h("time", null, clockTime(m.createdAt))),
+    richText(m.text),
+  ];
+  if (m.proactive) {
+    const why = h("div", { class: "why", hidden: true }, m.proactive.why, h("br"), h("small", null, `Trigger: ${m.proactive.trigger}`));
+    parts.push(h("button", { class: "whybtn", on: { click: () => { why.hidden = !why.hidden; } } }, "Why did I get this?"), why);
+  }
+  const mine = (m.jobIds || []).map((id: string) => jobs.find((j) => j.id === id)).filter(Boolean);
+  if (mine.length) parts.push(h("div", { class: "cards" }, mine.map(jobCard)));
+  if (m.did?.length) parts.push(h("div", { class: "chips" }, m.did.map((d: any) => h("span", { class: "chip" }, icon("check", 12), d.label))));
+  return h("div", { class: `msg bot ${m.error ? "err" : ""}` }, parts);
 }
 
-// ---------------- sheets ----------------
+function jobCard(j: any) {
+  const t = mate(j.teammateId);
+  const state = j.status === "done" ? h("span", { class: "st done" }, icon("check", 14)) : j.status === "failed" ? h("span", { class: "st failed" }, icon("x", 14)) : h("span", { class: `st ${j.status}` }, h("i"));
+  const tierLabel = j.escalated ? "escalated to heavy" : j.tier === "heavy" ? "heavy" : j.status === "queued" ? "queued" : j.status === "working" ? "working…" : "";
+  const body = j.result && j.status !== "working" ? h("div", { class: "result" }, richText(j.result)) : null;
+  return h("div", { class: `card ${j.status}` },
+    h("div", { class: "cardhead" }, dot(t, 22), h("span", { class: "grow" }, h("b", null, t.name), tierLabel ? h("em", null, tierLabel) : null), state),
+    h("div", { class: "task" }, j.task),
+    body,
+    j.did?.length ? h("div", { class: "chips" }, j.did.map((d: any) => h("span", { class: "chip" }, icon(d.label.includes("waiting") ? "lock" : "check", 12), d.label))) : null);
+}
 
-function openSheet(title: string, body: Node | (Node | null)[], opts: { onClose?: () => void } = {}) {
+function chatMenu() {
+  const t = S.thread?.thread;
+  if (!t || t.id === "new") return;
+  openSheet(t.title, [
+    h("div", { class: "stack" },
+      h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet("Delete this chat?", "Its messages and job results are deleted. Reminders it set keep working.", "Delete", async () => { await call(`/api/threads/${t.id}`, { method: "DELETE" }); location.hash = ""; }) } }, icon("trash", 16), "Delete chat")),
+  ]);
+}
+
+// ---------------- composer & voice ----------------
+
+let recording = false;
+let recorder: MediaRecorder | null = null;
+let chunks: Blob[] = [];
+let pressAt = 0;
+let timer: ReturnType<typeof setInterval> | null = null;
+
+function renderComposer() {
+  const wrap = document.getElementById("composerwrap");
+  if (!wrap) return;
+  const box = h("textarea", { id: "composer", rows: 1, value: sessionStorage.getItem("hearth.draft") || "", placeholder: S.conn === "offline" ? "Hub is offline" : "Ramble. I'll sort it out.", enterKeyHint: "send",
+    on: {
+      input: () => { autosize(box); sessionStorage.setItem("hearth.draft", box.value); swap(); },
+      keydown: (e: KeyboardEvent) => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); send(box.value); } },
+    } });
+  const action = h("button", { class: "act", id: "act", "aria-label": "Hold to talk" });
+  const swap = () => {
+    const hasText = !!box.value.trim();
+    action.classList.toggle("send", hasText);
+    clear(action, icon(hasText ? "send" : "mic", 20));
+    action.setAttribute("aria-label", hasText ? "Send" : "Hold to talk");
+  };
+  action.addEventListener("pointerdown", (e) => { if (box.value.trim()) return; e.preventDefault(); onMicDown(); });
+  action.addEventListener("pointerup", () => { if (recording) onMicUp(); });
+  action.addEventListener("pointerleave", () => { if (recording && Date.now() - pressAt > 350) onMicUp(); });
+  action.addEventListener("click", () => { if (box.value.trim()) send(box.value); });
+  clear(wrap, h("div", { class: "rec", id: "rec", hidden: true }), h("div", { class: "composer", id: "composerbox" }, box, action));
+  swap();
+  autosize(box);
+}
+
+function autosize(t: HTMLTextAreaElement) { t.style.height = "auto"; t.style.height = Math.min(150, t.scrollHeight) + "px"; }
+
+async function onMicDown() {
+  if (recording) { stopRecording(true); return; } // second tap ends open-mic
+  pressAt = Date.now();
+  if (!S.state?.voice) return toast("Voice isn't set up on this hub yet (add a Deepgram key to its .env).", "err");
+  try {
+    const media = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const type = ["audio/webm;codecs=opus", "audio/mp4", "audio/webm"].find((t) => MediaRecorder.isTypeSupported(t)) || "";
+    recorder = new MediaRecorder(media, type ? { mimeType: type } : undefined);
+    chunks = [];
+    recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    recorder.start(250);
+    recording = true;
+    showRecording(true);
+  } catch { toast("Microphone permission is off", "err"); }
+}
+
+function onMicUp() {
+  if (Date.now() - pressAt < 350) { toast("Listening. Tap again when you're done."); return; } // a tap = open mic
+  stopRecording(true);
+}
+
+function showRecording(on: boolean) {
+  const rec = document.getElementById("rec")!;
+  document.getElementById("composerbox")?.classList.toggle("listening", on);
+  if (timer) clearInterval(timer);
+  if (!on) { rec.hidden = true; return; }
+  const start = Date.now();
+  const label = h("span", { class: "clock" }, "0:00");
+  clear(rec, h("i", { class: "wave" }, h("b"), h("b"), h("b"), h("b"), h("b")), h("span", { class: "grow" }, "Listening…"), label,
+    h("button", { class: "cancel", on: { click: () => stopRecording(false) } }, "Cancel"));
+  rec.hidden = false;
+  timer = setInterval(() => { const s = Math.floor((Date.now() - start) / 1000); label.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }, 250);
+}
+
+function stopRecording(sendIt: boolean) {
+  if (!recorder) return;
+  const r = recorder;
+  recorder = null;
+  recording = false;
+  showRecording(false);
+  r.onstop = async () => {
+    r.stream.getTracks().forEach((t) => t.stop());
+    if (!sendIt || !chunks.length) return;
+    const blob = new Blob(chunks, { type: (r.mimeType || "audio/webm").split(";")[0] });
+    const box = document.getElementById("composer") as HTMLTextAreaElement;
+    box.placeholder = "Transcribing…";
+    try {
+      const hub = activeHub()!;
+      const res = await fetch(hub.url + "/api/transcribe", { method: "POST", headers: { Authorization: `Bearer ${hub.token}`, "Content-Type": blob.type }, body: blob });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Transcription failed");
+      if (data.text) send(data.text); else toast("I didn't catch that", "err");
+    } catch (e) { handleError(e); }
+    finally { box.placeholder = "Ramble. I'll sort it out."; }
+  };
+  r.stop();
+}
+
+async function send(text: string) {
+  const t = text.trim();
+  if (!t || !S.thread) return;
+  const box = document.getElementById("composer") as HTMLTextAreaElement | null;
+  if (box) { box.value = ""; box.dispatchEvent(new Event("input")); }
+  sessionStorage.removeItem("hearth.draft");
+  const id = S.thread.thread.id;
+  try {
+    const r = id === "new" ? await call("/api/threads", { body: { text: t } }) : await call(`/api/threads/${id}/messages`, { body: { text: t } });
+    if (id === "new") {
+      S.thread = { thread: r.thread, messages: [r.message], jobs: [] };
+      history.replaceState(null, "", `#chat/${r.thread.id}`);
+      renderTop();
+    } else if (!S.thread.messages.some((m: any) => m.id === r.message.id)) S.thread.messages.push(r.message);
+    S.planning = r.thread.id;
+    renderMessages();
+  } catch (e) {
+    if (box) { box.value = t; box.dispatchEvent(new Event("input")); }
+    handleError(e);
+  }
+}
+
+// ---------------- menu ----------------
+
+function openMenu() {
+  const st = S.state;
+  const item = (ic: string, label: string, sub: string, fn: () => void, badge?: string) =>
+    h("button", { class: "mi", on: { click: () => { closeDrawer(); setTimeout(fn, 180); } } }, icon(ic, 20), h("span", { class: "grow" }, h("b", null, label), h("small", null, sub)), badge ? h("em", null, badge) : null);
+  const drawer = h("aside", { class: "drawer", role: "dialog", "aria-label": "Menu" },
+    h("button", { class: "hubcard", on: { click: () => { closeDrawer(); setTimeout(openHubs, 180); } } },
+      h("span", { class: "hubicon" }, icon("server", 20)),
+      h("span", { class: "grow" }, h("b", null, st?.hub?.name || "Hub"), h("small", null, `${st?.hub?.storage || "?"}${st?.voice ? " · voice on" : ""}`)),
+      h("i", { class: `status ${S.conn}` })),
+    h("nav", null,
+      item("bell", "Plans", "Reminders, routines, watches", openPlans),
+      item("brain", "Memory", "What I know about you", openMemory),
+      item("users", "Teammates", "Who the orchestrator can hand work to", openTeammates),
+      item("sparkle", "Brains", "Which harness and model does what", openBrains),
+      item("code", "Scripts", "What I can run", openScripts, st?.pendingScripts ? `${st.pendingScripts} to approve` : undefined),
+      item("settings", "Settings", "Notifications, location, data", openSettings)),
+    h("p", { class: "foot" }, `Hearth · open source · ${__BUILD__}`),
+  );
+  const scrim = h("div", { class: "drawer-scrim", id: "drawer", on: { click: (e: Event) => { if (e.target === scrim) closeDrawer(); } } }, drawer);
+  document.body.appendChild(scrim);
+  requestAnimationFrame(() => scrim.classList.add("open"));
+}
+
+function closeDrawer() {
+  const d = document.getElementById("drawer");
+  if (!d) return;
+  d.classList.remove("open"); d.id = "";
+  setTimeout(() => d.remove(), 220);
+}
+
+// ---------------- teammates & brains ----------------
+
+function openTeammates() {
+  const name = h("input", { class: "field", placeholder: "Coach", maxLength: 24 });
+  const what = h("textarea", { class: "field", rows: 2, placeholder: "Keeps me honest about workouts and sleep. Checks in if I skip.", maxLength: 200 });
+  openSheet("Teammates", [
+    h("p", { class: "muted" }, "You never have to pick one. The orchestrator hands each job to the right teammate, and adds a new one when nobody fits."),
+    h("div", { class: "list" }, S.teammates.map((t) => h("div", { class: "item" },
+      dot(t, 34), h("span", { class: "grow" }, h("b", null, t.name), h("small", { class: "sub" }, t.description)),
+      !t.builtIn ? h("button", { class: "iconbtn", "aria-label": `Remove ${t.name}`, on: { click: () => confirmSheet(`Remove ${t.name}?`, "Past work stays.", "Remove", async () => { await call(`/api/teammates/${t.id}`, { method: "DELETE" }); toast("Removed"); }) } }, icon("trash", 16)) : null))),
+    h("h4", null, "Add one yourself"),
+    h("label", null, h("span", null, "Name"), name),
+    h("label", null, h("span", null, "What do they do?"), what),
+    h("button", { class: "btn primary big", on: { click: async () => {
+      if (!name.value.trim() || !what.value.trim()) return name.focus();
+      try { const t = await call("/api/teammates", { body: { name: name.value, description: what.value } }); closeSheet(); toast(`${t.name} joined`); loadTeammates(); }
+      catch (e) { handleError(e); }
+    } } }, "Add teammate"),
+  ]);
+}
+
+const MODEL_HINTS: Record<string, string[]> = {
+  claude: ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
+  codex: [],
+};
+
+async function openBrains() {
+  let data: any;
+  try { data = await call("/api/brains"); } catch (e) { return handleError(e); }
+  const roles: [string, string, string][] = [
+    ["orchestrator", "Orchestrator", "Reads every ramble, splits it into jobs, picks the teammate and how hard each job is. Use your smartest model."],
+    ["workhorse", "Workhorse", "Does the light jobs. Fast and cheap."],
+    ["heavy", "Heavy", "Does the hard jobs, and anything the workhorse can't finish (auto-escalation)."],
+  ];
+  const state: any = JSON.parse(JSON.stringify(data.current));
+  const block = ([key, title, blurb]: [string, string, string]) => {
+    const model = h("input", { class: "field", value: state[key].model, placeholder: "harness default", list: `models-${key}`, autocapitalize: "off", spellcheck: false,
+      on: { input: () => { state[key].model = model.value.trim(); } } });
+    const list = h("datalist", { id: `models-${key}` });
+    const fillHints = () => clear(list, (MODEL_HINTS[state[key].harness] || []).map((m) => h("option", { value: m })));
+    const seg = h("div", { class: "segmented" }, data.available.map((hn: string) => {
+      const b = h("button", { class: state[key].harness === hn ? "on" : "", on: { click: () => { state[key].harness = hn; seg.querySelectorAll("button").forEach((x) => x.classList.remove("on")); b.classList.add("on"); fillHints(); } } },
+        hn === "claude" ? "Claude Code" : hn === "codex" ? "Codex" : hn === "echo" ? "Demo" : "Custom");
+      return b;
+    }));
+    fillHints();
+    return h("div", { class: "brain" }, h("h4", null, title), h("p", { class: "muted small" }, blurb), seg, model, list);
+  };
+  openSheet("Brains", [
+    h("p", { class: "muted" }, "Pick a harness and model for each role. The harnesses listed are the ones installed on this hub."),
+    roles.map(block),
+    h("button", { class: "btn primary big", on: { click: async () => {
+      try { await call("/api/brains", { method: "PATCH", body: state }); toast("Saved"); closeSheet(); } catch (e) { handleError(e); }
+    } } }, "Save"),
+  ]);
+}
+
+// ---------------- plans & memory panels ----------------
+
+async function loadHooks() {
+  try { S.hooks = await call("/api/hooks"); if (S.panel === "plans") drawPlans(); } catch (e) { handleError(e); }
+}
+
+function openPlans() {
+  S.panel = "plans";
+  openSheet("Plans", h("div", { id: "plans" }), { onClose: () => { S.panel = null; } });
+  drawPlans();
+  loadHooks();
+}
+
+function drawPlans() {
+  const el = document.getElementById("plans");
+  if (!el) return;
+  const active = S.hooks.filter((x) => x.status !== "done" && x.source !== "system").sort((a, b) => (a.nextAt || "~").localeCompare(b.nextAt || "~"));
+  const done = S.hooks.filter((x) => x.status === "done").slice(-5).reverse();
+  const row = (hk: any) => h("button", { class: `item ${hk.status}`, on: { click: () => openHook(hk) } },
+    h("span", { class: "dotwrap" }, dot(mate(hk.teammateId), 30)),
+    h("span", { class: "grow" },
+      h("b", null, hk.title, hk.status === "paused" ? h("span", { class: "tag" }, "Paused") : null),
+      h("small", { class: "sub" }, hk.nextAt && hk.status === "active" ? `${dayLabel(hk.nextAt)} ${clockTime(hk.nextAt)} · ${hk.when}` : hk.when)));
+  clear(el,
+    h("p", { class: "muted" }, "When your teammates will speak up, and why."),
+    active.length ? h("div", { class: "list" }, active.map(row)) : h("p", { class: "empty" }, "Nothing planned. Just say “remind me…” or “every morning…”."),
+    done.length ? [h("h4", null, "Done"), h("div", { class: "list" }, done.map(row))] : null,
+    h("button", { class: "btn ghost", on: { click: openNewPlan } }, icon("plus", 16), "Add a reminder or routine"));
+}
+
+async function loadMemory() {
+  try { S.memory = await call(`/api/memory?q=${encodeURIComponent(S.memoryQuery)}`); if (S.panel === "memory") drawMemory(); } catch (e) { handleError(e); }
+}
+
+function openMemory() {
+  S.panel = "memory";
+  openSheet("Memory", [
+    h("div", { class: "search" }, icon("search", 18), h("input", { placeholder: "Search", type: "search", value: S.memoryQuery,
+      on: { input: debounce((e: Event) => { S.memoryQuery = (e.target as HTMLInputElement).value; loadMemory(); }, 250) } })),
+    h("div", { id: "memory" }),
+  ], { onClose: () => { S.panel = null; } });
+  drawMemory();
+  loadMemory();
+}
+
+function drawMemory() {
+  const el = document.getElementById("memory");
+  if (!el || !S.memory) return;
+  const facts = [...S.memory.facts].sort((a: any, b: any) => b.importance - a.importance || b.createdAt.localeCompare(a.createdAt));
+  clear(el,
+    facts.length ? h("div", { class: "list" }, facts.map((f: any) => h("div", { class: "item" },
+      h("button", { class: "grow left", on: { click: () => openFact(f) } }, h("b", { class: "light" }, f.fact), h("small", { class: "sub" }, `${f.notebook}${f.useCount ? ` · used ${f.useCount}×` : ""}`)),
+      h("button", { class: `star ${f.importance === 3 ? "on" : ""}`, "aria-label": "Always keep in mind",
+        on: { click: async () => { await call(`/api/memory/${f.id}`, { method: "PATCH", body: { importance: f.importance === 3 ? 2 : 3 } }); loadMemory(); } } }, icon("star", 18)))))
+      : h("p", { class: "empty" }, S.memoryQuery ? "Nothing matches." : "Nothing yet. Tell me things and I'll keep them."),
+    h("button", { class: "btn ghost", on: { click: () => openFact(null) } }, icon("plus", 16), "Add something to remember"));
+}
+
+// ---------------- settings ----------------
+
+function openSettings() {
+  const st = S.state;
+  if (!st) return;
+  const p = st.prefs;
+  const autoLoc = localStorage.getItem("hearth.autoLocation") === "1";
+  const row = (label: string, sub: string, fn: () => void, right?: Node) =>
+    h("button", { class: "item", on: { click: fn } }, h("span", { class: "grow" }, h("b", { class: "light" }, label), h("small", { class: "sub" }, sub)), right || icon("chevron", 16));
+  const sw = (on: boolean) => h("span", { class: `switch ${on ? "on" : ""}` }, h("i"));
+  openSheet("Settings", [
+    h("div", { class: "list" },
+      row("Name and time zone", `${p.userName || "Not set"} · ${p.tz}`, openProfile),
+      row("Notifications", st.push.subscribed ? "On for this device" : "Off", () => togglePush(st.push.subscribed), sw(st.push.subscribed)),
+      row("Quiet hours and daily limit", `${p.quietStart}–${p.quietEnd} · up to ${p.maxProactivePerDay}/day`, openQuiet)),
+    h("div", { class: "list" }, row("Brains", "Orchestrator, workhorse, heavy", openBrains)),
+    h("h4", null, "Location"),
+    h("div", { class: "list" },
+      row("Share when I open the app", "For place reminders and “near me”", () => { localStorage.setItem("hearth.autoLocation", autoLoc ? "0" : "1"); if (!autoLoc) shareLocation(false); closeSheet(); openSettings(); }, sw(autoLoc)),
+      row("Places", "Home, office…", openPlaces)),
+    h("h4", null, "Security and data"),
+    h("div", { class: "list" },
+      row("Devices", "Who can talk to this hub", openDevices),
+      row("Activity log", "Everything the hub did", openActivity),
+      row("Export everything", "One JSON file", exportData),
+      row("Delete my data", "Chats, memory, plans, places", openWipe)),
+    h("p", { class: "muted small center" }, `app ${__BUILD__} · hub ${st.hub.build} · brain ${st.hub.brain} · ${st.hub.storage}`),
+  ]);
+}
+
+
+function openSheet(title: string, body: Node | any[], opts: { onClose?: () => void } = {}) {
   closeSheet();
   S.sheetOpen = true;
   const sheet = h("div", { class: "sheet", role: "dialog", "aria-modal": "true", "aria-label": title },
@@ -203,7 +590,6 @@ function confirmSheet(title: string, text: string, action: string, fn: () => Pro
   ]);
 }
 
-// ---------------- pairing ----------------
 
 function renderPairing(code: string) {
   const isHubPage = location.protocol === "https:" || ["localhost", "127.0.0.1"].includes(location.hostname);
@@ -240,223 +626,12 @@ function renderPairing(code: string) {
   ));
 }
 
-// ---------------- Today ----------------
-
-async function refreshToday() {
-  try { S.today = await call("/api/today"); if (S.tab === "today") renderToday(); } catch (e) { handleError(e); }
-}
 
 function hookIcon(hk: any) {
   const t = hk.trigger?.type;
   return t === "at" ? (hk.trigger.repeat !== "none" ? "repeat" : "clock") : t === "schedule" ? "repeat" : t === "place" ? "pin" : t === "silence" ? "moon" : "eye";
 }
 
-function renderToday() {
-  const v = document.getElementById("view")!;
-  const t = S.today;
-  const name = S.state?.prefs?.userName;
-  const date = new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
-  if (!t) return clear(v, h("div", { class: "hero" }, h("h1", null, greeting(name)), h("p", { class: "muted" }, date)), skeleton(3));
-  const [next, ...rest] = t.upcoming;
-  const pending = S.state?.pendingScripts || 0;
-  clear(v,
-    h("div", { class: "hero" },
-      h("h1", null, greeting(name)),
-      h("p", { class: "muted" }, date, t.upcoming.length ? ` · ${t.upcoming.length} coming up` : "", t.watching.length ? ` · watching ${t.watching.length}` : "")),
-    pending ? h("button", { class: "banner", on: { click: openScripts } }, icon("code", 18), h("span", null, `${pending} script${pending > 1 ? "s" : ""} waiting for your approval`), icon("chevron", 16)) : null,
-    next
-      ? h("button", { class: "nextup", on: { click: () => openHook(next) } },
-          h("div", { class: "eyebrow" }, "Next up"),
-          h("div", { class: "nexttitle" }, next.title),
-          h("div", { class: "nextwhen" }, icon(hookIcon(next), 16), `${dayLabel(next.nextAt)} ${clockTime(next.nextAt)} · ${relTime(next.nextAt)}`),
-          next.why ? h("div", { class: "nextwhy" }, next.why) : null)
-      : null,
-    h("button", { class: "askbar", on: { click: () => { go("chat"); setTimeout(() => document.getElementById("composer")?.focus(), 50); } } },
-      icon("sparkle", 18), h("span", null, "Ask, or tell me something to remember…")),
-    !next && !t.proactive.length && !t.watching.length ? starter() : null,
-    rest.length ? section("Coming up", h("div", { class: "list" }, rest.map((hk: any) =>
-      h("button", { class: "item", on: { click: () => openHook(hk) } },
-        h("div", { class: "time" }, h("b", null, clockTime(hk.nextAt)), h("small", null, dayLabel(hk.nextAt))),
-        h("div", { class: "grow" }, h("div", { class: "title" }, hk.title), h("div", { class: "sub" }, hk.trigger.type === "at" ? (hk.trigger.repeat === "none" ? hk.why : hk.when) : hk.when)))))) : null,
-    t.watching.length ? section("Watching for you", h("div", { class: "chips" }, t.watching.map((hk: any) =>
-      h("button", { class: "chip", on: { click: () => openHook(hk) } }, icon(hookIcon(hk), 15), hk.title)))) : null,
-    t.proactive.length ? section("I reached out", h("div", { class: "list" }, t.proactive.map((m: any) =>
-      h("button", { class: "item reached", on: { click: () => go("chat") } },
-        h("div", { class: "grow" },
-          h("div", { class: "title" }, m.proactive.title, h("small", { class: "when" }, ` · ${relTime(m.createdAt)}`)),
-          h("div", { class: "sub clamp" }, m.text),
-          h("div", { class: "why" }, "Why: ", m.proactive.why)))))) : null,
-    t.activity.length ? section("On your hub", h("div", { class: "activity" }, t.activity.slice(0, 6).map((a: any) =>
-      h("div", { class: "act" }, h("span", { class: "acttime" }, shortAgo(a.createdAt)), h("span", null, a.text)))),
-      h("button", { class: "link", on: { click: openActivity } }, "See everything")) : null,
-  );
-}
-
-function starter() {
-  const ideas = [
-    ["clock", "Remind me at 6pm to call mom"],
-    ["repeat", "Every weekday at 8, give me a short brief"],
-    ["brain", "Remember my sister's birthday is 12 December"],
-    ["eye", "Check the weather every morning and tell me if it'll rain"],
-  ];
-  return section("Try saying", h("div", { class: "ideas" }, ideas.map(([ic, text]) =>
-    h("button", { class: "idea", on: { click: () => sendFromIdea(text) } }, icon(ic, 18), h("span", null, text)))));
-}
-
-function sendFromIdea(text: string) {
-  go("chat");
-  setTimeout(() => { const c = document.getElementById("composer") as HTMLTextAreaElement; if (c) { c.value = text; c.dispatchEvent(new Event("input")); c.focus(); } }, 60);
-}
-
-function section(title: string, ...body: any[]) {
-  return h("section", { class: "section" }, h("h3", null, title), ...body);
-}
-
-function skeleton(n: number) {
-  return h("div", { class: "list" }, Array.from({ length: n }, () => h("div", { class: "item skel" }, h("div", { class: "bar" }), h("div", { class: "bar short" }))));
-}
-
-// ---------------- Chat ----------------
-
-async function loadMessages() {
-  try { S.messages = await call("/api/messages?limit=60"); S.hasOlder = S.messages.length >= 60; if (S.tab === "chat") renderChat(); } catch (e) { handleError(e); }
-}
-
-async function loadOlder() {
-  if (!S.hasOlder || !S.messages.length) return;
-  const older = await call(`/api/messages?limit=40&before=${encodeURIComponent(S.messages[0].createdAt)}`);
-  S.hasOlder = older.length >= 40;
-  const list = document.getElementById("messages");
-  const prev = list ? list.scrollHeight : 0;
-  S.messages = [...older, ...S.messages];
-  renderChat();
-  if (list) { const l = document.getElementById("messages")!; l.scrollTop = l.scrollHeight - prev; }
-}
-
-function renderChat(keepComposer = false) {
-  const v = document.getElementById("view")!;
-  let composer = document.getElementById("composer") as HTMLTextAreaElement | null;
-  const draft = composer?.value ?? sessionStorage.getItem("hearth.draft") ?? "";
-  const list = h("div", { class: "messages", id: "messages", on: { scroll: (e: Event) => { if ((e.target as HTMLElement).scrollTop < 40) loadOlder(); } } });
-  let lastDay = "";
-  if (!S.messages.length) {
-    list.appendChild(h("div", { class: "emptychat" },
-      h("img", { src: "/icon.svg", alt: "", width: 56, height: 56 }),
-      h("h2", null, "What's on your mind?"),
-      h("p", { class: "muted" }, "I can remind you, remember things, keep watch, and check in when it matters."),
-      h("div", { class: "ideas" }, ["Remind me in 10 minutes to stretch", "Remember I don't take meetings before 10", "Every Sunday at 7pm, help me plan the week"].map((t) =>
-        h("button", { class: "idea small", on: { click: () => send(t) } }, t)))));
-  }
-  for (const m of S.messages) {
-    const day = new Date(m.createdAt).toDateString();
-    if (day !== lastDay) { list.appendChild(h("div", { class: "daysep" }, dayLabel(m.createdAt))); lastDay = day; }
-    list.appendChild(bubble(m));
-  }
-  if (S.thinking) list.appendChild(h("div", { class: "msg assistant typing" }, h("div", { class: "bubble" }, h("i"), h("i"), h("i"))));
-
-  if (!keepComposer || !composer) {
-    composer = h("textarea", { id: "composer", class: "composer", rows: 1, placeholder: S.conn === "offline" ? "Hub is offline" : "Message", value: draft, enterKeyHint: "send",
-      on: {
-        input: () => { autosize(composer!); sessionStorage.setItem("hearth.draft", composer!.value); },
-        keydown: (e: KeyboardEvent) => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); send(composer!.value); } },
-      } });
-    const sendBtn = h("button", { class: "sendbtn", "aria-label": "Send", on: { click: () => send(composer!.value) } }, icon("send", 20));
-    clear(v, list, h("div", { class: "composerbar" }, composer, sendBtn));
-    autosize(composer);
-  } else {
-    v.replaceChild(list, document.getElementById("messages")!);
-  }
-  requestAnimationFrame(() => { list.scrollTop = list.scrollHeight; });
-}
-
-function autosize(t: HTMLTextAreaElement) { t.style.height = "auto"; t.style.height = Math.min(160, t.scrollHeight) + "px"; }
-
-function bubble(m: any) {
-  const isUser = m.role === "user";
-  const parts: Node[] = [];
-  if (m.proactive) {
-    const why = h("div", { class: "whybox", hidden: true },
-      h("div", null, h("b", null, "Why I messaged: "), m.proactive.why),
-      h("div", null, h("b", null, "Trigger: "), m.proactive.trigger));
-    parts.push(h("div", { class: "prohead" }, icon("bell", 14), h("span", null, m.proactive.title),
-      h("button", { class: "whybtn", on: { click: () => { why.hidden = !why.hidden; } } }, "Why?")), why);
-  }
-  parts.push(isUser ? h("div", { class: "plain" }, m.text) : richText(m.text));
-  if (m.did?.length) parts.push(h("div", { class: "did" }, m.did.map((d: any) => h("span", { class: `didchip ${d.kind}` }, icon(d.kind === "memory" ? "brain" : d.kind === "script" ? "code" : d.kind === "place" ? "pin" : "check", 13), d.label))));
-  if (m.used?.length) parts.push(h("button", { class: "used", on: { click: () => { go("memory"); } } }, icon("brain", 12), `Used ${m.used.length} memor${m.used.length > 1 ? "ies" : "y"}`));
-  return h("div", { class: `msg ${isUser ? "user" : "assistant"} ${m.proactive ? "proactive" : ""} ${m.error ? "err" : ""}` },
-    h("div", { class: "bubble" }, parts),
-    h("div", { class: "stamp" }, clockTime(m.createdAt)));
-}
-
-async function send(text: string) {
-  const t = text.trim();
-  if (!t) return;
-  const c = document.getElementById("composer") as HTMLTextAreaElement | null;
-  if (c) { c.value = ""; autosize(c); }
-  sessionStorage.removeItem("hearth.draft");
-  try {
-    const m = await call("/api/messages", { body: { text: t } });
-    if (!S.messages.some((x) => x.id === m.id)) S.messages.push(m);
-    S.thinking = true;
-    renderChat(true);
-  } catch (e) {
-    if (c) c.value = t;
-    handleError(e);
-  }
-}
-
-// ---------------- Plans (hooks) ----------------
-
-async function loadHooks() {
-  try { S.hooks = await call("/api/hooks"); if (S.tab === "plans") renderPlans(); } catch (e) { handleError(e); }
-}
-
-function groupOf(hk: any) {
-  if (hk.status === "done") return "done";
-  const t = hk.trigger.type;
-  if (t === "at" && hk.trigger.repeat === "none") return "upcoming";
-  if (t === "at" || t === "schedule") return "repeating";
-  return "watching";
-}
-
-function renderPlans() {
-  const v = document.getElementById("view")!;
-  const groups: Record<string, any[]> = { upcoming: [], repeating: [], watching: [], done: [] };
-  for (const hk of S.hooks) groups[groupOf(hk)].push(hk);
-  groups.upcoming.sort((a, b) => (a.nextAt || "").localeCompare(b.nextAt || ""));
-  groups.done.sort((a, b) => (b.lastFiredAt || "").localeCompare(a.lastFiredAt || ""));
-  const labels: Record<string, string> = { upcoming: "Upcoming", repeating: "Routines", watching: "Watching", done: "Done" };
-  const blurbs: Record<string, string> = {
-    upcoming: "One-off reminders and follow-ups.",
-    repeating: "Things I do on a schedule.",
-    watching: "Conditions I keep an eye on, and only speak up when they're met.",
-    done: "Finished reminders.",
-  };
-  if (!S.plansFilter) S.plansFilter = ["upcoming", "repeating", "watching"].find((k) => groups[k].some((x) => x.source !== "system")) || "upcoming";
-  const items = groups[S.plansFilter];
-  clear(v,
-    h("div", { class: "pagehead" },
-      h("div", null, h("h1", null, "Plans"), h("p", { class: "muted" }, "When I'll speak up, and why.")),
-      h("button", { class: "fab", "aria-label": "New", on: { click: openNewPlan } }, icon("plus", 22))),
-    h("div", { class: "segmented" }, Object.keys(groups).map((k) =>
-      h("button", { class: S.plansFilter === k ? "on" : "", on: { click: () => { S.plansFilter = k; renderPlans(); } } },
-        labels[k], groups[k].length && k !== "done" ? h("small", null, String(groups[k].length)) : null))),
-    h("p", { class: "muted small pad" }, blurbs[S.plansFilter]),
-    items.length
-      ? h("div", { class: "list" }, items.map((hk) => h("button", { class: `item hook ${hk.status}`, on: { click: () => openHook(hk) } },
-          h("div", { class: `hicon ${hk.trigger.type}` }, icon(hookIcon(hk), 18)),
-          h("div", { class: "grow" },
-            h("div", { class: "title" }, hk.title,
-              hk.status === "paused" ? h("span", { class: "tag" }, "Paused") : null,
-              hk.source === "system" ? h("span", { class: "tag" }, "System") : null,
-              hk.source === "assistant" ? h("span", { class: "tag soft" }, "Suggested") : null),
-            h("div", { class: "sub" }, hk.status === "done" ? `Done ${hk.lastFiredAt ? relTime(hk.lastFiredAt) : ""}` : hk.nextAt ? `${dayLabel(hk.nextAt)} ${clockTime(hk.nextAt)} · ${hk.when}` : hk.when),
-            hk.why ? h("div", { class: "why" }, hk.why) : null))))
-      : h("div", { class: "empty" }, h("p", null, S.plansFilter === "watching" ? "Nothing to watch yet. Try: “every 2 hours, check if tickets are on sale and tell me only if they are.”" : "Nothing here yet."),
-          h("button", { class: "btn ghost", on: { click: () => sendFromIdea(S.plansFilter === "repeating" ? "Every weekday at 8am, give me a short brief" : "Remind me tomorrow at 9 to ") } }, "Ask in chat")),
-  );
-}
 
 function openHook(hk: any) {
   const actionText = hk.action.type === "notify" ? `Send: “${hk.action.text}”` : hk.action.type === "think" ? (hk.action.prompt === "[[memory-review]]" ? "Review and tidy memory" : `Think: ${hk.action.prompt}`) : `Run script ${hk.action.script}${hk.action.then === "think" ? " and interpret it" : ""}`;
@@ -528,7 +703,7 @@ function openNewPlan() {
           if (!title.value.trim() || !prompt.value.trim()) return;
           try {
             await call("/api/hooks", { body: { title: title.value, why: "A routine you set up", trigger: { type: "schedule", time: time.value, days: [...days] }, action: { type: "think", prompt: prompt.value } } });
-            toast("Routine added"); closeSheet(); S.plansFilter = "repeating"; loadHooks();
+            toast("Routine added"); closeSheet(); loadHooks();
           } catch (e) { handleError(e); }
         } } }, "Add routine"));
     }
@@ -537,44 +712,6 @@ function openNewPlan() {
   openSheet("New plan", body);
 }
 
-// ---------------- Memory ----------------
-
-async function loadMemory() {
-  try { S.memory = await call(`/api/memory?q=${encodeURIComponent(S.memoryQuery)}`); if (S.tab === "memory") renderMemory(); } catch (e) { handleError(e); }
-}
-
-function renderMemory() {
-  const v = document.getElementById("view")!;
-  const m = S.memory;
-  const searchBox = h("div", { class: "search" }, icon("search", 18), h("input", { placeholder: "Search memory", value: S.memoryQuery, type: "search",
-    on: { input: debounce((e: Event) => { S.memoryQuery = (e.target as HTMLInputElement).value; loadMemory(); }, 250) } }));
-  const head = h("div", { class: "pagehead" },
-    h("div", null, h("h1", null, "Memory"), h("p", { class: "muted" }, "What I know about you. Yours to edit or delete.")),
-    h("button", { class: "fab", "aria-label": "Add memory", on: { click: () => openFact(null) } }, icon("plus", 22)));
-  if (!m) return clear(v, head, searchBox, skeleton(4));
-  const core = m.facts.filter((f: any) => f.importance === 3);
-  const byBook = new Map<string, any[]>();
-  for (const f of m.facts.filter((f: any) => f.importance !== 3)) { if (!byBook.has(f.notebook)) byBook.set(f.notebook, []); byBook.get(f.notebook)!.push(f); }
-  const summaries = new Map<string, string>(m.notebooks.map((n: any) => [n.name, n.summary]));
-  const focused = document.activeElement?.closest?.(".search");
-  clear(v, head, searchBox,
-    !m.facts.length ? h("div", { class: "empty" }, h("p", null, S.memoryQuery ? "Nothing matches." : "Nothing yet. Tell me things in chat (“remember I'm vegetarian”) or add them here. I'll also pick up durable facts as we talk.")) : null,
-    core.length ? section("Always in mind", h("p", { class: "muted small" }, "Core facts I keep in every conversation."), h("div", { class: "list" }, core.map(factRow))) : null,
-    [...byBook.entries()].sort().map(([book, facts]) => section(book[0].toUpperCase() + book.slice(1),
-      summaries.get(book) ? h("p", { class: "summary" }, summaries.get(book)!) : null,
-      h("div", { class: "list" }, facts.map(factRow)))),
-    m.history.length ? h("p", { class: "muted small center" }, `${m.history.length} older version${m.history.length > 1 ? "s" : ""} kept as history. Open a fact to see what changed.`) : null,
-  );
-  if (focused) { const i = v.querySelector(".search input") as HTMLInputElement; i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
-}
-
-function factRow(f: any) {
-  const meta = [f.source === "you" ? "You told me" : "Learned in chat", f.useCount ? `used ${f.useCount}×` : null, f.expiresAt ? `until ${dayLabel(f.expiresAt)}` : null].filter(Boolean).join(" · ");
-  return h("div", { class: "item fact" },
-    h("button", { class: "grow left", on: { click: () => openFact(f) } }, h("div", { class: "title" }, f.fact), h("div", { class: "sub" }, meta)),
-    h("button", { class: `star ${f.importance === 3 ? "on" : ""}`, "aria-label": f.importance === 3 ? "Remove from core" : "Keep always in mind",
-      on: { click: async () => { await call(`/api/memory/${f.id}`, { method: "PATCH", body: { importance: f.importance === 3 ? 2 : 3 } }); loadMemory(); } } }, icon("star", 18)));
-}
 
 function openFact(f: any | null) {
   const text = h("textarea", { class: "field", rows: 3, value: f?.fact || "", placeholder: "I'm allergic to peanuts", maxLength: 500 });
@@ -611,45 +748,6 @@ function debounce<T extends (...a: any[]) => void>(fn: T, ms: number) {
   return (...a: any[]) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
 
-// ---------------- You (settings) ----------------
-
-function renderYou() {
-  const v = document.getElementById("view")!;
-  const st = S.state;
-  if (!st) return clear(v, h("div", { class: "pagehead" }, h("h1", null, "You")), skeleton(4));
-  const p = st.prefs;
-  const pushOk = "PushManager" in window && "serviceWorker" in navigator;
-  const autoLoc = localStorage.getItem("hearth.autoLocation") === "1";
-  const row = (ic: string, title: string, sub: string | Node | null, on: () => void, extra?: Node | null) =>
-    h("button", { class: "row-item", on: { click: on } }, h("span", { class: "ricon" }, icon(ic, 18)), h("span", { class: "grow left" }, h("span", { class: "title" }, title), sub ? h("span", { class: "sub" }, sub) : null), extra || icon("chevron", 16));
-  const toggle = (on: boolean) => h("span", { class: `switch ${on ? "on" : ""}` }, h("i"));
-  clear(v,
-    h("div", { class: "pagehead" }, h("div", null, h("h1", null, p.userName || "You"), h("p", { class: "muted" }, `${p.tz} · paired as ${st.device.name}`))),
-    h("div", { class: "hubcard", on: { click: openHubs } },
-      h("div", { class: "hubicon" }, icon("server", 22)),
-      h("div", { class: "grow" }, h("div", { class: "title" }, st.hub.name), h("div", { class: "sub" }, `Brain: ${st.hub.brain} · Storage: ${st.hub.storage} · v${st.hub.version}`)),
-      h("i", { class: `status ${S.conn}` })),
-    section("Profile", h("div", { class: "group" },
-      row("user", "Name and time zone", `${p.userName || "Not set"} · ${p.tz}`, openProfile))),
-    section("Speaking up", h("div", { class: "group" },
-      row("bell", "Notifications", st.push.subscribed ? "On for this device" : pushOk ? "Off" : "Add to Home Screen first", () => togglePush(st.push.subscribed), toggle(st.push.subscribed)),
-      row("moon", "Quiet hours", `${p.quietStart} – ${p.quietEnd}. Reminders you set still come through.`, openQuiet),
-      row("sparkle", "Daily limit", `Up to ${p.maxProactivePerDay} unprompted messages a day (${p.proactiveToday?.n || 0} today)`, openQuiet))),
-    section("Location", h("div", { class: "group" },
-      row("pin", "Share my location now", "Used for place reminders and “near me”", () => shareLocation(false)),
-      row("pin", "Share when I open the app", autoLoc ? "On" : "Off", () => { localStorage.setItem("hearth.autoLocation", autoLoc ? "0" : "1"); if (!autoLoc) shareLocation(false); renderYou(); }, toggle(autoLoc)),
-      row("pin", "Places", "Home, office… for arrive/leave hooks", openPlaces))),
-    section("Abilities", h("div", { class: "group" },
-      row("code", "Scripts", st.pendingScripts ? h("span", { class: "warn" }, `${st.pendingScripts} waiting for approval`) : "What your assistant can run", openScripts))),
-    section("Security", h("div", { class: "group" },
-      row("phone", "Devices", "Who can talk to this hub", openDevices))),
-    section("Your data", h("div", { class: "group" },
-      row("download", "Export everything", "One JSON file with all of it", exportData),
-      row("eye", "Activity log", "Everything the hub did", openActivity),
-      row("trash", "Delete my data", "Wipe chats, memory, plans and places", openWipe))),
-    h("p", { class: "muted small center foot" }, "Hearth is open source (MIT). Your data never leaves your hub unless your brain needs it to answer.", h("br"), `app ${__BUILD__} · hub ${st.hub.build}`),
-  );
-}
 
 function openProfile() {
   const p = S.state.prefs;
@@ -821,12 +919,11 @@ function openWipe() {
     h("label", null, h("span", null, "Type “delete my data” to confirm"), input),
     h("button", { class: "btn danger big", on: { click: async () => {
       if (input.value.trim() !== "delete my data") return input.focus();
-      try { await call("/api/wipe", { body: { confirm: "delete my data" } }); toast("Deleted"); closeSheet(); S.messages = []; refreshView(); } catch (e) { handleError(e); }
+      try { await call("/api/wipe", { body: { confirm: "delete my data" } }); toast("Deleted"); closeSheet(); location.hash = ""; refresh(); } catch (e) { handleError(e); }
     } } }, "Delete everything"),
   ]);
 }
 
-// ---------------- hubs ----------------
 
 function openHubs() {
   const list = hubs();

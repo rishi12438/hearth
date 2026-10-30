@@ -11,7 +11,7 @@ import { parseReply } from "../src/reply.ts";
 import { nextOccurrence, nextScheduledRun, inQuietHours, zonedToUtc } from "../src/time.ts";
 import { recall } from "../src/memory.ts";
 import { newPairingCode, redeemPairingCode, deviceForToken } from "../src/auth.ts";
-import type { Fact, Hook, Message } from "../src/types.ts";
+import type { Fact, Hook, Job, Message, Thread } from "../src/types.ts";
 
 const TZ = "America/Los_Angeles";
 let dir: string, store: Store, hub: Hub, now: Date;
@@ -51,20 +51,28 @@ test("reply parser takes the last hearth block and hides it", () => {
   expect(parseReply("```hearth\nnot json\n```").actions).toEqual([]);
 });
 
-test("chat creates a reminder that fires proactively with a why", async () => {
-  await hub.userSays("remind me in 5 minutes to stretch");
-  await until(async () => (await messages()).length === 2);
+test("a ramble becomes jobs for teammates; a reminder job fires proactively with a why", async () => {
+  await hub.ensureTeammates();
+  await hub.ramble("remind me in 5 minutes to stretch, and find a cheap dinner spot");
+  await until(async () => (await store.all<Job>("jobs")).every((j) => j.status === "done") && (await store.all<Job>("jobs")).length === 2);
+  const jobs = await store.all<Job>("jobs");
+  expect(jobs.map((j) => j.teammateId).sort()).toEqual(["planner", "scout"]);
+  const threads = await store.all<Thread>("threads");
+  expect(threads.length).toBe(1);
   const [hook] = (await store.all<Hook>("hooks"));
   expect(hook.title).toBe("stretch");
   expect(hook.source).toBe("you");
 
+  const before = (await messages()).length;
   await hub.tick();
-  expect((await messages()).length).toBe(2); // not yet
+  expect((await messages()).length).toBe(before); // not yet
 
   now = new Date(now.getTime() + 6 * 60000);
   await hub.tick();
   const last = (await messages()).at(-1)!;
   expect(last.proactive?.why).toContain("You asked me");
+  expect(last.threadId).toBe(threads[0].id);
+  expect(last.teammateId).toBe("planner");
   expect((await store.get<Hook>("hooks", hook.id))!.status).toBe("done");
 });
 
@@ -159,4 +167,35 @@ test("brain cannot act outside the action list", async () => {
   const r = await hub.applyActions([{ type: "shell.exec", cmd: "rm -rf /" }, { type: "hook.add", title: "x", trigger: { type: "every", minutes: 1 }, action: { type: "notify", text: "spam" } }], "");
   expect(r.done).toEqual([]);
   expect((await store.all<Hook>("hooks")).length).toBe(0);
+});
+
+test("orchestrator creates a new teammate when nobody fits", async () => {
+  await hub.ensureTeammates();
+  await hub.ramble("I want to go to the gym 3 times a week");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done" || j.status === "failed"));
+  const team = await store.all<any>("teammates");
+  expect(team.some((t) => t.name === "Coach")).toBe(true);
+});
+
+test("light jobs escalate to the heavy model when the workhorse gives up", async () => {
+  await hub.ensureTeammates();
+  const calls: string[] = [];
+  (hub.brain as any).think = async (b: any, p: any) => {
+    calls.push(`${b.mode}:${p.model}`);
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "Plan a trip", teammate: "Planner", effort: "light" }] });
+    return p.model === "small" ? "[[escalate]]" : "Here's your plan.";
+  };
+  await hub.setBrains({ workhorse: { harness: "echo", model: "small" }, heavy: { harness: "echo", model: "big" } });
+  await hub.ramble("plan my trip");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done"));
+  const [job] = await store.all<Job>("jobs");
+  expect(job.escalated).toBe(true);
+  expect(job.tier).toBe("heavy");
+  expect(job.result).toBe("Here's your plan.");
+  expect(calls.filter((c) => c.startsWith("job"))).toEqual(["job:small", "job:big"]);
+});
+
+test("the app can only pick harnesses the hub has", async () => {
+  expect((await hub.setBrains({ heavy: { harness: "rm", model: "" } })).error).toBeTruthy();
+  expect((await hub.setBrains({ heavy: { harness: "echo", model: "x; rm -rf /" } })).error).toBeTruthy();
 });

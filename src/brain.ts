@@ -10,16 +10,19 @@ import { wallParts, zonedToUtc } from "./time.ts";
 // and the agent runs in an empty folder with no file or shell tools and none of the hub's secrets.
 
 export type BrainInput = {
-  mode: "chat" | "hook" | "review";
+  mode: "chat" | "hook" | "review" | "job" | "orchestrate";
   context: Record<string, unknown>;
   input: string;
   toolResults?: string;
 };
 
 export const QUIET = "[[quiet]]";
+export const ESCALATE = "[[escalate]]";
 
 const PROTOCOL = `
 You are a personal assistant that lives on the user's own server ("hub"). You talk to one person.
+CONTEXT.you says which teammate you are right now (name and role). Speak as that teammate. CONTEXT.teammates lists the others;
+if a request clearly belongs to another teammate, do it anyway but mention who usually handles it.
 Be warm, brief and concrete, like a sharp friend texting back. Plain text; short lists are fine. No preamble.
 
 You can change things only by ending your reply with ONE fenced block tagged hearth containing a JSON array of actions:
@@ -70,11 +73,36 @@ SAFETY
 - You cannot send email, spend money or contact other people. Offer drafts instead.
 `.trim();
 
+const ORCHESTRATOR = `
+You are the orchestrator of a personal assistant team that lives on the user's own server. The user just rambled at you
+(often spoken, messy, several things at once). You do NOT do the work yourself. You:
+1. Pull out durable facts about the user worth remembering.
+2. Split the ramble into separate jobs. Each job is a self-contained instruction a teammate can do without seeing the ramble.
+   Merge things that belong together; skip filler. Chit-chat or a question you can answer from context needs no job.
+3. Give each job to the best teammate from CONTEXT.teammates by name. If none fits well, invent a new teammate
+   (short name, one-line description of their lane) and use it for this and future jobs like it.
+4. Write one short, warm reply telling the user what's happening ("On it: Planner's setting the 6pm reminder, Scout's finding dinner.").
+
+Reply with ONLY a JSON object, no prose, no code fence:
+{"title":"3-6 word chat title","reply":"...","facts":[{"fact":"...","notebook":"...","importance":1|2|3}],
+ "jobs":[{"task":"...","teammate":"<existing name>","effort":"light|heavy"} | {"task":"...","teammate":"<new name>","effort":"light|heavy","newTeammate":{"name":"...","description":"..."}}]}
+effort: "light" for quick, well-defined jobs (set a reminder, save a note, a simple lookup). "heavy" for jobs that need judgment,
+research across sources, planning, or careful writing. When unsure, choose light; it escalates on its own if needed.
+`.trim();
+
 export function buildPrompt(b: BrainInput) {
+  if (b.mode === "orchestrate") {
+    return [ORCHESTRATOR, "", "CONTEXT (JSON):", JSON.stringify(b.context, null, 1), "", "USER RAMBLE:", b.input].join("\n");
+  }
   const parts = [PROTOCOL, "", "CONTEXT (JSON):", JSON.stringify(b.context, null, 1)];
   if (b.mode === "hook") {
     parts.push("", "A hook just fired. Do what its prompt says. If there's nothing worth telling the user, reply exactly " + QUIET + ".");
     parts.push("HOOK PROMPT:", b.input);
+  } else if (b.mode === "job") {
+    parts.push("", "You were handed ONE job from the user's ramble by the orchestrator. Do it fully now: use actions for reminders,",
+      "routines, watches and memory; search the web if you need to. Then reply with the result in 1-5 short lines, written to the user.",
+      `If the job is clearly beyond you or you can't do it well, reply exactly ${ESCALATE} and a stronger model will take it.`,
+      "JOB:", b.input);
   } else if (b.mode === "review") {
     parts.push("", "MEMORY REVIEW (nightly): tidy memory. Merge duplicates, update stale facts, set expiresAt on temporary ones,",
       "forget trivia, and refresh notebook summaries. Reply with one short line describing what changed, or " + QUIET + " if nothing.");
@@ -93,6 +121,23 @@ function agentEnv() {
   return env;
 }
 
+/** Which harness runs a turn, and with which model. "" model = the harness's default. */
+export type BrainProfile = { harness: string; model: string };
+/** The orchestrator plans; the workhorse does light jobs; heavy does hard ones and anything the workhorse escalates. */
+export type Brains = { orchestrator: BrainProfile; workhorse: BrainProfile; heavy: BrainProfile };
+export const HARNESSES = ["claude", "codex", "echo", "custom"] as const;
+export const MODEL_RE = /^[A-Za-z0-9._:\/-]{0,64}$/;
+
+/** Harnesses this hub can actually run. The app may only choose from these. */
+export function availableHarnesses(config: Config) {
+  const out: string[] = [];
+  if (Bun.which("claude")) out.push("claude");
+  if (Bun.which("codex")) out.push("codex");
+  if (config.agentCmd?.length) out.push("custom");
+  out.push("echo");
+  return out;
+}
+
 export class Brain {
   private queue: Promise<unknown> = Promise.resolve();
   private workDir: string;
@@ -102,36 +147,55 @@ export class Brain {
     mkdirSync(this.workDir, { recursive: true, mode: 0o700 });
   }
 
+  /** Defaults from .env; the app can change them (see Hub.brains). */
+  defaults(): Brains {
+    const env = process.env;
+    const pick = (harnessVar: string, modelVar: string, claudeDefault: string): BrainProfile => {
+      const harness = env[harnessVar] || this.config.agent;
+      return { harness, model: env[modelVar] ?? (harness === "claude" ? claudeDefault : "") };
+    };
+    return {
+      orchestrator: pick("HEARTH_ORCHESTRATOR_AGENT", "HEARTH_ORCHESTRATOR_MODEL", "claude-fable-5-1"),
+      workhorse: pick("HEARTH_WORKHORSE_AGENT", "HEARTH_WORKHORSE_MODEL", "claude-sonnet-5-5"),
+      heavy: pick("HEARTH_HEAVY_AGENT", "HEARTH_HEAVY_MODEL", "claude-opus-5-5"),
+    };
+  }
+
   get label() { return this.config.agent === "custom" ? (this.config.agentCmd?.[0] ?? "custom") : this.config.agent; }
 
-  /** One turn at a time, so hooks and chat never race each other. */
-  think(b: BrainInput): Promise<string> {
-    const run = this.queue.then(() => this.run(b));
+  /** One turn at a time, so hooks, rambles and jobs never race each other. */
+  think(b: BrainInput, profile?: BrainProfile): Promise<string> {
+    const p = profile || this.defaults().workhorse;
+    const run = this.queue.then(() => this.run(b, p));
     this.queue = run.catch(() => {});
     return run;
   }
 
-  private async run(b: BrainInput): Promise<string> {
-    if (this.config.agent === "echo") return echoBrain(b);
+  private async run(b: BrainInput, profile: BrainProfile): Promise<string> {
+    const { harness } = profile;
+    const model = MODEL_RE.test(profile.model) ? profile.model : "";
+    if (harness === "echo") return b.mode === "orchestrate" ? echoOrchestrator(b) : echoBrain(b);
     const prompt = buildPrompt(b);
+    const planning = b.mode === "orchestrate";
+    const name = `${harness}${model ? ` (${model})` : ""}`;
     let outFile: string | null = null;
     let cmd: string[];
-    switch (this.config.agent) {
+    switch (harness) {
       case "claude":
-        cmd = ["claude", "-p", "--output-format", "text", "--no-session-persistence",
-          "--allowedTools", "WebSearch", "WebFetch",
-          "--disallowedTools", "Bash", "Edit", "Write", "Read", "Glob", "Grep", "NotebookEdit", "Task"];
+        cmd = ["claude", "-p", "--output-format", "text", "--no-session-persistence", ...(model ? ["--model", model] : []),
+          ...(planning ? [] : ["--allowedTools", "WebSearch", "WebFetch"]),
+          "--disallowedTools", "Bash", "Edit", "Write", "Read", "Glob", "Grep", "NotebookEdit", "Task", ...(planning ? ["WebSearch", "WebFetch"] : [])];
         break;
       case "codex":
         outFile = join(this.workDir, `${randomUUID()}.txt`);
-        cmd = ["codex", "exec", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "--color", "never", "-o", outFile, "-"];
+        cmd = ["codex", "exec", ...(model ? ["-m", model] : []), "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "--color", "never", "-o", outFile, "-"];
         break;
       case "custom":
-        if (!this.config.agentCmd?.length) throw new Error("HEARTH_AGENT=custom needs HEARTH_AGENT_CMD");
+        if (!this.config.agentCmd?.length) throw new Error("The custom harness needs HEARTH_AGENT_CMD in the hub's .env");
         cmd = this.config.agentCmd;
         break;
       default:
-        throw new Error(`Unknown HEARTH_AGENT: ${this.config.agent}`);
+        throw new Error(`Unknown harness: ${harness}`);
     }
     const proc = Bun.spawn(cmd, {
       cwd: this.workDir, env: agentEnv(),
@@ -142,12 +206,31 @@ export class Brain {
     const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
     const code = await proc.exited;
     clearTimeout(timer);
-    if (timedOut) throw new Error(`The brain (${this.label}) took longer than ${this.config.agentTimeoutMs / 1000}s.`);
+    if (timedOut) throw new Error(`${name} took longer than ${this.config.agentTimeoutMs / 1000}s.`);
     let reply = out;
     if (outFile) { try { reply = readFileSync(outFile, "utf8"); } catch {} rmSync(outFile, { force: true }); }
-    if (code !== 0 && !reply.trim()) throw new Error(`The brain (${this.label}) exited with ${code}: ${err.trim().slice(-300)}`);
+    if (code !== 0 && !reply.trim()) throw new Error(`${name} exited with ${code}: ${err.trim().slice(-300)}`);
     return reply.trim();
   }
+}
+
+// ---- Demo orchestrator: splits on "and"/sentences and routes by keywords. ----
+
+function echoOrchestrator(b: BrainInput): string {
+  const parts = b.input.split(/(?:[.!?;\n]+|,?\s+and also\s+|,?\s+and then\s+|,\s*and\s+)/i).map((x) => x.trim()).filter((x) => x.length > 3);
+  const route = (t: string) => /remind|every|tomorrow|at \d|schedule|plan/i.test(t) ? "Planner" : /find|where|weather|best|cheap|search|look up/i.test(t) ? "Scout"
+    : /pay|bill|rent|spend|money|subscription/i.test(t) ? "Money" : /gym|workout|run|sleep|exercise/i.test(t) ? "Coach" : "Hearth";
+  const facts = parts.filter((p) => /^remember|^my |i (hate|love|like|prefer)/i.test(p));
+  const jobs = parts.filter((p) => !facts.includes(p)).map((task) => {
+    const teammate = route(task);
+    return teammate === "Coach" ? { task, teammate, effort: "light", newTeammate: { name: "Coach", description: "Workouts, sleep and habits. Checks in if you slip." } } : { task, teammate, effort: /plan|research|compare/i.test(task) ? "heavy" : "light" };
+  });
+  return JSON.stringify({
+    title: b.input.split(/\s+/).slice(0, 5).join(" "),
+    reply: jobs.length ? `On it: ${jobs.map((j) => `${j.teammate} has "${j.task}"`).join(", ")}.` : "Noted.",
+    facts: facts.map((f) => ({ fact: f.replace(/^remember (that )?/i, ""), notebook: "general", importance: 2 })),
+    jobs,
+  });
 }
 
 // ---- The demo brain: no model, no keys. Understands a few phrases so you can try the app offline. ----
@@ -157,7 +240,7 @@ function echoBrain(b: BrainInput): string {
   if (b.mode === "review") return QUIET;
   if (b.toolResults) return `Here's what I found:\n${b.toolResults.replace(/^## .*\n/gm, "")}`;
   if (b.mode === "hook") return b.toolResults ? `Here's what I found:\n${b.toolResults}` : `(demo brain) ${b.input}`;
-  const text = b.input.trim();
+  const text = b.input.split("\n")[0].trim().replace(/^(please |can you |could you )/i, "");
   const fence = (actions: unknown[]) => "\n```hearth\n" + JSON.stringify(actions) + "\n```";
   const now = new Date(ctx.nowIso);
 

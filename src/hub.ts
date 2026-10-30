@@ -1,22 +1,43 @@
 import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store, Collection } from "./store/index.ts";
-import type { Brain, BrainInput } from "./brain.ts";
-import { QUIET } from "./brain.ts";
+import type { Brain, BrainInput, BrainProfile, Brains } from "./brain.ts";
+import { QUIET, ESCALATE, HARNESSES, MODEL_RE, availableHarnesses } from "./brain.ts";
 import type { Scripts } from "./scripts.ts";
 import type { Push } from "./push.ts";
 import { parseReply } from "./reply.ts";
 import { validateHook, computeNextAt, describeTrigger, isUserReminder } from "./hooks.ts";
 import { recall, isActive, validateFact } from "./memory.ts";
 import { describeLocal, inQuietHours, quietEndsAt, localDate, distanceMeters } from "./time.ts";
-import type { Activity, Done, Fact, Hook, LocationFix, Message, Notebook, Place, Prefs } from "./types.ts";
+import type { Activity, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Teammate, Thread } from "./types.ts";
 
 const DEFAULT_PREFS: Prefs = {
   userName: "", tz: "UTC", quietStart: "23:00", quietEnd: "07:30",
   maxProactivePerDay: 6, proactiveToday: { date: "", n: 0 }, placeState: {},
 };
+export const DEFAULT_TEAMMATES: Pick<Teammate, "id" | "name" | "color" | "description" | "prompt">[] = [
+  { id: "hearth", name: "Hearth", color: "#F5A524", description: "Your front desk. Handles anything and remembers everything.",
+    prompt: "You are Hearth, the user's main assistant. Handle anything; be brief and warm." },
+  { id: "planner", name: "Planner", color: "#5B8CFF", description: "Reminders, routines, your day and week.",
+    prompt: "You are Planner. You own the user's time: reminders, routines, follow-ups, planning the day and week. Prefer creating hooks." },
+  { id: "scout", name: "Scout", color: "#2FBF71", description: "Finds things: places, products, answers from the web.",
+    prompt: "You are Scout. You find things: places to eat, products, facts, prices. Search the web, give 3 good options with one line each." },
+  { id: "money", name: "Money", color: "#E36BD6", description: "Bills, subscriptions, spending, saving.",
+    prompt: "You are Money. You track bills, subscriptions and spending and nudge the user before due dates. Never move money; offer reminders and drafts." },
+];
+
 const REVIEW_MARKER = "[[memory-review]]";
 const LOCATION_KEEP_DAYS = 7;
+
+type TurnOpts = { teammate?: Teammate | null; threadId?: string; extra?: string; profile?: BrainProfile };
+const label = (p: BrainProfile) => `${p.harness}${p.model ? `/${p.model}` : ""}`;
+
+/** The orchestrator answers with JSON; tolerate a code fence or prose around it. */
+export function parsePlan(raw: string): any | null {
+  const m = raw.match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  try { const p = JSON.parse(m[0]); return p && typeof p === "object" && Array.isArray(p.jobs ?? []) ? p : null; } catch { return null; }
+}
 
 export type HubEvent = { type: string; data?: unknown };
 
@@ -77,7 +98,7 @@ export class Hub {
 
   // ---------- context for the brain ----------
 
-  async context(query: string, mode: BrainInput["mode"]) {
+  async context(query: string, mode: BrainInput["mode"], teammate?: Teammate | null) {
     const now = this.clock();
     const prefs = await this.prefs();
     const facts = await this.store.all<Fact>("memory");
@@ -93,7 +114,10 @@ export class Hub {
       const near = places.find((p) => distanceMeters(fix, p) <= p.radiusM);
       location = { lat: +fix.lat.toFixed(4), lon: +fix.lon.toFixed(4), minutesAgo: Math.round((now.getTime() - new Date(fix.createdAt).getTime()) / 60000), atPlace: near?.name ?? null };
     }
+    const team = await this.store.all<Teammate>("teammates");
     return {
+      you: teammate ? { name: teammate.name, role: teammate.prompt } : { name: "Hearth", role: "The user's main assistant." },
+      teammates: team.map((t) => ({ name: t.name, does: t.description })),
       hub: this.config.name,
       nowIso: now.toISOString(),
       now: describeLocal(now, prefs.tz),
@@ -113,10 +137,14 @@ export class Hub {
 
   // ---------- one brain turn, with an optional script round-trip ----------
 
-  async turn(mode: BrainInput["mode"], input: string, evidence: string, extraResults?: string) {
-    const ctx = await this.context(input, mode);
-    const first = parseReply(await this.brain.think({ mode, context: ctx, input, toolResults: extraResults }));
-    const applied = await this.applyActions(first.actions, evidence);
+  async turn(mode: BrainInput["mode"], input: string, evidence: string, opts: TurnOpts = {}) {
+    const { teammate, extra } = opts;
+    const profile = opts.profile || (await this.brains()).workhorse;
+    const where = { teammateId: teammate?.id, threadId: opts.threadId };
+    const ctx = await this.context(input, mode, teammate);
+    const first = parseReply(await this.brain.think({ mode, context: ctx, input, toolResults: extra }, profile));
+    if (first.text.includes(ESCALATE)) return { text: ESCALATE, did: [] as Done[], used: [] as string[] };
+    const applied = await this.applyActions(first.actions, evidence, where);
     if (!applied.runs.length) return { text: first.text, did: applied.done, used: applied.used };
 
     const results: string[] = [];
@@ -125,10 +153,163 @@ export class Hub {
       applied.done.push({ kind: "script", label: `Ran ${r.name}${out.ok ? "" : " (failed)"}` });
       results.push(`## ${r.name}\n${out.output}`);
     }
-    const ctx2 = await this.context(input, mode);
-    const second = parseReply(await this.brain.think({ mode, context: ctx2, input, toolResults: [extraResults, ...results].filter(Boolean).join("\n\n") }));
-    const applied2 = await this.applyActions(second.actions.filter((a: any) => a?.type !== "script.run"), evidence);
+    const ctx2 = await this.context(input, mode, teammate);
+    const second = parseReply(await this.brain.think({ mode, context: ctx2, input, toolResults: [extra, ...results].filter(Boolean).join("\n\n") }, profile));
+    const applied2 = await this.applyActions(second.actions.filter((a: any) => a?.type !== "script.run"), evidence, where);
     return { text: second.text || first.text, did: [...applied.done, ...applied2.done], used: [...applied.used, ...applied2.used] };
+  }
+
+  // ---------- brains: who plans, who works ----------
+
+  async brains(): Promise<Brains> {
+    const saved = (await this.prefs()).brains;
+    return { ...this.brain.defaults(), ...(saved || {}) };
+  }
+
+  async setBrains(patch: any) {
+    const allowed = availableHarnesses(this.config);
+    const cur = await this.brains();
+    const next: Brains = { ...cur };
+    for (const role of ["orchestrator", "workhorse", "heavy"] as const) {
+      const p = patch?.[role];
+      if (!p) continue;
+      const harness = String(p.harness || "");
+      const model = String(p.model ?? "");
+      if (!(HARNESSES as readonly string[]).includes(harness) || !allowed.includes(harness)) return { error: `${harness} isn't available on this hub.` };
+      if (!MODEL_RE.test(model)) return { error: "Model names are letters, digits, dots, dashes and slashes." };
+      next[role] = { harness, model };
+    }
+    await this.setPrefs({ brains: next });
+    await this.log("brains", `Orchestrator ${label(next.orchestrator)}, workhorse ${label(next.workhorse)}, heavy ${label(next.heavy)}`);
+    return { value: next };
+  }
+
+  // ---------- rambles: you talk, the orchestrator hands out jobs ----------
+
+  async listThreads() {
+    return (await this.store.all<Thread>("threads")).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  async threadDetail(id: string) {
+    const thread = await this.store.get<Thread>("threads", id);
+    if (!thread) return null;
+    const messages = (await this.store.all<Message>("messages")).filter((m) => m.threadId === id);
+    const jobs = (await this.store.all<Job>("jobs")).filter((j) => j.threadId === id);
+    return { thread, messages, jobs };
+  }
+
+  async removeThread(id: string) {
+    for (const m of (await this.store.all<Message>("messages")).filter((m) => m.threadId === id)) await this.store.remove("messages", m.id);
+    for (const j of (await this.store.all<Job>("jobs")).filter((j) => j.threadId === id)) await this.store.remove("jobs", j.id);
+    const ok = await this.store.remove("threads", id);
+    this.emit("threads");
+    return ok;
+  }
+
+  private async touchThread(id: string, patch: Partial<Thread>) {
+    const t = await this.store.get<Thread>("threads", id);
+    if (!t) return;
+    await this.store.put<Thread>("threads", { ...t, ...patch, updatedAt: this.clock().toISOString() });
+    this.emit("threads");
+  }
+
+  /** Where proactive messages go when the hook wasn't born in a chat. */
+  private async updatesThread() {
+    const t = await this.store.get<Thread>("threads", "updates");
+    if (t) return t.id;
+    const now = this.clock().toISOString();
+    await this.store.put<Thread>("threads", { id: "updates", createdAt: now, updatedAt: now, title: "Updates" });
+    return "updates";
+  }
+
+  /** Stores what you said right away; the orchestrator and teammates work in the background. */
+  async ramble(text: string, threadId?: string) {
+    const clean = text.trim().slice(0, 8000);
+    if (!clean) return { error: "Say something first." };
+    let thread = threadId ? await this.store.get<Thread>("threads", threadId) : null;
+    if (threadId && !thread) return { error: "No such chat." };
+    if (!thread) {
+      const now = this.clock().toISOString();
+      thread = await this.store.put<Thread>("threads", { id: randomUUID(), createdAt: now, updatedAt: now, title: clean.split(/\s+/).slice(0, 6).join(" ") });
+    }
+    const m = await this.addMessage({ role: "user", text: clean, threadId: thread.id });
+    await this.setPrefs({ lastUserAt: m.createdAt });
+    await this.touchThread(thread.id, { preview: clean.slice(0, 120) });
+    this.orchestrate(thread, m);
+    return { value: { thread, message: m } };
+  }
+
+  private async orchestrate(thread: Thread, m: Message) {
+    this.thinking = true;
+    this.emit("thinking", { threadId: thread.id });
+    let plan: any = null;
+    try {
+      const brains = await this.brains();
+      const ctx = await this.context(m.text, "orchestrate", null);
+      const history = (await this.store.all<Message>("messages")).filter((x) => x.threadId === thread.id && x.id !== m.id).slice(-10)
+        .map((x) => ({ role: x.role, text: x.text.slice(0, 500) }));
+      const raw = await this.brain.think({ mode: "orchestrate", context: { ...ctx, thisChat: history }, input: m.text }, brains.orchestrator);
+      plan = parsePlan(raw);
+    } catch (err: any) {
+      await this.log("orchestrator.failed", err.message);
+    }
+    this.thinking = false;
+    this.emit("thinking", null);
+    if (!plan) plan = { reply: "On it.", facts: [], jobs: [{ task: m.text, teammate: "Hearth", effort: "light" }] };
+
+    for (const f of (plan.facts || []).slice(0, 10)) await this.addFact({ ...f, evidence: m.text.slice(0, 300) }, "assistant");
+    const team = await this.store.all<Teammate>("teammates");
+    const jobs: Job[] = [];
+    for (const j of (plan.jobs || []).slice(0, 8)) {
+      if (typeof j?.task !== "string" || !j.task.trim()) continue;
+      const wanted = String(j.teammate || "Hearth").toLowerCase();
+      let mate = team.find((t) => t.name.toLowerCase() === wanted);
+      if (!mate && j.newTeammate) {
+        const r = await this.addTeammate(j.newTeammate);
+        if (r.value) { mate = r.value; team.push(mate); await this.log("teammate.created", `${mate.name} joined: ${mate.description}`); }
+      }
+      mate = mate || team.find((t) => t.id === "hearth")!;
+      jobs.push(await this.store.put<Job>("jobs", {
+        ...this.doc({}), threadId: thread.id, messageId: m.id, task: j.task.trim().slice(0, 1000), teammateId: mate.id,
+        status: "queued", effort: j.effort === "heavy" ? "heavy" : "light",
+      } as Job));
+    }
+    if (plan.title && thread.title === m.text.split(/\s+/).slice(0, 6).join(" ")) await this.touchThread(thread.id, { title: String(plan.title).slice(0, 60) });
+    await this.addMessage({ role: "assistant", teammateId: "hearth", threadId: thread.id, text: String(plan.reply || "On it.").slice(0, 1000), jobIds: jobs.map((j) => j.id) });
+    for (const j of jobs) this.emit("job", j);
+    for (const j of jobs) await this.runJob(j, m.text);
+    if (jobs.length) await this.touchThread(thread.id, {});
+  }
+
+  /** Light jobs go to the workhorse; heavy ones, and anything it can't do, go to the heavy model. */
+  private async runJob(job: Job, ramble: string) {
+    const brains = await this.brains();
+    const mate = await this.teammate(job.teammateId);
+    const input = `${job.task}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")`;
+    const attempt = async (tier: "workhorse" | "heavy") => {
+      await this.saveJob({ ...job, status: "working", tier });
+      return this.turn("job", input, job.task, { teammate: mate, threadId: job.threadId, profile: brains[tier] });
+    };
+    let tier: "workhorse" | "heavy" = job.effort === "heavy" ? "heavy" : "workhorse";
+    let escalated = false;
+    try {
+      let r = await attempt(tier).catch((err) => (tier === "workhorse" ? null : Promise.reject(err)));
+      if (tier === "workhorse" && (!r || r.text.includes(ESCALATE) || !r.text.trim())) {
+        escalated = true; tier = "heavy";
+        await this.log("job.escalated", `${job.task.slice(0, 80)} → ${label(brains.heavy)}`);
+        r = await attempt("heavy");
+      }
+      if (!r || r.text.includes(ESCALATE)) throw new Error("Nobody could do this one.");
+      await this.saveJob({ ...job, status: "done", tier, escalated, result: r.text.slice(0, 4000), did: r.did, finishedAt: this.clock().toISOString() });
+    } catch (err: any) {
+      await this.saveJob({ ...job, status: "failed", tier, escalated, result: err.message, finishedAt: this.clock().toISOString() });
+    }
+  }
+
+  private async saveJob(j: Job) {
+    const saved = await this.store.put<Job>("jobs", { ...j, updatedAt: this.clock().toISOString() });
+    this.emit("job", saved);
+    return saved;
   }
 
   // ---------- chat ----------
@@ -143,33 +324,9 @@ export class Hub {
     return m;
   }
 
-  /** Stores your message right away and answers in the background. */
-  async userSays(text: string) {
-    const clean = text.trim().slice(0, 4000);
-    if (!clean) return { error: "Empty message." };
-    const m = await this.addMessage({ role: "user", text: clean });
-    await this.setPrefs({ lastUserAt: m.createdAt });
-    this.reply(clean);
-    return { value: m };
-  }
-
-  private async reply(text: string) {
-    this.thinking = true;
-    this.emit("thinking", true);
-    try {
-      const r = await this.turn("chat", text, text);
-      await this.addMessage({ role: "assistant", text: r.text || "Done.", did: r.did.length ? r.did : undefined, used: r.used.length ? r.used : undefined });
-    } catch (err: any) {
-      await this.addMessage({ role: "assistant", text: `I couldn't think just now: ${err.message}`, error: true });
-    } finally {
-      this.thinking = false;
-      this.emit("thinking", false);
-    }
-  }
-
   // ---------- actions proposed by the brain ----------
 
-  async applyActions(actions: any[], evidence: string) {
+  async applyActions(actions: any[], evidence: string, where: { teammateId?: string; threadId?: string } = {}) {
     const done: Done[] = [];
     const used: string[] = [];
     const runs: { name: string; args: string[] }[] = [];
@@ -178,7 +335,7 @@ export class Hub {
       try {
         switch (a.type) {
           case "hook.add": {
-            const r = await this.addHook(a, a.requestedByUser === true ? "you" : "assistant");
+            const r = await this.addHook(a, a.requestedByUser === true ? "you" : "assistant", where);
             if (r.value) done.push({ kind: "hook", label: `${r.value.trigger.type === "at" ? "Reminder" : "Hook"}: ${r.value.title}`, id: r.value.id });
             else await this.log("action.rejected", `hook.add: ${r.error}`);
             break;
@@ -248,12 +405,12 @@ export class Hub {
     return (await this.store.all<Hook>("hooks")).map((h) => ({ ...h, when: describeTrigger(h.trigger, prefs.tz) }));
   }
 
-  async addHook(input: any, source: Hook["source"]) {
+  async addHook(input: any, source: Hook["source"], where: { teammateId?: string; threadId?: string } = {}) {
     const v = validateHook(input);
     if (!v.value) return { error: v.error! };
     const prefs = await this.prefs();
     const nextAt = computeNextAt(v.value.trigger, prefs.tz, this.clock());
-    const h = await this.store.put<Hook>("hooks", this.doc({ ...v.value, status: "active" as const, nextAt, fireCount: 0, source }));
+    const h = await this.store.put<Hook>("hooks", this.doc({ ...v.value, status: "active" as const, nextAt, fireCount: 0, source, teammateId: where.teammateId, threadId: where.threadId }));
     await this.log("hook.added", `${h.title} (${describeTrigger(h.trigger, prefs.tz)})`);
     this.emit("hooks");
     return { value: h };
@@ -351,6 +508,41 @@ export class Hub {
     this.emit("memory");
   }
 
+  // ---------- teammates ----------
+
+  async ensureTeammates() {
+    if ((await this.store.all<Teammate>("teammates")).length) return;
+    const t0 = Date.parse("2026-01-01T00:00:00Z");
+    for (const [i, t] of DEFAULT_TEAMMATES.entries()) {
+      await this.store.put<Teammate>("teammates", { ...t, builtIn: true, createdAt: new Date(t0 + i * 1000).toISOString() });
+    }
+  }
+
+  async teammate(id?: string | null) {
+    return id ? await this.store.get<Teammate>("teammates", id) : null;
+  }
+
+  async addTeammate(input: any) {
+    const name = typeof input?.name === "string" ? input.name.trim().slice(0, 24) : "";
+    const description = typeof input?.description === "string" ? input.description.trim().slice(0, 200) : "";
+    if (!name || !description) return { error: "A teammate needs a name and what they do." };
+    const color = /^#[0-9a-f]{6}$/i.test(input.color || "") ? input.color : ["#F97066", "#36BFFA", "#FDB022", "#9E77ED", "#32D583"][Math.floor(Math.random() * 5)];
+    const t = await this.store.put<Teammate>("teammates", this.doc({
+      name, color, description, builtIn: false,
+      prompt: `You are ${name}. ${description} Stay in that lane; hand anything else back to Hearth.`,
+    }));
+    this.emit("teammates");
+    return { value: t };
+  }
+
+  async removeTeammate(id: string) {
+    const t = await this.teammate(id);
+    if (!t || t.id === "hearth") return false;
+    await this.store.remove("teammates", id);
+    this.emit("teammates");
+    return true;
+  }
+
   // ---------- places & location ----------
 
   async addPlace(a: any) {
@@ -405,6 +597,7 @@ export class Hub {
   // ---------- the proactive engine ----------
 
   async start(intervalMs = 15_000) {
+    await this.ensureTeammates();
     await this.ensureSystemHooks();
     this.timer = setInterval(() => this.tick().catch((e) => console.error("tick failed", e)), intervalMs);
     await this.tick();
@@ -497,23 +690,24 @@ export class Hub {
       await this.store.put<Hook>("hooks", { ...fresh, lastFiredAt: now.toISOString(), fireCount: (h.fireCount || 0) + 1 });
 
       if (isReview) {
-        const r = await this.turn("review", "Review memory.", "nightly review");
+        const r = await this.turn("review", "Review memory.", "nightly review", { profile: (await this.brains()).heavy });
         if (r.text && r.text !== QUIET) await this.log("memory.review", r.text);
         return;
       }
 
       let text = "";
       let did: Done[] = [];
+      const teammate = await this.teammate(h.teammateId);
       const a = h.action;
       if (a.type === "notify") {
         text = a.text;
       } else if (a.type === "think") {
-        const r = await this.turn("hook", `${h.title}\n${a.prompt}`, `hook: ${h.title}`);
+        const r = await this.turn("hook", `${h.title}\n${a.prompt}`, `hook: ${h.title}`, { teammate, threadId: h.threadId });
         text = r.text; did = r.did;
       } else if (a.type === "script") {
         const out = await this.scripts.run(a.script, a.args);
         if (a.then === "notify" || !out.ok) text = out.ok ? out.output.slice(0, 1500) : `${h.title}: ${out.output}`;
-        else { const r = await this.turn("hook", `${h.title}\nInterpret the output of script ${a.script} for the user.`, `hook: ${h.title}`, `## ${a.script}\n${out.output}`); text = r.text; did = r.did; }
+        else { const r = await this.turn("hook", `${h.title}\nInterpret the output of script ${a.script} for the user.`, `hook: ${h.title}`, { teammate, threadId: h.threadId, extra: `## ${a.script}\n${out.output}` }); text = r.text; did = r.did; }
       }
 
       if (!text || text.trim() === QUIET || text.includes(QUIET)) {
@@ -522,11 +716,12 @@ export class Hub {
       }
       await this.countProactive(h);
       const msg = await this.addMessage({
-        role: "assistant", text: late ? `${text}\n\n(Late: the hub was offline when this was due.)` : text,
+        role: "assistant", teammateId: teammate?.id, threadId: h.threadId || (await this.updatesThread()), text: late ? `${text}\n\n(Late: the hub was offline when this was due.)` : text,
         proactive: { hookId: h.id, title: h.title, trigger: reason, why: h.why }, did: did.length ? did : undefined,
       });
+      await this.touchThread(msg.threadId!, { preview: msg.text.slice(0, 120) });
       await this.log("hook.fired", `${h.title}: sent`);
-      await this.push?.send({ title: h.title, body: msg.text.slice(0, 180), tag: h.id, url: "/#chat" });
+      await this.push?.send({ title: h.title, body: msg.text.slice(0, 180), tag: h.id, url: `/#chat/${msg.threadId}` });
     } catch (err: any) {
       await this.log("hook.failed", `${h.title}: ${err.message}`);
     } finally {
@@ -538,15 +733,16 @@ export class Hub {
 
   async exportAll() {
     const out: Record<string, unknown> = { exportedAt: this.clock().toISOString(), hub: this.config.name, storage: this.store.kind };
-    for (const col of ["messages", "hooks", "memory", "notebooks", "places", "locations", "activity", "scripts"] as const) out[col] = await this.store.all(col);
+    for (const col of ["threads", "messages", "jobs", "teammates", "hooks", "memory", "notebooks", "places", "locations", "activity", "scripts"] as const) out[col] = await this.store.all(col);
     out.devices = (await this.store.all<any>("devices")).map(({ tokenHash, ...d }) => d);
     out.prefs = await this.prefs();
     return out;
   }
 
   async wipePersonal() {
-    for (const col of ["messages", "hooks", "memory", "notebooks", "places", "locations", "activity"] as const) await this.store.clear(col);
+    for (const col of ["threads", "messages", "jobs", "hooks", "memory", "notebooks", "places", "locations", "activity"] as const) await this.store.clear(col);
     await this.ensureSystemHooks();
+    await this.ensureTeammates();
     await this.log("data.wiped", "All personal data deleted from this hub.");
     this.emit("reset");
   }

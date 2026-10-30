@@ -15,6 +15,12 @@ export type Message = Doc & {
   did?: Done[];
   /** Memory ids the brain says it relied on. */
   used?: string[];
+  /** Which teammate said it (assistant) or was addressed (user). */
+  teammateId?: string;
+  /** The chat it belongs to. */
+  threadId?: string;
+  /** Jobs the orchestrator handed out for this ramble. */
+  jobIds?: string[];
   error?: boolean;
 };
 
@@ -44,6 +50,36 @@ export type Hook = Doc & {
   source: "you" | "assistant" | "system";
   /** Minimum minutes between two firings. */
   cooldownMin?: number;
+  /** The teammate who set it up and speaks when it fires. */
+  teammateId?: string;
+  /** The chat it was created in; it reports back there. */
+  threadId?: string;
+};
+
+// ---- Rambles: each chat is a thread; the orchestrator splits what you say into jobs for teammates. ----
+export type Thread = Doc & { title: string; updatedAt: string; preview?: string };
+
+export type Job = Doc & {
+  threadId: string;
+  messageId: string;
+  task: string;
+  teammateId: string;
+  status: "queued" | "working" | "done" | "failed";
+  effort: "light" | "heavy";
+  tier?: "workhorse" | "heavy";
+  escalated?: boolean;
+  result?: string;
+  did?: Done[];
+  finishedAt?: string;
+};
+
+// ---- Teammates: personas you can talk to. Each is a role prompt and a colour dot. ----
+export type Teammate = Doc & {
+  name: string;
+  color: string;
+  description: string;
+  prompt: string;
+  builtIn: boolean;
 };
 
 // ---- Memory ----
@@ -92,4 +128,5 @@ export type Prefs = {
   proactiveToday: { date: string; n: number };
   lastUserAt?: string;
   placeState: Record<string, boolean>;
+  brains?: import("./brain.ts").Brains;
 };

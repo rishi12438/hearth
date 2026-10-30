@@ -7,6 +7,7 @@ import { Scripts } from "./scripts.ts";
 import { Push } from "./push.ts";
 import { Hub } from "./hub.ts";
 import { startServer } from "./server.ts";
+import { createSpeechToText } from "./voice.ts";
 import type { Device, Hook } from "./types.ts";
 
 const cmd = process.argv[2] || "start";
@@ -36,10 +37,11 @@ if (cmd === "pair") {
   const push = new Push(store, config.contact);
   try { await push.init(); } catch (e: any) { console.warn(`Push disabled: ${e.message}`); }
   const hub = new Hub(config, store, new Brain(config), scripts, push.publicKey ? push : null);
-  const { server, build } = await startServer(hub);
+  const stt = createSpeechToText();
+  const { server, build } = await startServer(hub, stt);
   await hub.start();
   console.log(`hearth · ${config.name} · build ${build}`);
-  console.log(`listening on http://${server.hostname}:${server.port}  storage: ${store.kind}  brain: ${hub.brain.label}`);
+  console.log(`listening on http://${server.hostname}:${server.port}  storage: ${store.kind}  brain: ${hub.brain.label}  voice: ${stt?.name ?? "off"}`);
   if ((await store.all("devices")).length === 0) {
     const { code, expiresInMin } = await newPairingCode(store);
     printPair(code, expiresInMin);

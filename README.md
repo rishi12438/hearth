@@ -5,7 +5,8 @@
 **A personal assistant that lives on your own server, uses the coding agent you already trust as its brain, and texts you first when it matters.**
 
 - **You own the data.** Everything sits in a database you run: SQLite by default, or your own Postgres, MySQL or MongoDB. Export it all as one JSON file, or wipe it, from the app.
-- **Your agent is the brain.** Each message or event becomes one headless run of `claude -p`, `codex exec`, or any CLI you configure. The hub stores no model keys.
+- **Just ramble.** Tap the big +, then type or hold to talk. An **orchestrator** on a smart model splits what you said into jobs, gives each to the right **teammate** (Planner, Scout, Money… or a new one it creates), and you watch the job cards finish.
+- **Your agent is the brain.** Each job runs headless on `claude -p`, `codex exec` or any CLI you configure. You pick a harness and model for each role: **orchestrator** (plans), **workhorse** (light jobs), **heavy** (hard jobs, and anything the workhorse escalates). The hub stores no model keys.
 - **Proactive by design.** The assistant creates *hooks*, rules for when to speak first. Each one has a reason it can show you, and all of them respect quiet hours and a daily limit.
 - **Direct line.** Your phone pairs with your hub using a one-time code and talks to it over HTTPS. There's no relay, no account and no middleman.
 
@@ -21,6 +22,13 @@ phone (home-screen web app) ──HTTPS──►  your hub (e.g. a $5 Lightsail 
 ```
 
 Run one hub on an always-on box so routines fire while your laptop sleeps. Run another on your laptop if you like. The app keeps a list of hubs and switches between them.
+
+### Rambles, teammates and escalation
+
+1. You ramble into a chat. The **orchestrator** (default `claude-fable-5-1`) returns a title, a short reply, facts to remember, and jobs. Each job has a teammate and an effort, `light` or `heavy`.
+2. Light jobs run on the **workhorse** (default `claude-sonnet-5-5`), heavy ones on **heavy** (default `claude-opus-5-5`). If the workhorse fails or answers `[[escalate]]`, the job reruns on heavy and its card says "escalated".
+3. Teammates are a name plus a role prompt. If no teammate fits, the orchestrator creates one, which you can see and delete in the app.
+4. Voice: the app records audio and the hub transcribes it with Deepgram (`HEARTH_DEEPGRAM_API_KEY`), so the key never reaches the phone. Speech-to-text is an interface in [src/voice.ts](src/voice.ts), so other providers can be added.
 
 ### Hooks: how it speaks first
 
@@ -66,7 +74,9 @@ All settings are environment variables; see [.env.example](.env.example). The ma
 
 | Variable | Default | |
 |---|---|---|
-| `HEARTH_AGENT` | `claude` | `claude`, `codex`, `echo` (demo), or `custom` with `HEARTH_AGENT_CMD='["ollama","run","llama3.1"]'` |
+| `HEARTH_AGENT` | `claude` | Default harness: `claude`, `codex`, `echo` (demo), or `custom` with `HEARTH_AGENT_CMD='["ollama","run","llama3.1"]'` |
+| `HEARTH_ORCHESTRATOR_MODEL` / `_WORKHORSE_` / `_HEAVY_` | Fable / Sonnet / Opus | Default models per role; `HEARTH_*_AGENT` sets the harness. Changeable in the app under Brains |
+| `HEARTH_DEEPGRAM_API_KEY` | none | Turns on hold-to-talk |
 | `HEARTH_DB_URL` | SQLite in `./data` | `postgres://…`, `mysql://…`, `mongodb://…` (run `bun add mongodb`) |
 | `HEARTH_HOST` / `HEARTH_PORT` | `127.0.0.1:8790` | Keep it on localhost and put Caddy in front |
 | `HEARTH_ALLOWED_ORIGINS` | none | Other hubs' origins allowed to call this one from the same app |
