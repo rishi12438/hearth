@@ -2342,7 +2342,7 @@ function computersSection(list: any[], primary: boolean, cloud: any) {
       h("div", { class: "cchead" },
         h("span", { class: "ccicon" }, icon(mc ? "cloud" : "laptop", 20), h("i", { class: `cdot ${busy ? "asleep" : l.state}` })),
         h("span", { class: "grow" }, h("b", null, d.name, mc ? h("span", { class: "tag soft" }, mc.kind === "e2b" ? "E2B sandbox" : `VM · ${mc.host}`) : null),
-          h("small", { class: `cstate ${busy ? "asleep" : l.state}` }, busy ? "Setting up" : mc?.state === "error" && l.state !== "online" ? "Needs attention" : STATE_LABEL[l.state])),
+          h("small", { class: `cstate ${busy ? "asleep" : l.state}` }, busy ? "Setting up" : mc?.state === "error" && l.state !== "online" ? "Needs attention" : mc?.state === "paused" && l.state !== "online" ? "Paused" : STATE_LABEL[l.state])),
         busy ? h("i", { class: "spin" }) : bars(l.level, l.state)),
       h("p", { class: `ccsub ${mc?.state === "error" && l.state !== "online" ? "err" : ""}` }, detail),
       l.harnesses.filter((x: string) => x !== "echo").length ? h("div", { class: "ccbrains" }, h("small", null, "Brains here"), l.harnesses.filter((x: string) => x !== "echo").map((x: string) => h("span", { class: "tag soft" }, x))) : null,
@@ -2366,6 +2366,7 @@ function computersSection(list: any[], primary: boolean, cloud: any) {
 function machineDetail(m: any) {
   if (m.state === "setting-up") return `${m.step || "Starting"}…`;
   if (m.state === "error") return `Couldn't set it up: ${m.error}`;
+  if (m.state === "paused") return `Paused · everything stays installed, wakes in seconds${m.autoStart ? " when a job needs it" : ""}`;
   if (m.state === "stopped") return m.kind === "e2b" ? (m.autoStart ? "Stopped · starts on its own when a job needs it" : "Stopped · not costing anything") : "Stopped";
   return "Starting the link…";
 }
@@ -2378,10 +2379,10 @@ function machineButtons(m: any) {
   };
   const running = m.state === "running" || m.state === "setting-up";
   return h("div", { class: "ccbtns" },
-    m.kind === "e2b" && !running ? h("button", { class: "btn small primary", on: { click: act("start", "Starting the sandbox") } }, "Start") : null,
-    m.kind === "e2b" && running ? h("button", { class: "btn small ghost", on: { click: act("stop", "Sandbox stopped") } }, "Stop") : null,
+    m.kind === "e2b" && !running ? h("button", { class: "btn small primary", on: { click: act("start", m.state === "paused" ? "Waking the sandbox" : "Starting the sandbox") } }, m.state === "paused" ? "Wake" : "Start") : null,
+    m.kind === "e2b" && running ? h("button", { class: "btn small ghost", on: { click: act("stop", "Paused. Everything stays installed.") } }, "Pause") : null,
     m.kind === "ssh" && m.state !== "setting-up" ? h("button", { class: "btn small ghost", on: { click: act("start", "Setting it up again") } }, "Set up again") : null,
-    h("button", { class: "btn small danger-ghost", on: { click: () => confirmSheet(`Remove ${m.name}?`, m.kind === "e2b" ? "The sandbox is shut down and its key stops working." : "The link on the VM is stopped, its key stops working, and the SSH key is deleted from this hub. The VM itself keeps running.", "Remove", async () => { await call(`/api/machines/${m.id}`, { method: "DELETE" }); toast("Removed"); refreshState(); }) } }, "Remove"));
+    h("button", { class: "btn small danger-ghost", on: { click: () => confirmSheet(`Remove ${m.name}?`, m.kind === "e2b" ? "The sandbox and its disk are deleted from E2B, and its key stops working." : "The link on the VM is stopped, its key stops working, and the SSH key is deleted from this hub. The VM itself keeps running.", "Remove", async () => { await call(`/api/machines/${m.id}`, { method: "DELETE" }); toast("Removed"); refreshState(); }) } }, "Remove"));
 }
 
 /** Add a computer the hub sets up itself: an E2B sandbox (your API key) or your own VM (its address and an SSH key). */
@@ -2417,16 +2418,16 @@ function openAddMachine(cloud: any, kind: "e2b" | "ssh" = "e2b") {
   } else if (kind === "e2b") {
     let auto = true, idle = 30;
     const sw = h("button", { class: "item", on: { click: () => { auto = !auto; sw.querySelector(".switch")!.classList.toggle("on", auto); } } },
-      h("span", { class: "grow" }, h("b", { class: "light" }, "Start on its own when needed"), h("small", { class: "sub" }, "When a job needs a computer and none is online")), h("span", { class: "switch on" }, h("i")));
+      h("span", { class: "grow" }, h("b", { class: "light" }, "Wake on its own when needed"), h("small", { class: "sub" }, "When a job needs a computer and none is online")), h("span", { class: "switch on" }, h("i")));
     const idleSel = h("select", { class: "field", on: { change: (e: Event) => { idle = Number((e.target as HTMLSelectElement).value); } } },
-      [15, 30, 60, 120].map((n) => h("option", { value: String(n), selected: n === 30 }, `Stop after ${n < 60 ? `${n} minutes` : `${n / 60} hour${n > 60 ? "s" : ""}`} idle`)));
+      [15, 30, 60, 120].map((n) => h("option", { value: String(n), selected: n === 30 }, `Pause after ${n < 60 ? `${n} minutes` : `${n / 60} hour${n > 60 ? "s" : ""}`} idle`)));
     const add = h("button", { class: "btn primary big", on: { click: async () => {
       add.disabled = true; add.textContent = "Starting…"; err.hidden = true;
       try { await call("/api/machines", { body: { kind: "e2b", name: name.value, autoStart: auto, idleStopMin: idle } }); toast("Setting up your sandbox. It takes a minute or two."); openDevices(); }
       catch (e) { fail(add, "Add sandbox")(e); }
     } } }, "Add sandbox");
     body = [name, h("div", { class: "list" }, sw), idleSel, err, add,
-      h("p", { class: "muted small" }, "Hearth makes a sandbox in your E2B account, installs itself and Claude Code there, and links it. It's stopped when idle so it stops costing; nothing is kept between runs except what's on your hub."),
+      h("p", { class: "muted small" }, "Hearth makes a sandbox in your E2B account, installs itself and Claude Code there, and links it. When idle it's paused: it stops costing compute but keeps everything installed, so it wakes in seconds. Your memory and chats never live on it; they stay on your hub."),
       h("button", { class: "linkbtn", on: { click: () => confirmSheet("Disconnect E2B?", "The key is removed from the hub. Sandboxes it made are left alone.", "Disconnect", async () => { await call("/api/machines/e2b-key", { method: "DELETE" }); toast("E2B disconnected"); }) } }, "Disconnect E2B")];
   } else {
     const host = h("input", { class: "field", placeholder: "IP address or host name", autocapitalize: "off", spellcheck: false });

@@ -119,7 +119,7 @@ kept awake while plugged in. The Mac connects out to your server and keeps the l
 
 No Mac, or want a computer that's always there? On your phone: **Settings → Devices → Add a cloud computer**.
 
-- **E2B sandbox:** paste your [E2B](https://e2b.dev) API key once. Hearth makes a sandbox, installs itself and Claude Code there and links it. It stops after the idle time you pick, and can start on its own when a job is waiting for a computer.
+- **E2B sandbox:** paste your [E2B](https://e2b.dev) API key once. Hearth makes a sandbox, installs itself and Claude Code there and links it. It pauses after the idle time you pick (no compute cost, everything stays installed) and wakes in seconds, on its own when a job is waiting for a computer. Remove deletes it from E2B.
 - **Your own VM:** any Linux machine you can SSH into (another Lightsail box, Hetzner, DigitalOcean). Enter its address, user and private key; Hearth checks it can log in, pins the machine's identity, and sets it up the same way.
 
 Both dial back to `HEARTH_PUBLIC_URL` (step 3 sets it). They use the logins this hub holds, so turn on **Copy to the cloud** for your Mac's Claude login first, or log in on the server.

@@ -12,8 +12,9 @@ import type { Vault } from "./vault.ts";
 export type MachineKind = "e2b" | "ssh";
 export type Machine = {
   id: string; kind: MachineKind; name: string; deviceId: string; createdAt: string;
-  state: "setting-up" | "running" | "stopped" | "error"; step?: string; error?: string;
-  /** e2b: the live sandbox; start on its own when a job needs a computer; stop after this many idle minutes. */
+  /** paused (e2b): its disk is kept, so Hearth, Claude Code and its login stay installed and it wakes in seconds. */
+  state: "setting-up" | "running" | "paused" | "stopped" | "error"; step?: string; error?: string;
+  /** e2b: the sandbox (live or paused); start on its own when a job needs a computer; pause after this many idle minutes. */
   sandboxId?: string; autoStart?: boolean; idleStopMin?: number; lastWorkAt?: number;
   /** ssh: where it is, and its host key as first seen (pinned: a different key later is refused). */
   host?: string; port?: number; user?: string; knownHosts?: string;
@@ -24,6 +25,10 @@ export type Runner = { run(cmd: string, opts: { stdin?: string; timeoutMs: numbe
 export type E2bSandbox = { sandboxId: string; runner: Runner };
 export type E2b = {
   create(apiKey: string, opts: { timeoutMs: number; metadata: Record<string, string> }): Promise<E2bSandbox>;
+  /** Keep the disk, drop the memory: it costs next to nothing while paused. */
+  pause(apiKey: string, sandboxId: string): Promise<void>;
+  /** Wake a paused sandbox (it boots from its kept disk). Throws if E2B no longer has it. */
+  resume(apiKey: string, sandboxId: string, timeoutMs: number): Promise<E2bSandbox>;
   kill(apiKey: string, sandboxId: string): Promise<void>;
   setTimeout(apiKey: string, sandboxId: string, timeoutMs: number): Promise<void>;
 };
@@ -63,18 +68,23 @@ if ! command -v claude >/dev/null; then step "Installing Claude Code"; curl -fsS
 if ! command -v codex >/dev/null; then step "Installing Codex"; curl -fsSL https://chatgpt.com/codex/install.sh | sh >/dev/null 2>&1 || true; fi
 umask 077
 printf '{"hub":"%s","token":"%s","deviceId":"%s","name":"%s","cloud":true}\\n' "$HUB" "$TOKEN" "$DEVICE" "$NAME" > "$H/data/computer.json"
-step "Starting the link"
-cd "$H"
-# Only this install's link, found by its full path.
-pkill -f "$H/src/cli.ts computer" 2>/dev/null || true
-S=""; command -v setsid >/dev/null && S=setsid
-nohup $S "$(command -v bun)" "$H/src/cli.ts" computer >> "$H/computer.log" 2>&1 < /dev/null &
+${START_LINK}
 if [ -z "\${HEARTH_NO_CRON:-}" ]; then
   (crontab -l 2>/dev/null | grep -v hearth-computer; echo "@reboot cd $H && PATH=$PATH bun $H/src/cli.ts computer >> $H/computer.log 2>&1 # hearth-computer") | crontab - 2>/dev/null || true
 fi
 step "Linked"
 `;
 }
+
+/** Start the link from what's already installed. Exits 3 if there's no install to start (then a full setup runs). */
+const START_LINK = `H="$HOME/hearth"; export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
+[ -f "$H/data/computer.json" ] && command -v bun >/dev/null || exit 3
+echo "@@step Starting the link"
+cd "$H"
+# Only this install's link, found by its full path.
+pkill -f "$H/src/cli.ts computer" 2>/dev/null || true
+S=""; command -v setsid >/dev/null && S=setsid
+nohup $S "$(command -v bun)" "$H/src/cli.ts" computer >> "$H/computer.log" 2>&1 < /dev/null &`;
 const STOP_SCRIPT = `pkill -f "$HOME/hearth/src/cli.ts computer" 2>/dev/null || true; `
   + `if [ -z "\${HEARTH_NO_CRON:-}" ]; then (crontab -l 2>/dev/null | grep -v hearth-computer) | crontab - 2>/dev/null || true; fi`;
 
@@ -207,16 +217,29 @@ export class Machines {
       let runner: Runner;
       if (m.kind === "e2b") {
         if (!this.opts.e2b) throw new Error("E2B isn't available on this hub.");
-        this.patch(id, { step: "Making a sandbox" });
-        const box = await this.opts.e2b.create(this.e2bKey(), { timeoutMs: ((m.idleStopMin || 30) + 10) * 60_000, metadata: { hearth: id } });
-        sandboxId = box.sandboxId;
+        const timeoutMs = ((m.idleStopMin || 30) + 10) * 60_000;
+        // A paused sandbox still has everything installed: wake it and just start the link.
+        if (m.state === "paused" && m.sandboxId) {
+          this.patch(id, { step: "Waking the sandbox" });
+          const woke = await this.opts.e2b.resume(this.e2bKey(), m.sandboxId, timeoutMs).catch(() => null);
+          if (woke) {
+            const quick = await woke.runner.run(`bash -c ${shq(START_LINK)}`, { timeoutMs: 60_000 });
+            if (quick.code === 0) { this.patch(id, { state: "running", step: undefined, lastWorkAt: this.now() }); return; }
+            sandboxId = woke.sandboxId; runner = woke.runner; // install missing: set it up in place
+          }
+        }
+        if (!sandboxId!) {
+          if (m.sandboxId) await this.opts.e2b.kill(this.e2bKey(), m.sandboxId).catch(() => {}); // gone or broken
+          this.patch(id, { step: "Making a sandbox" });
+          const box = await this.opts.e2b.create(this.e2bKey(), { timeoutMs, metadata: { hearth: id } });
+          sandboxId = box.sandboxId; runner = box.runner;
+        }
         this.patch(id, { sandboxId, lastWorkAt: this.now() });
-        runner = box.runner;
       } else {
         runner = this.sshRunner(m);
       }
       const token = await this.opts.rekey(m.deviceId);
-      const r = await runner.run(`bash -c ${shq(setupScript(hub, m.deviceId, m.name))}`, {
+      const r = await runner!.run(`bash -c ${shq(setupScript(hub, m.deviceId, m.name))}`, {
         stdin: `${token}\n`, timeoutMs: SETUP_TIMEOUT_MS,
         onLine: (line) => { if (line.startsWith("@@step ")) this.patch(id, { step: line.slice(7).trim() }); },
       });
@@ -228,19 +251,29 @@ export class Machines {
     } finally { this.busy.delete(id); }
   }
 
-  /** E2B: the sandbox goes away (you stop paying). SSH: the link stops; the VM keeps running. */
+  /** E2B: paused, so its disk (and everything installed) is kept but it stops costing compute. SSH: the link stops. */
   async stop(id: string) {
     const m = this.get(id);
     if (!m) return;
-    if (m.kind === "e2b" && m.sandboxId) await this.opts.e2b?.kill(this.e2bKey(), m.sandboxId).catch(() => {});
+    if (m.kind === "e2b" && m.sandboxId) {
+      const ok = await this.opts.e2b?.pause(this.e2bKey(), m.sandboxId).then(() => true).catch(() => false);
+      if (ok) { this.patch(id, { state: "paused", step: undefined }); return; }
+      await this.opts.e2b?.kill(this.e2bKey(), m.sandboxId).catch(() => {}); // couldn't pause: don't leave it running
+    }
     if (m.kind === "ssh") await this.sshRunner(m).run(STOP_SCRIPT, { timeoutMs: 20_000 }).catch(() => {});
     this.patch(id, { state: "stopped", sandboxId: undefined, step: undefined });
+  }
+
+  /** Gone for good: E2B deletes the sandbox and its disk. */
+  private async destroy(m: Machine) {
+    if (m.kind === "e2b" && m.sandboxId) await this.opts.e2b?.kill(this.e2bKey(), m.sandboxId).catch(() => {});
+    else await this.stop(m.id);
   }
 
   async remove(id: string) {
     const m = this.get(id);
     if (!m) return false;
-    await this.stop(id);
+    await this.destroy(m);
     this.opts.vault.delete(this.sshKey(id));
     this.save(this.list().filter((x) => x.id !== id));
     await this.opts.removeComputer(m.deviceId);
@@ -251,14 +284,14 @@ export class Machines {
   async deviceRemoved(deviceId: string) {
     const m = this.list().find((x) => x.deviceId === deviceId);
     if (!m) return;
-    await this.stop(m.id);
+    await this.destroy(m);
     this.opts.vault.delete(this.sshKey(m.id));
     this.save(this.list().filter((x) => x.id !== m.id));
   }
 
   /** A job needs a computer and none is online: wake a sandbox that's allowed to start on its own. */
   async wake() {
-    const m = this.list().find((x) => x.kind === "e2b" && x.autoStart && (x.state === "stopped" || x.state === "error") && !this.busy.has(x.id));
+    const m = this.list().find((x) => x.kind === "e2b" && x.autoStart && ["paused", "stopped", "error"].includes(x.state) && !this.busy.has(x.id));
     if (m && this.hasE2bKey()) await this.start(m.id);
     return !!m;
   }
@@ -266,7 +299,7 @@ export class Machines {
   startTimer() { this.timer ??= setInterval(() => this.tick().catch(() => {}), 60_000); }
   stopTimer() { if (this.timer) clearInterval(this.timer); this.timer = null; }
 
-  /** Once a minute: sandboxes doing work stay up; idle ones past their limit are stopped so they stop costing. */
+  /** Once a minute: sandboxes doing work stay up; idle ones past their limit are paused so they stop costing. */
   async tick() {
     for (const m of this.list()) {
       if (m.kind !== "e2b" || m.state !== "running" || !m.sandboxId) continue;
@@ -347,7 +380,19 @@ export const realSsh: Ssh = {
 export const realE2b: E2b = {
   async create(apiKey, opts) {
     const { Sandbox } = await import("e2b");
-    const sb: any = await Sandbox.create("base", { apiKey, timeoutMs: opts.timeoutMs, metadata: opts.metadata });
+    // If the hub ever misses its idle check, E2B pauses (keeping the disk) instead of deleting.
+    const sb: any = await Sandbox.create("base", { apiKey, timeoutMs: opts.timeoutMs, metadata: opts.metadata,
+      lifecycle: { onTimeout: { action: "pause", mode: "filesystem" }, autoResume: false } });
+    return e2bHandle(sb);
+  },
+  async pause(apiKey, sandboxId) { const { Sandbox } = await import("e2b"); await Sandbox.pause(sandboxId, { apiKey, mode: "filesystem" }); },
+  async resume(apiKey, sandboxId, timeoutMs) { const { Sandbox } = await import("e2b"); return e2bHandle(await Sandbox.connect(sandboxId, { apiKey, timeoutMs })); },
+  async kill(apiKey, sandboxId) { const { Sandbox } = await import("e2b"); await Sandbox.kill(sandboxId, { apiKey }); },
+  async setTimeout(apiKey, sandboxId, ms) { const { Sandbox } = await import("e2b"); await Sandbox.setTimeout(sandboxId, ms, { apiKey }); },
+};
+
+/** Commands run as the sandbox's normal user; "@@step" lines come back as they're printed. */
+function e2bHandle(sb: any): E2bSandbox {
     return {
       sandboxId: sb.sandboxId,
       runner: {
@@ -363,10 +408,7 @@ export const realE2b: E2b = {
         },
       },
     };
-  },
-  async kill(apiKey, sandboxId) { const { Sandbox } = await import("e2b"); await Sandbox.kill(sandboxId, { apiKey }); },
-  async setTimeout(apiKey, sandboxId, ms) { const { Sandbox } = await import("e2b"); await Sandbox.setTimeout(sandboxId, ms, { apiKey }); },
-};
+}
 
 async function readLines(stream: ReadableStream<Uint8Array>, onLine?: (l: string) => void) {
   const dec = new TextDecoder();

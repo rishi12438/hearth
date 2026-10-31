@@ -21,11 +21,13 @@ afterEach(async () => { for (const c of cleanups.splice(0).reverse()) await c();
 const KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----";
 
 /** A pretend E2B: records what it was asked, and runs commands with a runner the test picks. */
-function fakeE2b(runner: Runner) {
+function fakeE2b(runner: Runner, opts: { resumeFails?: boolean } = {}) {
   const calls: any[] = [];
   let n = 0;
   const e2b: E2b = {
     async create(apiKey, opts) { calls.push(["create", apiKey, opts]); return { sandboxId: `sb-${++n}`, runner }; },
+    async pause(apiKey, id) { calls.push(["pause", id]); },
+    async resume(apiKey, id) { calls.push(["resume", id]); if (opts.resumeFails) throw new Error("sandbox not found"); return { sandboxId: id, runner }; },
     async kill(apiKey, id) { calls.push(["kill", id]); },
     async setTimeout(apiKey, id, ms) { calls.push(["setTimeout", id, ms]); },
   };
@@ -88,7 +90,7 @@ test("E2B: needs a key, makes a sandbox, runs setup with a fresh key, and shows 
   expect(m.list()[0]).toMatchObject({ state: "running", sandboxId: "sb-1" });
 });
 
-test("E2B: a busy sandbox stays up, an idle one is stopped so it stops costing, and a waiting job wakes it", async () => {
+test("E2B: a busy sandbox stays up; an idle one is paused (kept, not deleted) and a waiting job wakes it in seconds", async () => {
   const { runner } = recorder();
   const { e2b, calls } = fakeE2b(runner);
   const { m, busy, tick } = machines({ e2b });
@@ -105,13 +107,36 @@ test("E2B: a busy sandbox stays up, an idle one is stopped so it stops costing, 
   busy.clear();
   tick(11 * 60_000);
   await m.tick();
-  expect(m.get(id)!.state).toBe("stopped");
-  expect(m.get(id)!.sandboxId).toBeUndefined();
-  expect(calls.at(-1)).toEqual(["kill", "sb-1"]);
+  expect(m.get(id)).toMatchObject({ state: "paused", sandboxId: "sb-1" }); // same sandbox, disk kept
+  expect(calls.at(-1)).toEqual(["pause", "sb-1"]);
+  expect(calls.some((c) => c[0] === "kill")).toBe(false);
 
+  // Waking resumes it and only starts the link: no new sandbox, no reinstall, no new key.
+  const before = { creates: calls.filter((c) => c[0] === "create").length };
   expect(await m.wake()).toBe(true);
   await until(() => m.get(id)!.state === "running");
-  expect(m.get(id)!.sandboxId).toBe("sb-2");
+  expect(m.get(id)!.sandboxId).toBe("sb-1");
+  expect(calls.at(-1)).toEqual(["resume", "sb-1"]);
+  expect(calls.filter((c) => c[0] === "create").length).toBe(before.creates);
+});
+
+test("E2B: a paused sandbox E2B no longer has is replaced with a fresh one, and Remove deletes it for good", async () => {
+  const { runs, runner } = recorder();
+  const { e2b, calls } = fakeE2b(runner, { resumeFails: true });
+  const { m } = machines({ e2b });
+  await m.setE2bKey("e2b_" + "x".repeat(30), async () => null);
+  const id = (await m.addE2b({})).value!.id;
+  await until(() => m.get(id)!.state === "running");
+  await m.stop(id);
+  expect(m.get(id)!.state).toBe("paused");
+  await m.start(id);
+  expect(calls.map((c) => c[0])).toEqual(["create", "pause", "resume", "kill", "create"]);
+  expect(m.get(id)).toMatchObject({ state: "running", sandboxId: "sb-2" });
+  expect(runs.at(-1)!.stdin).toContain("token-for-"); // full setup, with a fresh key
+
+  await m.remove(id);
+  expect(calls.at(-1)).toEqual(["kill", "sb-2"]);
+  expect(m.list()).toEqual([]);
 });
 
 test("E2B: a failed setup says why and doesn't leave a sandbox running", async () => {
@@ -245,6 +270,19 @@ test("end to end: the hub sets up a cloud computer that downloads Hearth from it
   // The phone sees it as a computer that belongs to a machine.
   const devices = (await (await api("/api/devices")).json()) as any[];
   expect(devices.find((d) => d.id === deviceId)).toMatchObject({ role: "computer", machine: id, link: { state: "online" } });
+
+  // Paused when idle: its link stops with it. Waking starts the link from what's installed, without a reinstall.
+  await ms.stop(id);
+  expect(ms.get(id)!.state).toBe("paused");
+  Bun.spawnSync(["pkill", "-f", `${box}/hearth/src/cli.ts computer`]);
+  await until(() => !computers.isOnline(deviceId), 10_000);
+  const installedAt = statSync(join(box, "hearth/node_modules")).mtimeMs;
+  await ms.start(id);
+  expect(ms.get(id)!.state).toBe("running");
+  await until(() => computers.isOnline(deviceId), 20_000);
+  expect(computers.isOnline(deviceId)).toBe(true);
+  expect(statSync(join(box, "hearth/node_modules")).mtimeMs).toBe(installedAt);
+  expect(calls.map((c) => c[0])).toContain("resume");
 
   // Removing it stops the sandbox, unlinks the key, and the link process exits.
   await api(`/api/machines/${id}`, { method: "DELETE" });
