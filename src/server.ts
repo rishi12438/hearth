@@ -10,6 +10,7 @@ import { availableHarnesses } from "./brain.ts";
 import { Computers, COPY_ITEMS, isCopyItem } from "./computers.ts";
 import { homedir } from "node:os";
 import { MAX_FILE_BYTES } from "./files.ts";
+import { fetchPublic } from "./watch.ts";
 import { appCsp } from "./apps.ts";
 import { isActive, search } from "./memory.ts";
 import { isValidTimeZone } from "./time.ts";
@@ -66,6 +67,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
   const pairLimiter = new RateLimiter(5, 10 * 60_000);
   const pairGlobal = new RateLimiter(30, 10 * 60_000);
   const ideaLimiter = new RateLimiter(2, 10 * 60_000);
+  // Webhook hooks: anyone with the secret URL can call it, so each hook gets 30 calls a minute at most.
+  const webhookLimiter = new RateLimiter(30, 60_000);
   // Wrong device tokens: 20 in 10 minutes and that address is shut out of the API for the rest of the window.
   const badToken = new RateLimiter(20, 10 * 60_000);
   // Access requests notify your primary phone, so strangers can't spam it.
@@ -169,6 +172,16 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
       const r = access.poll((await body(req)).poll);
       if (!r) throw new HttpError(404, "That request expired. Ask again.");
       return json({ status: r.status, token: r.token, deviceId: r.deviceId, hub: { name: config.name, build: web.build } });
+    }
+    // A webhook hook's secret URL. The token is the password; it wakes that hook's teammate with whatever was sent.
+    if (seg[1] === "webhook" && seg[2] && !seg[3]) {
+      if (method !== "POST") throw new HttpError(405, "POST to this address.");
+      if (badToken.blocked(ip)) throw banned();
+      if (!webhookLimiter.allow(seg[2])) throw new HttpError(429, "Too many calls. Wait a minute.");
+      if (Number(req.headers.get("content-length") || 0) > 64_000) throw new HttpError(413, "Too large.");
+      const text = (await req.text()).slice(0, 64_000);
+      if (!(await hub.webhook(seg[2], text))) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(404, "No webhook here."); }
+      return json({ ok: true }, 202);
     }
     if (path === "/api/pair" && method === "POST") {
       if (!pairLimiter.allow(ip) || !pairGlobal.allow("all")) throw new HttpError(429, "Too many attempts. Wait 10 minutes.");
@@ -778,14 +791,6 @@ function emojiFile(name: string) {
   return null;
 }
 
-/** A public address only: not localhost, not a private, link-local or reserved network (checked after DNS too). */
-function publicIp(ip: string) {
-  if (/^(127\.|10\.|0\.|169\.254\.|192\.168\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(ip)) return false;
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return false;
-  if (/^(::1?|f[cd]|fe[89ab]|::ffff:(127|10|192\.168|169\.254)\.)/i.test(ip)) return false;
-  return true;
-}
-
 /** Fetch a web picture for an app, once: public hosts only, images only, 8 MB max, cached by URL. */
 async function webImage(raw: string, dataDir: string, limiter: RateLimiter) {
   let u: URL;
@@ -797,18 +802,7 @@ async function webImage(raw: string, dataDir: string, limiter: RateLimiter) {
   if (existsSync(file) && existsSync(meta)) return { file, type: readFileSync(meta, "utf8") };
   if (!limiter.allow("img")) return null;
   try {
-    // Follow up to 3 redirects by hand, checking every hop's address.
-    let res: Response | null = null;
-    for (let hop = 0; hop < 4; hop++) {
-      if (!/^https?:$/.test(u.protocol)) return null;
-      const addrs = await (await import("node:dns/promises")).lookup(u.hostname, { all: true });
-      if (!addrs.length || !addrs.every((a) => publicIp(a.address))) return null;
-      res = await fetch(u, { redirect: "manual", headers: { "User-Agent": `Hearth/${pkg.version} (self-hosted personal assistant)`, Accept: "image/*" }, signal: AbortSignal.timeout(10_000) });
-      const next = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
-      if (!next) break;
-      u = new URL(next, u);
-      res = null;
-    }
+    const res = await fetchPublic(u.toString(), "image/*", 10_000);
     if (!res) return null;
     const type = (res.headers.get("content-type") || "").split(";")[0].trim();
     if (!res.ok || !/^image\/(png|jpeg|gif|webp|avif)$/.test(type) || Number(res.headers.get("content-length") || 0) > 8e6) return null;

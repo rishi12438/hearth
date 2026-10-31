@@ -9,6 +9,7 @@ import type { Scripts } from "./scripts.ts";
 import type { Push } from "./push.ts";
 import { parseReply } from "./reply.ts";
 import { validateHook, computeNextAt, describeTrigger, isUserReminder } from "./hooks.ts";
+import { look, lineDiff } from "./watch.ts";
 import { recall, isActive, validateFact } from "./memory.ts";
 import { describeLocal, inQuietHours, quietEndsAt, localDate, distanceMeters } from "./time.ts";
 import type { Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
@@ -1046,8 +1047,12 @@ export class Hub {
       try {
         switch (a.type) {
           case "hook.add": {
-            const r = await this.addHook(a, a.requestedByUser === true ? "you" : "assistant", where);
-            if (r.value) done.push({ kind: "hook", label: `${r.value.trigger.type === "at" ? "Reminder" : "Hook"}: ${r.value.title}`, id: r.value.id });
+            // "teammate": hand the hook to another teammate (by name), who then speaks when it fires.
+            const named = typeof a.teammate === "string" && a.teammate.trim()
+              ? (await this.store.all<Teammate>("teammates")).find((t) => t.name.toLowerCase() === a.teammate.trim().toLowerCase()) : undefined;
+            const r = await this.addHook(a, a.requestedByUser === true ? "you" : "assistant", named ? { ...where, teammateId: named.id } : where);
+            const kind = r.value?.trigger.type === "at" ? "Reminder" : r.value?.trigger.type === "webhook" ? "Webhook" : r.value?.trigger.type === "watch" || r.value?.trigger.type === "check" ? "Watching" : "Hook";
+            if (r.value) done.push({ kind: "hook", label: `${kind}: ${r.value.title}`, id: r.value.id });
             else await this.log("action.rejected", `hook.add: ${r.error}`);
             break;
           }
@@ -1265,6 +1270,9 @@ export class Hub {
       const v = validateHook({ ...h, ...patch });
       if (!v.value) return null;
       Object.assign(next, v.value);
+      // Editing a webhook hook keeps its URL working.
+      if (h.trigger.type === "webhook" && next.trigger.type === "webhook") next.trigger = h.trigger;
+      if (JSON.stringify(next.trigger) !== JSON.stringify(h.trigger)) delete next.seen;
       next.nextAt = computeNextAt(next.trigger, prefs.tz, this.clock());
     }
     if (patch.snoozeMin) {
@@ -1900,7 +1908,44 @@ export class Hub {
     await this.setPrefs({ proactiveToday: { date: today, n: n + 1 } });
   }
 
-  async fire(h: Hook, reason: string, late = false) {
+  /** Something POSTed to a webhook hook's secret URL: wake its teammate with what was sent. */
+  async webhook(token: string, payload: string) {
+    const h = (await this.store.all<Hook>("hooks")).find((x) => x.trigger.type === "webhook" && x.trigger.token === token);
+    if (!h || h.status !== "active") return false;
+    await this.log("hook.webhook", `${h.title}: called (${payload.length} bytes)`);
+    this.fire(h, "its webhook was called", false, `## What the webhook sent\n<untrusted>\n${payload.slice(0, 20_000) || "(empty)"}\n</untrusted>`).catch(() => {});
+    return true;
+  }
+
+  /** A watch hook's look at its page: what changed since last time, or null (first look, no change, or an error). */
+  private async lookAt(h: Hook & { trigger: { type: "watch" } }) {
+    const r = await look(h.trigger.url, this.clock());
+    const cur = (await this.store.get<Hook>("hooks", h.id)) || h;
+    if (!r.value) { await this.log("hook.watch", `${h.title}: couldn't read the page (${r.error})`); return null; }
+    await this.store.put<Hook>("hooks", { ...cur, seen: r.value });
+    if (!cur.seen) { await this.log("hook.watch", `${h.title}: first look saved`); return null; }
+    if (cur.seen.hash === r.value.hash) return null;
+    const d = lineDiff(cur.seen.text, r.value.text);
+    if (!d.added && !d.removed) return null;
+    return `## ${h.trigger.url} changed since ${cur.seen.at} (${d.added} lines added, ${d.removed} removed)\n<untrusted>\n${d.text}\n</untrusted>`;
+  }
+
+  /** A check hook's run of its script, with no model: its output if it should speak, else null. */
+  private async runCheck(h: Hook & { trigger: { type: "check" } }) {
+    const t = h.trigger;
+    const cur = (await this.store.get<Hook>("hooks", h.id)) || h;
+    // Unattended, so only scripts that just read: one that sends or changes things never runs from a check.
+    const out = await this.scripts.run(t.script, t.args, { last: cur.seen?.text ?? "" });
+    if (out.needsApproval) { await this.log("hook.check", `${h.title}: ${t.script} can change things, so it can't run on its own`); return null; }
+    if (!out.ok) { await this.log("hook.check", `${h.title}: ${out.output.slice(0, 200)}`); return null; }
+    const text = out.output === "(no output)" ? "" : out.output;
+    const seen = { hash: sha256(text), text, at: this.clock().toISOString() };
+    await this.store.put<Hook>("hooks", { ...cur, seen });
+    if (t.when === "output" ? !text : !cur.seen || cur.seen.hash === seen.hash || !text) return null;
+    return text;
+  }
+
+  async fire(h: Hook, reason: string, late = false, extra?: string) {
     if (this.firing.has(h.id)) return;
     this.firing.add(h.id);
     const now = this.clock();
@@ -1924,6 +1969,18 @@ export class Hub {
         return;
       }
       await this.reschedule(h, now); // before running, so a slow brain can't double-fire
+      // A watch speaks only when its page changed. Looked at after the gate, so a change in quiet hours isn't lost.
+      if (h.trigger.type === "watch" && extra === undefined) {
+        const changed = await this.lookAt(h as Hook & { trigger: { type: "watch" } });
+        if (!changed) return;
+        extra = changed;
+      }
+      let checked = "";
+      if (h.trigger.type === "check" && extra === undefined) {
+        checked = (await this.runCheck(h as Hook & { trigger: { type: "check" } })) || "";
+        if (!checked) return;
+        extra = `## ${h.trigger.script} printed\n<untrusted>\n${checked}\n</untrusted>`;
+      }
       const fresh = (await this.store.get<Hook>("hooks", h.id)) || h;
       await this.store.put<Hook>("hooks", { ...fresh, lastFiredAt: now.toISOString(), fireCount: (h.fireCount || 0) + 1 });
 
@@ -1943,9 +2000,9 @@ export class Hub {
       const teammate = await this.teammate(h.teammateId);
       const a = h.action;
       if (a.type === "notify") {
-        text = a.text;
+        text = h.trigger.type === "watch" ? `${a.text}\n${h.trigger.url}` : checked ? `${a.text}\n${checked.slice(0, 1200)}` : a.text;
       } else if (a.type === "think") {
-        const r = await this.turn("hook", `${h.title}\n${a.prompt}`, `hook: ${h.title}`, { teammate, threadId: h.threadId });
+        const r = await this.turn("hook", `${h.title}\n${a.prompt}`, `hook: ${h.title}`, { teammate, threadId: h.threadId, extra });
         text = r.text; did = r.did;
       } else if (a.type === "script") {
         const out = await this.scripts.run(a.script, a.args);

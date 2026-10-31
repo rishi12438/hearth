@@ -2001,7 +2001,7 @@ function renderPairing(code: string) {
 
 function hookIcon(hk: any) {
   const t = hk.trigger?.type;
-  return t === "at" ? (hk.trigger.repeat !== "none" ? "repeat" : "clock") : t === "schedule" ? "repeat" : t === "place" ? "pin" : t === "silence" ? "moon" : "eye";
+  return t === "at" ? (hk.trigger.repeat !== "none" ? "repeat" : "clock") : t === "schedule" ? "repeat" : t === "place" ? "pin" : t === "silence" ? "moon" : t === "webhook" ? "clip" : "eye";
 }
 
 
@@ -2012,6 +2012,13 @@ function openHook(hk: any) {
   openSheet(hk.title, [
     h("dl", { class: "facts" },
       h("dt", null, "When"), h("dd", null, hk.when),
+      hk.trigger.type === "watch" ? [h("dt", null, "Page"), h("dd", null, h("a", { href: hk.trigger.url, target: "_blank", rel: "noopener noreferrer" }, hk.trigger.url)),
+        h("dt", null, "Looked"), h("dd", null, hk.seen ? relTime(hk.seen.at) : "Not yet")] : null,
+      hk.trigger.type === "webhook" ? (() => {
+        const hookUrl = `${activeHub()!.url}/api/webhook/${hk.trigger.token}`;
+        return [h("dt", null, "URL"), h("dd", null, h("button", { class: "codeline", title: "Copy", on: { click: () => navigator.clipboard?.writeText(hookUrl).then(() => toast("Copied. POST anything to it to wake this plan"), () => toast("Couldn't copy", "err")) } }, h("code", null, hookUrl), icon("clip", 14)),
+          h("small", { class: "muted" }, "Keep it secret: anyone with it can wake this plan."))];
+      })() : null,
       hk.nextAt && hk.status === "active" ? [h("dt", null, "Next"), h("dd", null, `${dayLabel(hk.nextAt)} ${clockTime(hk.nextAt)} (${relTime(hk.nextAt)})`)] : null,
       h("dt", null, "Does"), h("dd", null, actionText),
       h("dt", null, "Why"), h("dd", null, hk.why),
