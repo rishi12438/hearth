@@ -109,6 +109,7 @@ Set up each machine for its role with one setting, the **target**:
 - **Mac on:** teammates run on your Mac, on your own Claude or Codex login and subscription.
 - **Mac off:** the hub does the work itself. A job that only your Mac can do waits as *Needs your Mac* and finishes by itself when the Mac comes back.
 - **No middleman:** your Mac dials out to your own server and keeps the line open, so it needs no domain, open ports or tunnel, and nothing passes through anyone else's service.
+- **Cloud computers:** no Mac, or want more? In **Settings → Devices → Add a cloud computer**, paste an [E2B](https://e2b.dev) API key (like the Deepgram key) or give the address and SSH key of any Linux VM. The hub sets the machine up itself: it installs Hearth (downloaded from your own hub, so versions always match) and Claude Code, hands over the logins it holds, and links the machine. E2B sandboxes stop when idle so they stop costing, and can start on their own when a job is waiting for a computer.
 - **Copy to the cloud:** in **Settings → Devices**, choose which logins (Claude, Codex) your Mac keeps copied to the server, so the server can use them while the Mac is off. Copies stay current, and turning one off deletes it from the server.
 - **See it at a glance:** Home shows where work runs right now, and each computer shows its connection (signal bars, round-trip time, jobs running, last seen). Every answer says where it ran.
 

@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, hostname, platform } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { sha256 } from "./auth.ts";
 import { Brain, availableHarnesses, type BrainProfile } from "./brain.ts";
 import { ALIVE_EVERY_MS, COPY_ITEMS, isCopyItem, type CopyItem } from "./computers.ts";
@@ -10,7 +10,8 @@ import type { Config } from "./config.ts";
 // with this computer's own Claude/Codex login. The hub never gets a shell here: it can only ask for a brain call, which
 // runs with the same slim, web-only tool set as on the hub, and for the login files you chose to copy.
 
-export type Link = { hub: string; token: string; deviceId: string; name: string };
+/** cloud: the hub set this machine up (a sandbox or your VM) and may hand it logins. Your Mac's link never has it. */
+export type Link = { hub: string; token: string; deviceId: string; name: string; cloud?: boolean };
 const linkFile = (dataDir: string) => join(dataDir, "computer.json");
 
 export function readLink(dataDir: string): Link | null {
@@ -62,7 +63,36 @@ export function readLogin(item: CopyItem): string | null {
   return existsSync(path) ? readFileSync(path, "utf8") : null;
 }
 
-type Opts = { config: Config; link: Link; brain?: Brain; readCopy?: (item: CopyItem) => string | null; log?: (s: string) => void; copyEveryMs?: number };
+/** Whether this machine has a login, without reading the secret (so no Keychain prompt just to check). */
+export function hasLogin(item: CopyItem): boolean {
+  if (item === "claude" && platform() === "darwin" && Bun.spawnSync(["security", "find-generic-password", "-s", "Claude Code-credentials"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0) return true;
+  return existsSync(join(homedir(), COPY_ITEMS[item].path));
+}
+
+type Opts = { config: Config; link: Link; brain?: Brain; readCopy?: (item: CopyItem) => string | null; log?: (s: string) => void; copyEveryMs?: number; home?: string;
+  /** The hub signed this computer out for good. */
+  onSignedOut?: () => void };
+
+/** A cloud computer got logins from its hub: put them where Claude Code and Codex look, and skip Claude's first-run questions. */
+export function writeLogins(home: string, items: Record<string, unknown>) {
+  const wrote: string[] = [];
+  for (const [item, data] of Object.entries(items)) {
+    if (!isCopyItem(item) || typeof data !== "string" || data.length > 64 * 1024) continue;
+    try { JSON.parse(data); } catch { continue; }
+    const path = join(home, COPY_ITEMS[item].path);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, data, { mode: 0o600 });
+    chmodSync(path, 0o600);
+    wrote.push(item);
+  }
+  if (wrote.includes("claude")) {
+    const state = join(home, ".claude.json");
+    let cur: any = {};
+    try { cur = JSON.parse(readFileSync(state, "utf8")); } catch {}
+    writeFileSync(state, JSON.stringify({ hasCompletedOnboarding: true, theme: "dark", ...cur }), { mode: 0o600 });
+  }
+  return wrote;
+}
 
 /** Keep a line open to the hub for as long as this runs, reconnecting with backoff. Returns a stop function. */
 export function connect(opts: Opts) {
@@ -105,7 +135,7 @@ export function connect(opts: Opts) {
   };
 
   let opened = false;
-  const signedOut = () => { log(`  ${link.name} was signed out of the hub. Run join again to link it.`); stopped = true; };
+  const signedOut = () => { log(`  ${link.name} was signed out of the hub. Run join again to link it.`); stopped = true; opts.onSignedOut?.(); };
   const retry = (why: string) => {
     log(`  lost the hub (${why}); trying again in ${Math.round(backoff / 1000)}s`);
     setTimeout(open, backoff);
@@ -131,6 +161,10 @@ export function connect(opts: Opts) {
       else if (m.t === "run" && typeof m.id === "string") run(m);
       else if (m.t === "stop") runs.get(m.id)?.abort();
       else if (m.t === "want") { want = { items: (m.items || []).filter(isCopyItem), have: m.have || {} }; copyUp(); }
+      else if (m.t === "logins" && link.cloud && m.items && typeof m.items === "object") {
+        const wrote = writeLogins(opts.home || homedir(), m.items);
+        if (wrote.length) log(`  got ${wrote.map((i) => COPY_ITEMS[i as CopyItem].label).join(" and ")} from the hub`);
+      }
     };
     ws.onclose = (ev) => {
       if (alive) clearInterval(alive);

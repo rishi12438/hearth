@@ -48,6 +48,10 @@ Hearth holds personal data and can act on a schedule, so it is built to fail clo
 - The hub can only ask a computer for a brain call. The computer runs it with its own code and the same slim, web-only tool set as on the hub, and only for harnesses it has installed. The hub never gets a shell on it.
 - **Copy to the cloud** is off by default and set per login (Claude, Codex) by the primary device. Only a server hub (`HEARTH_TARGET=lightsail`) accepts copies, only for the logins you turned on, at most 64 KB, and only valid JSON. They're written `0600` to the hub user's home. Turning a copy off deletes it, but only if the file is still the one the hub wrote, so a login set up by hand is never removed.
 - Unlinking a computer closes its line at once (the computer stops retrying) and deletes the logins it copied.
+- **Cloud computers** (an E2B sandbox or your VM) are set up by the hub, only from the primary device. The hub mints the machine's computer key and sends it to the setup script on stdin, never in a command line; each setup run gets a fresh key and the old one stops working. The script downloads Hearth from your own hub using that key.
+- The E2B key is checked with E2B, then kept in a `0600` file on the hub (or `HEARTH_E2B_API_KEY`); it's never in your data, exports or the app. A VM's SSH key is kept in its own `0600` file, used through a private temp folder per call, and the VM's host key is pinned the first time: a different host key later is refused.
+- The hub hands the logins it holds (for example, the Claude login your Mac copied up) only to computers it set up itself. Your Mac's link file has no `cloud` flag, so it ignores logins even if offered. Checking whether the hub has a login doesn't read the secret, so on a Mac there's no Keychain prompt just to show the screen; the secret is read only when a cloud computer links.
+- Removing a cloud computer shuts the sandbox down (or stops the link on the VM), unlinks its key and deletes its SSH key from the hub.
 
 ## Your data
 - SQLite files and the data folder are created with mode `0700`. Use a Postgres or MySQL user with access only to the Hearth tables.

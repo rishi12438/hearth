@@ -780,3 +780,8 @@ p.err { color: var(--danger); margin: 6px 2px 0; }
 .ccinfo { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
 .codeline { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 12px; border: 1px dashed var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); text-align: left; }
 .codeline code { flex: 1; font: 12.5px var(--mono); overflow-x: auto; white-space: nowrap; }
+.ccbtns { display: flex; gap: 8px; flex-wrap: wrap; }
+.ccard .ccsub.err { color: var(--danger); }
+.row2 { display: grid; grid-template-columns: 1fr 96px; gap: 8px; }
+.field.mono { font: 13px/1.4 var(--mono); }
+.sheetbody > .field, .sheetbody > .row2, .sheetbody > select.field { margin: 6px 0; }

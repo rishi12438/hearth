@@ -32,7 +32,8 @@ if (cmd === "computer") {
   const link = readLink(config.dataDir);
   if (!link) { console.log("This computer isn't linked yet. Run: bun run join https://yournameassistant.com"); process.exit(1); }
   console.log(`hearth · ${link.name} · linking to ${link.hub}  brains here: ${availableHarnesses(config).join(", ")}`);
-  const stop = connect({ config, link });
+  // Exits 0 when unlinked, so launchd and cron don't keep restarting a computer the hub no longer knows.
+  const stop = connect({ config, link, onSignedOut: () => process.exit(0) });
   const quit = () => { stop(); process.exit(0); };
   process.on("SIGINT", quit);
   process.on("SIGTERM", quit);
