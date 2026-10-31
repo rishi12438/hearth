@@ -2,13 +2,14 @@
 // The brain and scripts send DATA in one of a few fixed shapes; the app draws them with its own components.
 // No generated code ever reaches the app, so tiles always look right and can't do anything but display.
 
-export const TILE_TYPES = ["weather", "places", "checklist", "stat", "note"] as const;
+export const TILE_TYPES = ["weather", "places", "checklist", "stat", "note", "map"] as const;
 export type Tile = { type: (typeof TILE_TYPES)[number]; title?: string; data: Record<string, any>; options?: TileOptions };
 /** How a tile looks, saved on the skill so "show hourly" or "use °F" sticks. */
 export type TileOptions = Record<string, string | number | boolean>;
 
 const str = (v: unknown, max = 200) => (typeof v === "string" ? v.slice(0, max) : typeof v === "number" ? String(v) : undefined);
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? Math.round(v * 10) / 10 : undefined);
+const coord = (v: unknown, max: number) => (typeof v === "number" && Number.isFinite(v) && Math.abs(v) <= max ? Math.round(v * 1e5) / 1e5 : undefined);
 const url = (v: unknown) => (typeof v === "string" && /^https?:\/\//.test(v) ? v.slice(0, 500) : undefined);
 
 export function cleanOptions(o: unknown): TileOptions | undefined {
@@ -36,7 +37,7 @@ export function cleanTile(t: any): Tile | null {
       if (data.temp === undefined) return null;
       break;
     case "places":
-      data = { items: (Array.isArray(d.items) ? d.items : []).slice(0, 8).map((x: any) => ({ name: str(x?.name, 80), detail: str(x?.detail, 160), url: url(x?.url) })).filter((x: any) => x.name) };
+      data = { items: (Array.isArray(d.items) ? d.items : []).slice(0, 8).map((x: any) => ({ name: str(x?.name, 80), detail: str(x?.detail, 160), url: url(x?.url), lat: coord(x?.lat, 90), lon: coord(x?.lon, 180) })).filter((x: any) => x.name) };
       if (!data.items.length) return null;
       break;
     case "checklist":
@@ -50,6 +51,15 @@ export function cleanTile(t: any): Tile | null {
     case "note":
       data = { body: str(d.body, 1200) };
       if (!data.body) return null;
+      break;
+    case "map":
+      // A trip or a set of places on a real map; route=true plays it stop by stop in order.
+      data = {
+        route: d.route !== false,
+        stops: (Array.isArray(d.stops) ? d.stops : []).slice(0, 24).map((x: any) => ({ name: str(x?.name, 60), lat: coord(x?.lat, 85), lon: coord(x?.lon, 180), when: str(x?.when, 40), note: str(x?.note, 200), url: url(x?.url) }))
+          .filter((x: any) => x.name && x.lat !== undefined && x.lon !== undefined),
+      };
+      if (!data.stops.length) return null;
       break;
   }
   return { type: t.type, title: str(t.title, 80), data, options: cleanOptions(t.options) };

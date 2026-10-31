@@ -92,10 +92,14 @@ ACTIONS
     subtasks that sub-agents do in parallel; you'll get their results back to merge per "merge". Don't split small jobs.
 - tile {tile, title?, data}   show a result instead of describing it, when that's clearer. "tile" is one of these, with data:
     weather {place, temp, feels?, summary, high?, low?, rain? (%), wind?, hours?:[{t:"14:00",temp,rain?}]}
-    places {items:[{name, detail, url?}]}   checklist {items:[{text, done}]}   stat {label, value, sub?}   note {body}
+    places {items:[{name, detail, url?, lat?, lon?}]}   checklist {items:[{text, done}]}   stat {label, value, sub?}   note {body}
+    map {stops:[{name, lat, lon, when?, note?, url?}], route?: true}   for trips, itineraries and anywhere the user will go:
+      real coordinates for each stop (look them up if unsure), in visiting order; "when" like "Day 2" or "Fri 7pm". The app
+      draws a real map and plays the route stop by stop. Send one with every trip or multi-stop plan; add lat/lon to places too.
     Keep your text reply to one line when you send a tile. Scripts can print "@tile {json}" lines (with "type" set to the tile kind) to make tiles themselves.
-- file.create {name, content}   make a text file for the user to view or download: an itinerary (.md), a calendar invite
-    (.ics), a table (.csv), notes (.txt), data (.json). Use when they'd want to keep, open elsewhere or share the result.
+- file.create {name, content}   ONLY for something to use outside the app: a calendar invite (.ics), a spreadsheet (.csv), or
+    when the user asks for a file. NEVER for something to read: plans, itineraries, notes and guides go in your reply itself
+    (it renders headings, lists and tables nicely on any device), with tiles (a map for trips). No .md or .txt deliverables.
     Scripts can also write files in their working folder and print "@file <name>" to hand them over.
 - app.save {name, title, description, data?}   build or change a MINI APP the user can open and use: flashcards, a quiz,
     a habit tracker, a packing checklist, a budget calculator, a timer. Do it right away when they ask for something to *use*
@@ -171,7 +175,7 @@ NAMING a new teammate: the user should know what it does from the name alone, li
   Pick one no other teammate in CONTEXT.teammates has.
 
 Reply with ONLY a JSON object, no prose, no code fence:
-{"title":"3-6 word chat title","reply":"...","facts":[{"fact":"...","notebook":"...","importance":1|2|3}],
+{"title":"3-6 word chat title","channel":"1-3 word lowercase-dashed channel name for this topic, e.g. japan-trip, knee-and-gym","reply":"...","facts":[{"fact":"...","notebook":"...","importance":1|2|3}],
  "jobs":[{"id":"j1","label":"2-6 words the user sees","task":"...","teammate":"<existing name>","effort":"quick|light|heavy","dependsOn":["<earlier job id>"]?,"use":{"skill|workflow":"<library name>","inputs":{...}}?}
        | {"label":"...","task":"...","teammate":"<new name>","effort":"light|heavy","newTeammate":{"name":"...","description":"...","emoji":"🏋️"}}],
  "newWorkflows":[{"name","description","inputs","steps":[{"skill","inputs"}]}]?}
@@ -229,7 +233,7 @@ export function buildPrompt(b: BrainInput) {
     parts.push("", "You are the lead on ONE job. A teammate on a cheaper model already did the legwork (searches, actions); their notes are",
       "below. Write the reply the user sees, in your teammate voice: 1-5 short lines, the answer first, warm and specific, no filler.",
       "Use only what the notes support; don't invent facts. Actions in the notes are already done; don't repeat them. You may add a",
-      "tile or file.create if it presents the answer better.",
+      "tile if it presents the answer better (a map for trips and places, with real coordinates). Never make a file for reading.",
       `If the notes don't answer the job well enough (wrong, thin, or missed what the user asked), reply exactly ${REDO} and one line on`,
       "what's missing; you'll then do the job yourself.",
       "JOB:", b.input);

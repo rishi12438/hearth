@@ -135,7 +135,8 @@ function onEvent(e: { type: string; data?: any }) {
       // A teammate finished something you're not looking at: an in-app banner you can tap, like a phone notification.
       const was = jobStatus.get(e.data.id);
       jobStatus.set(e.data.id, e.data.status);
-      const here = (open && e.data.threadId === open) || (r.view === "dm" && e.data.threadId === `tm-${r.id}`);
+      // Tell them unless they're already looking at that very thread (or that DM).
+      const here = (r.view === "chat" && r.job && (r.job === e.data.id || r.job === e.data.followsUp)) || (r.view === "dm" && e.data.threadId === `tm-${r.id}`);
       if (was && was !== e.data.status && (e.data.status === "done" || e.data.status === "failed") && !e.data.parentId && !here) {
         const m = mate(e.data.teammateId);
         banner(m, `${m.name} ${e.data.status === "done" ? "finished" : "couldn't finish"}`, jobLabel(e.data),
@@ -556,7 +557,7 @@ function stage(place: string, t: any, state: string, title: string, sub: string 
 }
 
 function channelName(t: any) {
-  return t.num ? `ramble-${t.num}` : t.id === "new" ? "new-ramble" : String(t.title || "ramble").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 30);
+  return t.channel || (t.num ? `ramble-${t.num}` : t.id === "new" ? "new-ramble" : String(t.title || "ramble").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 30));
 }
 
 function rosterEntry(id: string) {
@@ -780,17 +781,39 @@ function dayDivider(at: string) {
   return h("div", { class: "daydiv" }, label);
 }
 
+async function fillNow(el: HTMLElement) {
+  let b: any = { working: [], next: [], needsYou: [] };
+  try { b = await call("/api/board"); } catch {}
+  const row = (lead: Node, title: string, sub: string, fn: () => void) => h("button", { class: "nowrow", on: { click: fn } }, lead, h("span", { class: "grow" }, h("b", null, title), h("small", null, sub)), icon("chevron", 16));
+  const go = (c: any) => () => { location.hash = c.kind === "plan" ? "#b" : c.threadId?.startsWith("tm-") ? `#t/${c.teammateId}` : `#c/${c.threadId}/${c.root}`; };
+  const sec = (title: string, rows: Node[]) => rows.length ? h("section", { class: "nowsec" }, h("h4", null, title), h("div", { class: "nowcard" }, rows)) : null;
+  const recent = S.threads.filter((t: any) => !t.archived).slice(0, 3);
+  const parts = [
+    sec("Needs you", b.needsYou.slice(0, 3).map((c: any) => row(face(mate(c.teammateId), 32, jobState({ status: c.status })), c.title, c.need ? `Stuck: ${c.need}` : "Needs your OK", go(c)))),
+    sec("In progress", b.working.slice(0, 4).map((c: any) => row(face(mate(c.teammateId), 32, "working"), c.title, `${mate(c.teammateId).name} · ${S.progress.get(c.id) || "on it"}`, go(c)))),
+    sec("Coming up", b.next.filter((c: any) => c.kind === "plan").slice(0, 3).map((c: any) => row(emoji3d("🔔", "ideaicon small"), c.title, `${dayLabel(c.at)} ${clockTime(c.at)}`, go(c)))),
+    sec("Ideas", S.ideas.slice(0, 2).map((i: any) => row(emoji3d(i.emoji || "💡", "ideaicon small"), i.title, i.body || "Tap to ask for it", () => {
+      const box = document.getElementById("composer") as HTMLTextAreaElement | null;
+      if (box) { box.value = i.prompt; box.dispatchEvent(new Event("input")); box.focus(); }
+    }))),
+    sec("Pick up where you left off", recent.map((t: any) => row(h("span", { class: "hicon" }, "#"), channelName(t), t.title || "", () => { location.hash = `#c/${t.id}`; }))),
+  ].filter(Boolean) as Node[];
+  clear(el, parts.length ? parts : h("div", { class: "starters" }, [
+    "Remind me at 6 to call mom, find a cheap dinner spot, and text Sam that Tuesday works",
+    "Plan 5 days in Tokyo in March: food, a day trip, and a map of where we go",
+    "I want to get to the gym 3 times a week, nag me if I don't",
+  ].map((x) => h("button", { on: { click: () => send(x) } }, x))));
+}
+
 function drawChannel(el: HTMLElement, stick: boolean) {
   const top = S.chat.messages.filter((m: any) => !m.replyTo);
   if (!top.length) {
+    // A fresh ramble shows what's going on (in progress, coming up, ideas, recent rambles), not the same examples every time.
+    const live = h("div", { class: "nowlist" });
     clear(el, h("div", { class: "hello" },
-      h("h2", null, "Start a ramble"),
-      h("p", null, "Say it however it comes out. Hearth turns it into tasks for the right teammates, and this becomes #ramble-N."),
-      h("div", { class: "starters" }, [
-        "Remind me at 6 to call mom, find a cheap dinner spot, and text Sam that Tuesday works",
-        "What's the weather in Paris tomorrow, and find pottery studios near Priya in Oakland",
-        "I want to get to the gym 3 times a week, nag me if I don't",
-      ].map((s) => h("button", { on: { click: () => send(s) } }, s)))));
+      h("h2", null, "What's on your mind?"),
+      h("p", null, "Talk or type, however it comes out. Hearth hands it to the right teammates."), live));
+    fillNow(live);
     return;
   }
   const nodes: Node[] = [];
@@ -988,12 +1011,23 @@ function chatMenu() {
     h("div", { class: "list" }, h("div", { class: "item" }, userAvatar(30), h("span", { class: "grow" }, S.state?.prefs?.userName || "You")),
       members.map((id) => h("button", { class: "item", on: { click: () => { closeSheet(); location.hash = `#t/${id}`; } } }, face(mate(id), 30, "idle"), h("span", { class: "grow" }, mate(id).name)))),
     h("p", { class: "muted small" }, "Rambles archive themselves an hour after everything in them is done. Posting here brings it back."),
+    h("button", { class: "btn ghost", on: { click: () => renameRamble(t) } }, icon("edit", 16), "Rename"),
     h("div", { class: "stack" },
       doneAll && lastRamble ? h("button", { class: "btn ghost", on: { click: async () => {
         try { const wf = await call("/api/workflows/from-ramble", { body: { messageId: lastRamble.id } }); toast(`Saved workflow ${wf.name}. Say “run ${wf.name}” any time.`); closeSheet(); loadSkills(); } catch (e) { handleError(e); }
       } } }, icon("repeat", 16), "Save as workflow") : null,
       h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet("Delete this ramble?", "Its messages and results are deleted. Reminders it set keep working.", "Delete", async () => { await call(`/api/threads/${t.id}`, { method: "DELETE" }); location.hash = ""; }) } }, icon("trash", 16), "Delete")),
   ]);
+}
+
+function renameRamble(t: any) {
+  const name = h("input", { class: "field", value: channelName(t), maxLength: 30, autocapitalize: "off", spellcheck: false, placeholder: "japan-trip" });
+  openSheet("Rename", [h("label", null, h("span", null, "Channel name"), name),
+    h("button", { class: "btn primary big", on: { click: async () => {
+      try { const r = await call(`/api/threads/${t.id}`, { method: "PATCH", body: { channel: name.value } }); S.chat.thread.channel = r.channel; closeSheet(); drawChat(); loadThreads(); toast(`Renamed to #${r.channel}`); }
+      catch (e) { handleError(e); }
+    } } }, "Save")]);
+  setTimeout(() => { name.focus(); name.select(); }, 60);
 }
 
 // ---------------- a DM with one teammate ----------------
@@ -1173,6 +1207,96 @@ function banner(who: any, title: string, text: string, onTap: () => void) {
   setTimeout(() => { b.classList.remove("show"); setTimeout(() => b.remove(), 350); }, 6000);
 }
 
+// ---- maps: real map tiles (fetched and cached by the hub), stops on top, a route that plays stop by stop ----
+
+const TILE = 256;
+function mercator(lat: number, lon: number, z: number) {
+  const n = TILE * 2 ** z, r = (Math.max(-85, Math.min(85, lat)) * Math.PI) / 180;
+  return { x: ((lon + 180) / 360) * n, y: ((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * n };
+}
+
+/** A map of stops. With route=true it plays: the line draws from stop to stop, each pin pops and its card shows. */
+function mapView(stops: { name: string; lat: number; lon: number; when?: string; note?: string; url?: string }[], route: boolean, list = false) {
+  // Fit the stops in the part of the map above the card (the card covers the bottom ~70px).
+  const H = 280, FIT_W = 250, FIT_H = 140, LIFT = 26;
+  let z = 15;
+  for (; z > 2; z--) {
+    const pts = stops.map((s) => mercator(s.lat, s.lon, z));
+    const w = Math.max(...pts.map((p) => p.x)) - Math.min(...pts.map((p) => p.x)), hh = Math.max(...pts.map((p) => p.y)) - Math.min(...pts.map((p) => p.y));
+    if (w <= FIT_W && hh <= FIT_H) break;
+  }
+  if (stops.length === 1) z = 14;
+  const pts = stops.map((s) => mercator(s.lat, s.lon, z));
+  const cx = (Math.max(...pts.map((p) => p.x)) + Math.min(...pts.map((p) => p.x))) / 2, cy = (Math.max(...pts.map((p) => p.y)) + Math.min(...pts.map((p) => p.y))) / 2;
+  const at = (p: { x: number; y: number }) => ({ x: p.x - cx, y: p.y - cy - LIFT }); // relative to the map's center, nudged up
+  const hub = activeHub()!, key = S.state?.tileKey || "";
+  const tiles: Node[] = [];
+  const max = 2 ** z;
+  for (let tx = Math.floor((cx - 420) / TILE); tx <= Math.floor((cx + 420) / TILE); tx++)
+    for (let ty = Math.floor((cy + LIFT - H / 2 - 20) / TILE); ty <= Math.floor((cy + LIFT + H / 2 + 20) / TILE); ty++) {
+      if (ty < 0 || ty >= max) continue;
+      const wx = ((tx % max) + max) % max;
+      tiles.push(h("img", { class: "mtile", alt: "", draggable: false, src: `${hub.url}/tiles/${z}/${wx}/${ty}.png?k=${encodeURIComponent(key)}`, style: `left:calc(50% + ${tx * TILE - cx}px);top:calc(50% + ${ty * TILE - cy - LIFT}px)` }));
+    }
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("class", "mroute");
+  const path = document.createElementNS(ns, "path");
+  const rel = pts.map(at);
+  path.setAttribute("d", rel.map((p, i) => `${i ? "L" : "M"}${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" "));
+  const seg = rel.slice(1).map((p, i) => Math.hypot(p.x - rel[i].x, p.y - rel[i].y));
+  const total = seg.reduce((a, b) => a + b, 0) || 1;
+  path.style.strokeDasharray = `${total}`;
+  path.style.strokeDashoffset = route ? `${total}` : `${total}`;
+  if (route && stops.length > 1) svg.appendChild(path);
+  const dot = h("span", { class: "mdot", hidden: true });
+  const card = h("div", { class: "mcard", hidden: true });
+  const show = (i: number) => {
+    const s = stops[i];
+    pins.forEach((p, k) => p.classList.toggle("cur", k === i));
+    clear(card, h("span", { class: "mnum" }, String(i + 1)), h("span", { class: "grow" }, h("small", null, [s.when, s.name].filter(Boolean).join(" · ")), s.note ? h("b", null, s.note) : h("b", null, s.name)),
+      h("a", { href: s.url || `https://maps.google.com/?q=${s.lat},${s.lon}`, target: "_blank", rel: "noopener noreferrer", class: "mopen", "aria-label": `Open ${s.name} in Maps` }, icon("chevron", 16)));
+    card.hidden = false;
+  };
+  const pins = rel.map((p, i) => h("button", { class: `mpin ${route ? "" : "on"}`, style: `left:calc(50% + ${p.x}px);top:calc(50% + ${p.y}px)`, "aria-label": stops[i].name, on: { click: () => show(i) } },
+    h("span", null, String(i + 1)), h("em", null, stops[i].name)));
+  let playing = 0;
+  const play = () => {
+    const run = ++playing;
+    pins.forEach((p) => p.classList.remove("on", "cur"));
+    path.style.strokeDashoffset = `${total}`;
+    let i = 0, drawn = 0;
+    const next = () => {
+      if (run !== playing) return;
+      pins[i].classList.add("on"); show(i);
+      if (i >= stops.length - 1) { dot.hidden = true; return; }
+      const a = rel[i], b = rel[i + 1], len = seg[i], t0 = performance.now(), dur = Math.min(1600, 500 + len * 4);
+      dot.hidden = false;
+      const step = (now: number) => {
+        if (run !== playing) return;
+        const k = Math.min(1, (now - t0) / dur), e = k < .5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2;
+        dot.style.left = `calc(50% + ${a.x + (b.x - a.x) * e}px)`; dot.style.top = `calc(50% + ${a.y + (b.y - a.y) * e}px)`;
+        path.style.strokeDashoffset = `${total - drawn - len * e}`;
+        if (k < 1) requestAnimationFrame(step); else { drawn += len; i++; setTimeout(next, 650); }
+      };
+      setTimeout(() => requestAnimationFrame(step), 500);
+    };
+    next();
+  };
+  const stage = h("div", { class: "mstage" }, tiles, svg, pins, dot);
+  const box = h("div", { class: "mapbox" }, stage, card,
+    route && stops.length > 1 ? h("button", { class: "mplay", on: { click: play } }, icon("repeat", 14), "Replay") : null,
+    h("span", { class: "mattr" }, "© OpenStreetMap"));
+  // Play once when it scrolls into view.
+  if (route && stops.length > 1) {
+    const io = new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) { io.disconnect(); setTimeout(play, 250); } }, { threshold: .5 });
+    requestAnimationFrame(() => io.observe(box));
+  }
+  return h("div", { class: "mapwrap" }, box,
+    list && stops.length > 1 ? h("div", { class: "mstops" }, stops.map((s, i) => h("button", { class: "mstop", on: { click: () => { show(i); box.scrollIntoView({ block: "nearest", behavior: "smooth" }); } } },
+      h("span", { class: "mnum" }, String(i + 1)), h("span", { class: "grow" }, h("b", null, s.name), s.when || s.note ? h("small", null, [s.when, s.note].filter(Boolean).join(" · ")) : null)))) : null);
+}
+
 function secs(ms?: number) {
   if (!ms) return "";
   return ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))}s` : `${Math.round(ms / 60_000)}m`;
@@ -1200,10 +1324,15 @@ function tile(t: any) {
             d.rain !== undefined ? h("span", null, `${Math.round(d.rain)}% rain`) : null)),
         o.hourly !== false && !o.compact && d.hours?.length ? h("div", { class: "hours" }, d.hours.map((x: any) =>
           h("div", { class: "hour" }, h("small", null, x.t), h("b", null, deg(x.temp, o.units)), x.rain ? h("i", { style: `--r:${Math.min(100, x.rain)}%` }) : h("i", { class: "dry" })))) : null);
-    case "places":
-      return h("div", { class: "tile places" }, t.title ? h("small", { class: "tt" }, t.title) : null, d.items.map((x: any, i: number) =>
+    case "places": {
+      const pins = d.items.filter((x: any) => typeof x.lat === "number" && typeof x.lon === "number");
+      return h("div", { class: "tile places" }, t.title ? h("small", { class: "tt" }, t.title) : null,
+        pins.length ? mapView(pins.map((x: any) => ({ name: x.name, lat: x.lat, lon: x.lon, note: x.detail, url: x.url })), false) : null, d.items.map((x: any, i: number) =>
         h(x.url ? "a" : "div", { class: "place", ...(x.url ? { href: x.url, target: "_blank", rel: "noopener noreferrer" } : {}) },
           h("span", { class: "n" }, String(i + 1)), h("span", { class: "grow" }, h("b", null, x.name), x.detail ? h("small", null, x.detail) : null), x.url ? icon("chevron", 14) : null)));
+    }
+    case "map":
+      return h("div", { class: "tile map" }, t.title ? h("small", { class: "tt" }, t.title) : null, mapView(d.stops, d.route !== false, true));
     case "checklist":
       return h("div", { class: "tile checklist" }, t.title ? h("small", { class: "tt" }, t.title) : null, d.items.map((x: any) =>
         h("div", { class: `ci ${x.done ? "done" : ""}` }, h("span", { class: "box" }, x.done ? icon("check", 12) : null), x.text)));

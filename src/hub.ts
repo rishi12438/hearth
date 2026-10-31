@@ -270,7 +270,7 @@ export class Hub {
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
       .map((t) => {
         const mine = jobs.filter((j) => j.threadId === t.id);
-        return { ...t, name: t.num ? `ramble-${t.num}` : t.title, archived: !!t.archivedAt, members: [...new Set(mine.map((j) => j.teammateId))],
+        return { ...t, name: channelOf(t), archived: !!t.archivedAt, members: [...new Set(mine.map((j) => j.teammateId))],
           working: mine.filter((j) => j.status === "working" || j.status === "queued").length,
           needsYou: mine.filter((j) => j.status === "waiting" || j.status === "blocked").length };
       });
@@ -290,6 +290,21 @@ export class Hub {
     const ok = await this.store.remove("threads", id);
     this.emit("threads");
     return ok;
+  }
+
+  /** Name a ramble's channel ("japan-trip"). Names are lowercase words and dashes, unique among rambles. */
+  async renameThread(id: string, name: string, byUser = true) {
+    const t = await this.store.get<Thread>("threads", id);
+    if (!t || t.id.startsWith("tm-")) return { error: "No such ramble." };
+    const slug = String(name).toLowerCase().replace(/^#/, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30);
+    if (!slug) return { error: "Give it a name with letters or numbers." };
+    const taken = new Set((await this.store.all<Thread>("threads")).filter((x) => x.id !== id).map((x) => channelOf(x)));
+    let unique = slug;
+    for (let n = 2; taken.has(unique); n++) unique = `${slug.slice(0, 27)}-${n}`;
+    const saved = await this.store.put<Thread>("threads", { ...t, channel: unique });
+    if (byUser) await this.log("ramble.renamed", `#${unique}`);
+    this.emit("threads");
+    return { value: saved };
   }
 
   /** Any activity in a ramble brings it back from the archive. */
@@ -418,6 +433,7 @@ export class Hub {
     for (const w of (Array.isArray(plan.newWorkflows) ? plan.newWorkflows : []).slice(0, 2)) await this.proposeWorkflow(w);
 
     const fresh = await this.store.get<Thread>("threads", thread.id);
+    if (fresh && !fresh.channel && !thread.id.startsWith("tm-") && typeof plan.channel === "string") await this.renameThread(thread.id, plan.channel, false);
     if (plan.title && !thread.id.startsWith("tm-") && fresh?.title === batch[0].text.split(/\s+/).slice(0, 6).join(" ")) await this.touchThread(thread.id, { title: String(plan.title).slice(0, 60) });
     // Hearth's short reply, then one message per task; each task's thread (the teammate working, replies) hangs under it.
     // Keep Hearth's line short when there are task posts under it; they say the rest.
@@ -1557,7 +1573,7 @@ export class Hub {
     const prefs = await this.prefs();
     const now = this.clock().getTime();
     const threads = new Map((await this.store.all<Thread>("threads")).map((t) => [t.id, t]));
-    const where = (id?: string) => !id ? "" : id.startsWith("tm-") ? "DM" : threads.get(id)?.num ? `#ramble-${threads.get(id)!.num}` : "";
+    const where = (id?: string) => !id ? "" : id.startsWith("tm-") ? "DM" : threads.get(id) ? `#${channelOf(threads.get(id)!)}` : "";
     const mine = (id?: string) => !teammateId || id === teammateId;
     const jobs = (await this.store.all<Job>("jobs")).filter((j) => !j.parentId && mine(j.teammateId));
     const card = (j: Job) => ({ kind: "task" as const, id: j.id, root: j.followsUp || j.id, title: j.label || shortLabel(undefined, j.task), teammateId: j.teammateId, threadId: j.threadId, where: where(j.threadId),
@@ -1635,7 +1651,7 @@ export class Hub {
     if (!terms.length) return "(nothing to search for)";
     const threads = new Map((await this.store.all<Thread>("threads")).map((t) => [t.id, t]));
     const team = new Map((await this.store.all<Teammate>("teammates")).map((t) => [t.id, t.name]));
-    const where = (id?: string) => !id ? "" : id.startsWith("tm-") ? `DM with ${team.get(id.slice(3)) || "a teammate"}` : threads.get(id)?.num ? `#ramble-${threads.get(id)!.num}` : "chat";
+    const where = (id?: string) => !id ? "" : id.startsWith("tm-") ? `DM with ${team.get(id.slice(3)) || "a teammate"}` : threads.get(id) ? `#${channelOf(threads.get(id)!)}` : "chat";
     const items: { at: string; where: string; text: string }[] = [
       ...(await this.store.all<Message>("messages")).map((m) => ({ at: m.createdAt, where: `${where(m.threadId)} · ${m.role === "user" ? "you" : team.get(m.teammateId || "hearth") || "Hearth"}`, text: m.text })),
       ...(await this.store.all<Job>("jobs")).filter((j) => j.result).map((j) => ({ at: j.finishedAt || j.createdAt, where: `${where(j.threadId)} · ${team.get(j.teammateId) || "teammate"}'s answer to "${(j.label || j.task).slice(0, 60)}"`, text: j.result! })),
@@ -1919,3 +1935,6 @@ export function cleanEmoji(v: unknown) {
   const flag = /^[\u{1F1E6}-\u{1F1FF}]{2}$/u.test(s);
   return parts.length === 1 && (flag || (/\p{Extended_Pictographic}/u.test(s) && !/[\p{L}\p{N}\s<>&"']/u.test(s))) ? s : undefined;
 }
+
+/** A ramble's channel name: its own ("japan-trip"), or ramble-N. */
+export const channelOf = (t: Thread) => t.channel || (t.num ? `ramble-${t.num}` : t.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 30));

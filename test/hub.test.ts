@@ -396,3 +396,23 @@ test("people: the relationship map grows as people come up, merging by name", as
   expect((await hub.upsertPerson({ name: "me" })).error).toBeTruthy();
   expect(((await hub.context("hi", "chat")) as any).people.length).toBe(2);
 });
+
+test("rambles get a channel name from the plan and can be renamed; names stay unique", async () => {
+  await hub.ensureTeammates();
+  const a = (await hub.ramble("plan my japan trip")).value!.thread;
+  await until(async () => !hub.thinking);
+  const r1 = await hub.renameThread(a.id, "Japan Trip!");
+  expect(r1.value!.channel).toBe("japan-trip");
+  const b = (await hub.ramble("another")).value!.thread;
+  await until(async () => !hub.thinking);
+  expect((await hub.renameThread(b.id, "japan-trip")).value!.channel).toBe("japan-trip-2");
+  expect((await hub.listThreads()).find((t: any) => t.id === a.id)!.name).toBe("japan-trip");
+});
+
+test("map tiles keep real coordinates in order and drop stops without them", async () => {
+  const { cleanTile } = await import("../src/tiles.ts");
+  const t = cleanTile({ type: "map", data: { stops: [{ name: "Osaka", lat: 34.6687, lon: 135.5013, when: "Day 1" }, { name: "Nowhere" }, { name: "Tokyo", lat: 35.68, lon: 139.76 }] } })!;
+  expect(t.data.stops.map((s: any) => s.name)).toEqual(["Osaka", "Tokyo"]);
+  expect(t.data.route).toBe(true);
+  expect(cleanTile({ type: "map", data: { stops: [{ name: "x", lat: 200, lon: 0 }] } })).toBeNull();
+});

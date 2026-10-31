@@ -1,5 +1,5 @@
-import { readFileSync, readdirSync, existsSync } from "node:fs";
-import { join, resolve, extname } from "node:path";
+import { readFileSync, readdirSync, existsSync, mkdirSync } from "node:fs";
+import { join, resolve, extname, dirname } from "node:path";
 type Server = Bun.Server<unknown>;
 import { sha256, deviceForToken, newPairingCode, redeemPairingCode, RateLimiter } from "./auth.ts";
 import type { Hub } from "./hub.ts";
@@ -55,6 +55,8 @@ class HttpError extends Error { constructor(public status: number, msg: string) 
 export async function startServer(hub: Hub, voice: VoiceSettings | null = null) {
   const voiceLimiter = new RateLimiter(5, 10 * 60_000);
   const liveTickets = new Map<string, number>();
+  const tileKey = randomBytes(12).toString("base64url");
+  const tileLimiter = new RateLimiter(600, 60_000);
   const { config, store } = hub;
   const web = await buildWeb();
   const pairLimiter = new RateLimiter(5, 10 * 60_000);
@@ -144,6 +146,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
           push: { available: !!hub.push, subscribed: hub.push ? await hub.push.hasDevice(device.id) : false },
           pendingScripts: (await hub.scripts.list()).filter((s) => s.status === "proposed").length,
           voice: voice?.current?.name ?? null,
+          tileKey,
         });
       }
       case "stream": {
@@ -187,6 +190,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
           return json(r.value);
         }
         if (method === "DELETE" && id) return json({ ok: await hub.removeThread(id) });
+        if (method === "PATCH" && id) { const r = await hub.renameThread(id, String((await body(req)).channel || "")); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         break;
       }
       case "files": {
@@ -512,6 +516,23 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
           "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Frame-Options": "SAMEORIGIN",
           "Content-Security-Policy": appCsp(["'self'", ...config.allowedOrigins].join(" ")),
         } }));
+      }
+      // Map tiles (OpenStreetMap by default, HEARTH_MAP_TILES to change): fetched by the hub (the phone never talks to the map service), cached on disk.
+      // Needs the hub's tile key (in /api/state for paired devices) so the hub isn't an open proxy.
+      const tm = url.pathname.match(/^\/tiles\/(\d{1,2})\/(\d{1,6})\/(\d{1,6})\.png$/);
+      if (tm) {
+        const [z, x, y] = tm.slice(1).map(Number);
+        if (url.searchParams.get("k") !== tileKey || z > 18 || x >= 2 ** z || y >= 2 ** z) return finish(new Response("Not found", { status: 404 }));
+        const file = join(config.dataDir, "tiles", String(z), String(x), `${y}.png`);
+        if (!existsSync(file)) {
+          if (!tileLimiter.allow("tiles")) return finish(new Response("Slow down", { status: 429 }));
+          const src = (process.env.HEARTH_MAP_TILES || "https://tile.openstreetmap.org/{z}/{x}/{y}.png").replace("{z}", String(z)).replace("{x}", String(x)).replace("{y}", String(y));
+          const res = await fetch(src, { headers: { "User-Agent": `Hearth/${pkg.version} (self-hosted personal assistant; tiles cached)` }, signal: AbortSignal.timeout(10_000) }).catch(() => null);
+          if (!res?.ok) return finish(new Response("Map unavailable", { status: 502 }));
+          mkdirSync(dirname(file), { recursive: true });
+          await Bun.write(file, await res.arrayBuffer());
+        }
+        return finish(new Response(Bun.file(file), { headers: { "Content-Type": "image/png", "Cache-Control": "private, max-age=604800" } }));
       }
       // 3D emoji (Microsoft Fluent Emoji 3D, MIT, via @lobehub/fluent-emoji-3d) served from the package: no calls out.
       if (url.pathname.startsWith("/emoji/")) {
