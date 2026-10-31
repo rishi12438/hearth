@@ -145,3 +145,46 @@ cd /opt/hearth && sudo -u hearth git pull && sudo -iu hearth bash -c 'cd /opt/he
 ```
 
 Back up `/opt/hearth/data` (or your database), and turn on automatic snapshots in Lightsail (Snapshots tab).
+
+## Sharing teammates by link
+
+Optional. Each shared link runs in its own sealed Docker container (see [docs/design/public-teammates.md](../docs/design/public-teammates.md)).
+The hub never gets Docker access or the boxes' API key: a small root helper, `hearth-boxctl`, starts and stops boxes when
+the hub asks.
+
+1. **Install Docker** and build the box image:
+   ```bash
+   sudo apt install -y docker.io
+   sudo docker build -t hearth-box -f /opt/hearth/deploy/box.Dockerfile /opt/hearth
+   ```
+2. **Give the boxes their own Claude API key.** Make a separate key in the Claude Console (ideally in its own workspace)
+   and set a monthly spend limit on it there. That limit holds even if everything else fails.
+   ```bash
+   sudo install -d -m 700 /etc/hearth/box-keys
+   echo 'ANTHROPIC_API_KEY=sk-ant-...' | sudo tee /etc/hearth/box-keys/default.env >/dev/null
+   sudo chmod 600 /etc/hearth/box-keys/default.env
+   ```
+   For a different key per link, add `/etc/hearth/box-keys/<link id>.env`.
+3. **Install the helper** (root-owned, outside `/opt/hearth`, so the hub can't change what root runs):
+   ```bash
+   sudo install -m 0755 /opt/hearth/deploy/hearth-boxctl /usr/local/sbin/hearth-boxctl
+   sudo install -d -o hearth -g hearth -m 700 /opt/hearth/data/boxctl
+   sudo cp /opt/hearth/deploy/hearth-boxctl.path /opt/hearth/deploy/hearth-boxctl.service /etc/systemd/system/
+   sudo systemctl daemon-reload && sudo systemctl enable --now hearth-boxctl.path
+   ```
+4. **Check the seal.** Every line must say `ok`:
+   ```bash
+   sudo bash /opt/hearth/deploy/box-selftest.sh
+   ```
+5. **Turn it on.** Add `HEARTH_BOX_RUNNER=docker` to `/opt/hearth/.env` and `sudo systemctl restart hearth`.
+6. **Share one.** On the server (phone screens for this are still to come):
+   ```bash
+   sudo -iu hearth bash -c 'cd /opt/hearth && ~/.bun/bin/bun src/cli.ts share Recipes --owner Rishi --notebook food'
+   sudo -iu hearth bash -c 'cd /opt/hearth && ~/.bun/bin/bun src/cli.ts shares'      # links, chats, spend
+   sudo -iu hearth bash -c 'cd /opt/hearth && ~/.bun/bin/bun src/cli.ts unshare <id>' # turn one off and delete its box
+   ```
+
+Visitors open `https://example.com/t/<link>/`. Caddy needs no change: the hub serves the page and forwards the link's API
+calls to that box's socket. After updating Hearth, rebuild the image (step 1); running boxes pick it up when they restart
+(`sudo docker restart $(sudo docker ps -q --filter label=hearth.box)`).
+

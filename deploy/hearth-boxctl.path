@@ -1,0 +1,12 @@
+# Runs hearth-boxctl whenever the hub asks for a box to start or stop. Install:
+#   sudo cp deploy/hearth-boxctl.path deploy/hearth-boxctl.service /etc/systemd/system/
+#   sudo systemctl enable --now hearth-boxctl.path
+# The hub creates the folder (as its own user) the first time sharing is on.
+[Unit]
+Description=Watch for shared-teammate box requests from the Hearth hub
+
+[Path]
+DirectoryNotEmpty=/opt/hearth/data/boxctl
+
+[Install]
+WantedBy=multi-user.target

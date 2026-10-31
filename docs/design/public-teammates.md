@@ -1,12 +1,13 @@
 # Sharing a teammate with other people
 
-Status: design, not built yet.
+Status: built (hub side, sealed box, deploy, tests). Not built yet: the phone screens for sharing (use the CLI or
+`/api/shares` for now), free/busy-style summaries, captchas, and device approval for guests (a guest link is a named link).
 
 Goal: send someone a link (or post it publicly) and they can chat with one teammate, say "Recipes" or "Book a call with
 Rishi". They get only what you chose to share, and that's a hard block, not a polite one: no prompt, trick or bug on
 their side can reach the rest of your hub.
 
-## How it works today
+## How it worked before this
 
 **You can't share a teammate safely yet.** There's no guest or public mode.
 
@@ -34,7 +35,7 @@ So the block lives in the hub's code, before the model runs:
 | Who | Gets in by | Sees |
 |---|---|---|
 | **You** | your paired devices (as today) | everything |
-| **Invited guest** | a link tied to one person, approved by you | one teammate + the notebooks you tick for them |
+| **Invited guest** | a named link you give one person | one teammate + the notebooks you tick for them |
 | **Public** | an open link | one teammate + its public notebook only |
 
 Guests and public links run on the same sealed setup. A guest is just a public link with more notebooks and a name on it.
@@ -47,12 +48,13 @@ Lightsail server.
 ```
         Internet
            │
-        Caddy (443)
-        ├── yourdomain.com/*         → hub        (your stuff, as today)
-        └── yourdomain.com/t/<link>  → box for that link
+        Caddy (443) → hub
+        ├── yourdomain.com/*            your stuff, as today
+        └── yourdomain.com/t/<link>/    the chat page (hub code, sandbox CSP);
+                                        /t/<link>/api/* forwarded as JSON to that box's unix socket
                                          │
                   ┌──────────────────────┴───────────────────────┐
-                  │ container: hearth-public-<link>              │
+                  │ container: hearth-box-<id>                   │
                   │  - its own tiny SQLite (its notebook copy,   │
                   │    visitor chats, outbox)                    │
                   │  - its own model API key, hard spend cap     │
@@ -95,7 +97,7 @@ What makes it sealed:
 The hub only copies what you picked, worked out ahead of time:
 
 - **Notebooks you tick:** for example "food" and "projects", not "health" or "people".
-- **Summaries instead of raw data:** "free/busy" instead of your calendar, "in Bangalore" instead of GPS.
+- **Summaries instead of raw data (not built yet):** "free/busy" instead of your calendar, "in Bangalore" instead of GPS.
 - **Ask me:** if a visitor wants something the box doesn't have ("what's his email?"), the box puts a request in its
   outbox and your phone asks *Share once / always / no*. Answering pushes just that one thing to the box.
 
@@ -142,8 +144,8 @@ as they happen, so it feels live. It's still the hub writing a checked diff, not
 path rules, a backup before every write, Undo per change, and a pause button. Public links can't turn this on.
 
 **Editing inside the box.** For a folder teammate the box gets file tools (read, edit, optionally run with CPU, memory and
-time limits). Each visitor gets their own working copy. The box tracks changes itself (a hidden git repo inside the box,
-whatever the original was), so you don't need git and visitors never see it.
+time limits). Each visitor gets their own working copy. The box records each change itself (the file before and after, per message),
+whatever the original was, so you don't need git and visitors never see it.
 
 **The edit log.** Every change is recorded, so you can see how it was edited, not just the end result:
 
@@ -178,7 +180,7 @@ checking them, so the seal holds.
 A "Recipes" link shouldn't write someone's essay or debug their code on your bill. Each shared teammate has a **scope**,
 and the box checks every message against it before the real model sees it.
 
-**The scope** is written when you share the teammate (the hub drafts it, you edit it):
+**The scope** is written when you share the teammate (it starts from the teammate's description; you edit it):
 
 ```json
 {
@@ -229,16 +231,17 @@ injection is actually dangerous, so it's the next place to put it after shared l
 - A captcha after N messages from one IP, or if the link gets hammered.
 - Visitor messages are capped in length, and nothing a visitor says becomes a memory in your hub.
 
-## Build order
+## Where it lives
 
-1. **`src/public/`:** the standalone box service: chat route, its own store, per-visitor sessions, rate/cost limits,
-   brain with no tools, and the guard model and reply check.
-2. **Publishing:** "Share this teammate" on the hub creates a link, picks notebooks, starts the container, pushes the copy.
-3. **Deploy:** `deploy/public.Dockerfile`, a Caddy route for `/t/*`, a Docker network that only allows the model API,
-   setup steps in `deploy/lightsail.md`.
-4. **Outbox:** hub pulls activity and "ask me" requests and shows them as notifications.
-5. **Invited guests:** named links with more notebooks, same box.
-6. **Folder sharing:** copy-in, per-visitor working copies, edit log, apply/merge/undo on the hub.
+- `src/public/`: the box. `box.ts` (sessions, limits, the teammate loop, file tools, outbox), `guard.ts` (guard model and
+  reply check), `rules.ts` (path rules, secret scan), `diff.ts`, `model.ts` (Claude API, own key, via the proxy),
+  `egress.ts` (the allowlist proxy), `selftest.ts` (seal checks run inside a container). Nothing here imports the hub.
+- `src/shares.ts`: the hub side: publish, runners (`docker` via `hearth-boxctl`, `local` for laptops), outbox pull with
+  field-by-field checks, apply / save as a copy / branch / undo, "ask me" answers.
+- `src/share-page.ts`: the visitor page. `src/server.ts`: `/t/<link>/` and `/api/shares`. `src/cli.ts`: `share`, `shares`, `unshare`.
+- `deploy/`: `box.Dockerfile`, `hearth-boxctl` (+ systemd path/service), `box-selftest.sh`; setup in `lightsail.md`.
+- Models: the teammate runs on Claude Opus 5.5 (effort medium) with server-side refusal fallback; the guard on Claude Haiku
+  5.5. Both are per-link settings.
 
 ## Tests that must pass
 

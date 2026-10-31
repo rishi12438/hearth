@@ -322,3 +322,57 @@ export type Component = Doc & {
 
 /** What an app saved for itself (flashcard progress, ticked boxes). */
 export type AppState = Doc & { state: unknown };
+
+// ---- Shared teammates (a link someone else can chat with; runs sealed in its own box, see docs/design/public-teammates.md) ----
+
+export type Share = Doc & {
+  /** The random part of the link (/t/<link>). Knowing it is the only way in. */
+  link: string;
+  kind: "public" | "guest";
+  /** Who a guest link is for. */
+  label?: string;
+  teammateId: string;
+  /** What the shared teammate is, in your words (its private prompt isn't copied). */
+  role: string;
+  /** How the shared teammate refers to you. */
+  ownerName: string;
+  /** Notebooks whose facts are copied in. Nothing else from memory is. */
+  notebooks: string[];
+  /** Extra things you typed in for this link. */
+  notes: string[];
+  scope: import("./public/types.ts").Scope;
+  limits: import("./public/types.ts").BoxLimits;
+  models: import("./public/types.ts").BoxModels;
+  folder?: {
+    path: string;
+    rules: import("./public/rules.ts").PathRules;
+    /** What the last publish copied in, so changes coming back can be checked against it. */
+    published: Record<string, { sha256: string; access: "read" | "edit" }>;
+    excluded: { path: string; why: string }[];
+  };
+  /** Trusted guests only: changes land in your folder as they come, with a backup and Undo. */
+  autoApply: boolean;
+  version: number;
+  status: "running" | "paused" | "revoked";
+  outboxOffset: number;
+  stats: { chats: number; refused: number; offTopic: number; costUsd: number; lastAt?: string };
+  answers: import("./public/types.ts").Answers;
+};
+
+export type ShareEvent = Doc & {
+  shareId: string;
+  kind: "chat" | "refused" | "ask" | "edit" | "paused";
+  status: "new" | "pending" | "applied" | "rejected" | "conflict" | "copied" | "branched" | "answered";
+  /** What the box sent, checked field by field. Untrusted text: shown as text, never acted on. */
+  event: import("./public/types.ts").OutboxEvent;
+  result?: string;
+};
+
+export type ShareApply = Doc & {
+  shareId: string;
+  eventIds: string[];
+  /** Each file as it was before, so Undo can put it back exactly (null = it didn't exist). */
+  files: { path: string; before: string | null; after: string | null }[];
+  undoneAt?: string;
+};
+

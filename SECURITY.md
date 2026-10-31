@@ -41,6 +41,30 @@ Hearth holds personal data and can act on a schedule, so it is built to fail clo
 - The only ways out of an app are `postMessage`s the app screen accepts only from that app's own frame: `hearth.save(state)` (that app's state, 48 KB max) and `hearth.ask(text)` (a message to the teammate who made it, at most one every 3 seconds and 30 an hour, shown in your DM with them). A message from an app is still just a message: anything with external effects stops at Approve.
 - What remains: an app could *show* misleading text, such as a fake login form. Hearth never asks for passwords inside an app.
 
+## Shared teammates
+- A shared link runs in its own container: non-root, read-only image, no capabilities, `no-new-privileges`, memory, CPU and
+  process limits. It sees two folders: its bundle (read-only) and its own data. The bundle holds only the notebooks, notes,
+  scope and folder files you picked; the teammate's private prompt, other memory, people, location, messages, files, hooks
+  and apps are never copied.
+- Its network is an internal Docker network with no route out (not the host, not `169.254.169.254`, no outside DNS). The
+  only way out is an egress proxy that tunnels HTTPS to `api.anthropic.com` and refuses everything else, including IP
+  literals and private addresses. It uses its own API key, which the hub never sees; set a spend limit on that key.
+- The hub doesn't get Docker access: `hearth-boxctl` (root, installed outside the hub's folder) accepts only
+  start/stop/remove for a 24-hex-digit id and builds every path and flag itself. It refuses a bundle that's a symlink.
+- The box can't reach the hub. The hub reads the box's outbox file and rebuilds every event field by field; malformed
+  events are dropped. Visitor text is shown as text and never becomes memory.
+- Visitors reach the box only through `/t/<link>/api/*`, which the hub forwards as JSON with `Content-Security-Policy: sandbox`.
+  The chat page is the hub's own code, served with a sandbox CSP (opaque origin), so it can't read the app's storage or
+  device token. Links are 144-bit random capabilities; turning one off removes its box and data.
+- Folders: copies skip `.env*`, keys, `.git`, `node_modules`, anything in `.gitignore`, symlinks, binary files and files
+  that look like they hold a secret. `read` files are mounted read-only; writes land only in that visitor's copy. Changes
+  come back as proposals; the hub checks each path against your rules again (and refuses files it never copied) before
+  writing, keeps the previous contents for Undo, and stops on a conflict instead of overwriting your edits.
+- A guard model screens each message for scope, rule-change attempts and abuse, and a reply check blocks code and essays
+  where the scope doesn't allow them. These keep the teammate on its job; they are not what protects your data. The
+  container is: assume anything in the bundle can be read out word for word.
+- The `local` runner (a plain subprocess) is for trying the feature on your own machine and is not sealed.
+
 ## Your data
 - SQLite files and the data folder are created with mode `0700`. Use a Postgres or MySQL user with access only to the Hearth tables.
 - Web Push VAPID keys are generated on first run and kept with your data; nothing is hard-coded. Push payloads go from your hub to your browser's push service, encrypted end to end per the Web Push standard.
