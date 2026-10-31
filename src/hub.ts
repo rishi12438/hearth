@@ -435,7 +435,9 @@ export class Hub {
     const fresh = await this.store.get<Thread>("threads", thread.id);
     // Hearth names the ramble from its topic, and renames it when the topic changes, unless you named it yourself.
     const wanted = typeof plan.channel === "string" ? plan.channel : !fresh?.channel && typeof plan.title === "string" ? nameFrom(plan.title) : "";
-    if (fresh && wanted && !thread.id.startsWith("tm-") && fresh.channelBy !== "you" && slugOf(wanted) && slugOf(wanted) !== fresh.channel) await this.renameThread(thread.id, wanted, false);
+    // Hearth's names stay short however many topics a ramble covers: three words, 24 characters at most.
+    const short = slugOf(wanted).split("-").filter(Boolean).slice(0, 3).join("-").slice(0, 24).replace(/-+$/, "");
+    if (fresh && short && !thread.id.startsWith("tm-") && fresh.channelBy !== "you" && short !== fresh.channel) await this.renameThread(thread.id, short, false);
     if (plan.title && !thread.id.startsWith("tm-") && fresh?.title === batch[0].text.split(/\s+/).slice(0, 6).join(" ")) await this.touchThread(thread.id, { title: String(plan.title).slice(0, 60) });
     // Hearth's short reply, then one message per task; each task's thread (the teammate working, replies) hangs under it.
     // Keep Hearth's line short when there are task posts under it; they say the rest.

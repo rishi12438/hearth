@@ -186,7 +186,7 @@ NAMING a new teammate: the user should know what it does from the name alone, li
   Pick one no other teammate in CONTEXT.teammates has.
 
 Reply with ONLY a JSON object, no prose, no code fence:
-{"title":"3-6 word chat title","channel":"1-3 word lowercase-dashed name for this ramble's topic, e.g. japan-trip, knee-and-gym (CONTEXT.thisChannel is its current name: repeat it unless the topic clearly changed; always give one)","reply":"...","facts":[{"fact":"...","notebook":"...","importance":1|2|3}],
+{"title":"3-6 word chat title","channel":"lowercase-dashed name for this ramble, at most 3 words and 24 characters, that covers EVERY topic in it (thisChat, openTasks and this message): one short word per topic when there are several, e.g. japan-trip, knee-gym, landlord-gift-tickets. CONTEXT.thisChannel is the current name: keep it if it still covers everything, otherwise update it. Always give one","reply":"...","facts":[{"fact":"...","notebook":"...","importance":1|2|3}],
  "jobs":[{"id":"j1","label":"2-6 words the user sees","task":"...","teammate":"<existing name>","effort":"quick|light|heavy","dependsOn":["<earlier job id>"]?,"use":{"skill|workflow":"<library name>","inputs":{...}}?}
        | {"label":"...","task":"...","teammate":"<new name>","effort":"light|heavy","newTeammate":{"name":"...","description":"...","emoji":"🏋️"}}],
  "newWorkflows":[{"name","description","inputs","steps":[{"skill","inputs"}]}]?}

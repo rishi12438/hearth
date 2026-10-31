@@ -429,6 +429,10 @@ test("Hearth names rambles from the plan and renames them when the topic changes
   await hub.ramble("actually just kyoto, find a ryokan", t.id);
   await until(async () => !hub.thinking);
   expect((await store.get<any>("threads", t.id)).channel).toBe("kyoto-ryokan");
+  channel = "kyoto-ryokan-gym-plan-and-landlord-email-followup";
+  await hub.ramble("also my gym plan and email the landlord", t.id);
+  await until(async () => !hub.thinking);
+  expect((await store.get<any>("threads", t.id)).channel).toBe("kyoto-ryokan-gym"); // several topics, still short
   await hub.renameThread(t.id, "honeymoon");
   channel = "something-else";
   await hub.ramble("and a restaurant", t.id);
