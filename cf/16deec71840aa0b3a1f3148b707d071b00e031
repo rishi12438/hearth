@@ -1,0 +1,38 @@
+src/hub.ts
+  s_a62c474b26f7ae::t_8ca2723bcd1e23 97-98,2129-2135,2142-2150
+src/computers.ts
+  s_a62c474b26f7ae::t_e7faaecd5fa6df 13-14,71-73,100,120,217-250
+src/connections.ts
+  s_a62c474b26f7ae::t_18970abda6ea18 2,44,55,114-116
+  s_a62c474b26f7ae::t_7da25d0e6f2af5 3,16,30-43,45-54,56-64,75,99,103
+  s_a62c474b26f7ae::t_f0a5b961a77205 14
+src/chrome.ts
+  s_a62c474b26f7ae::t_07a629f3741787 109-118
+src/cookie-sites.ts
+  s_a62c474b26f7ae::t_f0a5b961a77205 1-11
+web/src/app.ts
+  s_a62c474b26f7ae::t_350df122a867db 1433-1435,1480-1483,1499-1506,1526-1527
+test/social.test.ts
+  s_a62c474b26f7ae::t_707ae7263af6e8 126-170
+src/computer.ts
+  s_a62c474b26f7ae::t_7e7cd009b6daae 7-8,13-15,111,128-144,177,186
+src/server.ts
+  s_a62c474b26f7ae::t_d5b344adabbf60 491,493-498
+  s_a62c474b26f7ae::t_8ca2723bcd1e23 87-91,96
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "cf16deec71840aa0b3a1f3148b707d071b00e031",
+  "prompts": {},
+  "sessions": {
+    "s_a62c474b26f7ae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4c826b8c-287f-4f16-ac8d-eafba60501f3",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
