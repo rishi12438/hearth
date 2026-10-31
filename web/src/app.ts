@@ -985,10 +985,6 @@ function answer(j: any) {
       const b = e.currentTarget as HTMLButtonElement; b.disabled = true;
       try { const sk = await call(`/api/jobs/${j.id}/save-skill`, { body: {} }); toast(`Saved skill ${sk.name}`); b.textContent = "Saved as skill"; loadSkills(); } catch (err) { b.disabled = false; handleError(err); }
     } } }, "Save as skill") : null,
-    j.status === "done" && !(j.did || []).some((d: any) => d.kind === "app") ? h("button", { class: "linkbtn", on: { click: async (e: Event) => {
-      (e.currentTarget as HTMLButtonElement).disabled = true;
-      try { await call(`/api/jobs/${j.followsUp || j.id}/reply`, { body: { text: "Turn this into a mini app I can use, with this content in it." } }); } catch (err) { handleError(err); }
-    } } }, icon("sparkle", 14), "Make an app") : null,
   ], false, j.status === "failed" ? "err" : "");
 }
 
@@ -1216,86 +1212,90 @@ function mercator(lat: number, lon: number, z: number) {
   return { x: ((lon + 180) / 360) * n, y: ((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * n };
 }
 
-/** A map of stops. With route=true it plays: the line draws from stop to stop, each pin pops and its card shows. */
-function mapView(stops: { name: string; lat: number; lon: number; when?: string; note?: string; url?: string }[], route: boolean, list = false) {
-  // Fit the stops in the part of the map above the card (the card covers the bottom ~70px).
-  const H = 280, FIT_W = 250, FIT_H = 140, LIFT = 26;
-  let z = 15;
-  for (; z > 2; z--) {
-    const pts = stops.map((s) => mercator(s.lat, s.lon, z));
-    const w = Math.max(...pts.map((p) => p.x)) - Math.min(...pts.map((p) => p.x)), hh = Math.max(...pts.map((p) => p.y)) - Math.min(...pts.map((p) => p.y));
-    if (w <= FIT_W && hh <= FIT_H) break;
-  }
-  if (stops.length === 1) z = 14;
-  const pts = stops.map((s) => mercator(s.lat, s.lon, z));
-  const cx = (Math.max(...pts.map((p) => p.x)) + Math.min(...pts.map((p) => p.x))) / 2, cy = (Math.max(...pts.map((p) => p.y)) + Math.min(...pts.map((p) => p.y))) / 2;
-  const at = (p: { x: number; y: number }) => ({ x: p.x - cx, y: p.y - cy - LIFT }); // relative to the map's center, nudged up
+/**
+ * A map you can read at a glance: one stop at a time, zoomed in, with a plain card underneath ("Day 1-2 · Osaka",
+ * what to do, ‹ 1 of 5 ›). It plays through the stops once on its own; "See whole route" shows the overview.
+ */
+function mapView(stops: { name: string; lat: number; lon: number; when?: string; note?: string; url?: string; leg?: string }[], route: boolean, _list = false) {
+  const H = 210;
   const hub = activeHub()!, key = S.state?.tileKey || "";
-  const tiles: Node[] = [];
-  const max = 2 ** z;
-  for (let tx = Math.floor((cx - 420) / TILE); tx <= Math.floor((cx + 420) / TILE); tx++)
-    for (let ty = Math.floor((cy + LIFT - H / 2 - 20) / TILE); ty <= Math.floor((cy + LIFT + H / 2 + 20) / TILE); ty++) {
-      if (ty < 0 || ty >= max) continue;
-      const wx = ((tx % max) + max) % max;
-      tiles.push(h("img", { class: "mtile", alt: "", draggable: false, src: `${hub.url}/tiles/${z}/${wx}/${ty}.png?k=${encodeURIComponent(key)}`, style: `left:calc(50% + ${tx * TILE - cx}px);top:calc(50% + ${ty * TILE - cy - LIFT}px)` }));
-    }
   const ns = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(ns, "svg");
-  svg.setAttribute("class", "mroute");
-  const path = document.createElementNS(ns, "path");
-  const rel = pts.map(at);
-  path.setAttribute("d", rel.map((p, i) => `${i ? "L" : "M"}${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" "));
-  const seg = rel.slice(1).map((p, i) => Math.hypot(p.x - rel[i].x, p.y - rel[i].y));
-  const total = seg.reduce((a, b) => a + b, 0) || 1;
-  path.style.strokeDasharray = `${total}`;
-  path.style.strokeDashoffset = route ? `${total}` : `${total}`;
-  if (route && stops.length > 1) svg.appendChild(path);
-  const dot = h("span", { class: "mdot", hidden: true });
-  const card = h("div", { class: "mcard", hidden: true });
-  const show = (i: number) => {
-    const s = stops[i];
-    pins.forEach((p, k) => p.classList.toggle("cur", k === i));
-    clear(card, h("span", { class: "mnum" }, String(i + 1)), h("span", { class: "grow" }, h("small", null, [s.when, s.name].filter(Boolean).join(" · ")), s.note ? h("b", null, s.note) : h("b", null, s.name)),
-      h("a", { href: s.url || `https://maps.google.com/?q=${s.lat},${s.lon}`, target: "_blank", rel: "noopener noreferrer", class: "mopen", "aria-label": `Open ${s.name} in Maps` }, icon("chevron", 16)));
-    card.hidden = false;
+  let cur = 0, overview = false, touched = false;
+  const stage = h("div", { class: "mstage" });
+  const counter = h("span", { class: "mcount" });
+  const label = h("div", { class: "mlabel" });
+  const dots = h("div", { class: "mdots" }, stops.map((_, k) => h("i", { on: { click: () => go(k) } })));
+  // Tiles for a view centered on (cx, cy) at zoom z, plus a function placing a point on it.
+  const tilesFor = (cx: number, cy: number, z: number) => {
+    const out: Node[] = [], max = 2 ** z;
+    for (let tx = Math.floor((cx - 420) / TILE); tx <= Math.floor((cx + 420) / TILE); tx++)
+      for (let ty = Math.floor((cy - H / 2 - 10) / TILE); ty <= Math.floor((cy + H / 2 + 10) / TILE); ty++) {
+        if (ty < 0 || ty >= max) continue;
+        out.push(h("img", { class: "mtile", alt: "", draggable: false, src: `${hub.url}/tiles/${z}/${((tx % max) + max) % max}/${ty}.png?k=${encodeURIComponent(key)}`, style: `left:calc(50% + ${tx * TILE - cx}px);top:calc(50% + ${ty * TILE - cy}px)` }));
+      }
+    return out;
   };
-  const pins = rel.map((p, i) => h("button", { class: `mpin ${route ? "" : "on"}`, style: `left:calc(50% + ${p.x}px);top:calc(50% + ${p.y}px)`, "aria-label": stops[i].name, on: { click: () => show(i) } },
-    h("span", null, String(i + 1)), h("em", null, stops[i].name)));
-  let playing = 0;
-  const play = () => {
-    const run = ++playing;
-    pins.forEach((p) => p.classList.remove("on", "cur"));
-    path.style.strokeDashoffset = `${total}`;
-    let i = 0, drawn = 0;
-    const next = () => {
-      if (run !== playing) return;
-      pins[i].classList.add("on"); show(i);
-      if (i >= stops.length - 1) { dot.hidden = true; return; }
-      const a = rel[i], b = rel[i + 1], len = seg[i], t0 = performance.now(), dur = Math.min(1600, 500 + len * 4);
-      dot.hidden = false;
-      const step = (now: number) => {
-        if (run !== playing) return;
-        const k = Math.min(1, (now - t0) / dur), e = k < .5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2;
-        dot.style.left = `calc(50% + ${a.x + (b.x - a.x) * e}px)`; dot.style.top = `calc(50% + ${a.y + (b.y - a.y) * e}px)`;
-        path.style.strokeDashoffset = `${total - drawn - len * e}`;
-        if (k < 1) requestAnimationFrame(step); else { drawn += len; i++; setTimeout(next, 650); }
-      };
-      setTimeout(() => requestAnimationFrame(step), 500);
-    };
-    next();
+  const draw = () => {
+    if (overview) {
+      let z = 14;
+      for (; z > 2; z--) {
+        const p = stops.map((s) => mercator(s.lat, s.lon, z));
+        if (Math.max(...p.map((q) => q.x)) - Math.min(...p.map((q) => q.x)) <= 260 && Math.max(...p.map((q) => q.y)) - Math.min(...p.map((q) => q.y)) <= 150) break;
+      }
+      const p = stops.map((s) => mercator(s.lat, s.lon, z));
+      const cx = (Math.max(...p.map((q) => q.x)) + Math.min(...p.map((q) => q.x))) / 2, cy = (Math.max(...p.map((q) => q.y)) + Math.min(...p.map((q) => q.y))) / 2;
+      const svg = document.createElementNS(ns, "svg"); svg.setAttribute("class", "mroute");
+      if (route && stops.length > 1) {
+        const path = document.createElementNS(ns, "path");
+        path.setAttribute("d", p.map((q, k) => `${k ? "L" : "M"}${(q.x - cx).toFixed(1)} ${(q.y - cy).toFixed(1)}`).join(" "));
+        svg.appendChild(path);
+      }
+      // How you get from one stop to the next ("✈️ 2h 40m"), on the middle of each line.
+      // Each label sits beside the middle of its own line, alternating sides, so lines that run close don't stack labels.
+      const legs = route ? p.slice(1).map((q, k) => {
+        if (!stops[k + 1].leg) return null;
+        const a = p[k], dx = q.x - a.x, dy = q.y - a.y, len = Math.hypot(dx, dy) || 1, side = k % 2 ? 1 : -1;
+        const mx = (a.x + q.x) / 2 + (-dy / len) * 16 * side, my = (a.y + q.y) / 2 + (dx / len) * 16 * side;
+        return h("span", { class: "mleg", style: `left:calc(50% + ${mx - cx}px);top:calc(50% + ${my - cy}px)` }, stops[k + 1].leg!);
+      }) : [];
+      clear(stage, tilesFor(cx, cy, z), svg, legs, p.map((q, k) => h("button", { class: `mpin on ${k === cur ? "cur" : ""}`, style: `left:calc(50% + ${q.x - cx}px);top:calc(50% + ${q.y - cy}px)`, "aria-label": stops[k].name,
+        on: { click: () => { overview = false; go(k); } } }, h("span", null, String(k + 1)))));
+    } else {
+      const s = stops[cur], z = 13, q = mercator(s.lat, s.lon, z);
+      clear(stage, tilesFor(q.x, q.y, z), h("span", { class: "mpinbig" }, emoji3d("📍")));
+    }
+    const s = stops[cur];
+    clear(label, h("small", null, [s.when, s.name].filter(Boolean).join(" · ")), h("b", null, s.note || s.name),
+      cur > 0 && s.leg ? h("span", { class: "mlegline" }, `From ${stops[cur - 1].name} · ${s.leg}`) : null,
+      h("a", { href: s.url || `https://maps.google.com/?q=${s.lat},${s.lon}`, target: "_blank", rel: "noopener noreferrer", class: "mopenlink" }, "Open in Maps"));
+    counter.textContent = stops.length > 1 ? `${cur + 1} of ${stops.length}` : "";
+    Array.from(dots.children).forEach((d, k) => d.classList.toggle("on", k === cur));
+    toggle.textContent = overview ? "Back to stops" : "See whole route";
   };
-  const stage = h("div", { class: "mstage" }, tiles, svg, pins, dot);
-  const box = h("div", { class: "mapbox" }, stage, card,
-    route && stops.length > 1 ? h("button", { class: "mplay", on: { click: play } }, icon("repeat", 14), "Replay") : null,
-    h("span", { class: "mattr" }, "© OpenStreetMap"));
-  // Play once when it scrolls into view.
-  if (route && stops.length > 1) {
-    const io = new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) { io.disconnect(); setTimeout(play, 250); } }, { threshold: .5 });
+  const go = (k: number) => { cur = (k + stops.length) % stops.length; stage.classList.remove("in"); void stage.offsetWidth; stage.classList.add("in"); draw(); };
+  const toggle = h("button", { class: "mtoggle", on: { click: () => { touched = true; overview = !overview; draw(); } } });
+  const nav = stops.length > 1 ? h("div", { class: "mnav" },
+    h("button", { class: "mbtn", "aria-label": "Previous stop", on: { click: () => { touched = true; overview = false; go(cur - 1); } } }, icon("back", 18)), counter,
+    h("button", { class: "mbtn", "aria-label": "Next stop", on: { click: () => { touched = true; overview = false; go(cur + 1); } } }, icon("chevron", 18))) : null;
+  // Swipe left/right on the map to change stop.
+  let sx = 0;
+  stage.addEventListener("pointerdown", (e) => { sx = e.clientX; });
+  stage.addEventListener("pointerup", (e) => { const dx = e.clientX - sx; if (Math.abs(dx) > 40 && !overview) { touched = true; go(cur + (dx < 0 ? 1 : -1)); } });
+  const box = h("div", { class: "mapwrap" },
+    h("div", { class: "mapbox" }, stage, stops.length > 1 && route ? toggle : null, h("span", { class: "mattr" }, "© OpenStreetMap")),
+    h("div", { class: "mcardline" }, label, nav), stops.length > 1 ? dots : null);
+  draw();
+  // Plays through the stops once when it comes into view, until you touch it.
+  if (stops.length > 1) {
+    const io = new IntersectionObserver((es) => {
+      if (!es.some((e) => e.isIntersecting)) return;
+      io.disconnect();
+      const tick = () => { if (touched || cur >= stops.length - 1 || !box.isConnected) return; go(cur + 1); setTimeout(tick, 2600); };
+      setTimeout(tick, 2600);
+    }, { threshold: .6 });
     requestAnimationFrame(() => io.observe(box));
   }
-  return h("div", { class: "mapwrap" }, box,
-    list && stops.length > 1 ? h("div", { class: "mstops" }, stops.map((s, i) => h("button", { class: "mstop", on: { click: () => { show(i); box.scrollIntoView({ block: "nearest", behavior: "smooth" }); } } },
-      h("span", { class: "mnum" }, String(i + 1)), h("span", { class: "grow" }, h("b", null, s.name), s.when || s.note ? h("small", null, [s.when, s.note].filter(Boolean).join(" · ")) : null)))) : null);
+  return box;
 }
 
 function secs(ms?: number) {

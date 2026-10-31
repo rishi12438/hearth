@@ -93,10 +93,13 @@ ACTIONS
 - tile {tile, title?, data}   show a result instead of describing it, when that's clearer. "tile" is one of these, with data:
     weather {place, temp, feels?, summary, high?, low?, rain? (%), wind?, hours?:[{t:"14:00",temp,rain?}]}
     places {items:[{name, detail, url?, lat?, lon?}]}   checklist {items:[{text, done}]}   stat {label, value, sub?}   note {body}
-    map {stops:[{name, lat, lon, when?, note?, url?}], route?: true}   for trips, itineraries and anywhere the user will go:
+    map {stops:[{name, lat, lon, when?, note?, url?, leg?}], route?: true}   for trips, itineraries and anywhere the user will go:
+      leg = how they get to this stop from the previous one and how long, e.g. "✈️ 2h 40m", "🚄 45 min", "🚗 1h 10m" (shown on the line);
       real coordinates for each stop (look them up if unsure), in visiting order; "when" like "Day 2" or "Fri 7pm". The app
-      draws a real map and plays the route stop by stop. Send one with every trip or multi-stop plan; add lat/lon to places too.
-    Keep your text reply to one line when you send a tile. Scripts can print "@tile {json}" lines (with "type" set to the tile kind) to make tiles themselves.
+      shows one stop at a time, zoomed in, with its "when" and "note" (one short line: what to do there). Send one with every
+      trip or multi-stop plan, and then keep your text reply to ONE or TWO lines: don't repeat the stops in text. Add lat/lon
+      to places too.
+    Keep your text reply to one or two lines when you send a tile or an artifact; the tile carries the details. Scripts can print "@tile {json}" lines (with "type" set to the tile kind) to make tiles themselves.
 - file.create {name, content}   ONLY for something to use outside the app: a calendar invite (.ics), a spreadsheet (.csv), or
     when the user asks for a file. NEVER for something to read: plans, itineraries, notes and guides go in your reply itself
     (it renders headings, lists and tables nicely on any device), with tiles (a map for trips). No .md or .txt deliverables.
@@ -187,6 +190,10 @@ Reply with ONLY a JSON object, no prose, no code fence:
  "jobs":[{"id":"j1","label":"2-6 words the user sees","task":"...","teammate":"<existing name>","effort":"quick|light|heavy","dependsOn":["<earlier job id>"]?,"use":{"skill|workflow":"<library name>","inputs":{...}}?}
        | {"label":"...","task":"...","teammate":"<new name>","effort":"light|heavy","newTeammate":{"name":"...","description":"...","emoji":"🏋️"}}],
  "newWorkflows":[{"name","description","inputs","steps":[{"skill","inputs"}]}]?}
+VISUALS FIRST (the user reads on a phone): in each task brief, say what the answer should look like so it's comfortable on a
+small screen: a map for trips and places (each stop with when, one line on what to do, and how you get there + how long), a
+checklist, a weather/stat tile, or an artifact (a small interactive view) for anything with structure, like days, options to
+compare, a timeline or prices. Then at most 2-3 short lines of text. Never a wall of text, never a file to read.
 TILES: results like weather, places, checklists and numbers show as tiles; teammates and skills handle that, so write each
 task plainly ("Weather in Paris tomorrow"). Requests to change how a tile looks are jobs for the teammate that owns that skill.
 MINI APPS: "make me flashcards / a tracker / a quiz / an app for this" is a job for the teammate whose lane it is (Languages builds
@@ -239,7 +246,10 @@ export function buildPrompt(b: BrainInput) {
       "JOB:", b.input);
   } else if (b.mode === "voice") {
     parts.push("", "You are the lead on ONE job. A teammate on a cheaper model already did the legwork (searches, actions); their notes are",
-      "below. Write the reply the user sees, in your teammate voice: 1-5 short lines, the answer first, warm and specific, no filler.",
+      "below. Write the reply the user sees, in your teammate voice. They read it on a PHONE: the answer first in 1-3 short lines,",
+      "warm and specific, no filler, no long lists. Put the details in a visual: a map tile for trips and places (when, one-line note,",
+      "and leg like \"✈️ 2h 40m\" per stop), a checklist/stat/weather tile, or an inline artifact (app.save with inline: true) for days,",
+      "comparisons, timelines or prices. Check the visual reads well at ~360px wide: big text, few words, generous spacing.",
       "Use only what the notes support; don't invent facts. Actions in the notes are already done; don't repeat them. You may add a",
       "tile if it presents the answer better (a map for trips and places, with real coordinates). Never make a file for reading.",
       `If the notes don't answer the job well enough (wrong, thin, or missed what the user asked), reply exactly ${REDO} and one line on`,

@@ -56,7 +56,7 @@ export function cleanTile(t: any): Tile | null {
       // A trip or a set of places on a real map; route=true plays it stop by stop in order.
       data = {
         route: d.route !== false,
-        stops: (Array.isArray(d.stops) ? d.stops : []).slice(0, 24).map((x: any) => ({ name: str(x?.name, 60), lat: coord(x?.lat, 85), lon: coord(x?.lon, 180), when: str(x?.when, 40), note: str(x?.note, 200), url: url(x?.url) }))
+        stops: (Array.isArray(d.stops) ? d.stops : []).slice(0, 24).map((x: any) => ({ name: str(x?.name, 60), lat: coord(x?.lat, 85), lon: coord(x?.lon, 180), when: str(x?.when, 40), note: str(x?.note, 200), url: url(x?.url), leg: str(x?.leg, 30) }))
           .filter((x: any) => x.name && x.lat !== undefined && x.lon !== undefined),
       };
       if (!data.stops.length) return null;
