@@ -114,6 +114,33 @@ repo:
 Either way it skips `.env*`, keys, `node_modules`, anything in `.gitignore`, and warns you about anything that looks
 like a password or token. Assume visitors can read everything that's copied.
 
+**Who can touch what.** You set rules per file or folder when you share, and can give edit access to anything,
+including the core of the project:
+
+```json
+{
+  "edit":   ["src/recipes/**", "src/core/**"],
+  "read":   ["src/**", "README.md"],
+  "hidden": ["deploy/**", "secrets/**", "*.pem"]
+}
+```
+
+- **hidden:** never copied into the box. The teammate can't see it exists.
+- **read:** copied in, mounted **read-only** in the container, so even if the teammate ran a shell command the
+  operating system would refuse the write.
+- **edit:** copied into the writable part of the container.
+
+Anything not listed is `hidden`; the most specific rule wins (`edit src/core/**` beats `read src/**`). Rules are set per
+link, so a trusted guest can get `edit` on the core while the public link only gets `read`.
+
+The rules are enforced twice, by code, not by the model: by the container's mounts, and again by the hub when changes
+come back. The hub drops any change to a file that isn't `edit` for that link, whatever the box says, because the box is
+untrusted.
+
+**Auto-apply (optional, trusted guests only).** For people you trust, edits to `edit` paths can land in your real folder
+as they happen, so it feels live. It's still the hub writing a checked diff, not the container touching your disk: same
+path rules, a backup before every write, Undo per change, and a pause button. Public links can't turn this on.
+
 **Editing inside the box.** For a folder teammate the box gets file tools (read, edit, optionally run with CPU, memory and
 time limits). Each visitor gets their own working copy. The box tracks changes itself (a hidden git repo inside the box,
 whatever the original was), so you don't need git and visitors never see it.
@@ -143,8 +170,8 @@ For git folders there's a fifth: **open as a branch/PR**, with one commit per lo
 **Keeping the copy fresh.** *Update* (or automatic refresh) pushes your latest folder into the box. Visitors' open copies
 keep their base, so the merge on the way back still works.
 
-**What it won't do:** edit your real folder live. That would mean mounting your disk into the container, which breaks the
-seal.
+**What it won't do:** mount your real folder into the container. Even with auto-apply, the hub writes the changes after
+checking them, so the seal holds.
 
 ## Staying on topic
 
@@ -222,6 +249,7 @@ injection is actually dangerous, so it's the next place to put it after shared l
 - Revoking a link makes it 404 within seconds and deletes its container and data.
 - Visitor A can't read visitor B's conversation.
 - Applying a visitor's changes after you edited the same file shows a conflict instead of overwriting, and Undo
-  restores the folder exactly. Copied folders never contain `.env*` or files that match `.gitignore`.
+  restores the folder exactly. A change to a `read` or `hidden` path is
+  refused by the container's filesystem and dropped again by the hub; `hidden` files are absent from the box. Copied folders never contain `.env*` or files that match `.gitignore`.
 - An off-topic suite (essays, code, homework, "pretend you're a general assistant") is mostly answered with the fixed
   reply, never calls the main model when the guard says `out`, and any reply that slips through stays under the length cap.
