@@ -210,6 +210,17 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       if (!(await hub.webhook(seg[2], text))) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(404, "No webhook here."); }
       return json({ ok: true }, 202);
     }
+    // Google sends the browser back here after you approve (no device key on a redirect; the state ties it to your Connect).
+    if (path === "/api/google/callback" && method === "GET") {
+      const err = url.searchParams.get("error");
+      const r = err ? { error: err === "access_denied" ? "You didn't allow access." : err }
+        : await hub.google.finish(url.searchParams.get("code") || "", url.searchParams.get("state") || "");
+      if (r.error && badToken.blocked(ip)) throw banned();
+      if (r.error) badToken.allow(ip);
+      else { await hub.log("google.connected", `Google connected (${hub.google.status().email || "account"})`); hub.emit("connections"); }
+      const to = `/#connections=${r.error ? `error:${encodeURIComponent(r.error)}` : "google"}`;
+      return new Response(null, { status: 302, headers: { Location: to, "Cache-Control": "no-store" } });
+    }
     if (path === "/api/pair" && method === "POST") {
       if (!pairLimiter.allow(ip) || !pairGlobal.allow("all")) throw new HttpError(429, "Too many attempts. Wait 10 minutes.");
       const b = await body(req);
@@ -445,6 +456,29 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (audio.length > 15 * 1024 * 1024) throw new HttpError(413, "Recording too long.");
         try { return json({ text: await stt.transcribe(audio, type) }); }
         catch (err: any) { throw new HttpError(502, `Transcription failed: ${err.message}`); }
+      }
+      case "google": {
+        // The redirect Google must allow: this hub's own address, as your browser sees it.
+        const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || url.host;
+        const proto = config.behindProxy ? (req.headers.get("x-forwarded-proto") || "https") : url.protocol.replace(":", "");
+        const redirectUri = `${proto}://${host}/api/google/callback`;
+        if (method === "GET" && !id) return json({ ...hub.google.status(), redirectUri });
+        if (method === "PUT" && id === "client") {
+          ownerOnly();
+          const b = await body(req);
+          const r = hub.google.setClient(String(b.clientId || ""), String(b.clientSecret || ""));
+          if (r.error) throw new HttpError(400, r.error);
+          hub.emit("connections");
+          return json({ ...r.value, redirectUri });
+        }
+        if (method === "POST" && id === "connect") {
+          ownerOnly();
+          const r = hub.google.authUrl(redirectUri);
+          if (r.error) throw new HttpError(400, r.error);
+          return json({ url: r.value });
+        }
+        if (method === "DELETE" && !id) { ownerOnly(); const st = await hub.google.disconnect(); await hub.log("google.disconnected", "Google disconnected"); hub.emit("connections"); return json({ ...st, redirectUri }); }
+        break;
       }
       case "hooks": {
         if (method === "GET" && !id) return json(await hub.listHooks());

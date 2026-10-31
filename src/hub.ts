@@ -10,6 +10,8 @@ import type { Push } from "./push.ts";
 import { parseReply } from "./reply.ts";
 import { validateHook, computeNextAt, describeTrigger, isUserReminder } from "./hooks.ts";
 import { look, lineDiff } from "./watch.ts";
+import { Google } from "./google.ts";
+import { SOURCES, sourceById, formatItems } from "./sources/index.ts";
 import { recall, isActive, validateFact } from "./memory.ts";
 import { describeLocal, inQuietHours, quietEndsAt, localDate, distanceMeters } from "./time.ts";
 import type { Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
@@ -69,6 +71,9 @@ export class Hub {
   clock = () => new Date();
   private listeners = new Set<(e: HubEvent) => void>();
   private firing = new Set<string>();
+  private _google: Google | null = null;
+  /** Your Google account (Gmail, Calendar), if you've connected one. */
+  get google() { return (this._google ??= new Google(this.config.dataDir)); }
   /** Webhook calls that arrived while their hook was still busy with the last one; handled together right after. */
   private webhookQueue = new Map<string, string[]>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -181,6 +186,7 @@ export class Hub {
       proactiveMessagesLeftToday: Math.max(0, prefs.maxProactivePerDay - used),
       location,
       places: places.map((p) => ({ name: p.name, radiusM: p.radiusM })),
+      sources: SOURCES.map((s) => ({ id: s.id, label: s.label, connected: s.needs === "google" ? this.google.connected : false })),
       memory: memory.map((f) => ({ id: f.id, fact: f.fact, notebook: f.notebook, importance: f.importance, ...(f.expiresAt ? { expiresAt: f.expiresAt } : {}) })),
       notebooks: (await this.store.all<Notebook>("notebooks")).map((n) => ({ name: n.name, summary: n.summary })),
       hooks: hooks.map((h) => ({ id: h.id, title: h.title, when: describeTrigger(h.trigger, prefs.tz), does: h.action.type, why: h.why, status: h.status })),
@@ -213,6 +219,7 @@ export class Hub {
     const results: string[] = [];
     for (const r of applied.runs.slice(0, 3)) {
       if (r.name === "@history") { results.push(`## Past conversations matching "${r.args[0]}"\n${await this.searchHistory(r.args[0])}`); continue; }
+      if (r.name === "@source") { results.push(await this.readSource(JSON.parse(r.args[0]))); continue; }
       if (opts.allowedScripts && !opts.allowedScripts.includes(r.name)) {
         results.push(`## ${r.name}\nNot allowed: this recipe may only use ${opts.allowedScripts.join(", ") || "no scripts"}.`);
         continue;
@@ -1172,6 +1179,9 @@ export class Hub {
           case "script.run":
             if (typeof a.name === "string") runs.push({ name: a.name, args: Array.isArray(a.args) ? a.args.slice(0, 8).map(String) : [] });
             break;
+          case "source.read":
+            if (typeof a.source === "string") runs.push({ name: "@source", args: [JSON.stringify({ source: a.source, config: a.config || {} })] });
+            break;
           case "history.search":
             if (typeof a.query === "string" && a.query.trim()) runs.push({ name: "@history", args: [a.query.trim().slice(0, 200)] });
             break;
@@ -1976,6 +1986,37 @@ export class Hub {
     return text;
   }
 
+  /** source.read: what a trigger module sees right now, for a teammate answering a question. */
+  async readSource(req: { source: string; config: unknown }) {
+    const src = sourceById(req.source);
+    if (!src) return `## ${req.source}\nNo such source. Sources: ${SOURCES.map((s) => s.id).join(", ")}.`;
+    const config = src.validate(req.config);
+    if (typeof config === "string") return `## ${src.label}\n${config}`;
+    if (src.needs === "google" && !this.google.connected) return `## ${src.label}\nGoogle isn't connected. Tell the user to connect it in Menu → Connections.`;
+    try {
+      const items = await src.items(config, { google: this.google, now: this.clock(), tz: (await this.prefs()).tz });
+      return `## ${src.label}: ${src.describe(config)}\n<untrusted>\n${formatItems(items)}\n</untrusted>`;
+    } catch (e: any) { return `## ${src.label}\nCouldn't read it: ${e.message}`; }
+  }
+
+  /** A source hook's check: items it hasn't seen before, or null. The first check only remembers what's there. */
+  private async pollSource(h: Hook & { trigger: { type: "source" } }) {
+    const t = h.trigger, src = sourceById(t.source);
+    if (!src) { await this.log("hook.source", `${h.title}: unknown source ${t.source}`); return null; }
+    if (src.needs === "google" && !this.google.connected) { await this.log("hook.source", `${h.title}: Google isn't connected`); return null; }
+    let items;
+    try { items = await src.items(t.config as never, { google: this.google, now: this.clock(), tz: (await this.prefs()).tz }); }
+    catch (e: any) { await this.log("hook.source", `${h.title}: ${String(e.message).slice(0, 200)}`); return null; }
+    const cur = (await this.store.get<Hook>("hooks", h.id)) || h;
+    const known = new Set((cur.seen?.text || "").split("\n").filter(Boolean));
+    const fresh = cur.seen ? items.filter((i) => !known.has(i.id)) : [];
+    // Remember what we've seen, newest first, capped so the list doesn't grow forever.
+    const ids = [...new Set([...items.map((i) => i.id), ...known])].slice(0, 1000);
+    await this.store.put<Hook>("hooks", { ...cur, seen: { hash: sha256(ids.join("\n")), text: ids.join("\n"), at: this.clock().toISOString() } });
+    if (!cur.seen) { await this.log("hook.source", `${h.title}: first look saved (${items.length} already there)`); return null; }
+    return fresh.length ? { count: fresh.length, text: `## ${fresh.length} new from ${src.label}\n<untrusted>\n${formatItems(fresh)}\n</untrusted>`, items: fresh } : null;
+  }
+
   async fire(h: Hook, reason: string, late = false, extra?: string) {
     if (this.firing.has(h.id)) return;
     this.firing.add(h.id);
@@ -2011,6 +2052,12 @@ export class Hub {
         extra = changed;
       }
       let checked = "";
+      if (h.trigger.type === "source" && extra === undefined) {
+        const found = await this.pollSource(h as Hook & { trigger: { type: "source" } });
+        if (!found) return;
+        extra = found.text;
+        checked = found.items.slice(0, 5).map((i) => `• ${i.title}`).join("\n") + (found.count > 5 ? `\n…and ${found.count - 5} more` : "");
+      }
       if (h.trigger.type === "check" && extra === undefined) {
         checked = (await this.runCheck(h as Hook & { trigger: { type: "check" } })) || "";
         if (!checked) return;
