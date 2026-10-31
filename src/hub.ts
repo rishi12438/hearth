@@ -69,6 +69,8 @@ export class Hub {
   clock = () => new Date();
   private listeners = new Set<(e: HubEvent) => void>();
   private firing = new Set<string>();
+  /** Webhook calls that arrived while their hook was still busy with the last one; handled together right after. */
+  private webhookQueue = new Map<string, string[]>();
   private timer: ReturnType<typeof setInterval> | null = null;
   // Planning runs one batch at a time per ramble: messages sent while it's planning wait and are planned together next.
   private planning = new Set<string>();
@@ -1914,8 +1916,31 @@ export class Hub {
     const h = (await this.store.all<Hook>("hooks")).find((x) => x.trigger.type === "webhook" && x.trigger.token === token);
     if (!h || h.status !== "active") return false;
     await this.log("hook.webhook", `${h.title}: called (${payload.length} bytes)`);
-    this.fire(h, "its webhook was called", false, `## What the webhook sent\n<untrusted>\n${payload.slice(0, 20_000) || "(empty)"}\n</untrusted>`).catch(() => {});
+    const sent = `## What the webhook sent\n<untrusted>\n${payload.slice(0, 20_000) || "(empty)"}\n</untrusted>`;
+    if (this.firing.has(h.id) || this.webhookQueue.has(h.id)) {
+      const q = this.webhookQueue.get(h.id) || [];
+      if (q.length < 20) q.push(sent);
+      this.webhookQueue.set(h.id, q);
+      if (!this.firing.has(h.id)) this.drainWebhook(h.id);
+      return true;
+    }
+    this.fireWebhook(h, sent);
     return true;
+  }
+
+  private fireWebhook(h: Hook, sent: string) {
+    this.inflight++;
+    this.fire(h, "its webhook was called", false, sent).catch(() => {}).finally(() => { this.inflight--; this.drainWebhook(h.id); });
+  }
+
+  /** Calls that came in while the hook was busy go to it in one batch, so none are dropped. */
+  private async drainWebhook(id: string) {
+    const q = this.webhookQueue.get(id);
+    if (!q?.length || this.firing.has(id)) return;
+    this.webhookQueue.delete(id);
+    const h = await this.store.get<Hook>("hooks", id);
+    if (!h || h.status !== "active") return;
+    this.fireWebhook(h, q.length === 1 ? q[0] : `${q.length} calls came in:\n\n${q.join("\n\n")}`);
   }
 
   /** A watch hook's look at its page: what changed since last time, or null (first look, no change, or an error). */

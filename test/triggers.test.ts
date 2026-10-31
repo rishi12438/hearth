@@ -122,3 +122,11 @@ test("a webhook call in quiet hours is held and handled when they end", async ()
   expect(after.held).toBeUndefined();
   expect(after.nextAt).toBeNull();
 });
+
+test("webhook calls that land while the hook is busy are queued, not dropped", async () => {
+  const r = await hub.addHook({ title: "Door", trigger: { type: "webhook" }, action: { type: "notify", text: "Door" } }, "assistant");
+  const token = (r.value!.trigger as { token: string }).token;
+  await Promise.all([hub.webhook(token, "1"), hub.webhook(token, "2"), hub.webhook(token, "3")]);
+  await hub.idle(5000);
+  expect((await sent()).length).toBe(2); // the first call, then the two that waited, together
+});
