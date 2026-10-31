@@ -130,3 +130,44 @@ test("webhook calls that land while the hook is busy are queued, not dropped", a
   await hub.idle(5000);
   expect((await sent()).length).toBe(2); // the first call, then the two that waited, together
 });
+
+test("triggers are searchable, so a new request finds the plan that already covers it", async () => {
+  await hub.ensureTeammates();
+  const r = await hub.addHook({ title: "School email deadlines", trigger: { type: "webhook" }, action: { type: "think", prompt: "Tell me if a school email has a deadline" }, why: "You asked on Friday" }, "assistant");
+  await hub.addHook({ title: "Morning weather", trigger: { type: "schedule", time: "08:00", days: [1, 2, 3, 4, 5] }, action: { type: "notify", text: "Weather" } }, "assistant");
+  const hits = await hub.searchLibrary("tell me when the school emails about a deadline");
+  expect(hits[0]).toMatchObject({ kind: "trigger", id: r.value!.id, name: "School email deadlines" });
+  // hook.update edits it in place: the webhook URL stays, the new teammate takes it.
+  const token = (r.value!.trigger as { token: string }).token;
+  await hub.applyActions([{ type: "hook.update", id: r.value!.id, why: "Widened to the soccer club too", trigger: { type: "webhook" }, teammate: "Research" }], "test");
+  const after = await get(r.value!.id);
+  expect(after).toMatchObject({ why: "Widened to the soccer club too", teammateId: "scout" });
+  expect((after.trigger as { token: string }).token).toBe(token);
+});
+
+test("trigger setups can be saved and reused with new details", async () => {
+  await hub.ensureTeammates();
+  const save = await hub.applyActions([{ type: "trigger.save", name: "sender-deadline-alerts", description: "Tell me when an email from a sender has a deadline",
+    inputs: [{ name: "sender", description: "who sends it" }, { name: "label", description: "what to call it" }],
+    hook: { title: "$input.label deadlines", trigger: { type: "source", source: "gmail", config: { query: "from:$input.sender" } }, action: { type: "think", prompt: "If an email from $input.sender has a deadline, tell me." }, why: "Saved setup", teammate: "Research" } }], "test");
+  expect(save.done.map((d) => d.label)).toEqual(["Saved setup: sender-deadline-alerts"]);
+  expect((await hub.searchLibrary("deadline emails from the soccer club"))[0]).toMatchObject({ kind: "trigger-recipe", name: "sender-deadline-alerts", inputs: ["sender", "label"] });
+  const use = await hub.applyActions([{ type: "trigger.use", name: "sender-deadline-alerts", inputs: { sender: "soccerclub.org", label: "Soccer club" } }], "test");
+  expect(use.done[0].label).toBe("Watching: Soccer club deadlines");
+  const h = await get(use.done[0].id!);
+  expect(h.trigger).toEqual({ type: "source", source: "gmail", config: { query: "from:soccerclub.org" }, minutes: 15 });
+  expect(h.teammateId).toBe("scout");
+  expect((await hub.listTriggerRecipes())[0].uses).toBe(1);
+  // A broken setup (bad trigger) is refused when saved, not when someone tries to use it.
+  const bad = await hub.applyActions([{ type: "trigger.save", name: "broken", description: "x", hook: { title: "x", trigger: { type: "watch", url: "$input.url" }, action: { type: "notify", text: "x" } } }], "test");
+  expect(bad.done).toEqual([]);
+});
+
+test("with many plans, the brain sees the relevant ones and the count", async () => {
+  for (let i = 0; i < 35; i++) await hub.addHook({ title: `Routine ${i}`, trigger: { type: "schedule", time: "09:00", days: [1] }, action: { type: "notify", text: "x" } }, "assistant");
+  const r = await hub.addHook({ title: "Taylor Swift tickets", trigger: { type: "watch", url: "https://example.com/tickets" }, action: { type: "notify", text: "x" } }, "assistant");
+  const ctx: any = await hub.context("are the Taylor Swift tickets on sale yet", "chat");
+  expect(ctx.hooksTotal).toBe(36);
+  expect(ctx.hooks.length).toBeLessThan(36);
+  expect(ctx.hooks.some((h: any) => h.id === r.value!.id)).toBe(true);
+});

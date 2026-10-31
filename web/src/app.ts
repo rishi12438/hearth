@@ -26,6 +26,8 @@ const S = {
   skills: [] as any[],
   workflows: [] as any[],
   hooks: [] as any[],
+  triggerRecipes: [] as any[],
+  plansQuery: "",
   memory: null as any,
   memoryQuery: "",
   plansFilter: "",
@@ -1857,7 +1859,10 @@ function openSkill(sk: any) {
 // ---------------- plans & memory panels ----------------
 
 async function loadHooks() {
-  try { S.hooks = await call("/api/hooks"); if (S.panel === "plans") drawPlans(); } catch (e) { handleError(e); }
+  try {
+    [S.hooks, S.triggerRecipes] = await Promise.all([call("/api/hooks"), call("/api/trigger-recipes")]);
+    if (S.panel === "plans") drawPlans();
+  } catch (e) { handleError(e); }
 }
 
 function openPlans() {
@@ -1872,23 +1877,35 @@ function drawPlans() {
   if (!el) return;
   // Triggers wait for something to happen (a page change, a webhook call, a script finding something, a place, a silence).
   const EVENT = ["watch", "webhook", "check", "source", "place", "silence"];
-  const live = S.hooks.filter((x) => x.status !== "done" && x.source !== "system");
+  // The search box filters every list here: title, when, why and what it does.
+  const q = S.plansQuery.trim().toLowerCase();
+  const hit = (...parts: unknown[]) => !q || parts.map((p) => (typeof p === "string" ? p : JSON.stringify(p ?? ""))).join(" ").toLowerCase().includes(q);
+  const live = S.hooks.filter((x) => x.status !== "done" && x.source !== "system" && hit(x.title, x.when, x.why, x.action, mate(x.teammateId).name));
+  const recipes = (S.triggerRecipes || []).filter((r: any) => hit(r.name, r.description, r.hook));
   const triggers = live.filter((x) => EVENT.includes(x.trigger.type));
   const active = live.filter((x) => !EVENT.includes(x.trigger.type)).sort((a, b) => (a.nextAt || "~").localeCompare(b.nextAt || "~"));
-  const done = S.hooks.filter((x) => x.status === "done").slice(-5).reverse();
+  const done = S.hooks.filter((x) => x.status === "done" && hit(x.title, x.when, x.why)).slice(-5).reverse();
   const row = (hk: any) => h("button", { class: `item ${hk.status}`, on: { click: () => openHook(hk) } },
     h("span", { class: "dotwrap" }, face(mate(hk.teammateId), 30, "idle")),
     h("span", { class: "grow" },
       h("b", null, hk.title, hk.status === "paused" ? h("span", { class: "tag" }, "Paused") : null),
       h("small", { class: "sub" }, EVENT.includes(hk.trigger.type) ? triggerStatus(hk) : hk.nextAt && hk.status === "active" ? `${dayLabel(hk.nextAt)} ${clockTime(hk.nextAt)} · ${hk.when}` : hk.when)));
+  const typing = document.activeElement === el.querySelector(".plansearch input");
   clear(el,
     h("p", { class: "muted" }, "When your teammates will speak up, and why."),
-    active.length ? h("div", { class: "list" }, active.map(row)) : h("p", { class: "empty" }, "Nothing planned. Just say “remind me…” or “every morning…”."),
+    S.hooks.filter((x) => x.source !== "system").length > 3 || q ? h("div", { class: "search plansearch" }, icon("search", 18), h("input", { placeholder: "Search plans and triggers", type: "search", value: S.plansQuery,
+      on: { input: (e: Event) => { S.plansQuery = (e.target as HTMLInputElement).value; drawPlans(); } } })) : null,
+    active.length ? h("div", { class: "list" }, active.map(row)) : h("p", { class: "empty" }, q ? "No plans match." : "Nothing planned. Just say “remind me…” or “every morning…”."),
     h("h4", null, "Triggers"),
     triggers.length ? h("div", { class: "list" }, triggers.map(row))
-      : h("p", { class: "empty" }, "Nothing watching yet. Say “tell me when this page changes…”, “give me a webhook for…” or “check every hour if…”."),
+      : h("p", { class: "empty" }, q ? "No triggers match." : "Nothing watching yet. Say “tell me when this page changes…”, “give me a webhook for…” or “check every hour if…”."),
+    recipes.length ? [h("h4", null, "Saved setups"), h("p", { class: "muted small" }, "Trigger setups your teammates saved to reuse, like skills. Say “same as the school one, but for soccer club”."),
+      h("div", { class: "list" }, recipes.map((r: any) => h("div", { class: "item" },
+        h("span", { class: "grow" }, h("b", null, r.name), h("small", { class: "sub" }, `${r.description}${r.uses ? ` · used ${r.uses}×` : ""}`)),
+        h("button", { class: "iconbtn", "aria-label": `Forget ${r.name}`, on: { click: () => confirmSheet("Forget this setup?", `“${r.name}” won't be reused. Plans made from it keep running.`, "Forget", async () => { await call(`/api/trigger-recipes/${r.id}`, { method: "DELETE" }); toast("Forgotten"); loadHooks(); }) } }, icon("trash", 16)))))] : null,
     done.length ? [h("h4", null, "Done"), h("div", { class: "list" }, done.map(row))] : null,
     h("button", { class: "btn ghost", on: { click: openNewPlan } }, icon("plus", 16), "Add a reminder or routine"));
+  if (typing) { const box = el.querySelector<HTMLInputElement>(".plansearch input"); box?.focus(); box?.setSelectionRange(box.value.length, box.value.length); }
 }
 
 async function loadMemory() {

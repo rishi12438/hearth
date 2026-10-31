@@ -234,6 +234,16 @@ export type DayLog = Doc & { summary: string };
 
 export type SkillInput = { name: string; description: string };
 
+/** A trigger setup worth reusing ("school deadline alerts"): a hook with $input.x blanks, found by search like a skill. */
+export type TriggerRecipe = Doc & {
+  name: string;
+  description: string;
+  inputs: SkillInput[];
+  hook: { title: string; trigger: unknown; action: unknown; why: string; teammate?: string; cooldownMin?: number };
+  uses: number;
+  lastUsedAt?: string;
+};
+
 export type Skill = Doc & {
   name: string;
   description: string;

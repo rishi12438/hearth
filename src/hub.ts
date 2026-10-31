@@ -14,8 +14,8 @@ import { Google } from "./google.ts";
 import { SOURCES, sourceById, formatItems } from "./sources/index.ts";
 import { recall, isActive, validateFact } from "./memory.ts";
 import { describeLocal, inQuietHours, quietEndsAt, localDate, distanceMeters } from "./time.ts";
-import type { Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
-import { Library, validateSkill, validateWorkflow, fill } from "./library.ts";
+import type { TriggerRecipe, Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
+import { Library, validateSkill, validateWorkflow, validateTriggerRecipe, fillDeep, fill, type LibraryItem } from "./library.ts";
 import { cleanTile, cleanOptions, extractTiles, type Tile } from "./tiles.ts";
 import { Files, extractFiles } from "./files.ts";
 import { Apps, appSize } from "./apps.ts";
@@ -189,7 +189,9 @@ export class Hub {
       sources: SOURCES.map((s) => ({ id: s.id, label: s.label, connected: s.needs === "google" ? this.google.connected : false })),
       memory: memory.map((f) => ({ id: f.id, fact: f.fact, notebook: f.notebook, importance: f.importance, ...(f.expiresAt ? { expiresAt: f.expiresAt } : {}) })),
       notebooks: (await this.store.all<Notebook>("notebooks")).map((n) => ({ name: n.name, summary: n.summary })),
-      hooks: hooks.map((h) => ({ id: h.id, title: h.title, when: describeTrigger(h.trigger, prefs.tz), does: h.action.type, why: h.why, status: h.status })),
+      // Every plan while there are few; with many, the ones that match this request plus the newest (search finds the rest).
+      hooks: (hooks.length <= 30 ? hooks : await this.relevantHooks(hooks, query)).map((h) => ({ id: h.id, title: h.title, when: describeTrigger(h.trigger, prefs.tz), does: h.action.type, why: h.why, status: h.status, ...(h.teammateId ? { teammate: h.teammateId } : {}) })),
+      ...(hooks.length > 30 ? { hooksTotal: hooks.length } : {}),
       scripts: (await this.scripts.list()).filter((s) => s.status !== "rejected").map((s) => ({ name: s.name, description: s.description, status: s.status })),
       recentMessages: history.map((m) => ({ role: m.role, at: m.createdAt, text: m.text.slice(0, 600) })),
       library: mode === "review" ? undefined : await this.searchLibrary(query),
@@ -730,8 +732,41 @@ export class Hub {
   async searchLibrary(query: string) {
     if (!query.trim()) return [];
     const [skills, workflows, scripts, components] = await Promise.all([this.store.all<Skill>("skills"), this.store.all<Workflow>("workflows"), this.scripts.list(), this.store.all<Component>("components")]);
-    return this.library.search(query, skills, workflows, scripts, 8, components);
+    return this.library.search(query, skills, workflows, scripts, 8, components, await this.triggerItems());
   }
+
+  /** Your live triggers and saved trigger setups, as library entries: searched before a new one is made. */
+  private async triggerItems(): Promise<Omit<LibraryItem, "score">[]> {
+    const tz = (await this.prefs()).tz;
+    const hooks = (await this.store.all<Hook>("hooks")).filter((h) => h.status !== "done" && h.source !== "system");
+    const recipes = await this.store.all<TriggerRecipe>("triggerRecipes");
+    const does = (h: Hook) => h.action.type === "think" ? h.action.prompt.slice(0, 160) : h.action.type === "notify" ? h.action.text.slice(0, 160) : `runs ${h.action.script}`;
+    return [
+      ...hooks.map((h) => ({ kind: "trigger" as const, id: h.id, name: h.title, description: `${describeTrigger(h.trigger, tz)}. ${h.why} ${does(h)}`.trim(), how: h.status })),
+      ...recipes.map((r) => ({ kind: "trigger-recipe" as const, name: r.name, description: r.description, inputs: r.inputs.map((i) => i.name), how: `${(r.hook.trigger as any)?.type || "?"} trigger, used ${r.uses}×` })),
+    ];
+  }
+
+  private async relevantHooks(hooks: Hook[], query: string) {
+    const hits = new Set((await this.searchLibrary(query)).filter((x) => x.kind === "trigger").map((x) => x.id));
+    const newest = [...hooks].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 20);
+    return [...hooks.filter((h) => hits.has(h.id)), ...newest.filter((h) => !hits.has(h.id))];
+  }
+
+  /** hook.add and trigger.use: route to a named teammate, add, and report it. */
+  private async addHookFrom(a: any, where: { teammateId?: string; threadId?: string }, done: Done[]) {
+    // "teammate": hand the hook to another teammate (by name), who then speaks when it fires.
+    const named = typeof a.teammate === "string" && a.teammate.trim()
+      ? (await this.store.all<Teammate>("teammates")).find((t) => t.name.toLowerCase() === a.teammate.trim().toLowerCase()) : undefined;
+    const r = await this.addHook(a, a.requestedByUser === true ? "you" : "assistant", named ? { ...where, teammateId: named.id } : where);
+    const t = r.value?.trigger.type;
+    const kind = t === "at" ? "Reminder" : t === "webhook" ? "Webhook" : t === "watch" || t === "check" || t === "source" ? "Watching" : "Hook";
+    if (r.value) done.push({ kind: "hook", label: `${kind}: ${r.value.title}`, id: r.value.id });
+    return r;
+  }
+
+  async listTriggerRecipes() { return this.store.all<TriggerRecipe>("triggerRecipes"); }
+  async removeTriggerRecipe(id: string) { const ok = await this.store.remove("triggerRecipes", id); if (ok) this.emit("hooks"); return ok; }
 
   async skillByName(name: string) {
     return (await this.store.all<Skill>("skills")).find((s) => s.name === name.toLowerCase()) || null;
@@ -1056,13 +1091,51 @@ export class Hub {
       try {
         switch (a.type) {
           case "hook.add": {
-            // "teammate": hand the hook to another teammate (by name), who then speaks when it fires.
-            const named = typeof a.teammate === "string" && a.teammate.trim()
-              ? (await this.store.all<Teammate>("teammates")).find((t) => t.name.toLowerCase() === a.teammate.trim().toLowerCase()) : undefined;
-            const r = await this.addHook(a, a.requestedByUser === true ? "you" : "assistant", named ? { ...where, teammateId: named.id } : where);
-            const kind = r.value?.trigger.type === "at" ? "Reminder" : r.value?.trigger.type === "webhook" ? "Webhook" : r.value?.trigger.type === "watch" || r.value?.trigger.type === "check" ? "Watching" : "Hook";
-            if (r.value) done.push({ kind: "hook", label: `${kind}: ${r.value.title}`, id: r.value.id });
-            else await this.log("action.rejected", `hook.add: ${r.error}`);
+            const r = await this.addHookFrom(a, where, done);
+            if (!r.value) await this.log("action.rejected", `hook.add: ${r.error}`);
+            break;
+          }
+          case "hook.update": {
+            // Change a plan instead of adding a near-copy (a wider Gmail search, a new time, another teammate).
+            const cur = await this.store.get<Hook>("hooks", String(a.id));
+            if (!cur || cur.source === "system") break;
+            const patch: any = {};
+            for (const k of ["title", "trigger", "action", "why"]) if (a[k] !== undefined) patch[k] = a[k];
+            const h = await this.updateHook(cur.id, patch);
+            if (h && typeof a.teammate === "string") {
+              const t = (await this.store.all<Teammate>("teammates")).find((x) => x.name.toLowerCase() === a.teammate.trim().toLowerCase());
+              if (t) await this.store.put<Hook>("hooks", { ...h, teammateId: t.id });
+            }
+            if (h) done.push({ kind: "hook", label: `Updated: ${h.title}`, id: h.id });
+            else await this.log("action.rejected", `hook.update: couldn't apply to ${cur.title}`);
+            break;
+          }
+          case "trigger.save": {
+            if (where.recipe) break;
+            const v = validateTriggerRecipe(a);
+            if (!v.value) { await this.log("action.rejected", `trigger.save: ${v.error}`); break; }
+            // Check the setup works by filling every blank with a stand-in.
+            const sample = fillDeep(v.value.hook, Object.fromEntries(v.value.inputs.map((i) => [i.name, "x"])));
+            const ok = validateHook(sample);
+            if (ok.error) { await this.log("action.rejected", `trigger.save: ${ok.error}`); break; }
+            const prev = (await this.store.all<TriggerRecipe>("triggerRecipes")).find((r) => r.name === v.value.name);
+            await this.store.put<TriggerRecipe>("triggerRecipes", prev ? { ...prev, ...v.value, updatedAt: this.clock().toISOString() } : this.doc({ ...v.value, uses: 0 }));
+            done.push({ kind: "skill", label: `Saved setup: ${v.value.name}` });
+            this.emit("hooks");
+            break;
+          }
+          case "trigger.use": {
+            const rec = (await this.store.all<TriggerRecipe>("triggerRecipes")).find((r) => r.name === String(a.name || "").toLowerCase());
+            if (!rec) { await this.log("action.rejected", `trigger.use: no setup called ${a.name}`); break; }
+            const inputs = Object.fromEntries(Object.entries(a.inputs && typeof a.inputs === "object" ? a.inputs : {}).map(([k, x]) => [k, String(x).slice(0, 300)]));
+            const r = await this.addHookFrom({ ...fillDeep(rec.hook, inputs), requestedByUser: false }, where, done);
+            if (r.value) await this.store.put<TriggerRecipe>("triggerRecipes", { ...rec, uses: (rec.uses || 0) + 1, lastUsedAt: this.clock().toISOString() });
+            else await this.log("action.rejected", `trigger.use ${rec.name}: ${r.error}`);
+            break;
+          }
+          case "trigger.forget": {
+            const rec = (await this.store.all<TriggerRecipe>("triggerRecipes")).find((r) => r.name === String(a.name || "").toLowerCase());
+            if (rec && (await this.removeTriggerRecipe(rec.id))) done.push({ kind: "skill", label: `Forgot setup: ${rec.name}` });
             break;
           }
           case "hook.remove": {
