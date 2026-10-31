@@ -56,6 +56,7 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
   const web = await buildWeb();
   const pairLimiter = new RateLimiter(5, 10 * 60_000);
   const pairGlobal = new RateLimiter(30, 10 * 60_000);
+  const ideaLimiter = new RateLimiter(2, 10 * 60_000);
   const streams = new Map<string, Set<ReadableStreamDefaultController>>();
   const enc = new TextEncoder();
 
@@ -314,6 +315,22 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
         if (method === "DELETE" && id) { const h = await store.get<Hook>("hooks", id); if (h?.source === "system") throw new HttpError(400, "Pause system hooks instead."); return json({ ok: await hub.removeHook(id) }); }
         break;
       }
+      case "ideas": {
+        if (method === "GET" && !id) return json(await hub.listIdeas());
+        if (method === "POST" && !id) {
+          if (!ideaLimiter.allow("ideas")) throw new HttpError(429, "The team just looked. Try again in a few minutes.");
+          return json(await hub.thinkOfIdeas());
+        }
+        if (method === "POST" && id && seg[3] === "accept") { const r = await hub.acceptIdea(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "POST" && id && seg[3] === "dismiss") return json({ ok: await hub.dismissIdea(id) });
+        break;
+      }
+      case "about": {
+        const p = await hub.prefs();
+        if (method === "GET") return json({ text: p.about || "", updatedAt: p.aboutUpdatedAt || null });
+        if (method === "PUT") { await hub.setAbout(String((await body(req)).text || ""), true); return json({ ok: true }); }
+        break;
+      }
       case "memory": {
         if (method === "GET") {
           const all = await store.all<Fact>("memory");
@@ -429,6 +446,12 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
           "Content-Security-Policy": appCsp(["'self'", ...config.allowedOrigins].join(" ")),
         } }));
       }
+      // 3D emoji (Microsoft Fluent Emoji 3D, MIT, via @lobehub/fluent-emoji-3d) served from the package: no calls out.
+      if (url.pathname.startsWith("/emoji/")) {
+        const file = emojiFile(url.pathname.slice("/emoji/".length).replace(/\.webp$/, ""));
+        if (!file) return finish(new Response("Not found", { status: 404 }));
+        return finish(new Response(Bun.file(file), { headers: { "Content-Type": "image/webp", "Cache-Control": "public, max-age=31536000, immutable" } }));
+      }
       const asset = web.assets.get(url.pathname) || (url.pathname.includes(".") ? null : web.assets.get("/"));
       if (!asset) return finish(new Response("Not found", { status: 404 }));
       const cache = url.pathname === "/sw.js" || asset.type.startsWith("text/html") ? "no-cache" : "public, max-age=300";
@@ -436,4 +459,14 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
     },
   });
   return { server, build: web.build };
+}
+
+const EMOJI_DIR = (() => { try { return join(resolve(import.meta.dir, ".."), "node_modules/@lobehub/fluent-emoji-3d/assets"); } catch { return ""; } })();
+/** The 3D image for an emoji's codepoints ("1f3cb-fe0f"), trying it with and without the variation selector. */
+function emojiFile(name: string) {
+  if (!EMOJI_DIR || !/^[0-9a-f]{2,6}(-[0-9a-f]{2,6}){0,9}$/.test(name)) return null;
+  const bare = name.split("-").filter((c) => c !== "fe0f");
+  const tries = [name, bare.join("-"), [bare[0], "fe0f", ...bare.slice(1)].join("-"), bare.map((c, i) => (i === 0 || c === "200d" || bare[i - 1] !== "200d" ? c : `${c}-fe0f`)).join("-"), `${bare.join("-")}-fe0f`];
+  for (const t of tries) { const f = join(EMOJI_DIR, `${t}.webp`); if (existsSync(f)) return f; }
+  return null;
 }

@@ -10,7 +10,7 @@ import { wallParts, zonedToUtc } from "./time.ts";
 // and the agent runs in an empty folder with no file or shell tools and none of the hub's secrets.
 
 export type BrainInput = {
-  mode: "chat" | "hook" | "review" | "job" | "orchestrate";
+  mode: "chat" | "hook" | "review" | "job" | "orchestrate" | "ideas";
   context: Record<string, unknown>;
   input: string;
   toolResults?: string;
@@ -57,6 +57,10 @@ ACTIONS
 - notebook.summary {name, summary}   1-2 sentence "where it stands" for a topic
 - place.add {name, here:true} or {name, lat, lon, radiusM?}   save a place for place hooks
 - script.run {name, args}   run an approved script now; you'll be called again with its output
+- history.search {query}   search past conversations, answers and the daily log (exact wording, "what did I say about X");
+    you'll be called again with what matched. Use it when memory doesn't have what you need.
+- about.update {text}   rewrite CONTEXT.aboutYou, the short profile of the user (people, routines, likes, goals, constraints),
+    when you learn something durable that belongs there. Keep it under ~250 words, plain lines, most important first.
 - script.propose {name, description, code}   write a new Bun/TypeScript script (stdout = result; use fetch, no secrets,
     no file writes outside the working dir). It will NOT run until the user approves it in the app. Say so.
 - approval.request {summary, details, script, args}   ANYTHING that sends, posts, pays, books, deletes or changes something
@@ -195,7 +199,19 @@ export function buildPrompt(b: BrainInput) {
       "JOB:", b.input);
   } else if (b.mode === "review") {
     parts.push("", "MEMORY REVIEW (nightly): tidy memory. Merge duplicates, update stale facts, set expiresAt on temporary ones,",
-      "forget trivia, and refresh notebook summaries. Reply with one short line describing what changed, or " + QUIET + " if nothing.");
+      "forget trivia, and refresh notebook summaries. Then:",
+      "- day.log {date, summary} for each day in CONTEXT.recentDays that has no log yet: 1-3 plain sentences of what the user",
+      "  asked for, decided and got done (names, places, numbers). This is how past days are found later.",
+      "- about.update {text} if CONTEXT.aboutYou is missing or out of date given memory and these days.",
+      "Reply with one short line describing what changed, or " + QUIET + " if nothing.");
+  } else if (b.mode === "ideas") {
+    parts.push("", "IDEAS: look at memory, aboutYou, recent days, hooks and recent messages, and suggest up to 2 things the team",
+      "could do for the user RIGHT NOW that they'd be glad about: a follow-up nobody closed, a deadline coming up, prep for",
+      "something on their calendar, a better way to do something they keep doing. Ground each in something concrete you saw.",
+      "- idea.add {title, body, emoji, prompt, teammate?}: title starts \"I can …\" (max ~60 chars); body is 1-2 sentences on why,",
+      "  citing what you noticed; emoji is one emoji for it; prompt is the request to run if they say yes, written as the user.",
+      "Never repeat anything in CONTEXT.ideas (open, accepted or dismissed) or something a hook already covers. If nothing is",
+      "genuinely useful, add nothing and reply " + QUIET + ". Otherwise reply with one short line.");
   } else {
     parts.push("", "USER MESSAGE:", b.input);
   }
@@ -376,6 +392,12 @@ function echoOrchestrator(b: BrainInput): string {
 function echoBrain(b: BrainInput): string {
   const ctx = b.context as { tz: string; nowIso: string };
   if (b.mode === "review") return QUIET;
+  if (b.mode === "ideas") {
+    const facts = ((b.context as any).memory || []) as { fact: string }[];
+    const open = (((b.context as any).ideas?.open || []) as string[]).length + (((b.context as any).ideas?.dismissed || []) as string[]).length;
+    if (!facts.length || open) return QUIET;
+    return "One idea." + "\n```hearth\n" + JSON.stringify([{ type: "idea.add", title: "I can turn this into a plan", body: `You mentioned: ${facts[0].fact}`, emoji: "💡", prompt: `Make me a simple plan for this: ${facts[0].fact}` }]) + "\n```";
+  }
   if (b.toolResults) return `Here's what I found:\n${b.toolResults.replace(/^## .*\n/gm, "")}`;
   if (b.mode === "hook") return b.toolResults ? `Here's what I found:\n${b.toolResults}` : `(demo brain) ${b.input}`;
   const text = b.input.split("\n")[0].trim().replace(/^(please |can you |could you )/i, "");

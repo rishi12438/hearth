@@ -169,7 +169,26 @@ export type Prefs = {
   brains?: import("./brain.ts").Brains;
   spend?: { date: string; usd: number };
   costCaps?: { rambleUsd: number; dayUsd: number };
+  /** "About you": a short profile the assistant keeps (and you can edit). Always in context. */
+  about?: string;
+  aboutUpdatedAt?: string;
 };
+
+/** Something the assistant could do for you, suggested on its own ("I can follow up on your airline refund"). */
+export type Idea = Doc & {
+  title: string;
+  body: string;
+  emoji?: string;
+  /** What runs as a ramble if you say yes. */
+  prompt: string;
+  teammateId?: string;
+  status: "open" | "accepted" | "dismissed";
+  decidedAt?: string;
+  threadId?: string;
+};
+
+/** One line per day of what happened, so "what did I say last week" works without loading every chat. id = YYYY-MM-DD. */
+export type DayLog = Doc & { summary: string };
 
 // ---- Skills: things the team already knows how to do, so it doesn't work them out again. ----
 

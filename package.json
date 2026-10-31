@@ -14,6 +14,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@lobehub/fluent-emoji-3d": "1.1.0",
     "web-push": "^3.6.7"
   },
   "devDependencies": {

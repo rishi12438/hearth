@@ -326,3 +326,27 @@ test("teammates wear an emoji badge the orchestrator or the user can set; only r
   expect(r.done.some((d: any) => d.label.includes("Volleyball updated"))).toBe(true);
   expect((await hub.teammate(t.id))!.emoji).toBe("🇵🇹");
 });
+
+test("ideas: suggested, accepted into a ramble or dismissed for good; near-duplicates and too many are refused", async () => {
+  await hub.ensureTeammates();
+  const a = (await hub.addIdea({ title: "I can follow up on your airline refund", body: "No refund since Oct 14.", emoji: "🛂", prompt: "Draft a follow-up to the airline about my refund" })).value!;
+  expect((await hub.addIdea({ title: "I can follow up on the airline refund", prompt: "x" })).error).toBeTruthy(); // too close
+  const b = (await hub.addIdea({ title: "I can plan your half marathon training", prompt: "Plan my half marathon training" })).value!;
+  expect((await hub.listIdeas()).length).toBe(2);
+  expect(await hub.dismissIdea(b.id)).toBe(true);
+  expect((await hub.addIdea({ title: "I can plan your half marathon training", prompt: "again" })).error).toBeTruthy(); // learned from no
+  const r = await hub.acceptIdea(a.id);
+  expect(r.value!.thread).toBeTruthy();
+  expect((await hub.listIdeas()).length).toBe(0);
+  expect((await hub.ideaTitlesForTest()).dismissed).toEqual(["I can plan your half marathon training"]);
+});
+
+test("about you is always in context; past conversations are searchable by the brain", async () => {
+  await hub.ensureTeammates();
+  await hub.setAbout("Sister Priya, turns 30 on Dec 12.\nTraining for a half marathon.", true);
+  expect(((await hub.context("hi", "chat")) as any).aboutYou).toContain("Priya");
+  await hub.ramble("email the landlord about the leak in the bathroom");
+  const found = await hub.searchHistory("what did I say about the landlord leak");
+  expect(found).toContain("landlord");
+  expect(await hub.searchHistory("zebra unicorn")).toBe("(no matches)");
+});

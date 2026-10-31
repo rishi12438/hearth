@@ -9,7 +9,7 @@ import { parseReply } from "./reply.ts";
 import { validateHook, computeNextAt, describeTrigger, isUserReminder } from "./hooks.ts";
 import { recall, isActive, validateFact } from "./memory.ts";
 import { describeLocal, inQuietHours, quietEndsAt, localDate, distanceMeters } from "./time.ts";
-import type { MiniApp, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
+import type { DayLog, Idea, MiniApp, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
 import { Library, validateSkill, validateWorkflow, fill } from "./library.ts";
 import { cleanTile, cleanOptions, extractTiles, type Tile } from "./tiles.ts";
 import { Files, extractFiles } from "./files.ts";
@@ -35,6 +35,8 @@ const OLD_NAMES: Record<string, string> = { planner: "Planner", scout: "Scout", 
 
 const REVIEW_MARKER = "[[memory-review]]";
 const PURGE_MARKER = "[[library-purge]]";
+const IDEAS_MARKER = "[[ideas]]";
+const MAX_OPEN_IDEAS = 4;
 const LOCATION_KEEP_DAYS = 7;
 
 type TurnOpts = { teammate?: Teammate | null; threadId?: string; jobId?: string; extra?: string; profile?: BrainProfile; meter?: Meter; allowedScripts?: string[] };
@@ -155,6 +157,7 @@ export class Hub {
       now: describeLocal(now, prefs.tz),
       tz: prefs.tz,
       userName: prefs.userName || undefined,
+      aboutYou: prefs.about || "(not written yet)",
       quietHours: `${prefs.quietStart}-${prefs.quietEnd}`,
       proactiveMessagesLeftToday: Math.max(0, prefs.maxProactivePerDay - used),
       location,
@@ -165,6 +168,8 @@ export class Hub {
       scripts: (await this.scripts.list()).filter((s) => s.status !== "rejected").map((s) => ({ name: s.name, description: s.description, status: s.status })),
       recentMessages: history.map((m) => ({ role: m.role, at: m.createdAt, text: m.text.slice(0, 600) })),
       library: mode === "review" ? undefined : await this.searchLibrary(query),
+      ...(mode === "review" || mode === "ideas" ? { recentDays: await this.recentDays(mode === "ideas" ? 3 : 2) } : {}),
+      ...(mode === "ideas" ? { ideas: await this.ideaTitles() } : {}),
       apps: mode === "review" ? undefined : (await this.apps.list()).map((a) => {
         const data = JSON.stringify(a.data ?? null);
         return { name: a.name, title: a.title, does: a.description, onHome: a.pinned ? appSize(a.size) : false, data: data.length > 6000 ? `${data.slice(0, 6000)}… (truncated; send the full data when you change it)` : a.data };
@@ -188,6 +193,7 @@ export class Hub {
 
     const results: string[] = [];
     for (const r of applied.runs.slice(0, 3)) {
+      if (r.name === "@history") { results.push(`## Past conversations matching "${r.args[0]}"\n${await this.searchHistory(r.args[0])}`); continue; }
       if (opts.allowedScripts && !opts.allowedScripts.includes(r.name)) {
         results.push(`## ${r.name}\nNot allowed: this recipe may only use ${opts.allowedScripts.join(", ") || "no scripts"}.`);
         continue;
@@ -1053,6 +1059,26 @@ export class Hub {
           case "script.run":
             if (typeof a.name === "string") runs.push({ name: a.name, args: Array.isArray(a.args) ? a.args.slice(0, 8).map(String) : [] });
             break;
+          case "history.search":
+            if (typeof a.query === "string" && a.query.trim()) runs.push({ name: "@history", args: [a.query.trim().slice(0, 200)] });
+            break;
+          case "about.update": {
+            if (where.recipe || typeof a.text !== "string" || !a.text.trim()) break;
+            await this.setAbout(a.text, false);
+            done.push({ kind: "memory", label: "Updated what I know about you" });
+            break;
+          }
+          case "day.log": {
+            if (typeof a.date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(a.date) || typeof a.summary !== "string") break;
+            await this.store.put<DayLog>("days", { id: a.date, createdAt: this.clock().toISOString(), summary: a.summary.trim().slice(0, 800) });
+            break;
+          }
+          case "idea.add": {
+            if (where.recipe) break;
+            const r = await this.addIdea(a);
+            if (r.value) done.push({ kind: "note", label: `Idea: ${r.value.title}` });
+            break;
+          }
           case "blocked": {
             const b = { need: String(a.need || "Something from you").slice(0, 200), why: String(a.why || "").slice(0, 300), unblock: String(a.unblock || "Tap Try again when it's sorted").slice(0, 200) };
             if (where.jobId) {
@@ -1382,6 +1408,109 @@ export class Hub {
     return { value: saved };
   }
 
+  // ---------- ideas: things the team could do for you, suggested on its own (Leon's "pulse") ----------
+
+  async listIdeas() {
+    return (await this.store.all<Idea>("ideas")).filter((i) => i.status === "open").sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  /** Titles the model must not repeat: what's open, what you said yes to, and what you dismissed (it learns from those). */
+  private async ideaTitles() {
+    const all = (await this.store.all<Idea>("ideas")).sort((a, b) => (b.decidedAt || b.createdAt).localeCompare(a.decidedAt || a.createdAt));
+    const pick = (st: Idea["status"], n: number) => all.filter((i) => i.status === st).slice(0, n).map((i) => i.title);
+    return { open: pick("open", MAX_OPEN_IDEAS), accepted: pick("accepted", 20), dismissed: pick("dismissed", 40) };
+  }
+
+  async addIdea(a: any) {
+    const title = typeof a?.title === "string" ? a.title.trim().slice(0, 90) : "";
+    const prompt = typeof a?.prompt === "string" ? a.prompt.trim().slice(0, 1000) : "";
+    if (!title || !prompt) return { error: "An idea needs a title and what to do." };
+    const all = await this.store.all<Idea>("ideas");
+    if (all.filter((i) => i.status === "open").length >= MAX_OPEN_IDEAS) return { error: "Enough ideas waiting already." };
+    const words = (s: string) => new Set(s.toLowerCase().match(/[a-z0-9']{3,}/g) || []);
+    const w = words(title);
+    const like = all.find((i) => { const o = words(i.title); const both = [...w].filter((x) => o.has(x)).length; return both / Math.max(1, Math.min(w.size, o.size)) >= 0.6; });
+    if (like) return { error: `Too close to "${like.title}".` };
+    const team = await this.store.all<Teammate>("teammates");
+    const mate = team.find((t) => t.name.toLowerCase() === String(a.teammate || "").toLowerCase());
+    const idea = await this.store.put<Idea>("ideas", this.doc({
+      title, prompt, body: typeof a.body === "string" ? a.body.trim().slice(0, 400) : "", emoji: cleanEmoji(a.emoji), teammateId: mate?.id, status: "open" as const,
+    }));
+    this.emit("ideas");
+    return { value: idea };
+  }
+
+  ideaTitlesForTest() { return this.ideaTitles(); }
+
+  /** Ask the team for ideas now (the system hook does this every few hours, outside quiet hours). */
+  async thinkOfIdeas() {
+    const r = await this.turn("ideas", "Suggest ideas.", "ideas", { profile: (await this.brains()).workhorse });
+    await this.log("ideas", r.text && r.text !== QUIET ? r.text : "nothing worth suggesting");
+    return this.listIdeas();
+  }
+
+  /** Yes: it runs as a ramble, like you'd typed it. */
+  async acceptIdea(id: string) {
+    const i = await this.store.get<Idea>("ideas", id);
+    if (!i || i.status !== "open") return { error: "That idea is gone." };
+    const r = await this.ramble(i.prompt);
+    if (r.error) return r;
+    await this.store.put<Idea>("ideas", { ...i, status: "accepted", decidedAt: this.clock().toISOString(), threadId: r.value!.thread.id });
+    this.emit("ideas");
+    return r;
+  }
+
+  /** No: it goes away and stays in the "don't suggest" list, so the team learns what you don't want. */
+  async dismissIdea(id: string) {
+    const i = await this.store.get<Idea>("ideas", id);
+    if (!i || i.status !== "open") return false;
+    await this.store.put<Idea>("ideas", { ...i, status: "dismissed", decidedAt: this.clock().toISOString() });
+    this.emit("ideas");
+    return true;
+  }
+
+  // ---------- about you, the daily log, and searching what was said ----------
+
+  async setAbout(text: string, byUser: boolean) {
+    await this.setPrefs({ about: String(text).trim().slice(0, 2500) || undefined, aboutUpdatedAt: this.clock().toISOString() });
+    await this.log("about.updated", byUser ? "you edited it" : "the assistant updated it");
+    this.emit("about");
+  }
+
+  /** The last few days: what was said (for the nightly log) and any logs already written. */
+  private async recentDays(n: number) {
+    const prefs = await this.prefs();
+    const now = this.clock();
+    const since = new Date(now.getTime() - n * 864e5).toISOString();
+    const logs = await this.store.all<DayLog>("days");
+    const msgs = (await this.store.all<Message>("messages")).filter((m) => m.createdAt >= since);
+    const days = new Map<string, string[]>();
+    for (const m of msgs) {
+      const d = localDate(new Date(m.createdAt), prefs.tz);
+      if (!days.has(d)) days.set(d, []);
+      days.get(d)!.push(`${m.role === "user" ? "user" : "team"}: ${m.text.replace(/\s+/g, " ").slice(0, 200)}`);
+    }
+    return [...days.entries()].map(([date, lines]) => ({ date, log: logs.find((l) => l.id === date)?.summary || null, said: lines.slice(-40) }));
+  }
+
+  /** Plain word search over messages, task answers and day logs; newest first among equals. */
+  async searchHistory(query: string) {
+    const terms = [...new Set(query.toLowerCase().match(/[a-z0-9']{3,}/g) || [])].slice(0, 8);
+    if (!terms.length) return "(nothing to search for)";
+    const threads = new Map((await this.store.all<Thread>("threads")).map((t) => [t.id, t]));
+    const team = new Map((await this.store.all<Teammate>("teammates")).map((t) => [t.id, t.name]));
+    const where = (id?: string) => !id ? "" : id.startsWith("tm-") ? `DM with ${team.get(id.slice(3)) || "a teammate"}` : threads.get(id)?.num ? `#ramble-${threads.get(id)!.num}` : "chat";
+    const items: { at: string; where: string; text: string }[] = [
+      ...(await this.store.all<Message>("messages")).map((m) => ({ at: m.createdAt, where: `${where(m.threadId)} · ${m.role === "user" ? "you" : team.get(m.teammateId || "hearth") || "Hearth"}`, text: m.text })),
+      ...(await this.store.all<Job>("jobs")).filter((j) => j.result).map((j) => ({ at: j.finishedAt || j.createdAt, where: `${where(j.threadId)} · ${team.get(j.teammateId) || "teammate"}'s answer to "${(j.label || j.task).slice(0, 60)}"`, text: j.result! })),
+      ...(await this.store.all<DayLog>("days")).map((d) => ({ at: `${d.id}T12:00:00Z`, where: `daily log ${d.id}`, text: d.summary })),
+    ];
+    const scored = items.map((it) => { const t = it.text.toLowerCase(); return { it, score: terms.filter((w) => t.includes(w)).length }; })
+      .filter((x) => x.score > 0).sort((a, b) => b.score - a.score || b.it.at.localeCompare(a.it.at)).slice(0, 8);
+    if (!scored.length) return "(no matches)";
+    return scored.map(({ it }) => `- ${it.at.slice(0, 10)} (${it.where}): ${it.text.replace(/\s+/g, " ").slice(0, 350)}`).join("\n");
+  }
+
   async removeTeammate(id: string) {
     const t = await this.teammate(id);
     if (!t || t.id === "hearth") return false;
@@ -1464,6 +1593,12 @@ export class Hub {
       await this.addHook({
         title: "Nightly memory review", why: "Keeps memory tidy: merges duplicates, expires stale facts.",
         trigger: { type: "schedule", time: "03:30", days: [] }, action: { type: "think", prompt: REVIEW_MARKER },
+      }, "system");
+    }
+    if (!hooks.some((h) => h.source === "system" && h.action.type === "think" && h.action.prompt === IDEAS_MARKER)) {
+      await this.addHook({
+        title: "Ideas", why: "Every few hours the team looks for something useful it could do for you, and suggests it on Home.",
+        trigger: { type: "every", minutes: 240 }, action: { type: "think", prompt: IDEAS_MARKER },
       }, "system");
     }
     if (!hooks.some((h) => h.source === "system" && h.action.type === "think" && h.action.prompt === PURGE_MARKER)) {
@@ -1554,6 +1689,11 @@ export class Hub {
       const fresh = (await this.store.get<Hook>("hooks", h.id)) || h;
       await this.store.put<Hook>("hooks", { ...fresh, lastFiredAt: now.toISOString(), fireCount: (h.fireCount || 0) + 1 });
 
+      if (h.source === "system" && h.action.type === "think" && h.action.prompt === IDEAS_MARKER) {
+        const prefs = await this.prefs();
+        if (!inQuietHours(now, prefs.tz, prefs.quietStart, prefs.quietEnd)) await this.thinkOfIdeas();
+        return;
+      }
       if (isReview) {
         const r = await this.turn("review", "Review memory.", "nightly review", { profile: (await this.brains()).heavy });
         if (r.text && r.text !== QUIET) await this.log("memory.review", r.text);
@@ -1605,7 +1745,7 @@ export class Hub {
 
   async exportAll() {
     const out: Record<string, unknown> = { exportedAt: this.clock().toISOString(), hub: this.config.name, storage: this.store.kind };
-    for (const col of ["threads", "messages", "jobs", "teammates", "skills", "workflows", "approvals", "hooks", "memory", "notebooks", "places", "locations", "activity", "scripts", "apps", "appState"] as const) out[col] = await this.store.all(col);
+    for (const col of ["threads", "messages", "jobs", "teammates", "skills", "workflows", "approvals", "hooks", "memory", "notebooks", "places", "locations", "activity", "scripts", "apps", "appState", "ideas", "days"] as const) out[col] = await this.store.all(col);
     out.devices = (await this.store.all<any>("devices")).map(({ tokenHash, ...d }) => d);
     out.prefs = await this.prefs();
     return out;
@@ -1613,7 +1753,8 @@ export class Hub {
 
   async wipePersonal() {
     for (const f of await this.store.all<StoredFile>("files")) await this.files.remove(f.id);
-    for (const col of ["threads", "messages", "jobs", "approvals", "hooks", "memory", "notebooks", "places", "locations", "activity", "apps", "appState"] as const) await this.store.clear(col);
+    for (const col of ["threads", "messages", "jobs", "approvals", "hooks", "memory", "notebooks", "places", "locations", "activity", "apps", "appState", "ideas", "days"] as const) await this.store.clear(col);
+    await this.setPrefs({ about: undefined, aboutUpdatedAt: undefined });
     await this.ensureSystemHooks();
     await this.ensureTeammates();
     await this.log("data.wiped", "All personal data deleted from this hub.");
