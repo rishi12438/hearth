@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { REPEATS, type Repeat, nextOccurrence, nextScheduledRun, describeLocal } from "./time.ts";
 import type { Hook, HookAction, Trigger } from "./types.ts";
 import { NAME_RE } from "./scripts.ts";
+import { sourceById, SOURCES } from "./sources/index.ts";
 
 // A hook is a rule for when the assistant speaks first: a trigger, an action, and a reason.
 //   at        a moment, optionally repeating         -> reminders, follow-ups
@@ -12,6 +13,7 @@ import { NAME_RE } from "./scripts.ts";
 //   watch     a web page's text changed (checked every N min) -> "tell me when tickets drop"
 //   webhook   something POSTed to the hook's secret URL       -> Shortcuts, Zapier, changedetection.io, GitHub…
 //   check     an approved script, run every N min with no model -> any check you can write in code
+//   source    a trigger module (src/sources/): new Gmail, calendar events… -> "tell me when the school emails"
 // Actions: notify (send fixed text), think (run the brain; it may stay quiet), script (run an approved script).
 
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -70,6 +72,16 @@ export function validateTrigger(t: any): Trigger | string {
       const args = Array.isArray(t.args) ? t.args.slice(0, 8).map((x: unknown) => String(x).slice(0, 200)) : [];
       return { type: "check", script, args, minutes, when: t.when === "output" ? "output" : "changed" };
     }
+    case "source": {
+      const src = sourceById(String(t.source || ""));
+      if (!src) return `Unknown source. Use one of: ${SOURCES.map((s) => s.id).join(", ")}.`;
+      const config = src.validate(t.config || {});
+      if (typeof config === "string") return config;
+      const m = src.minutes(config);
+      const minutes = t.minutes === undefined ? m.default : Math.round(Number(t.minutes));
+      if (!(minutes >= m.min && minutes <= 10080)) return `${src.label} checks need minutes between ${m.min} and 10080.`;
+      return { type: "source", source: src.id, config, minutes };
+    }
   }
   return "Unknown trigger type.";
 }
@@ -114,7 +126,7 @@ export function computeNextAt(trigger: Trigger, tz: string, now = new Date(), fi
       return nextOccurrence(trigger.at, trigger.repeat, tz, now)?.toISOString() ?? null;
     }
     case "schedule": return nextScheduledRun(trigger.time, trigger.days, tz, now)?.toISOString() ?? null;
-    case "every": case "watch": case "check": return new Date(now.getTime() + trigger.minutes * 60000).toISOString();
+    case "every": case "watch": case "check": case "source": return new Date(now.getTime() + trigger.minutes * 60000).toISOString();
     default: return null;
   }
 }
@@ -137,6 +149,10 @@ export function describeTrigger(t: Trigger, tz: string) {
     case "silence": return `after ${t.hours}h without hearing from you`;
     case "watch": return `when ${hostOf(t.url)} changes (checked every ${t.minutes % 60 === 0 ? `${t.minutes / 60}h` : `${t.minutes} min`})`;
     case "webhook": return "when its webhook is called";
+    case "source": {
+      const src = sourceById(t.source);
+      return `${src ? src.describe(t.config as never) : t.source} (checked every ${t.minutes % 60 === 0 ? `${t.minutes / 60}h` : `${t.minutes} min`})`;
+    }
     case "check": return `when ${t.script} ${t.when === "output" ? "finds something" : "sees a change"} (runs every ${t.minutes % 60 === 0 ? `${t.minutes / 60}h` : `${t.minutes} min`})`;
   }
 }

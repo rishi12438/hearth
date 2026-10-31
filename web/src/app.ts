@@ -65,6 +65,9 @@ async function boot() {
   try { await call("/api/state"); } catch (e) { if (e instanceof ApiError && e.status === 423) return renderLock(!!e.data?.hasPasskey); }
   const wantsAccess = location.hash === "#access";
   if (wantsAccess) history.replaceState(null, "", "#");
+  // Back from Google's sign-in: #connections=google, or #connections=error:<why>.
+  const backFromGoogle = location.hash.startsWith("#connections=") ? decodeURIComponent(location.hash.slice(13)) : null;
+  if (backFromGoogle) history.replaceState(null, "", "#");
   await Promise.all([refreshState(), loadTeammates(), loadSkills(), loadFiles(), loadApps(), loadIdeas()]);
   show();
   connect();
@@ -74,7 +77,8 @@ async function boot() {
   document.addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openJump(); } });
   setInterval(checkForUpdate, 5 * 60_000);
   setInterval(() => { if (route().view === "home") drawHome(); }, 30_000);
-  if (wantsAccess || S.state?.pendingAccess) openDevices();
+  if (backFromGoogle) { openConnections(backFromGoogle === "google" ? "connected" : "available"); toast(backFromGoogle === "google" ? "Google connected" : `Google: ${backFromGoogle.replace(/^error:/, "")}`, backFromGoogle === "google" ? undefined : "err"); }
+  else if (wantsAccess || S.state?.pendingAccess) openDevices();
   else if (S.state?.device.primary && !S.state.device.passkey && passkeysWork() && !localStorage.getItem("hearth.faceIdAsked")) {
     localStorage.setItem("hearth.faceIdAsked", "1");
     openSheet("Lock with Face ID?", [
@@ -1381,6 +1385,129 @@ function tile(t: any) {
   return null;
 }
 
+// ---------------- connections ----------------
+
+type Shape = [string, Record<string, string | number>];
+/** A connector's tile: a brand color and a simple mark drawn as SVG (no images, no innerHTML). */
+type Connector = { id: string; name: string; blurb: string; group: "Featured" | "Social" | "Productivity"; via?: "google"; bg: string; shapes: Shape[] };
+const CONNECTORS: Connector[] = [
+  { id: "gmail", name: "Gmail", blurb: "New mail you care about, read-only", group: "Featured", via: "google", bg: "#fff", shapes: [
+    ["path", { d: "M5 18V8.5l7 5 7-5V18", fill: "none", stroke: "#EA4335", "stroke-width": 2.4, "stroke-linejoin": "round" }],
+    ["path", { d: "M5 18V8.5", stroke: "#4285F4", "stroke-width": 2.4, "stroke-linecap": "round" }],
+    ["path", { d: "M19 18V8.5", stroke: "#34A853", "stroke-width": 2.4, "stroke-linecap": "round" }]] },
+  { id: "calendar", name: "Google Calendar", blurb: "New invites and heads-ups before events", group: "Featured", via: "google", bg: "#fff", shapes: [
+    ["rect", { x: 4, y: 5, width: 16, height: 15, rx: 3, fill: "#4285F4" }], ["rect", { x: 4, y: 5, width: 16, height: 4, rx: 2, fill: "#1A73E8" }],
+    ["text", { x: 12, y: 18, "text-anchor": "middle", "font-size": 8.5, "font-weight": 800, fill: "#fff", "font-family": "-apple-system, sans-serif" }]] },
+  { id: "linkedin", name: "LinkedIn", blurb: "Messages and invites", group: "Social", bg: "#0A66C2", shapes: [
+    ["text", { x: 12, y: 16.5, "text-anchor": "middle", "font-size": 12, "font-weight": 800, fill: "#fff", "font-family": "-apple-system, sans-serif" }]] },
+  { id: "x", name: "X", blurb: "Mentions and DMs", group: "Social", bg: "#000", shapes: [
+    ["path", { d: "M6 6l12 12M18 6L6 18", stroke: "#fff", "stroke-width": 2.2, "stroke-linecap": "round" }]] },
+  { id: "instagram", name: "Instagram Messages", blurb: "DMs", group: "Social", bg: "#E1306C", shapes: [
+    ["rect", { x: 6, y: 6, width: 12, height: 12, rx: 3.5, fill: "none", stroke: "#fff", "stroke-width": 1.8 }], ["circle", { cx: 12, cy: 12, r: 2.8, fill: "none", stroke: "#fff", "stroke-width": 1.8 }]] },
+  { id: "outlook", name: "Outlook Mail", blurb: "New mail, read-only", group: "Productivity", bg: "#0F6CBD", shapes: [
+    ["text", { x: 12, y: 16.5, "text-anchor": "middle", "font-size": 12, "font-weight": 800, fill: "#fff", "font-family": "-apple-system, sans-serif" }]] },
+  { id: "drive", name: "Google Drive", blurb: "Find and read your files", group: "Productivity", bg: "#fff", shapes: [
+    ["path", { d: "M9 5h6l5 9h-6z", fill: "#FBBC04" }], ["path", { d: "M9 5l-5 9 3 5 5-9z", fill: "#34A853" }], ["path", { d: "M7 19h10l3-5H10z", fill: "#4285F4" }]] },
+];
+const TILE_TEXT: Record<string, string> = { calendar: "31", linkedin: "in", outlook: "O" };
+
+function connectorTile(c: Connector, size = 40) {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("width", String(size * 0.62)); svg.setAttribute("height", String(size * 0.62));
+  for (const [tag, attrs] of c.shapes) {
+    const el = document.createElementNS(ns, tag);
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
+    if (tag === "text") el.textContent = TILE_TEXT[c.id] || "";
+    svg.append(el);
+  }
+  const tile = h("span", { class: "ctile" }, svg);
+  tile.style.cssText = `width:${size}px;height:${size}px;background:${c.bg}`;
+  return tile;
+}
+
+/** Connectors, laid out like an app store: search, Available / Connected, Featured, then groups. */
+async function openConnections(tab: "available" | "connected" = "available") {
+  let g: any;
+  try { g = await call("/api/google"); } catch (e) { return handleError(e); }
+  const isOn = (c: Connector) => c.via === "google" && g.connected;
+  const body = h("div", { class: "connectors" });
+  let q = "";
+  const action = (c: Connector) => !c.via ? h("span", { class: "csoon" }, "Soon")
+    : h("button", { class: "clink", on: { click: () => openGoogleSetup() } }, isOn(c) ? "Manage" : "Connect");
+  const draw = () => {
+    const match = (c: Connector) => !q || `${c.name} ${c.blurb}`.toLowerCase().includes(q);
+    const shown = CONNECTORS.filter((c) => match(c) && (tab === "available" || isOn(c)));
+    const row = (c: Connector) => h("div", { class: "crow" }, connectorTile(c), h("span", { class: "grow" }, h("b", null, c.name), h("small", null, isOn(c) ? `Connected · ${g.email || "Google"}` : c.blurb)), action(c));
+    const featured = tab === "available" && !q ? shown.filter((c) => c.group === "Featured") : [];
+    const groups = tab === "connected" || q ? [["", shown]] as [string, Connector[]][]
+      : (["Social", "Productivity"] as const).map((n) => [n, shown.filter((c) => c.group === n)] as [string, Connector[]]);
+    clear(body,
+      h("div", { class: "search" }, icon("search", 18), h("input", { placeholder: "Search connectors", type: "search", value: q,
+        on: { input: (e: Event) => { q = (e.target as HTMLInputElement).value.trim().toLowerCase(); draw(); setTimeout(() => (body.querySelector("input") as HTMLInputElement)?.focus(), 0); } } })),
+      h("div", { class: "segmented" },
+        h("button", { class: tab === "available" ? "on" : "", on: { click: () => { tab = "available"; draw(); } } }, "Available"),
+        h("button", { class: tab === "connected" ? "on" : "", on: { click: () => { tab = "connected"; draw(); } } }, "Connected")),
+      featured.length ? [h("h4", null, "Featured"), h("div", { class: "cfeatured" }, featured.map((c) =>
+        h("button", { class: "cfeat", on: { click: () => openGoogleSetup() } }, h("span", { class: "grow" }, h("b", null, c.name), h("small", null, isOn(c) ? `Connected · ${g.email || "Google"}` : c.blurb)), connectorTile(c, 56))))] : null,
+      groups.filter(([, list]) => list.length || tab === "connected").map(([name, list]) => [
+        name ? h("h4", null, name) : null,
+        list.length ? h("div", { class: "list" }, list.map(row))
+          : h("p", { class: "empty" }, "Nothing connected yet. Connect Gmail or Calendar and your teammates can watch them for you."),
+      ]),
+      h("p", { class: "muted small" }, "Everything you connect stays on your hub. Sign-ins never go to the model, this app or your exports."));
+  };
+  draw();
+  openSheet("Connectors", body);
+}
+
+/**
+ * Connect your Google account with your own OAuth client: make one in Google Cloud, paste its ID and secret,
+ * tap Connect. The hub keeps the sign-in in a private file; teammates read Gmail and Calendar, never change them.
+ */
+async function openGoogleSetup() {
+  let g: any;
+  try { g = await call("/api/google"); } catch (e) { return handleError(e); }
+  const copyRow = (text: string) => h("button", { class: "codeline", title: "Copy", on: { click: () => navigator.clipboard?.writeText(text).then(() => toast("Copied"), () => toast("Couldn't copy", "err")) } }, h("code", null, text), icon("clip", 14));
+  const err = h("p", { class: "err small", hidden: true });
+  const fail = (e: any) => { err.textContent = e.message; err.hidden = false; };
+  const connect = async () => { try { location.href = (await call("/api/google/connect", { body: {} })).url; } catch (e) { fail(e); } };
+  const id = h("input", { class: "field", placeholder: "Client ID (….apps.googleusercontent.com)", autocomplete: "off", autocapitalize: "off", spellcheck: false });
+  const secret = h("input", { class: "field", type: "password", placeholder: "Client secret", autocomplete: "off", autocapitalize: "off", spellcheck: false });
+  const save = h("button", { class: "btn primary big", on: { click: async () => {
+    if (!id.value.trim()) return id.focus();
+    if (!secret.value.trim()) return secret.focus();
+    save.disabled = true; err.hidden = true;
+    try { await call("/api/google/client", { method: "PUT", body: { clientId: id.value, clientSecret: secret.value } }); await connect(); }
+    catch (e) { fail(e); save.disabled = false; }
+  } } }, "Save and connect Google");
+  const cloud = (path: string, label: string) => h("a", { href: `https://console.cloud.google.com/${path}`, target: "_blank", rel: "noopener noreferrer" }, label);
+  openSheet("Google", [
+    h("button", { class: "btn ghost", on: { click: () => openConnections() } }, icon("back", 16), "All connectors"),
+    h("div", { class: "phero" }, h("span", { class: "ctile-pair" }, connectorTile(CONNECTORS[0], 48), connectorTile(CONNECTORS[1], 48)), h("b", null, g.connected ? "Google is connected" : "Gmail and Calendar"),
+      h("small", null, g.connected ? `${g.email || "Your account"} · read-only` : "Teammates can watch your inbox and calendar and tell you what matters. Read-only.")),
+    g.connected ? [
+      h("p", { class: "muted" }, "Ask for things like “tell me when the school emails”, “LinkedIn digest every 30 min” or “what's on tomorrow?”. They show up under Triggers in Plans."),
+      h("div", { class: "stack" },
+        h("button", { class: "btn ghost", on: { click: connect } }, icon("repeat", 16), "Reconnect"),
+        h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet("Disconnect Google?", "Hearth signs out of your Google account. Gmail and Calendar triggers stop until you connect again.", "Disconnect", async () => { await call("/api/google", { method: "DELETE" }); toast("Google disconnected"); openConnections(); }) } }, "Disconnect Google")),
+    ] : g.hasClient ? [
+      h("p", { class: "muted" }, `Your Google client is saved (${g.clientIdHint}). Connect to sign in.`),
+      err, h("button", { class: "btn primary big", on: { click: connect } }, "Connect Google"),
+      h("details", null, h("summary", { class: "muted small" }, "Use a different client"), h("div", { class: "stack" }, id, secret, save)),
+    ] : [
+      h("ol", { class: "steps" },
+        h("li", null, "In Google Cloud, ", cloud("projectcreate", "create a project"), " (any name, like “Hearth”)."),
+        h("li", null, "Turn on the ", cloud("apis/library/gmail.googleapis.com", "Gmail API"), " and the ", cloud("apis/library/calendar-json.googleapis.com", "Calendar API"), "."),
+        h("li", null, "Set up the ", cloud("auth/branding", "consent screen"), ": External, add your own email as a test user. Then publish it (“In production”) so the sign-in doesn't expire every 7 days. Google will warn it's unverified; that's fine for your own account."),
+        h("li", null, "Create an ", cloud("auth/clients/create", "OAuth client"), ": Web application. Under Authorized redirect URIs, add:", h("div", { class: "hookurl" }, copyRow(g.redirectUri))),
+        h("li", null, "Paste the client ID and secret here.")),
+      id, secret, err, save,
+    ],
+    h("p", { class: "muted small" }, "The sign-in stays on your hub in a private file. It never goes to the model, this app or your exports. Hearth asks only to read mail and calendars, so it can't send, delete or change anything."),
+  ]);
+}
+
 // ---------------- voice ----------------
 
 /** Connect speech-to-text: paste a Deepgram key once; the hub checks it, keeps it, and never shows it again. */
@@ -1561,6 +1688,7 @@ function openMenu() {
     h("nav", null,
       item("search", "Jump to…", "Find a teammate, chat or task (⌘K)", openJump),
       item("bell", "Plans", "Reminders, routines, triggers", openPlans),
+      item("clip", "Connectors", "Gmail, Calendar and more for your teammates", () => openConnections()),
       item("brain", "Memory", "What I know about you", openMemory),
       item("dms", "People", "Your relationship map", openPeople),
       item("users", "Teammates", "Who the orchestrator can hand work to", openTeammates),
@@ -1743,7 +1871,7 @@ function drawPlans() {
   const el = document.getElementById("plans");
   if (!el) return;
   // Triggers wait for something to happen (a page change, a webhook call, a script finding something, a place, a silence).
-  const EVENT = ["watch", "webhook", "check", "place", "silence"];
+  const EVENT = ["watch", "webhook", "check", "source", "place", "silence"];
   const live = S.hooks.filter((x) => x.status !== "done" && x.source !== "system");
   const triggers = live.filter((x) => EVENT.includes(x.trigger.type));
   const active = live.filter((x) => !EVENT.includes(x.trigger.type)).sort((a, b) => (a.nextAt || "~").localeCompare(b.nextAt || "~"));
@@ -2009,7 +2137,7 @@ function renderPairing(code: string) {
 /** One line on what a trigger has been doing: when it last looked or was called, and when it last spoke. */
 function triggerStatus(hk: any) {
   const t = hk.trigger.type;
-  const looked = t === "watch" || t === "check" ? (hk.seen ? `checked ${relTime(hk.seen.at)}` : "not checked yet") : t === "webhook" ? (hk.lastFiredAt ? `called ${relTime(hk.lastFiredAt)}` : "never called") : null;
+  const looked = t === "watch" || t === "check" || t === "source" ? (hk.seen ? `checked ${relTime(hk.seen.at)}` : "not checked yet") : t === "webhook" ? (hk.lastFiredAt ? `called ${relTime(hk.lastFiredAt)}` : "never called") : null;
   const spoke = hk.fireCount ? `spoke ${hk.fireCount}×` : t === "webhook" ? null : "quiet so far";
   return [hk.when, looked, t === "webhook" ? null : spoke].filter(Boolean).join(" · ");
 }

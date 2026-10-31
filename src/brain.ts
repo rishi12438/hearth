@@ -3,6 +3,10 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import { wallParts, zonedToUtc } from "./time.ts";
+import { SOURCES } from "./sources/index.ts";
+
+/** Each trigger module's own description of its config, for the hook docs below. */
+const SOURCE_DOCS = SOURCES.map((s) => `        ${s.id}: ${s.doc}`).join("\n");
 
 // The brain is whatever coding agent you already use, run headless: one call per event.
 // It gets context in, and replies with text plus an optional ```hearth block of actions.
@@ -60,6 +64,10 @@ ACTIONS
                            and print nothing when there's nothing to say. Use this for anything a page watch can't do:
                            an API, a price under $X, a JSON field, several pages, a calculation. Write it with
                            script.propose in the same reply; it starts once the user approves the code. Read-only only.
+      {"type":"source","source":"<id>","config":{…},"minutes":n}   a trigger module; CONTEXT.sources lists them and
+                           whether each is connected. You get only the items that are new since the last check. Modules:
+${SOURCE_DOCS}
+                           If a source isn't connected, tell the user to connect it in Menu → Connections first.
     Actions:
       {"type":"notify","text":"exact message to send"}            (plain reminders)
       {"type":"think","prompt":"what to do when it fires"}       (you will be called; you may stay quiet)
@@ -77,6 +85,8 @@ ACTIONS
 - memory.used {ids}   the memory ids you relied on for this reply (always include when you used any)
 - notebook.summary {name, summary}   1-2 sentence "where it stands" for a topic
 - place.add {name, here:true} or {name, lat, lon, radiusM?}   save a place for place hooks
+- source.read {source, config}   read a trigger module now (e.g. today's calendar, recent mail from someone);
+    you'll be called again with what it found. Same config as the trigger.
 - script.run {name, args}   run an approved script now; you'll be called again with its output
 - history.search {query}   search past conversations, answers and the daily log (exact wording, "what did I say about X");
     you'll be called again with what matched. Use it when memory doesn't have what you need.

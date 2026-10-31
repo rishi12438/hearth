@@ -50,7 +50,9 @@ export type Trigger =
   /** Fires when something POSTs to the hook's secret URL (/api/webhook/<token>). */
   | { type: "webhook"; token: string }
   /** Runs an approved script every N minutes (no model). Fires when it prints something, or when its output changes. */
-  | { type: "check"; script: string; args: string[]; minutes: number; when: "output" | "changed" };
+  | { type: "check"; script: string; args: string[]; minutes: number; when: "output" | "changed" }
+  /** A trigger module (src/sources/): Gmail, Calendar… polled every N minutes; fires on items it hasn't seen. */
+  | { type: "source"; source: string; config: Record<string, unknown>; minutes: number };
 
 export type HookAction =
   | { type: "notify"; text: string }
