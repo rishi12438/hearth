@@ -1283,8 +1283,8 @@ export class Hub {
             const site = String(a.site || "").trim();
             if (!site) break;
             if (!this.computers?.canCopyCookies()) { done.push({ kind: "memory", label: `No Mac online to refresh ${site}. Reconnect it in Connectors.` }); break; }
-            this.connections.wantFromMac(site);       // mark it Mac-fed
-            this.computers.refreshCookies(site);       // and pull it now
+            this.connections.wantFromMac(site);                                   // mark it Mac-fed
+            this.computers.refreshCookies(this.connections.domainFor(site) || site); // and pull it now
             done.push({ kind: "memory", label: `Asked your Mac for a fresh ${site} login` });
             break;
           }
@@ -2138,13 +2138,8 @@ export class Hub {
     const was = this.connections.problemFor(id);
     this.connections.problem(id, message);
     this.emit("connections");
-    // Fed from your Mac and it's online? Ask it for a fresh login instead of bothering you.
-    if (id !== "google" && this.connections.macSites().includes(id) && this.computers?.canCopyCookies()) {
-      this.computers.refreshCookies(id);
-      await this.log("connection.refresh", `${id}: asked your Mac for a fresh login`);
-      if (!was) return; // give the Mac a chance before we nag
-      return;
-    }
+    // Just flag it (Connectors shows "needs reconnecting") and tell you once. No auto-pull: a teammate or you can
+    // run connection.refresh when you actually want a fresh login, so a transient blip doesn't churn the Mac.
     if (was) return;
     const msg = await this.addMessage({ role: "assistant", threadId: await this.updatesThread(), text: message });
     await this.push?.send({ title: "Reconnect needed", body: message.slice(0, 180), tag: `signedout-${id}`, url: threadLink(msg.threadId!) });

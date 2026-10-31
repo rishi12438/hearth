@@ -125,6 +125,8 @@ export class Connections {
   problem(id: string, message: string | null) { const d = this.key(id) || id; if (message) this.problems.set(d, message); else this.problems.delete(d); }
   /** The current problem for a connection (sign-out message), by preset id or domain. */
   problemFor(id: string): string | null { return this.problems.get(this.key(id) || id) ?? null; }
+  /** The storage domain for a preset id or domain ("linkedin" -> "linkedin.com"). */
+  domainFor(id: string): string | null { return this.key(id); }
 
   /** Days until the stored login lapses by its own expiry (not sign-out), or null if session-only / not set. */
   private expiresInDays(s: Saved | null): number | null {

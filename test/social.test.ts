@@ -159,14 +159,20 @@ test("a Mac copies a login up over the link; the hub stores it and re-asks on si
   cmp.message("mac1", JSON.stringify({ t: "cookies", site: "x.com", data: JSON.stringify({ cookies: [{ name: "ct0", value: "x", domain: ".x.com" }] }), hash: "h2" }));
   expect(hub.connections.connected("x")).toBe(false);
 
-  // When the session dies, the hub asks the Mac again (fresh want, hash dropped) instead of only nagging.
+  // When the session dies, the hub only flags it (no auto-pull from the Mac — that was flaky). A teammate pulls on demand.
   sent.length = 0;
   page = { url: "https://www.linkedin.com/login", data: null };
   const r = await hub.addHook({ title: "LinkedIn", trigger: { type: "source", source: "linkedin", config: { what: "messages" } }, action: { type: "notify", text: "x" } }, "assistant");
   await hub.fire(await get(r.value!.id), "check");
+  expect(sent.find((m) => m.t === "wantCookies")).toBeUndefined(); // no automatic re-ask
+  expect(hub.connections.status().find((s) => s.id === "linkedin")!.problem).toContain("signed Hearth out");
+
+  // The agent pulls a fresh login on demand with connection.refresh.
+  sent.length = 0;
+  await hub.applyActions([{ type: "connection.refresh", site: "linkedin" }], "test");
   const reask = sent.find((m) => m.t === "wantCookies");
   expect(reask).toBeTruthy();
-  expect(reask.have["linkedin.com"]).toBeUndefined(); // dropped, so the Mac re-copies even if it looks unchanged
+  expect(reask.have["linkedin.com"]).toBeUndefined();
 });
 
 test("any domain works, not just presets: save, read a logged-in page, and watch it change", async () => {
