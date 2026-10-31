@@ -15,7 +15,7 @@ svg{display:block;width:100%;overflow:visible;margin-top:8px;touch-action:pan-y}
 </style></head><body><div class="c"><div class="title" id="title"></div><div class="sub" id="sub"></div><div class="big" id="big"></div><div class="wrap"><svg id="svg"></svg><div class="tip" id="tip"></div></div><div class="legend" id="legend"></div><button class="dbtn" id="databtn">Show data</button><div id="data" hidden></div></div>
 <script>
 // Data: { type: "line"|"area"|"bar"|"hbar"|"donut", title?, subtitle?, unit?: "$"|"%"|"kg"|..., unit_after?: true,
-//   labels: ["Mon","Tue",...], series: [{ name, values: [n, ...], color? }], headline?: { value, change? } }
+//   labels: ["Mon","Tue",...], series: [{ name, values: [n, ...], color? }], headline?: { value, change?, good?: "up"|"down" } }
 const d = hearth.data || {}, type = d.type || "line", labels = d.labels || [], series = (d.series || []).filter((s) => s && s.values);
 const PALETTE = ["#1d1b19", "#e5603e", "#3f7fd8", "#2f9e6b", "#c59b2e", "#8e6bd6", "#d0567e"];
 const color = (s, i) => s.color || PALETTE[i % PALETTE.length];
@@ -40,7 +40,14 @@ function draw() {
     legend(labels.map((l, i) => [l, PALETTE[i % PALETTE.length]])); return;
   }
   const horiz = type === "hbar", n = labels.length || Math.max(0, ...series.map((s) => s.values.length));
-  const all = series.flatMap((s) => s.values).filter((v) => v != null), max = niceMax(Math.max(0, ...all)), min = Math.min(0, ...all);
+  const all = series.flatMap((s) => s.values).filter((v) => v != null);
+  // Bars start at zero; lines and areas zoom to where the data is, so a change of 2 kg on 80 is visible.
+  let min = Math.min(0, ...all), max = niceMax(Math.max(0, ...all));
+  if (type !== "bar" && all.length) {
+    const lo = Math.min(...all), hi = Math.max(...all), pad = (hi - lo || Math.abs(hi) || 1) * .25, step = niceMax((hi - lo + 2 * pad) / 4) / 2 || 1;
+    min = Math.floor((lo - pad) / step) * step; max = Math.ceil((hi + pad) / step) * step;
+    if (lo >= 0 && min < 0) min = 0;
+  }
   if (horiz) {
     const rowH = 30, lw = Math.min(110, W * .32), H = n * rowH + 6; svg.setAttribute("height", H);
     for (let i = 0; i < n; i++) {
@@ -84,7 +91,7 @@ function legend(items) { const l = document.getElementById("legend"); l.textCont
 hearth.ready(() => {
   document.getElementById("title").textContent = d.title || ""; document.getElementById("sub").textContent = d.subtitle || "";
   const big = document.getElementById("big");
-  if (d.headline) { big.textContent = d.headline.value; if (d.headline.change) { const s = document.createElement("small"); s.textContent = d.headline.change; s.className = /^[-–▼]/.test(d.headline.change) ? "down" : "up"; big.append(s); } } else big.style.display = "none";
+  if (d.headline) { big.textContent = d.headline.value; if (d.headline.change) { const s = document.createElement("small"); s.textContent = d.headline.change; const isUp = !/^[-–▼]/.test(d.headline.change); s.className = isUp === ((d.headline.good || "up") === "up") ? "up" : "down"; big.append(s); } } else big.style.display = "none";
   draw(); new ResizeObserver(() => draw()).observe(svg);
   // The numbers behind the chart, for reading exact values.
   const btn = document.getElementById("databtn"), box = document.getElementById("data");

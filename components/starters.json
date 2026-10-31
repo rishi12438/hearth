@@ -222,7 +222,7 @@
   {
     "name": "chart",
     "title": "Chart",
-    "description": "Line, area, bar, horizontal bar or donut chart with a headline number and change; tap or drag to read values. Use for any numbers over time or across categories: spending, weight, steps, prices, scores.",
+    "description": "Line, area, bar, horizontal bar or donut chart with a headline number and change; tap or drag to read values, and a Show data view. Set headline.good to \"down\" when lower is better (weight, spending). Use for any numbers over time or across categories: spending, weight, steps, prices, scores.",
     "example": {
       "type": "line",
       "title": "Weight",
@@ -231,7 +231,8 @@
       "unit_after": true,
       "headline": {
         "value": "78.4 kg",
-        "change": "-2.1 kg"
+        "change": "-2.1 kg",
+        "good": "down"
       },
       "labels": [
         "W1",
@@ -314,8 +315,20 @@
       "title": "Lisbon",
       "photos": [
         {
-          "url": "https://upload.wikimedia.org/wikipedia/commons/thumb/7/7d/Lisbon_%2836831596786%29_%28cropped%29.jpg/640px-Lisbon_%2836831596786%29_%28cropped%29.jpg",
-          "caption": "Alfama rooftops"
+          "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/f/f2/Lisboa_-_Portugal_%2852597836992%29.jpg/330px-Lisboa_-_Portugal_%2852597836992%29.jpg",
+          "caption": "Lisbon from above"
+        },
+        {
+          "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/0/07/Lisbon_alfalma.jpg/330px-Lisbon_alfalma.jpg",
+          "caption": "Alfama"
+        },
+        {
+          "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/6/65/Torre_Bel%C3%A9m_April_2009-4a.jpg/330px-Torre_Bel%C3%A9m_April_2009-4a.jpg",
+          "caption": "Belém Tower"
+        },
+        {
+          "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/5/52/Pra%C3%A7a_de_D._Pedro_IV.jpg/330px-Pra%C3%A7a_de_D._Pedro_IV.jpg",
+          "caption": "Rossio"
         }
       ]
     }
