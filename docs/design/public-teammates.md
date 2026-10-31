@@ -116,25 +116,38 @@ and the box checks every message against it before the real model sees it.
 
 **Each message goes through three steps:**
 
-1. **Gate.** A small, cheap model call with no tools reads only the scope and the visitor's message (not the notebook,
-   not the chat so far). It answers `in`, `out` or `unsure` as structured JSON. It can't leak anything because it
-   doesn't have anything.
+1. **Guard model.** Always on for shared links. A small, cheap model call with no tools reads only the scope and the
+   visitor's message (plus the last couple of visitor turns, so "now make it 2000 words" is caught). It never sees the
+   notebook or anything of yours, so it can't leak anything. It returns structured JSON:
+
+   ```json
+   { "fit": "in|out|unsure", "injection": false, "abuse": "none|rude|harmful", "reason": "asks for an essay" }
+   ```
+
+   - `fit`: does this match what the teammate does?
+   - `injection`: is it trying to change the rules ("ignore your instructions", fake system messages, "you are now…")?
+   - `abuse`: harassment, or things no teammate should help with.
 2. **Answer or refuse.**
    - `in`: the real teammate answers.
    - `out`: a fixed reply written by code ("I only help with recipes; try asking me what to cook tonight"). The main
      model isn't called, so an off-topic request costs a fraction of a cent.
    - `unsure`: the teammate answers, but with a short reply cap.
+   - `injection` or `abuse` set: a fixed reply, the message is flagged to you, and the visitor gets a strike.
 3. **Check the reply.** A quick rule check on the way out: the reply is cut off at the length limit, and if it's long-form
    writing or code the teammate shouldn't produce (for a scope that doesn't allow it), it's replaced with the fixed reply.
 
-**Monitoring.** Every `out`/`unsure` goes in the outbox, so the hub can show you per link: messages, how many were
-off-topic, the cost, and the top off-topic requests. If a visitor keeps getting `out`, they're slowed down, then blocked
+**Monitoring.** Every `out`/`unsure`/flagged message goes in the outbox, so the hub can show you per link: messages, how many were
+off-topic, the cost, and the top off-topic requests. If a visitor keeps getting `out` or strikes, they're slowed down, then blocked
 for the day. If many visitors ask for the same off-topic thing, the hub suggests adding it to the scope.
 
-**Why the gate isn't the security.** The gate can be fooled ("this is a recipe for an essay..."). That's fine: it's
+**Why the guard isn't the security.** The guard can be fooled ("this is a recipe for an essay..."). That's fine: it's
 there to stop people using your teammate as free ChatGPT, not to protect your data. The data is protected by the sealed
-box, so the worst a visitor who gets past the gate can do is get a short, capped, tool-less answer you paid a little
+box, so the worst a visitor who gets past the guard can do is get a short, capped, tool-less answer you paid a little
 for, and the daily cap still holds.
+
+**Later, for your own hub too.** The same guard can check untrusted text coming *into* your main hub (web pages a
+teammate reads, emails, files) for injection before it reaches a teammate that can see your data. That's where
+injection is actually dangerous, so it's the next place to put it after shared links.
 
 ## Limits for public links
 
@@ -145,7 +158,7 @@ for, and the daily cap still holds.
 ## Build order
 
 1. **`src/public/`:** the standalone box service: chat route, its own store, per-visitor sessions, rate/cost limits,
-   brain with no tools, and the scope gate and reply check.
+   brain with no tools, and the guard model and reply check.
 2. **Publishing:** "Share this teammate" on the hub creates a link, picks notebooks, starts the container, pushes the copy.
 3. **Deploy:** `deploy/public.Dockerfile`, a Caddy route for `/t/*`, a Docker network that only allows the model API,
    setup steps in `deploy/lightsail.md`.
@@ -161,4 +174,4 @@ for, and the daily cap still holds.
 - Revoking a link makes it 404 within seconds and deletes its container and data.
 - Visitor A can't read visitor B's conversation.
 - An off-topic suite (essays, code, homework, "pretend you're a general assistant") is mostly answered with the fixed
-  reply, never calls the main model when the gate says `out`, and any reply that slips through stays under the length cap.
+  reply, never calls the main model when the guard says `out`, and any reply that slips through stays under the length cap.
