@@ -1,0 +1,51 @@
+<!doctype html><html><head><style>
+*{box-sizing:border-box}html,body{margin:0;background:#fff;color:#1d1b19;font:14px/1.35 -apple-system,system-ui,sans-serif}
+.screen{position:relative;background:#000;aspect-ratio:16/9;overflow:hidden}
+video,.thumb{width:100%;height:100%;display:block;object-fit:contain;background:#000}.thumb{object-fit:cover}
+.big{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:64px;height:64px;border-radius:50%;border:0;background:rgba(255,255,255,.92);display:grid;place-items:center;box-shadow:0 6px 20px rgba(0,0,0,.35)}
+.big::after{content:"";border-left:20px solid #1d1b19;border-top:12px solid transparent;border-bottom:12px solid transparent;margin-left:5px}
+.ctrl{display:flex;align-items:center;gap:10px;padding:10px 12px 4px}.ctrl button{border:0;background:#f2f0ec;border-radius:999px;height:32px;min-width:32px;padding:0 10px;font:700 13px system-ui;color:#1d1b19}
+.bar{flex:1;height:6px;border-radius:3px;background:#ebe8e3;position:relative;cursor:pointer;touch-action:none}.bar i{position:absolute;inset:0 auto 0 0;background:#1d1b19;border-radius:3px;width:0}
+.time{font:600 12.5px system-ui;color:#8c8781;font-variant-numeric:tabular-nums;min-width:74px;text-align:right}
+.meta{padding:6px 14px 4px}.meta b{display:block;font-size:16px}.meta span{font-size:13px;color:#8c8781}
+.ch{padding:4px 8px 10px}.ch button{display:flex;gap:10px;width:100%;border:0;background:none;text-align:left;padding:8px 6px;border-radius:10px;font:15px system-ui;color:#1d1b19}
+.ch button.on{background:#f2f0ec}.ch em{font-style:normal;font:700 12.5px system-ui;color:#8c8781;min-width:42px;font-variant-numeric:tabular-nums;padding-top:2px}
+.yt{display:flex;justify-content:center;padding:4px 0 10px}.yt button{border:0;background:#1d1b19;color:#fff;border-radius:999px;padding:9px 16px;font:700 14px system-ui}
+</style></head><body><div class="screen" id="screen"></div><div id="controls"></div><div class="meta" id="meta"></div><div class="ch" id="ch"></div><div class="yt" id="yt"></div>
+<script>
+// Data: { title?, by?, file? (a hub video id) | youtube? (a YouTube URL or id), chapters?: [{ t: "1:30" | 90, label }] }
+// Your own videos play here (scrub, speed, chapters). YouTube shows its picture and chapters and opens in YouTube.
+const d = hearth.data || {};
+const el = (t, c, txt) => { const e = document.createElement(t); if (c) e.className = c; if (txt != null) e.textContent = txt; return e; };
+const secs = (t) => typeof t === "number" ? t : String(t).split(":").reverse().reduce((s, p, i) => s + Number(p) * 60 ** i, 0);
+const clock = (s) => { s = Math.max(0, Math.floor(s || 0)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = String(s % 60).padStart(2, "0"); return h ? `${h}:${String(m).padStart(2, "0")}:${x}` : `${m}:${x}`; };
+const ytId = d.youtube ? (String(d.youtube).match(/(?:v=|youtu\.be\/|shorts\/|embed\/)([\w-]{11})/) || [])[1] || (/^[\w-]{11}$/.test(d.youtube) ? d.youtube : null) : null;
+hearth.ready(() => {
+  const screen = document.getElementById("screen"), chapters = (d.chapters || []).map((c) => ({ s: secs(c.t), label: c.label }));
+  const meta = document.getElementById("meta"); meta.append(el("b", null, d.title || ""), d.by ? el("span", null, d.by) : "");
+  const ch = document.getElementById("ch"), rows = chapters.map((c) => { const b = el("button"); b.append(el("em", null, clock(c.s)), el("span", null, c.label)); ch.append(b); return b; });
+  if (ytId) {
+    const im = el("img", "thumb"); im.alt = ""; im.src = hearth.image(`https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`); screen.append(im);
+    const go = (s) => hearth.link(`https://www.youtube.com/watch?v=${ytId}${s ? `&t=${Math.floor(s)}s` : ""}`);
+    const big = el("button", "big"); big.setAttribute("aria-label", "Play on YouTube"); big.onclick = () => go(0); screen.append(big);
+    rows.forEach((b, i) => (b.onclick = () => go(chapters[i].s)));
+    const y = el("button", null, "Open in YouTube"); y.onclick = () => go(0); document.getElementById("yt").append(y);
+    return;
+  }
+  const v = el("video"); v.src = d.file ? hearth.file(d.file) : ""; v.playsInline = true; v.preload = "metadata"; screen.append(v);
+  const big = el("button", "big"); big.setAttribute("aria-label", "Play"); screen.append(big);
+  const c = el("div", "ctrl"), play = el("button", null, "▶"), bar = el("div", "bar"), fill = el("i"), time = el("span", "time", "0:00"), speed = el("button", null, "1×");
+  bar.append(fill); c.append(play, bar, time, speed); document.getElementById("controls").append(c);
+  const toggle = () => (v.paused ? v.play() : v.pause());
+  big.onclick = toggle; play.onclick = toggle; v.onclick = toggle;
+  v.onplay = () => { play.textContent = "❚❚"; big.style.display = "none"; }; v.onpause = () => { play.textContent = "▶"; big.style.display = ""; };
+  const rates = [1, 1.25, 1.5, 2, 0.75]; speed.onclick = () => { v.playbackRate = rates[(rates.indexOf(v.playbackRate) + 1) % rates.length]; speed.textContent = v.playbackRate + "×"; };
+  v.ontimeupdate = () => {
+    fill.style.width = (100 * v.currentTime) / (v.duration || 1) + "%"; time.textContent = `${clock(v.currentTime)} / ${clock(v.duration)}`;
+    let k = -1; chapters.forEach((c, i) => { if (v.currentTime >= c.s) k = i; }); rows.forEach((b, i) => b.classList.toggle("on", i === k));
+  };
+  const seek = (e) => { const r = bar.getBoundingClientRect(); v.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * (v.duration || 0); };
+  bar.addEventListener("pointerdown", (e) => { seek(e); bar.setPointerCapture(e.pointerId); }); bar.addEventListener("pointermove", (e) => e.buttons && seek(e));
+  rows.forEach((b, i) => (b.onclick = () => { v.currentTime = chapters[i].s; v.play(); }));
+});
+</script></body></html>

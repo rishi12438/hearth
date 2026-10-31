@@ -1,0 +1,102 @@
+<!doctype html><html><head><style>
+*{box-sizing:border-box}html,body{margin:0;background:#fff;color:#1d1b19;font:14px/1.35 -apple-system,system-ui,sans-serif}
+.c{padding:14px 14px 10px}.title{font-size:16px;font-weight:700}.sub{font-size:13px;color:#8c8781;margin-top:1px}
+.big{font-size:26px;font-weight:800;letter-spacing:-.02em;margin-top:6px}.big small{font-size:13px;font-weight:700;margin-left:6px}
+.up{color:#2f9e6b}.down{color:#d9534f}
+svg{display:block;width:100%;overflow:visible;margin-top:8px;touch-action:pan-y}
+.axis{fill:#8c8781;font-size:11px}.grid{stroke:#efece8;stroke-width:1}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:8px;font-size:12.5px;color:#3b3834}.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+.tip{position:absolute;pointer-events:none;background:#1d1b19;color:#fff;border-radius:10px;padding:6px 9px;font-size:12.5px;white-space:nowrap;transform:translate(-50%,-110%);opacity:0;transition:opacity .12s}
+.tip b{display:block;font-size:11.5px;color:#cfc9c1;font-weight:600}
+.wrap{position:relative}
+.dbtn{margin-top:8px;border:0;background:#f2f0ec;border-radius:999px;padding:6px 12px;font:700 12.5px system-ui;color:#1d1b19}
+#data table{width:100%;border-collapse:collapse;margin-top:8px;font-size:13px;font-variant-numeric:tabular-nums}#data th,#data td{padding:6px 4px;border-bottom:1px solid #f0ede9;text-align:right}
+#data th{color:#8c8781;font-size:11.5px;text-transform:uppercase}#data th:first-child,#data td:first-child{text-align:left}
+</style></head><body><div class="c"><div class="title" id="title"></div><div class="sub" id="sub"></div><div class="big" id="big"></div><div class="wrap"><svg id="svg"></svg><div class="tip" id="tip"></div></div><div class="legend" id="legend"></div><button class="dbtn" id="databtn">Show data</button><div id="data" hidden></div></div>
+<script>
+// Data: { type: "line"|"area"|"bar"|"hbar"|"donut", title?, subtitle?, unit?: "$"|"%"|"kg"|..., unit_after?: true,
+//   labels: ["Mon","Tue",...], series: [{ name, values: [n, ...], color? }], headline?: { value, change? } }
+const d = hearth.data || {}, type = d.type || "line", labels = d.labels || [], series = (d.series || []).filter((s) => s && s.values);
+const PALETTE = ["#1d1b19", "#e5603e", "#3f7fd8", "#2f9e6b", "#c59b2e", "#8e6bd6", "#d0567e"];
+const color = (s, i) => s.color || PALETTE[i % PALETTE.length];
+const fmt = (v) => { if (v == null || isNaN(v)) return "–"; const n = Math.abs(v) >= 1e6 ? (v / 1e6).toFixed(1) + "M" : Math.abs(v) >= 1e4 ? Math.round(v / 1e3) + "k" : Number.isInteger(v) ? String(v) : v.toFixed(1); return d.unit ? (d.unit_after ? n + d.unit : d.unit + n) : n; };
+const ns = "http://www.w3.org/2000/svg", mk = (t, a) => { const e = document.createElementNS(ns, t); for (const k in a) e.setAttribute(k, a[k]); return e; };
+const svg = document.getElementById("svg"), tip = document.getElementById("tip");
+function niceMax(v) { if (v <= 0) return 1; const p = 10 ** Math.floor(Math.log10(v)), f = v / p; return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * p; }
+function showTip(x, y, head, lines) { tip.textContent = ""; const b = document.createElement("b"); b.textContent = head; tip.append(b, ...lines.map((l) => { const s = document.createElement("div"); s.textContent = l; return s; })); tip.style.left = x + "px"; tip.style.top = y + "px"; tip.style.opacity = 1; }
+function draw() {
+  const W = svg.clientWidth || 320; svg.textContent = ""; tip.style.opacity = 0;
+  if (type === "donut") {
+    const H = 190, r = 74, cx = W / 2, cy = H / 2, vals = series[0] ? series[0].values : [], total = vals.reduce((a, b) => a + (b || 0), 0) || 1;
+    svg.setAttribute("height", H); let a0 = -Math.PI / 2;
+    vals.forEach((v, i) => {
+      const a1 = a0 + (2 * Math.PI * (v || 0)) / total, large = a1 - a0 > Math.PI ? 1 : 0;
+      const p = mk("path", { d: `M${cx + r * Math.cos(a0)} ${cy + r * Math.sin(a0)} A${r} ${r} 0 ${large} 1 ${cx + r * Math.cos(a1 - .0001)} ${cy + r * Math.sin(a1 - .0001)}`, fill: "none", stroke: PALETTE[i % PALETTE.length], "stroke-width": 26 });
+      const mid = (a0 + a1) / 2;
+      p.addEventListener("click", () => showTip(cx + (r + 4) * Math.cos(mid), cy + (r + 4) * Math.sin(mid), labels[i] || "", [`${fmt(v)} · ${Math.round((100 * v) / total)}%`]));
+      svg.append(p); a0 = a1;
+    });
+    const t = mk("text", { x: cx, y: cy + 6, "text-anchor": "middle", "font-size": 20, "font-weight": 800, fill: "#1d1b19" }); t.textContent = fmt(total); svg.append(t);
+    legend(labels.map((l, i) => [l, PALETTE[i % PALETTE.length]])); return;
+  }
+  const horiz = type === "hbar", n = labels.length || Math.max(0, ...series.map((s) => s.values.length));
+  const all = series.flatMap((s) => s.values).filter((v) => v != null), max = niceMax(Math.max(0, ...all)), min = Math.min(0, ...all);
+  if (horiz) {
+    const rowH = 30, lw = Math.min(110, W * .32), H = n * rowH + 6; svg.setAttribute("height", H);
+    for (let i = 0; i < n; i++) {
+      const y = i * rowH, lab = mk("text", { x: 0, y: y + 19, class: "axis", "font-size": 12.5, fill: "#3b3834" }); lab.textContent = labels[i] || ""; svg.append(lab);
+      const v = series[0].values[i] || 0, w = Math.max(2, ((W - lw - 46) * v) / max);
+      const bar = mk("rect", { x: lw, y: y + 7, width: w, height: 16, rx: 5, fill: color(series[0], 0) }); svg.append(bar);
+      const val = mk("text", { x: lw + w + 6, y: y + 19, class: "axis", "font-weight": 700, fill: "#1d1b19" }); val.textContent = fmt(v); svg.append(val);
+    }
+    return legend(series.length > 1 ? series.map((s, i) => [s.name, color(s, i)]) : []);
+  }
+  const H = 190, L = 40, R = 8, T = 8, B = 24, w = W - L - R, h = H - T - B; svg.setAttribute("height", H);
+  const X = (i) => L + (type === "bar" ? (w / n) * (i + .5) : n > 1 ? (w * i) / (n - 1) : w / 2), Y = (v) => T + h - ((v - min) / (max - min || 1)) * h;
+  for (let k = 0; k <= 4; k++) { const v = min + ((max - min) * k) / 4, y = Y(v); svg.append(mk("line", { x1: L, x2: W - R, y1: y, y2: y, class: "grid" })); const t = mk("text", { x: L - 6, y: y + 4, class: "axis", "text-anchor": "end" }); t.textContent = fmt(v); svg.append(t); }
+  const every = Math.ceil(n / Math.max(1, Math.floor(w / 46)));
+  for (let i = 0; i < n; i += every) { const t = mk("text", { x: X(i), y: H - 6, class: "axis", "text-anchor": "middle" }); t.textContent = labels[i] ?? ""; svg.append(t); }
+  if (type === "bar") {
+    const gw = (w / n) * .7, bw = gw / series.length;
+    series.forEach((s, si) => s.values.forEach((v, i) => { if (v == null) return; const y = Y(Math.max(0, v)), y0 = Y(0); svg.append(mk("rect", { x: X(i) - gw / 2 + si * bw, y, width: Math.max(1, bw - 2), height: Math.max(1, Math.abs(y0 - Y(v))), rx: 4, fill: color(s, si) })); }));
+  } else series.forEach((s, si) => {
+    const pts = s.values.map((v, i) => (v == null ? null : [X(i), Y(v)])).filter(Boolean);
+    if (!pts.length) return;
+    const line = pts.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join(" ");
+    if (type === "area") svg.append(mk("path", { d: `${line} L${pts[pts.length - 1][0]} ${Y(Math.max(0, min))} L${pts[0][0]} ${Y(Math.max(0, min))}Z`, fill: color(s, si), opacity: .12 }));
+    const path = mk("path", { d: line, fill: "none", stroke: color(s, si), "stroke-width": 2.5, "stroke-linejoin": "round", "stroke-linecap": "round" });
+    svg.append(path);
+    const len = path.getTotalLength ? path.getTotalLength() : 0; if (len) { path.style.strokeDasharray = len; path.style.strokeDashoffset = len; requestAnimationFrame(() => { path.style.transition = "stroke-dashoffset .9s ease"; path.style.strokeDashoffset = 0; }); }
+    const last = pts[pts.length - 1]; svg.append(mk("circle", { cx: last[0], cy: last[1], r: 3.5, fill: color(s, si) }));
+  });
+  // Tap or drag across the chart to read values.
+  const guide = mk("line", { y1: T, y2: T + h, stroke: "#c9c3bb", "stroke-dasharray": "3 3", opacity: 0 }); svg.append(guide);
+  const read = (ev) => {
+    const box = svg.getBoundingClientRect(), x = ev.clientX - box.left;
+    let i = type === "bar" ? Math.floor(((x - L) / w) * n) : Math.round(((x - L) / w) * (n - 1)); i = Math.max(0, Math.min(n - 1, i));
+    guide.setAttribute("x1", X(i)); guide.setAttribute("x2", X(i)); guide.setAttribute("opacity", 1);
+    showTip(X(i), T + 4, labels[i] ?? "", series.map((s) => `${series.length > 1 ? s.name + ": " : ""}${fmt(s.values[i])}`));
+  };
+  svg.addEventListener("pointerdown", read); svg.addEventListener("pointermove", (e) => e.buttons && read(e));
+  legend(series.length > 1 ? series.map((s, i) => [s.name, color(s, i)]) : []);
+}
+function legend(items) { const l = document.getElementById("legend"); l.textContent = ""; for (const [name, c] of items) { const s = document.createElement("span"), i = document.createElement("i"); i.style.background = c; s.append(i, name || ""); l.append(s); } }
+hearth.ready(() => {
+  document.getElementById("title").textContent = d.title || ""; document.getElementById("sub").textContent = d.subtitle || "";
+  const big = document.getElementById("big");
+  if (d.headline) { big.textContent = d.headline.value; if (d.headline.change) { const s = document.createElement("small"); s.textContent = d.headline.change; s.className = /^[-–▼]/.test(d.headline.change) ? "down" : "up"; big.append(s); } } else big.style.display = "none";
+  draw(); new ResizeObserver(() => draw()).observe(svg);
+  // The numbers behind the chart, for reading exact values.
+  const btn = document.getElementById("databtn"), box = document.getElementById("data");
+  btn.onclick = () => {
+    box.hidden = !box.hidden; btn.textContent = box.hidden ? "Show data" : "Hide data";
+    if (box.childElementCount) return;
+    const t = document.createElement("table"), head = document.createElement("tr");
+    for (const x of ["", ...(type === "donut" ? ["Value"] : series.map((s) => s.name || "Value"))]) { const th = document.createElement("th"); th.textContent = x; head.append(th); }
+    t.append(head);
+    labels.forEach((l, i) => { const tr = document.createElement("tr"), td0 = document.createElement("td"); td0.textContent = l; tr.append(td0);
+      for (const s of type === "donut" ? series.slice(0, 1) : series) { const td = document.createElement("td"); td.textContent = fmt(s.values[i]); tr.append(td); } t.append(tr); });
+    box.append(t);
+  };
+});
+</script></body></html>

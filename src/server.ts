@@ -57,6 +57,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
   const liveTickets = new Map<string, number>();
   const tileKey = randomBytes(12).toString("base64url");
   const tileLimiter = new RateLimiter(600, 60_000);
+  const imgLimiter = new RateLimiter(120, 60_000);
   const { config, store } = hub;
   const web = await buildWeb();
   const pairLimiter = new RateLimiter(5, 10 * 60_000);
@@ -533,6 +534,32 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
           "Content-Security-Policy": appCsp(["'self'", ...config.allowedOrigins].join(" "), hubOrigin),
         } }));
       }
+      // Pictures from the web for apps and artifacts (hearth.image): fetched by the hub, images only, cached on disk.
+      // Same key as tiles; public hosts only (no localhost or private networks), so it can't be pointed inward.
+      if (url.pathname === "/img") {
+        if (url.searchParams.get("k") !== tileKey) return finish(new Response("Not found", { status: 404 }));
+        const r = await webImage(url.searchParams.get("u") || "", config.dataDir, imgLimiter);
+        if (!r) return finish(new Response("Can't show that picture", { status: 404 }));
+        return finish(new Response(Bun.file(r.file), { headers: { "Content-Type": r.type, "Cache-Control": "private, max-age=86400", "Content-Security-Policy": "sandbox; default-src 'none'" } }));
+      }
+      // The user's own photos, videos and audio for an app (hearth.file): only with the app's live ticket, only files named
+      // in that app's data, only media types, and with byte ranges so videos can seek.
+      const af = url.pathname.match(/^\/app-file\/([\w-]+)\/([\w-]+)$/);
+      if (af) {
+        const app = await hub.apps.ticketApp(af[1]);
+        const f = app && JSON.stringify(app.data ?? null).includes(af[2]) ? await store.get<StoredFile>("files", af[2]) : null;
+        const bytes = f && /^(image\/(png|jpeg|gif|webp|avif)|video\/|audio\/)/.test(f.mime) ? hub.files.bytes(f.id) : null;
+        if (!f || !bytes) return finish(new Response("Not found", { status: 404 }));
+        const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.get("range") || "");
+        const base = { "Content-Type": f.mime, "Accept-Ranges": "bytes", "Cache-Control": "private, max-age=600", "Content-Security-Policy": "sandbox; default-src 'none'" };
+        if (range) {
+          const start = range[1] ? Number(range[1]) : Math.max(0, bytes.length - Number(range[2]));
+          const end = range[1] && range[2] ? Math.min(Number(range[2]), bytes.length - 1) : bytes.length - 1;
+          if (start > end || start >= bytes.length) return finish(new Response(null, { status: 416, headers: { "Content-Range": `bytes */${bytes.length}` } }));
+          return finish(new Response(bytes.subarray(start, end + 1), { status: 206, headers: { ...base, "Content-Range": `bytes ${start}-${end}/${bytes.length}`, "Content-Length": String(end - start + 1) } }));
+        }
+        return finish(new Response(bytes, { headers: { ...base, "Content-Length": String(bytes.length) } }));
+      }
       // Map tiles (OpenStreetMap by default, HEARTH_MAP_TILES to change): fetched by the hub (the phone never talks to the map service), cached on disk.
       // Needs the hub's tile key (in /api/state for paired devices) so the hub isn't an open proxy.
       const tm = url.pathname.match(/^\/tiles\/(\d{1,2})\/(\d{1,6})\/(\d{1,6})\.png$/);
@@ -573,4 +600,47 @@ function emojiFile(name: string) {
   const tries = [name, bare.join("-"), [bare[0], "fe0f", ...bare.slice(1)].join("-"), bare.map((c, i) => (i === 0 || c === "200d" || bare[i - 1] !== "200d" ? c : `${c}-fe0f`)).join("-"), `${bare.join("-")}-fe0f`];
   for (const t of tries) { const f = join(EMOJI_DIR, `${t}.webp`); if (existsSync(f)) return f; }
   return null;
+}
+
+/** A public address only: not localhost, not a private, link-local or reserved network (checked after DNS too). */
+function publicIp(ip: string) {
+  if (/^(127\.|10\.|0\.|169\.254\.|192\.168\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(ip)) return false;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return false;
+  if (/^(::1?|f[cd]|fe[89ab]|::ffff:(127|10|192\.168|169\.254)\.)/i.test(ip)) return false;
+  return true;
+}
+
+/** Fetch a web picture for an app, once: public hosts only, images only, 8 MB max, cached by URL. */
+async function webImage(raw: string, dataDir: string, limiter: RateLimiter) {
+  let u: URL;
+  try { u = new URL(raw); } catch { return null; }
+  if (!/^https?:$/.test(u.protocol) || u.username || u.password || raw.length > 2000) return null;
+  const dir = join(dataDir, "imgcache");
+  const key = sha256(raw);
+  const file = join(dir, key), meta = `${file}.type`;
+  if (existsSync(file) && existsSync(meta)) return { file, type: readFileSync(meta, "utf8") };
+  if (!limiter.allow("img")) return null;
+  try {
+    // Follow up to 3 redirects by hand, checking every hop's address.
+    let res: Response | null = null;
+    for (let hop = 0; hop < 4; hop++) {
+      if (!/^https?:$/.test(u.protocol)) return null;
+      const addrs = await (await import("node:dns/promises")).lookup(u.hostname, { all: true });
+      if (!addrs.length || !addrs.every((a) => publicIp(a.address))) return null;
+      res = await fetch(u, { redirect: "manual", headers: { "User-Agent": `Hearth/${pkg.version} (self-hosted personal assistant)`, Accept: "image/*" }, signal: AbortSignal.timeout(10_000) });
+      const next = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
+      if (!next) break;
+      u = new URL(next, u);
+      res = null;
+    }
+    if (!res) return null;
+    const type = (res.headers.get("content-type") || "").split(";")[0].trim();
+    if (!res.ok || !/^image\/(png|jpeg|gif|webp|avif)$/.test(type) || Number(res.headers.get("content-length") || 0) > 8e6) return null;
+    const buf = new Uint8Array(await res.arrayBuffer());
+    if (buf.length > 8e6) return null;
+    mkdirSync(dir, { recursive: true });
+    await Bun.write(file, buf);
+    await Bun.write(meta, type);
+    return { file, type };
+  } catch { return null; }
 }

@@ -1,0 +1,44 @@
+<!doctype html><html><head><style>
+*{box-sizing:border-box}html,body{margin:0;background:#fff;color:#1d1b19;font:14px/1.35 -apple-system,system-ui,sans-serif}
+.t{padding:12px 14px 0;font-size:16px;font-weight:700}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:3px;padding:10px 12px 12px}.grid.two{grid-template-columns:repeat(2,1fr)}
+.grid button{padding:0;border:0;aspect-ratio:1;border-radius:6px;overflow:hidden;background:#f2f0ec;position:relative}
+.grid button:first-child{border-top-left-radius:14px}.grid img{width:100%;height:100%;object-fit:cover;display:block}
+.grid .hero{grid-column:span 2;grid-row:span 2}
+.more{position:absolute;inset:0;display:grid;place-items:center;background:rgba(0,0,0,.45);color:#fff;font:700 20px system-ui}
+.view{position:fixed;inset:0;background:#000;display:none;flex-direction:column;z-index:9}.view.on{display:flex}
+.strip{flex:1;display:flex;overflow-x:auto;scroll-snap-type:x mandatory;scrollbar-width:none}.strip::-webkit-scrollbar{display:none}
+.strip figure{flex:none;width:100%;height:100%;margin:0;scroll-snap-align:center;display:flex;flex-direction:column;justify-content:center}
+.strip img{width:100%;max-height:80%;object-fit:contain}.strip figcaption{color:#eee;padding:12px 16px;font-size:14px;text-align:center}
+.close{position:absolute;top:10px;right:10px;width:38px;height:38px;border-radius:50%;border:0;background:rgba(255,255,255,.18);color:#fff;font:600 20px system-ui}
+.count{position:absolute;top:18px;left:16px;color:#ddd;font:600 13px system-ui}
+</style></head><body><div class="t" id="t"></div><div class="grid" id="grid"></div>
+<div class="view" id="view"><div class="strip" id="strip"></div><span class="count" id="count"></span><button class="close" id="close" aria-label="Close">✕</button></div>
+<script>
+// Data: { title?, photos: [{ url? (web picture) | file? (a hub file id), caption? }] }  Tap one to see it big; swipe between them.
+const d = hearth.data || {}, photos = (d.photos || []).filter((p) => p && (p.url || p.file));
+const src = (p) => (p.file ? hearth.file(p.file) : hearth.image(p.url));
+const el = (t, c, txt) => { const e = document.createElement(t); if (c) e.className = c; if (txt != null) e.textContent = txt; return e; };
+function open(i) {
+  const v = document.getElementById("view"), strip = document.getElementById("strip"); v.classList.add("on");
+  if (!strip.childElementCount) for (const p of photos) { const f = el("figure"), im = el("img"); im.alt = p.caption || ""; im.src = src(p); f.append(im); if (p.caption) f.append(el("figcaption", null, p.caption)); strip.append(f); }
+  requestAnimationFrame(() => { strip.scrollLeft = strip.clientWidth * i; count(); });
+}
+// Inside an answer the frame is small: a tap opens the gallery full screen at that photo.
+const tap = (i) => { if (hearth.view === "full") return open(i); hearth.save({ open: i }); hearth.open(); };
+function count() { const s = document.getElementById("strip"); document.getElementById("count").textContent = `${Math.round(s.scrollLeft / (s.clientWidth || 1)) + 1} / ${photos.length}`; }
+hearth.ready(() => {
+  document.getElementById("t").textContent = d.title || ""; if (!d.title) document.getElementById("t").style.display = "none";
+  const grid = document.getElementById("grid"), show = photos.slice(0, 7);
+  if (photos.length <= 4) grid.classList.add("two");
+  show.forEach((p, i) => {
+    const b = el("button"); if (i === 0 && photos.length >= 5) b.className = "hero";
+    const im = el("img"); im.alt = p.caption || ""; im.loading = "lazy"; im.src = src(p); b.append(im);
+    if (i === show.length - 1 && photos.length > show.length) b.append(el("span", "more", `+${photos.length - show.length + 1}`));
+    b.onclick = () => tap(i); grid.append(b);
+  });
+  document.getElementById("close").onclick = () => document.getElementById("view").classList.remove("on");
+  document.getElementById("strip").addEventListener("scroll", count, { passive: true });
+  if (hearth.view === "full" && hearth.state && hearth.state.open != null) open(hearth.state.open);
+});
+</script></body></html>

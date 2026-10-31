@@ -1,0 +1,32 @@
+<!doctype html><html><head><style>
+*{box-sizing:border-box}html,body{margin:0;background:#fff;color:#1d1b19;font:14px/1.35 -apple-system,system-ui,sans-serif}
+.g{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:10px;padding:12px}
+.s{background:#f7f5f2;border-radius:16px;padding:12px 12px 10px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.top{display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:700;color:#8c8781;text-transform:uppercase;letter-spacing:.04em}.top img{width:18px;height:18px}
+.v{font-size:26px;font-weight:800;letter-spacing:-.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ch{font-size:12.5px;font-weight:700}.up{color:#2f9e6b}.down{color:#d9534f}.flat{color:#8c8781}
+.note{font-size:12.5px;color:#8c8781}svg{width:100%;height:30px;margin-top:4px}
+</style></head><body><div class="g" id="g"></div>
+<script>
+// Data: { stats: [{ label, value, emoji?, change?: "+12%" | "-3 kg", good?: "up"|"down", note?, trend?: [n, ...] }] }
+const stats = (hearth.data && hearth.data.stats) || [];
+const el = (t, c, txt) => { const e = document.createElement(t); if (c) e.className = c; if (txt != null) e.textContent = txt; return e; };
+hearth.ready(() => {
+  const g = document.getElementById("g");
+  for (const s of stats) {
+    const box = el("div", "s"), top = el("div", "top");
+    if (s.emoji) { const im = el("img"); im.alt = ""; im.src = hearth.emoji(s.emoji); top.append(im); }
+    top.append(s.label || ""); box.append(top, el("div", "v", String(s.value ?? "")));
+    if (s.change) { const up = !/^[-–▼]/.test(s.change), good = (s.good || "up") === (up ? "up" : "down"); box.append(el("div", "ch " + (s.change === "0" ? "flat" : good ? "up" : "down"), (up ? "▲ " : "▼ ") + s.change.replace(/^[-–+▲▼]\s*/, ""))); }
+    if (s.trend && s.trend.length > 1) {
+      const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg"), mn = Math.min(...s.trend), mx = Math.max(...s.trend);
+      svg.setAttribute("viewBox", "0 0 100 30"); svg.setAttribute("preserveAspectRatio", "none");
+      const p = document.createElementNS(ns, "polyline"); p.setAttribute("fill", "none"); p.setAttribute("stroke", "#1d1b19"); p.setAttribute("stroke-width", "2"); p.setAttribute("vector-effect", "non-scaling-stroke");
+      p.setAttribute("points", s.trend.map((v, i) => `${(100 * i) / (s.trend.length - 1)},${28 - (26 * (v - mn)) / (mx - mn || 1)}`).join(" "));
+      svg.append(p); box.append(svg);
+    }
+    if (s.note) box.append(el("div", "note", s.note));
+    g.append(box);
+  }
+});
+</script></body></html>

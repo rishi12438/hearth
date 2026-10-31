@@ -24,13 +24,23 @@ export function appSize(v: unknown, fallback: AppSize = "small"): AppSize {
 }
 
 /** The bridge every app gets: window.hearth = { data, state, view, save(state), ask(text), open(), ready(cb) }. */
-function bridge(data: unknown, state: unknown, view: View, assets: { origin: string; tileKey: string }) {
+function bridge(data: unknown, state: unknown, view: View, assets: { origin: string; tileKey: string; ticket?: string }) {
   const j = (v: unknown) => JSON.stringify(v ?? null).replace(/</g, "\\u003c").replace(/\u2028|\u2029/g, " ");
   return `<script>
 window.hearth = { data: ${j(data)}, state: ${j(state)}, view: ${j(view)},
   /** Pictures an app may show (the only things it can load): 3D emoji and map tiles from the hub. */
   emoji(e) { return ${j(assets.origin)} + "/emoji/" + Array.from(String(e)).map((c) => c.codePointAt(0).toString(16)).join("-") + ".webp"; },
   tile(z, x, y) { return ${j(assets.origin)} + "/tiles/" + z + "/" + x + "/" + y + ".png?k=" + ${j(assets.tileKey)}; },
+  /** A picture from the web, fetched and cached by the hub (the app itself has no network). */
+  image(url) { return ${j(assets.origin)} + "/img?k=" + ${j(assets.tileKey)} + "&u=" + encodeURIComponent(url); },
+  /** One of the user's files on the hub (photo, video, audio), if its id is in this app's data. */
+  file(id) { return ${j(assets.origin)} + "/app-file/" + ${j(assets.ticket || "")} + "/" + encodeURIComponent(id); },
+  /** Open a web page (YouTube, a booking page) outside the app. */
+  link(url) { parent.postMessage({ hearth: "link", url: String(url) }, "*"); },
+  /** Copy text for the user (the app does it; sandboxed frames can't). */
+  copy(text) { parent.postMessage({ hearth: "copy", text: String(text).slice(0, 200000) }, "*"); },
+  /** Save text as a file on the user's device (CSV, ICS…); the app does the download. */
+  download(name, text, type) { parent.postMessage({ hearth: "download", name: String(name), text: String(text).slice(0, 2000000), type: String(type || "text/plain") }, "*"); },
   save(s) { this.state = s; parent.postMessage({ hearth: "save", state: s }, "*"); },
   ask(text) { parent.postMessage({ hearth: "ask", text: String(text).slice(0, 2000) }, "*"); },
   open() { parent.postMessage({ hearth: "open" }, "*"); },
@@ -44,7 +54,7 @@ ${view === "inline" ? `window.hearth.ready(() => { const tell = () => parent.pos
 export function appCsp(frameAncestors: string, hubOrigin = "") {
   return [
     "sandbox allow-scripts allow-forms", "default-src 'none'", "script-src 'unsafe-inline'", "style-src 'unsafe-inline'",
-    `img-src data: blob: ${hubOrigin}`.trim(), "media-src data: blob:", "font-src data:", "connect-src 'none'", "form-action 'none'",
+    `img-src data: blob: ${hubOrigin}`.trim(), `media-src data: blob: ${hubOrigin}`.trim(), "font-src data:", "connect-src 'none'", "form-action 'none'",
     "base-uri 'none'", `frame-ancestors ${frameAncestors}`,
   ].join("; ");
 }
@@ -131,13 +141,19 @@ export class Apps {
     return t;
   }
 
+  /** The app a live ticket belongs to (for its file links), or null. */
+  async ticketApp(ticket: string) {
+    const t = this.tickets.get(ticket);
+    return t && t.exp > Date.now() ? this.store.get<MiniApp>("apps", t.appId) : null;
+  }
+
   /** The page for a ticket: the app's html with the bridge in front. */
   async page(ticket: string, assets: { origin: string; tileKey: string } = { origin: "", tileKey: "" }) {
     const t = this.tickets.get(ticket);
     if (!t || t.exp < Date.now()) return null;
     const a = await this.store.get<MiniApp>("apps", t.appId);
     if (!a) return null;
-    const head = `<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">${bridge(a.data, await this.state(a.id), t.view, assets)}`;
+    const head = `<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">${bridge(a.data, await this.state(a.id), t.view, { ...assets, ticket })}`;
     return /<head[^>]*>/i.test(a.html) ? a.html.replace(/<head[^>]*>/i, (m) => m + head) : head + a.html;
   }
 }

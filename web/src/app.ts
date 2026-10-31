@@ -2358,7 +2358,16 @@ window.addEventListener("message", (e: MessageEvent) => {
     const a = S.apps.find((x) => x.id === id);
     call(`/api/apps/${id}/ask`, { body: { text: String(e.data.text || "") } }).then(() => toast(`Asked ${mate(a?.teammateId).name}`)).catch(handleError);
   } else if (e.data.hearth === "open") location.hash = `#a/${id}`;
-  else if (e.data.hearth === "height") {
+  else if (e.data.hearth === "copy") navigator.clipboard?.writeText(String(e.data.text || "")).then(() => toast("Copied"), () => toast("Couldn't copy", "err"));
+  else if (e.data.hearth === "download") {
+    // Plain text types only, with a safe file name.
+    const type = /^(text\/(plain|csv|calendar|tab-separated-values)|application\/json)$/.test(String(e.data.type)) ? String(e.data.type) : "text/plain";
+    const a = h("a", { href: URL.createObjectURL(new Blob([String(e.data.text || "")], { type })), download: String(e.data.name || "export.txt").replace(/[^\w.\- ]/g, "_").slice(0, 80) });
+    document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  } else if (e.data.hearth === "link") {
+    // An app asked to open a web page (YouTube, a booking page): web links only, in a new tab.
+    try { const u = new URL(String(e.data.url)); if (/^https?:$/.test(u.protocol)) window.open(u.href, "_blank", "noopener,noreferrer"); } catch {}
+  } else if (e.data.hearth === "height") {
     const f = frameEls.get(e.source as Window);
     if (f?.classList.contains("autoh")) f.style.height = `${Math.max(80, Math.min(720, Number(e.data.h) || 0))}px`;
   }

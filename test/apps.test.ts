@@ -192,7 +192,8 @@ test("components: an artifact becomes a reusable component with a description, f
 test("starter components ship with Hearth: loaded once, found by search, and not overwritten once the team improves one", async () => {
   await hub.ensureStarterComponents();
   const names = (await store.all<any>("components")).map((c) => c.name).sort();
-  expect(names).toEqual(["budget-breakdown", "checklist", "countdown", "day-by-day-itinerary", "option-comparison", "recipe", "timeline"]);
+  expect(names).toEqual(["budget-breakdown", "chart", "checklist", "countdown", "day-by-day-itinerary", "option-comparison", "photo-gallery", "recipe", "stats", "table", "timeline", "video-player"]);
+  expect((await hub.searchLibrary("chart of my spending this month")).some((x: any) => x.name === "chart")).toBe(true);
   expect((await hub.searchLibrary("compare three hotels in lisbon")).some((x: any) => x.name === "option-comparison")).toBe(true);
   expect((await hub.searchLibrary("packing list for my trip")).some((x: any) => x.name === "checklist")).toBe(true);
   // The team improves the checklist; a later start doesn't put the starter back over it.

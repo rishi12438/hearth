@@ -1,0 +1,119 @@
+<!doctype html><html><head><style>
+*{box-sizing:border-box}html,body{margin:0;background:#fff;color:#1d1b19;font:14px/1.35 -apple-system,system-ui,sans-serif}
+.head{display:flex;align-items:center;gap:8px;padding:12px 12px 8px}.head b{flex:1;font-size:16px}.head small{color:#8c8781;font-size:12.5px;font-weight:600}
+.tools{display:flex;gap:6px}.tools button{border:0;background:#f2f0ec;border-radius:999px;height:30px;padding:0 11px;font:700 12.5px system-ui;color:#1d1b19}
+.search{margin:0 12px 8px;width:calc(100% - 24px);border:0;background:#f2f0ec;border-radius:12px;padding:9px 12px;font:14px system-ui;outline:none}
+.scroller{position:relative;overflow:auto;max-height:420px;margin:0 0 4px;-webkit-overflow-scrolling:touch}
+.scroller.full{max-height:none}
+/* Edge shadows tell you there's more to the side. */
+.wrapx{position:relative}.wrapx::before,.wrapx::after{content:"";position:absolute;top:0;bottom:4px;width:18px;pointer-events:none;z-index:3;opacity:0;transition:opacity .15s}
+.wrapx::before{left:0;background:linear-gradient(90deg,rgba(0,0,0,.08),transparent)}.wrapx::after{right:0;background:linear-gradient(-90deg,rgba(0,0,0,.08),transparent)}
+.wrapx.l::before,.wrapx.r::after{opacity:1}
+table{border-collapse:separate;border-spacing:0;min-width:100%;font-variant-numeric:tabular-nums}
+th,td{padding:9px 12px;border-bottom:1px solid #f0ede9;text-align:left;vertical-align:top;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}
+td.wrap{white-space:normal;min-width:160px}
+th{position:sticky;top:0;background:#faf9f7;font-size:12px;font-weight:700;color:#8c8781;text-transform:uppercase;letter-spacing:.03em;z-index:2;cursor:pointer;user-select:none}
+th .arr{opacity:.35;margin-left:3px}th.sorted{color:#1d1b19}th.sorted .arr{opacity:1}
+/* The first column stays put while you scroll sideways. */
+th:first-child,td:first-child{position:sticky;left:0;background:#fff;z-index:1;font-weight:650;max-width:150px;white-space:normal}
+th:first-child{z-index:4;background:#faf9f7}
+td.num,th.num{text-align:right}tr.hl td{background:#fdf7e8}tr.hl td:first-child{background:#fdf7e8}
+td.open{white-space:normal;max-width:none}
+/* Card view: one card per row, first column as its title (for many columns on a phone). */
+.cards{display:flex;flex-direction:column;gap:8px;padding:0 12px 4px}.card{background:#f7f5f2;border-radius:14px;padding:10px 12px}
+.card.hl{background:#fdf7e8}.card b{display:block;font-size:15px;margin-bottom:4px}.card dl{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;margin:0;font-size:13.5px}
+.card dt{color:#8c8781}.card dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+.foot{display:flex;justify-content:center;padding:6px 0 10px}.foot button{border:0;background:none;font:700 13.5px system-ui;color:#1d1b19;padding:6px 12px}
+</style></head><body>
+<div class="head"><b id="title"></b><small id="count"></small><div class="tools"><button id="mode" hidden>Cards</button><button id="csv">Copy</button><button id="dl" aria-label="Download CSV">⤓</button><button id="full" aria-label="Full screen">⤢</button></div></div>
+<input class="search" id="q" placeholder="Search" type="search" hidden>
+<div class="wrapx" id="wx"><div class="scroller" id="sc"><table><thead id="th"></thead><tbody id="tb"></tbody></table></div></div><div class="cards" id="cards" hidden></div>
+<div class="foot" id="foot"></div>
+<script>
+// Data: { title?, columns: [{ key, label, type?: "number"|"money"|"percent"|"text", unit?: "$", wrap?: true }],
+//   rows: [{ <key>: value, ... , _highlight?: true }], sort?: { key, desc? }, note? }
+// Phone-friendly: sideways scroll with edge shadows, sticky header and first column, numbers right-aligned,
+// tap a header to sort, tap a cell to read it all, search for long tables, Copy/Download CSV, full screen,
+// and a card view (one card per row) for many columns on a phone.
+const d = hearth.data || {}, cols = d.columns || Object.keys((d.rows || [])[0] || {}).filter((k) => k[0] !== "_").map((k) => ({ key: k, label: k }));
+let rows = (d.rows || []).slice(), sortKey = d.sort ? d.sort.key : null, desc = !!(d.sort && d.sort.desc), q = "", showAll = false, cards = false;
+const LIMIT = 8;
+const isNum = (c) => c.type === "number" || c.type === "money" || c.type === "percent";
+const num = (v) => typeof v === "number" ? v : parseFloat(String(v).replace(/[^0-9.\-]/g, ""));
+const fmt = (c, v) => {
+  if (v == null || v === "") return "–";
+  if (!isNum(c)) return String(v);
+  const n = num(v); if (isNaN(n)) return String(v);
+  const s = n.toLocaleString(undefined, { maximumFractionDigits: c.type === "percent" ? 1 : 2 });
+  return c.type === "money" ? (c.unit || "$") + s : c.type === "percent" ? s + "%" : c.unit ? s + " " + c.unit : s;
+};
+const el = (t, c, txt) => { const e = document.createElement(t); if (c) e.className = c; if (txt != null) e.textContent = txt; return e; };
+function view() {
+  let r = rows;
+  if (q) r = r.filter((row) => cols.some((c) => String(row[c.key] ?? "").toLowerCase().includes(q)));
+  if (sortKey) {
+    const c = cols.find((x) => x.key === sortKey);
+    r = r.slice().sort((a, b) => { const x = a[sortKey], y = b[sortKey]; const cmp = c && isNum(c) ? (num(x) || 0) - (num(y) || 0) : String(x ?? "").localeCompare(String(y ?? "")); return desc ? -cmp : cmp; });
+  }
+  return r;
+}
+function draw() {
+  const th = document.getElementById("th"), tb = document.getElementById("tb"); th.textContent = ""; tb.textContent = "";
+  const tr = el("tr");
+  for (const c of cols) {
+    const h = el("th", (isNum(c) ? "num " : "") + (sortKey === c.key ? "sorted" : ""), c.label || c.key);
+    h.setAttribute("aria-sort", sortKey === c.key ? (desc ? "descending" : "ascending") : "none"); h.tabIndex = 0;
+    h.append(el("span", "arr", sortKey === c.key ? (desc ? "↓" : "↑") : "↕"));
+    h.onclick = () => { if (sortKey === c.key) desc = !desc; else { sortKey = c.key; desc = isNum(c); } draw(); };
+    tr.append(h);
+  }
+  th.append(tr);
+  const r = view(), shown = showAll || hearth.view === "full" ? r : r.slice(0, LIMIT);
+  // Cards: the first column is each card's title, the rest are label/value pairs.
+  document.getElementById("wx").hidden = cards; const cardBox = document.getElementById("cards"); cardBox.hidden = !cards; cardBox.textContent = "";
+  if (cards) for (const row of shown) {
+    const c0 = cols[0], card = el("div", "card" + (row._highlight ? " hl" : "")), dl = el("dl");
+    card.append(el("b", null, fmt(c0, row[c0.key])));
+    for (const c of cols.slice(1)) dl.append(el("dt", null, c.label || c.key), el("dd", null, fmt(c, row[c.key])));
+    card.append(dl); cardBox.append(card);
+  }
+  for (const row of cards ? [] : shown) {
+    const t = el("tr", row._highlight ? "hl" : "");
+    for (const c of cols) {
+      const td = el("td", (isNum(c) ? "num " : "") + (c.wrap ? "wrap" : ""), fmt(c, row[c.key]));
+      td.onclick = () => td.classList.toggle("open"); // tap to read a long cell
+      t.append(td);
+    }
+    tb.append(t);
+  }
+  document.getElementById("count").textContent = `${r.length} row${r.length === 1 ? "" : "s"}`;
+  const foot = document.getElementById("foot"); foot.textContent = "";
+  if (r.length > LIMIT && hearth.view !== "full") { const b = el("button", null, showAll ? "Show less" : `Show all ${r.length}`); b.onclick = () => { showAll = !showAll; draw(); }; foot.append(b); }
+  if (d.note) foot.append(el("small", null, d.note));
+  shadows();
+}
+function shadows() { const sc = document.getElementById("sc"), wx = document.getElementById("wx"); wx.classList.toggle("l", sc.scrollLeft > 2); wx.classList.toggle("r", sc.scrollLeft + sc.clientWidth < sc.scrollWidth - 2); }
+hearth.ready(() => {
+  document.getElementById("title").textContent = d.title || "";
+  const search = document.getElementById("q");
+  if ((d.rows || []).length > 10) { search.hidden = false; search.oninput = () => { q = search.value.trim().toLowerCase(); draw(); }; }
+  const csv = () => {
+    const esc = (v) => /[",\n]/.test(String(v ?? "")) ? `"${String(v).replace(/"/g, '""')}"` : String(v ?? "");
+    return [cols.map((c) => esc(c.label || c.key)).join(","), ...view().map((row) => cols.map((c) => esc(row[c.key])).join(","))].join("\n");
+  };
+  document.getElementById("csv").onclick = (e) => { hearth.copy(csv()); e.target.textContent = "Copied"; setTimeout(() => (e.target.textContent = "Copy"), 1500); };
+  document.getElementById("dl").onclick = () => hearth.download(`${(d.title || "table").replace(/[^\w ]+/g, "").trim() || "table"}.csv`, csv(), "text/csv");
+  // Many columns on a narrow screen: offer cards (and start with them when it's very wide).
+  const mode = document.getElementById("mode");
+  if (cols.length > 4) {
+    mode.hidden = false; cards = cols.length > 6 && innerWidth < 420;
+    const label = () => (mode.textContent = cards ? "Table" : "Cards");
+    mode.onclick = () => { cards = !cards; label(); draw(); }; label();
+  }
+  const full = document.getElementById("full");
+  if (hearth.view === "full") { full.hidden = true; document.getElementById("sc").classList.add("full"); } else full.onclick = () => hearth.open();
+  document.getElementById("sc").addEventListener("scroll", shadows, { passive: true });
+  new ResizeObserver(shadows).observe(document.getElementById("sc"));
+  draw();
+});
+</script></body></html>
