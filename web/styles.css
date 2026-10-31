@@ -785,3 +785,6 @@ p.err { color: var(--danger); margin: 6px 2px 0; }
 .row2 { display: grid; grid-template-columns: 1fr 96px; gap: 8px; }
 .field.mono { font: 13px/1.4 var(--mono); }
 .sheetbody > .field, .sheetbody > .row2, .sheetbody > select.field { margin: 6px 0; }
+.radio { width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--line); flex: none; }
+.radio.on { border: 6px solid var(--ink); }
+.item:disabled { opacity: .55; }

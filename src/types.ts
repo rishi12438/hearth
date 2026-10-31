@@ -190,6 +190,30 @@ export type Prefs = {
   aboutUpdatedAt?: string;
   /** Hybrid: cheaper models do a job's legwork, the heavy model writes what the user reads. On unless turned off. */
   hybrid?: boolean;
+  /** Where work runs (Settings → Where work runs). */
+  work?: WorkSettings;
+};
+
+/**
+ * agent: where teammates think. "mac-first" = a linked computer when one is online, else this hub; "hub" = always here;
+ * "mac" = only on a linked computer (jobs wait for it). workbench: where code runs. "auto" = E2B if connected, else Docker
+ * on this hub; or pin one. "plain" = straight on this machine, no container: the code runs as the hub's own user and
+ * could read its data and keys, so it's never picked automatically. "off" = no code at all.
+ */
+export type WorkSettings = { agent: "mac-first" | "hub" | "mac"; workbench: "auto" | "e2b" | "docker" | "plain" | "off" };
+
+/** One job's time on the workbench: what went in, what ran, what came out. Kept so anyone can see what happened and continue. */
+export type WorkSession = Doc & {
+  jobId?: string; threadId?: string; teammateId?: string; task?: string;
+  /** "e2b:<sandbox>", "docker" or "plain". */
+  machine: string;
+  folder: string;
+  status: "working" | "done" | "failed";
+  endedAt?: string;
+  steps: { at: string; tool: string; what: string; ok: boolean; ms: number; out?: string }[];
+  /** Packages it installed (pip, npm, apt), so the environment can be rebuilt. */
+  installed: string[];
+  fileIds: string[];
 };
 
 /** Something the assistant could do for you, suggested on its own ("I can follow up on your airline refund"). */

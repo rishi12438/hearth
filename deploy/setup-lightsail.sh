@@ -89,6 +89,31 @@ grep -q '^HEARTH_REQUIRE_PASSKEY=' "$ENV" || set_env HEARTH_REQUIRE_PASSKEY 0
 chown hearth: "$ENV" && chmod 600 "$ENV"
 sudo -u hearth mkdir -p "$APP/data" && chmod 700 "$APP/data"
 
+say "Workbench: Docker, where teammates' code runs (sealed off from the hub's data and keys)"
+if [ "${HEARTH_NO_DOCKER:-}" != 1 ]; then
+  command -v docker >/dev/null || { apt-get install -yq docker.io >/dev/null; systemctl enable --now docker >/dev/null; }
+  # The hub starts and stops the workbench container. (Docker access is powerful; the container itself gets none of it.)
+  usermod -aG docker hearth
+  docker pull -q python:3.12-slim >/dev/null || true
+  # Containers may use the internet, but never the cloud's metadata address (it can hand out the server's credentials).
+  cat > /etc/systemd/system/hearth-workbench-net.service <<'UNIT'
+[Unit]
+Description=Keep Hearth's workbench container away from the cloud metadata address
+After=docker.service
+Requires=docker.service
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'iptables -C DOCKER-USER -d 169.254.169.254 -j DROP 2>/dev/null || iptables -I DOCKER-USER -d 169.254.169.254 -j DROP'
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload && systemctl enable --now hearth-workbench-net >/dev/null
+  echo "   Docker is ready. Code runs in a container with no access to /opt/hearth or the hub's keys."
+else
+  echo "   Skipped (HEARTH_NO_DOCKER=1). Connect E2B in the app, or teammates won't run code."
+fi
+
 say "HTTPS for $DOMAIN (Caddy gets and renews the certificate)"
 sed -e "s/hub.example.com/$DOMAIN/" -e "s/you@example.com/$EMAIL/" "$APP/deploy/Caddyfile" > /etc/caddy/Caddyfile
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null

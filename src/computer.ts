@@ -99,6 +99,8 @@ export function connect(opts: Opts) {
   const { config, link } = opts;
   const log = opts.log || ((s: string) => console.log(s));
   const brain = opts.brain || new Brain(config);
+  // When this computer thinks, the job's workbench tools call the hub at its public address.
+  brain.toolUrl ??= link.hub;
   const readCopy = opts.readCopy || readLogin;
   const runs = new Map<string, AbortController>();
   let ws: WebSocket | null = null;

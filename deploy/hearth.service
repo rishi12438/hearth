@@ -18,6 +18,8 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/opt/hearth/data /home/hearth/.claude /home/hearth/.codex
+# The workbench: the hub starts its Docker container through the socket.
+ReadWritePaths=-/run/docker.sock
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true

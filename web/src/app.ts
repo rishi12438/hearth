@@ -1910,6 +1910,7 @@ function openSettings() {
       row("Notifications", st.push.subscribed ? "On for this device" : "Off", () => togglePush(st.push.subscribed), sw(st.push.subscribed)),
       row("Quiet hours and daily limit", `${p.quietStart}–${p.quietEnd} · up to ${p.maxProactivePerDay}/day`, openQuiet)),
     h("div", { class: "list" }, row("Brains", "Which models do what, and smart voice", openBrains),
+      row("Where work runs", "Where teammates think, and where code runs", openWork),
       row("Voice", st.voice ? `On · ${st.voice === "deepgram" ? "Deepgram" : st.voice}` : "Off · connect Deepgram to talk", openVoice)),
     h("h4", null, "Location"),
     h("div", { class: "list" },
@@ -2456,6 +2457,45 @@ function computersChanged() {
     if (route().view === "home") drawHome();
     if (document.querySelector('.sheet[aria-label="Devices"]')) openDevices();
   }, 400);
+}
+
+/** Settings → Where work runs: where teammates think, the workbench where code runs, and what ran there lately. */
+async function openWork() {
+  let st: any, sessions: any[] = [];
+  try { [st, sessions] = await Promise.all([call("/api/work"), call("/api/sessions")]); } catch (e) { return handleError(e); }
+  const primary = !!S.state?.device.primary;
+  const save = async (patch: any) => { try { await call("/api/work", { method: "PUT", body: { ...st.settings, ...patch } }); toast("Saved"); openWork(); } catch (e) { handleError(e); } };
+  const agentOpts: [string, string][] = [["mac-first", "Mac when on"], ["hub", "Always this hub"], ["mac", "Only my Mac"]];
+  const benchRow = (value: string, title: string, sub: string, ok: boolean, danger = false) => {
+    const on = st.settings.workbench === value;
+    return h("button", { class: "item", disabled: !primary || (!ok && !on), on: { click: () => {
+      if (on) return;
+      if (value === "plain") return confirmSheet("Run code without a container?", "Code your teammates write would run straight on this hub, as the hub's own user. It could read your memory, files and keys. Only use this if you trust everything it might run.", "Run it plain", () => save({ workbench: "plain" }));
+      save({ workbench: value });
+    } } },
+      h("span", { class: "grow" }, h("b", { class: "light" }, title, danger ? h("span", { class: "tag warn" }, "Less safe") : null), h("small", { class: "sub" }, sub)),
+      h("span", { class: `radio ${on ? "on" : ""}` }));
+  };
+  const when = (iso: string) => relTime(iso);
+  openSheet("Where work runs", [
+    h("h4", null, "Teammates think on"),
+    h("div", { class: "segmented" }, agentOpts.map(([v, label]) => h("button", { class: st.settings.agent === v ? "on" : "", disabled: !primary, on: { click: () => save({ agent: v }) } }, label))),
+    h("p", { class: "muted small" }, st.settings.agent === "mac" ? "Jobs wait until your Mac is online." : st.settings.agent === "hub" ? "This hub always does the thinking, with the login it holds." : "Your Mac thinks with your own login when it's on; this hub does when it's off."),
+    h("h4", null, "Code runs on"),
+    h("div", { class: "list" },
+      benchRow("auto", "Automatic", "E2B if connected, otherwise Docker on this hub", true),
+      benchRow("e2b", "E2B sandbox", st.e2b ? "Paused when idle, woken when code needs to run" : "Connect E2B in Devices → Add a cloud computer", st.e2b),
+      benchRow("docker", "Docker on this hub", st.docker ? "A sealed container: no access to your data or keys" : "Docker isn't installed on this hub", st.docker),
+      benchRow("plain", "Plain, on this hub", "No container. Fast, but code can read everything", true, true),
+      benchRow("off", "Off", "Teammates can't run code", true)),
+    h("p", { class: "muted small" }, st.workbench ? `Right now: ${st.workbench.label}.` : "Right now: nowhere to run code, so teammates will say so instead."),
+    h("h4", null, "Recent work"),
+    sessions.length ? h("div", { class: "list" }, sessions.slice(0, 8).map((x: any) => h("div", { class: "item" },
+      h("span", { class: "grow" }, h("b", { class: "light" }, x.task || "A job"),
+        h("small", { class: "sub" }, [`${x.machine.replace(/^e2b:/, "")} · ${x.steps.length} step${x.steps.length === 1 ? "" : "s"}`, x.installed.length ? `installed ${x.installed.map((i: string) => i.split(":")[1]).join(", ")}` : "", x.fileIds.length ? `${x.fileIds.length} file${x.fileIds.length > 1 ? "s" : ""} back` : "", when(x.createdAt)].filter(Boolean).join(" · "))),
+      h("span", { class: `tag ${x.status === "failed" ? "warn" : "soft"}` }, x.status))))
+      : h("p", { class: "muted small" }, "Nothing has run yet. When a teammate runs code, each job's commands, installs and files show up here."),
+  ]);
 }
 
 async function toggleFaceId() {

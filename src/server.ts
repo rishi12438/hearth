@@ -10,13 +10,14 @@ import { availableHarnesses } from "./brain.ts";
 import { Computers, COPY_ITEMS, isCopyItem } from "./computers.ts";
 import { Machines, realE2b, realSsh, type E2b, type Ssh } from "./machines.ts";
 import { Vault } from "./vault.ts";
+import { DEFAULT_WORK, Workbench, type Bench, type E2bSdk } from "./workbench.ts";
 import { hasLogin, readLogin } from "./computer.ts";
 import { homedir } from "node:os";
 import { MAX_FILE_BYTES } from "./files.ts";
 import { appCsp } from "./apps.ts";
 import { isActive, search } from "./memory.ts";
 import { isValidTimeZone } from "./time.ts";
-import type { Component, Person, StoredFile, Approval, Device, Fact, Hook, LocationFix, MiniApp, Message, Notebook, Place, Prefs, Skill, Teammate, Workflow } from "./types.ts";
+import type { WorkSession, Component, Person, StoredFile, Approval, Device, Fact, Hook, LocationFix, MiniApp, Message, Notebook, Place, Prefs, Skill, Teammate, Workflow } from "./types.ts";
 import pkg from "../package.json" with { type: "json" };
 
 const WEB = resolve(import.meta.dir, "../web");
@@ -60,7 +61,7 @@ class HttpError extends Error { constructor(public status: number, msg: string) 
 
 /** drivers: stand-ins for E2B and ssh in tests. */
 export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
-  drivers: { e2b?: E2b; ssh?: Ssh; readLogin?: typeof readLogin; allowLocalHub?: boolean; vault?: Vault } = {}) {
+  drivers: { e2b?: E2b; ssh?: Ssh; readLogin?: typeof readLogin; allowLocalHub?: boolean; vault?: Vault; dockerBench?: Bench; e2bSdk?: E2bSdk; docker?: () => boolean } = {}) {
   const voiceLimiter = new RateLimiter(5, 10 * 60_000);
   const liveTickets = new Map<string, number>();
   const tileKey = randomBytes(12).toString("base64url");
@@ -109,6 +110,14 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   machines.onChange = () => hub.emit("computers", {});
   machines.startTimer();
   hub.onNeedsComputer = () => { machines.wake().catch((e) => console.error(e)); };
+  // Where code runs (E2B, Docker on this hub, or plain) and where teammates think: Settings → Where work runs.
+  const workSettings = async () => ({ ...DEFAULT_WORK, ...((await hub.prefs()).work || {}) });
+  const workbench = new Workbench({ store, files: hub.files, dataDir: config.dataDir, vault, settings: workSettings, dockerBench: drivers.dockerBench, e2bSdk: drivers.e2bSdk, docker: drivers.docker });
+  hub.workbench = workbench;
+  workbench.startTimer();
+  const applyWork = async () => { hub.brain.agentOn = (await workSettings()).agent; };
+  await applyWork();
+  hub.on((e) => { if (e.type === "prefs") applyWork().catch(() => {}); });
   const computerSummary = async () => {
     const list = (await linkedComputers()).map((d) => computers.status(d.id, d.name, d.lastSeenAt));
     const rank = { online: 0, asleep: 1, offline: 2 };
@@ -181,6 +190,15 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
     })();
 
     // ---- public ----
+    // A job's workbench tools (tools-mcp.ts) call here with that job's short-lived key; nothing else is reachable with it.
+    if (path === "/api/tool" && method === "POST") {
+      const key = /^Bearer ([A-Za-z0-9_-]{20,})$/.exec(req.headers.get("authorization") || "")?.[1];
+      if (!key) throw new HttpError(401, "No key.");
+      const text = await req.text();
+      if (text.length > 2_500_000) throw new HttpError(413, "Too large.");
+      let b: any; try { b = JSON.parse(text); } catch { throw new HttpError(400, "Bad JSON."); }
+      return json(await workbench.tool(key, String(b?.name || ""), b?.arguments));
+    }
     if (path === "/api/health") return json({ name: config.name, version: pkg.version, build: web.build, setup: (await store.all<Device>("devices")).length === 0 });
     // A new device asks to join. Your primary phone gets a notification with the same short code to compare.
     if (path === "/api/access/request" && method === "POST") {
@@ -656,6 +674,28 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (method === "DELETE") { await machines.remove(m.id); await hub.log("machines.remove", `${m.name} removed`); return json(view()); }
         break;
       }
+      // Where work runs: where teammates think, and the workbench where code runs.
+      case "work": {
+        if (method === "GET") return json(await workbench.status());
+        if (method === "PUT") {
+          ownerOnly();
+          const b = await body(req);
+          const cur = await workSettings();
+          const agent = ["mac-first", "hub", "mac"].includes(b.agent) ? b.agent : cur.agent;
+          const bench = ["auto", "e2b", "docker", "plain", "off"].includes(b.workbench) ? b.workbench : cur.workbench;
+          await hub.setPrefs({ work: { agent, workbench: bench } });
+          await applyWork();
+          await hub.log("work.settings", `Teammates think: ${agent}; code runs: ${bench}`);
+          return json(await workbench.status());
+        }
+        break;
+      }
+      // What happened on the workbench: each job's session, newest first.
+      case "sessions": {
+        const teammateId = url.searchParams.get("teammate") || undefined, threadId = url.searchParams.get("thread") || undefined;
+        const all = (await store.all<WorkSession>("sessions")).filter((x) => (!teammateId || x.teammateId === teammateId) && (!threadId || x.threadId === threadId));
+        return json(all.sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 30));
+      }
       case "push": {
         if (!hub.push) throw new HttpError(503, "Push is not available on this hub.");
         if (id === "key") return json({ publicKey: hub.push.publicKey });
@@ -820,7 +860,9 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       return finish(new Response(asset.body as BodyInit, { headers: { "Content-Type": asset.type, "Cache-Control": cache } }));
     },
   });
-  return { server, build: web.build, computers, machines };
+  // The workbench tools call back to this hub on its own port (a linked computer uses the hub's public address instead).
+  hub.brain.toolUrl = `http://127.0.0.1:${server.port}`;
+  return { server, build: web.build, computers, machines, workbench };
 }
 
 const EMOJI_DIR = (() => { try { return join(resolve(import.meta.dir, ".."), "node_modules/@lobehub/fluent-emoji-3d/assets"); } catch { return ""; } })();

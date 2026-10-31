@@ -97,6 +97,22 @@ phone (home-screen web app) ──HTTPS──►  your hub (e.g. a $5 VPS)
                             your Mac ───────────┘ connects out and keeps the line open; runs work with your logins
 ```
 
+### Where work runs
+
+Two things, set in **Settings → Where work runs**:
+
+| | Default | Options |
+|---|---|---|
+| **Where teammates think** (`claude -p`) | Your Mac when it's on, else the hub | Always the hub · only your Mac |
+| **Where code runs** (the workbench) | E2B if connected, else Docker on the hub | E2B · Docker · plain (no container, less safe) · off |
+
+- **The workbench** is one place the whole team's code runs. Teammates get a few tools (`run`, `write_file`, `read_file`, `copy_in`, `copy_out`); the agent decides *what* to run, the hub decides *where*.
+- **Folders:** `/work/<teammate>` keeps each teammate's files between jobs; `/work/shared` is for the whole team.
+- **Nothing secret goes there.** Your logins and API keys stay on the hub (or Mac). Docker containers can't see the hub's data; plain mode can, which is why it's never picked automatically.
+- **Every job's time on it is written down:** what came in, what ran, what it installed and what came back. It shows under *Recent work*, and the next job gets it so it carries on instead of starting over.
+
+<p align="center"><img src="docs/screenshots/where-work-runs.png" width="220" alt="Where work runs: teammates think on your Mac when it's on; code runs automatically on E2B or Docker"></p>
+
 ### Your Mac and the cloud
 
 Set up each machine for its role with one setting, the **target**:

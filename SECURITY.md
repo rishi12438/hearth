@@ -53,6 +53,14 @@ Hearth holds personal data and can act on a schedule, so it is built to fail clo
 - The hub hands the logins it holds (for example, the Claude login your Mac copied up) only to computers it set up itself. Your Mac's link file has no `cloud` flag, so it ignores logins even if offered. Checking whether the hub has a login doesn't read the secret, so on a Mac there's no Keychain prompt just to show the screen; the secret is read only when a cloud computer links.
 - Removing a cloud computer shuts the sandbox down (or stops the link on the VM), unlinks its key and deletes its SSH key from the hub.
 
+## The workbench (where teammates' code runs)
+- Teammates never run code on the hub's own process. They call tools (`run`, `write_file`, `read_file`, `copy_in`, `copy_out`) through a small MCP server, with a key that's good for one job only (30 minutes, renewed while used, dead when the job ends). The hub carries the call out on the workbench.
+- The tools stay inside `/work`: paths outside it are refused, and in plain mode symlinks are resolved so a link the code made can't lead the tools elsewhere. `copy_in` only reaches files from the same chat.
+- **Docker** (the default on a hub without E2B): the container sees only its own volume, not the hub's data, keys or files. It runs as an unprivileged user, with all capabilities dropped, `no-new-privileges`, and capped memory, CPU and processes. File reads and writes go through the container, never a folder shared with the host. On a server, `deploy/setup.sh` blocks containers from the cloud metadata address (169.254.169.254). Honest trade-off: the hub's user is in the `docker` group to start the container, and Docker access is powerful on the host.
+- **E2B:** one sandbox for the team, on E2B's machines. Nothing secret is put on it.
+- **Plain** (opt-in only, with a warning): commands run as the hub's own user, so they could read its data and keys. "Automatic" never picks it.
+- Each job's session (commands, installs, files in and out, trimmed output) is stored on the hub, so you can see exactly what ran.
+
 ## API keys (the vault)
 - The hub's API keys (E2B, Deepgram, your VMs' SSH keys) are kept in their own SQLite file, `data/keys/vault.db` (`0600`, folder `0700`), separate from your main data even when that's Postgres or MySQL. Each value is encrypted with AES-256-GCM under a fresh random IV and bound to its name, so a value copied to another row won't decrypt, and any tampering is detected.
 - The master key lives outside the data folder: `~/.hearth/master.key` (`0600`; the hub refuses it if others can read it), or `HEARTH_MASTER_KEY`. A copy or backup of the data folder alone can't reveal your keys. A wrong master key is reported at start rather than failing quietly.

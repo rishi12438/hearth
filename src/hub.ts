@@ -195,12 +195,35 @@ export class Hub {
 
   // ---------- one brain turn, with an optional script round-trip ----------
 
+  /** Set by the server: where code runs. A job turn gets the workbench tools while it lasts. */
+  workbench: import("./workbench.ts").Workbench | null = null;
+
   async turn(mode: BrainInput["mode"], input: string, evidence: string, opts: TurnOpts = {}) {
+    const bench = (mode === "job" || mode === "legwork") && opts.jobId && this.workbench
+      ? await this.workbench.open({ jobId: opts.jobId, threadId: opts.threadId, teammateId: opts.teammate?.id, teammateName: opts.teammate?.name, task: evidence }).catch(() => null)
+      : null;
+    if (!bench) return this.turnInner(mode, input, evidence, opts);
+    let ok = false;
+    try {
+      const r = await this.turnInner(mode, input, evidence, opts, { token: bench.token });
+      ok = true;
+      const made = await this.workbench!.close(bench.token, true);
+      return made.length ? { ...r, fileIds: [...(r.fileIds || []), ...made.filter((id) => !(r.fileIds || []).includes(id))] } : r;
+    } finally { if (!ok) await this.workbench!.close(bench.token, false); }
+  }
+
+  private async turnInner(mode: BrainInput["mode"], input: string, evidence: string, opts: TurnOpts = {}, workbench?: { token: string }) {
     const { teammate, extra } = opts;
     const profile = opts.profile || (await this.brains()).workhorse;
     const where = { teammateId: teammate?.id, threadId: opts.threadId, jobId: opts.jobId, recipe: opts.allowedScripts };
     const ctx = await this.context(input, mode, teammate);
-    const first = parseReply(await this.brain.think({ mode, context: ctx, input, toolResults: extra }, profile, opts.meter));
+    // What this teammate (or this chat) did on the workbench before, so a new job carries on instead of starting over.
+    if (workbench && this.workbench) {
+      const past = (await this.workbench.recent({ teammateId: teammate?.id, threadId: opts.threadId }, 5)).filter((x) => x.status !== "working").slice(0, 4);
+      if (past.length) (ctx as any).recentWork = past.map((x) => ({ when: x.createdAt, task: x.task, folder: x.folder, installed: x.installed,
+        did: x.steps.slice(-8).map((st) => `${st.tool}: ${st.what}${st.ok ? "" : " (failed)"}`) }));
+    }
+    const first = parseReply(await this.brain.think({ mode, context: ctx, input, toolResults: extra, workbench }, profile, opts.meter));
     if (first.text.includes(ESCALATE)) return { text: ESCALATE, did: [] as Done[], used: [] as string[] };
     const applied = await this.applyActions(first.actions, evidence, where);
     if (!applied.runs.length) return { text: first.text, did: applied.done, used: applied.used, split: applied.split, tiles: applied.tiles, fileIds: applied.fileIds };
@@ -232,7 +255,7 @@ export class Hub {
       results.push(`## ${r.name}\n${ex.text}${ex.tiles.length ? `\n(${ex.tiles.length} tile(s) already shown to the user)` : ""}`);
     }
     const ctx2 = await this.context(input, mode, teammate);
-    const second = parseReply(await this.brain.think({ mode, context: ctx2, input, toolResults: [extra, ...results].filter(Boolean).join("\n\n") }, profile, opts.meter));
+    const second = parseReply(await this.brain.think({ mode, context: ctx2, input, toolResults: [extra, ...results].filter(Boolean).join("\n\n"), workbench }, profile, opts.meter));
     const applied2 = await this.applyActions(second.actions.filter((a: any) => a?.type !== "script.run"), evidence, where);
     const tiles = [...applied.tiles, ...applied2.tiles, ...scriptTiles].slice(0, 4);
     const fileIds = [...applied.fileIds, ...applied2.fileIds, ...scriptFiles];

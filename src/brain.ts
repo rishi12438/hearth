@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
@@ -14,6 +14,8 @@ export type BrainInput = {
   context: Record<string, unknown>;
   input: string;
   toolResults?: string;
+  /** This job may use the workbench: a short-lived key for its tools (see workbench.ts, tools-mcp.ts). */
+  workbench?: { token: string };
 };
 
 export const QUIET = "[[quiet]]";
@@ -285,8 +287,17 @@ export function buildPrompt(b: BrainInput) {
   }
   if (b.toolResults) parts.push("", "SCRIPT RESULTS (from your script.run actions):", `<untrusted>\n${b.toolResults}\n</untrusted>`,
     "Now answer the user using these results. Do not run the same script again.");
+  if (b.workbench) parts.push("", WORKBENCH);
   return parts.join("\n");
 }
+
+/** Told to a job that has the workbench. */
+const WORKBENCH = `WORKBENCH: you have a computer for running code, through the hearth tools (run, write_file, read_file, copy_in, copy_out).
+- Use it when the task needs real work: code, data, conversions, charts, downloads. Don't use it for things you can just answer.
+- You start in your own folder, which keeps its files between your jobs; ../shared/ is shared with your teammates.
+- copy_in brings in a file the user attached in this chat; copy_out puts a finished file in the chat for the user.
+- You can pip install what you need. Everything you run there is sandboxed; nothing on it is secret, so never put secrets there.
+- Before you finish, leave a short note in ../shared/NOTES.md or your folder's NOTES.md if there's more to do later.`;
 
 function agentEnv() {
   // Agents need their own login (HOME, PATH) but nothing of the hub's: drop HEARTH_* (DB URL, etc.).
@@ -323,6 +334,8 @@ export function describeStep(name: string, input: any): string | null {
  */
 export type Brains = { orchestrator: BrainProfile; quick: BrainProfile; workhorse: BrainProfile; heavy: BrainProfile };
 export const HARNESSES = ["claude", "codex", "echo", "custom"] as const;
+/** The workbench tools as Claude Code names them (server "hearth"). */
+export const WORKBENCH_TOOLS = ["run", "write_file", "read_file", "copy_in", "copy_out"].map((t) => `mcp__hearth__${t}`);
 export const MODEL_RE = /^[A-Za-z0-9._:\/-]{0,64}$/;
 
 /** Harnesses this hub can actually run. The app may only choose from these. */
@@ -356,6 +369,10 @@ export class Brain {
   private workDir: string;
   /** Linked computers. When one is online with the harness, calls run there, on its own logins. */
   remote: Remote | null = null;
+  /** Where teammates think (Settings → Where work runs). */
+  agentOn: "mac-first" | "hub" | "mac" = "mac-first";
+  /** The hub address the workbench tools call back to (the hub itself, or a linked computer's hub). */
+  toolUrl: string | null = null;
 
   constructor(private config: Config) {
     this.global = new Semaphore(config.maxParallel);
@@ -403,7 +420,8 @@ export class Brain {
 
   /** A linked computer if one is online with this harness, else this hub (the cloud). */
   private async dispatch(b: BrainInput, p: BrainProfile, meter?: Meter): Promise<string> {
-    const r = this.remote?.pick(p);
+    const r = this.agentOn === "hub" ? null : this.remote?.pick(p);
+    if (!r && this.agentOn === "mac" && this.remote) throw new NeedsComputer("This hub is set to think only on your Mac, and it isn't online.");
     if (r) {
       if (meter) meter.ranOn = r.name;
       try { return await r.run(b, p, meter); }
@@ -424,16 +442,23 @@ export class Brain {
     const prompt = buildPrompt(b);
     const planning = b.mode === "orchestrate";
     const name = `${harness}${model ? ` (${model})` : ""}`;
-    let outFile: string | null = null;
+    let outFile: string | null = null, mcpFile: string | null = null;
     let cmd: string[];
     switch (harness) {
       case "claude": {
         // Slim: our own short system prompt instead of Claude Code's, only the tools this call needs, none of the machine's
         // MCP servers, settings or hooks. Cuts ~22k tokens of overhead from every call (~$0.06 on Sonnet, ~5x that on Opus).
         const web = !NO_TOOLS.has(b.mode);
+        // The workbench tools come in as one MCP server, configured in a private file (its key never sits in argv).
+        if (b.workbench && this.toolUrl) {
+          mcpFile = join(this.workDir, `${randomUUID()}.mcp.json`);
+          writeFileSync(mcpFile, JSON.stringify({ mcpServers: { hearth: { command: process.execPath, args: [join(import.meta.dir, "tools-mcp.ts")],
+            env: { HEARTH_TOOL_URL: this.toolUrl, HEARTH_TOOL_TOKEN: b.workbench.token } } } }), { mode: 0o600 });
+        }
+        const allowed = [...(web ? ["WebSearch", "WebFetch"] : []), ...(mcpFile ? WORKBENCH_TOOLS : [])];
         cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence", ...(model ? ["--model", model] : []),
-          "--system-prompt", SYSTEM_PROMPT, "--strict-mcp-config", "--setting-sources", "project",
-          "--tools", web ? "WebSearch,WebFetch" : "", ...(web ? ["--allowedTools", "WebSearch", "WebFetch"] : [])];
+          "--system-prompt", SYSTEM_PROMPT, "--strict-mcp-config", ...(mcpFile ? ["--mcp-config", mcpFile] : []), "--setting-sources", "project",
+          "--tools", web ? "WebSearch,WebFetch" : "", ...(allowed.length ? ["--allowedTools", ...allowed] : [])];
         break;
       }
       case "codex":
@@ -494,6 +519,7 @@ export class Brain {
       } catch { if (meter) meter.unknown = true; }
     } else if (meter) meter.unknown = true;
     if (outFile) { try { reply = readFileSync(outFile, "utf8"); } catch {} rmSync(outFile, { force: true }); }
+    if (mcpFile) rmSync(mcpFile, { force: true });
     if (code !== 0 && !reply.trim()) throw new Error(`${name} exited with ${code}: ${err.trim().slice(-300)}`);
     return reply.trim();
   }
