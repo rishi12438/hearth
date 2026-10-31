@@ -58,6 +58,10 @@ Ask for something you'll *use* and a teammate builds it right there: "make me a 
 - **Apps can talk back.** `hearth.ask("quiz me")` messages the teammate who made it (shown in your DM with them, rate-limited).
 - **Sandboxed.** Apps run in a frame with no network and no access to your hub; see [SECURITY.md](SECURITY.md).
 
+### Artifacts and components
+
+Teammates can put a one-off interactive piece in an answer (an **artifact**: one HTML file plus its data, run in the same sandbox as mini apps). Every artifact is also saved as a reusable **component**, like a skill for visuals: general code, a description and the data it draws. The team searches components before building, and reuses one with new data instead of writing new code. Hearth ships with starters in [components/](components/): day-by-day itinerary (with maps), option comparison, checklist, timeline, budget, recipe and countdown. See them under Skills → Components.
+
 ### Workflows you keep, and a cleanup
 
 Tap **Save as workflow** on a finished ramble to keep it, or say "save this as my …". "Run my …" replays it, reusing skills where it can. A nightly cleanup, with no model, removes skills and workflows unused for `HEARTH_PURGE_UNUSED_DAYS` (default 45), ones that keep failing, proposals never switched on, and assistant scripts nothing uses. Pinned items are never removed, and everything removed is logged.

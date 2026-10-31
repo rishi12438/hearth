@@ -163,7 +163,7 @@ test("artifacts: inline apps show in the answer at their own height, can use hub
   expect(r.done.some((d: any) => d.kind === "app" && d.id === a.id)).toBe(true);
   const page = (await hub.apps.page(hub.apps.ticket(a.id, "inline"), { origin: "https://hub.example", tileKey: "k1" }))!;
   expect(page).toContain('view: "inline"');
-  expect(page).toContain("ResizeObserver"); // reports its height to the app
+  expect(page).toContain("ResizeObserver"); // reports its content height to the app
   expect(page).toContain('"https://hub.example" + "/emoji/"');
   expect(appCsp("'self'", "https://hub.example")).toContain("img-src data: blob: https://hub.example");
   expect(appCsp("'self'", "https://hub.example")).toContain("connect-src 'none'"); // still no network
@@ -187,4 +187,16 @@ test("components: an artifact becomes a reusable component with a description, f
   expect([lisbon.html, lisbon.inline]).toEqual([html, true]);
   expect((await hub.componentByName("day-by-day-itinerary"))!.uses).toBe(2);
   expect((await store.all<any>("components")).length).toBe(1); // reused, not copied
+});
+
+test("starter components ship with Hearth: loaded once, found by search, and not overwritten once the team improves one", async () => {
+  await hub.ensureStarterComponents();
+  const names = (await store.all<any>("components")).map((c) => c.name).sort();
+  expect(names).toEqual(["budget-breakdown", "checklist", "countdown", "day-by-day-itinerary", "option-comparison", "recipe", "timeline"]);
+  expect((await hub.searchLibrary("compare three hotels in lisbon")).some((x: any) => x.name === "option-comparison")).toBe(true);
+  expect((await hub.searchLibrary("packing list for my trip")).some((x: any) => x.name === "checklist")).toBe(true);
+  // The team improves the checklist; a later start doesn't put the starter back over it.
+  await hub.saveComponent({ name: "checklist", html: "<html><body>improved</body></html>", data: { items: [] } });
+  await hub.ensureStarterComponents();
+  expect((await hub.componentByName("checklist"))!.html).toContain("improved");
 });

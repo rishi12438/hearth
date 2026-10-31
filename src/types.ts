@@ -314,6 +314,8 @@ export type Component = Doc & {
   lastUsedAt?: string;
   teammateId?: string;
   versions: { html: string; at: string }[];
+  /** Ships with Hearth (components/*.html). Kept up to date with new releases until the team improves it. */
+  builtIn?: boolean;
 };
 
 /** What an app saved for itself (flashcard progress, ticked boxes). */

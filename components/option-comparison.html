@@ -1,0 +1,33 @@
+<!doctype html><html><head><style>
+*{box-sizing:border-box}html,body{margin:0;background:#fff;color:#1d1b19;font:15px/1.4 -apple-system,system-ui,sans-serif}
+.wrap{display:flex;gap:10px;overflow-x:auto;scroll-snap-type:x mandatory;padding:14px;scrollbar-width:none}.wrap::-webkit-scrollbar{display:none}
+.card{flex:none;width:78%;max-width:300px;scroll-snap-align:start;border-radius:18px;background:#f7f5f2;padding:14px;display:flex;flex-direction:column;gap:8px;position:relative}
+.card.best{background:#fff;box-shadow:0 0 0 2px #1d1b19,0 8px 22px rgba(40,30,20,.1)}
+.badge{position:absolute;top:-1px;right:12px;background:#1d1b19;color:#fff;font:700 11.5px system-ui;padding:4px 9px;border-radius:0 0 10px 10px}
+.top{display:flex;gap:10px;align-items:center}.top img{width:40px;height:40px}.top b{font-size:17px;line-height:1.2}
+.price{font-size:22px;font-weight:750;letter-spacing:-.02em}.price small{font-size:13px;font-weight:600;color:#8c8781}
+.stars{color:#e0a020;font-size:14px;letter-spacing:1px}.stars span{color:#8c8781;font-size:12.5px;letter-spacing:0;margin-left:4px}
+ul{margin:0;padding:0;list-style:none}li{font-size:14px;padding:2px 0 2px 22px;position:relative;color:#3b3834}
+li.pro::before{content:"✓";position:absolute;left:2px;color:#2f9e6b;font-weight:800}li.con::before{content:"–";position:absolute;left:4px;color:#d9534f;font-weight:800}
+.why{font-size:13.5px;color:#8c8781}
+</style></head><body><div class="wrap" id="wrap"></div>
+<script>
+// Data: { options: [{ name, emoji?, price?, per?, rating? (0-5), reviews?, pros: [], cons: [], note?, best? }] }
+const opts = (hearth.data && hearth.data.options) || [];
+const el = (t, c, txt) => { const e = document.createElement(t); if (c) e.className = c; if (txt != null) e.textContent = txt; return e; };
+hearth.ready(() => {
+  const wrap = document.getElementById("wrap");
+  for (const o of opts) {
+    const c = el("div", "card" + (o.best ? " best" : ""));
+    if (o.best) c.append(el("span", "badge", "Best pick"));
+    const top = el("div", "top"); const im = el("img"); im.alt = ""; im.src = hearth.emoji(o.emoji || "✨"); top.append(im, el("b", null, o.name || ""));
+    c.append(top);
+    if (o.price != null) { const p = el("div", "price", String(o.price)); if (o.per) p.append(" ", el("small", null, o.per)); c.append(p); }
+    if (o.rating != null) { const s = el("div", "stars", "★".repeat(Math.round(o.rating)) + "☆".repeat(5 - Math.round(o.rating))); s.append(el("span", null, `${o.rating}${o.reviews ? ` · ${o.reviews}` : ""}`)); c.append(s); }
+    const ul = el("ul"); for (const p of o.pros || []) ul.append(el("li", "pro", p)); for (const x of o.cons || []) ul.append(el("li", "con", x)); c.append(ul);
+    if (o.note) c.append(el("div", "why", o.note));
+    wrap.append(c);
+  }
+  if (opts.length === 1) wrap.firstChild && (wrap.firstChild.style.width = "100%");
+});
+</script></body></html>

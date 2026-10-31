@@ -1,0 +1,67 @@
+[
+  {
+    "name": "day-by-day-itinerary",
+    "title": "Day by day",
+    "description": "A tab per day with a zoomed map of where you are and a short list of things to do (3D emoji). Use for any multi-day trip or plan with places.",
+    "example": { "days": [
+      { "when": "Day 1-2", "title": "Osaka", "lat": 34.6687, "lon": 135.5013, "leg": "🚄 50 min from Kansai Airport", "items": [
+        { "emoji": "🍜", "name": "Dotonbori", "note": "Street food crawl at night" },
+        { "emoji": "🐟", "name": "Kuromon market", "note": "Breakfast of fresh sashimi" } ] },
+      { "when": "Day 3", "title": "Nara", "lat": 34.6851, "lon": 135.843, "leg": "🚃 45 min", "items": [
+        { "emoji": "🦌", "name": "Nara Park", "note": "Bow to the deer" },
+        { "emoji": "⛩️", "name": "Todai-ji", "note": "The giant Buddha hall" } ] }
+    ] }
+  },
+  {
+    "name": "option-comparison",
+    "title": "Compare options",
+    "description": "Swipeable cards side by side with price, rating, pros and cons, and the best pick highlighted. Use when choosing between products, places, hotels, plans or services.",
+    "example": { "options": [
+      { "name": "Clayroom Oakland", "emoji": "🏺", "price": "$60", "per": "gift card", "rating": 4.8, "reviews": "212 reviews", "pros": ["Wheel classes", "Near BART"], "cons": ["Books up fast"], "best": true },
+      { "name": "Waveform Ceramics", "emoji": "🎨", "price": "$75", "per": "class", "rating": 4.6, "pros": ["Lake Merritt"], "cons": ["Pricier"] }
+    ] }
+  },
+  {
+    "name": "checklist",
+    "title": "Checklist",
+    "description": "Groups of tickable items with progress, and the ticks are remembered. Use for packing lists, prep, moving, errands or any to-do set.",
+    "example": { "title": "Lisbon packing", "groups": [
+      { "name": "Clothes", "emoji": "👕", "items": [{ "text": "Rain jacket" }, { "text": "Walking shoes", "note": "Hills!" }] },
+      { "name": "Docs", "emoji": "🛂", "items": [{ "text": "Passport" }, { "text": "Travel insurance" }] }
+    ] }
+  },
+  {
+    "name": "timeline",
+    "title": "Timeline",
+    "description": "Dated steps down the page with what's done, now and next. Use for schedules, plans over weeks, recovery or training plans, histories and deadlines.",
+    "example": { "title": "Knee before Saturday", "steps": [
+      { "when": "Today", "what": "Ice 15 min, 3 times", "emoji": "🧊", "status": "now" },
+      { "when": "Friday", "what": "Gentle warm-up test", "note": "Stop if it's sharp", "emoji": "🦵", "status": "next" },
+      { "when": "Saturday", "what": "Play with a brace", "emoji": "🏐", "status": "next" }
+    ] }
+  },
+  {
+    "name": "budget-breakdown",
+    "title": "Budget",
+    "description": "Bars per category with amounts, a total against the budget, and anything over budget in red. Use for trip costs, monthly spending, subscriptions or any money split.",
+    "example": { "currency": "$", "total_budget": 2500, "categories": [
+      { "name": "Flights", "emoji": "✈️", "amount": 980, "budget": 900 },
+      { "name": "Hotels", "emoji": "🏨", "amount": 840, "budget": 1000 },
+      { "name": "Food", "emoji": "🍜", "amount": 420, "budget": 450 }
+    ] }
+  },
+  {
+    "name": "recipe",
+    "title": "Recipe",
+    "description": "Ingredients that rescale with servings and steps you tick off while cooking (both remembered). Use for any recipe or meal plan.",
+    "example": { "title": "Shakshuka", "emoji": "🍳", "time": "25 min", "servings": 2, "ingredients": [
+      { "qty": 4, "item": "eggs" }, { "qty": 1, "unit": "can", "item": "crushed tomatoes" }, { "qty": 0.5, "unit": "tsp", "item": "cumin" } ],
+      "steps": ["Soften onion and pepper", "Add tomatoes and spices, simmer 10 min", "Crack in the eggs, cover until set"] }
+  },
+  {
+    "name": "countdown",
+    "title": "Countdown",
+    "description": "Big number of days (or hours) to go with an emoji. Use for trips, birthdays, deadlines and events; good as a small Home widget too.",
+    "example": { "what": "Lisbon", "date": "2027-03-12", "emoji": "🇵🇹" }
+  }
+]

@@ -35,8 +35,9 @@ window.hearth = { data: ${j(data)}, state: ${j(state)}, view: ${j(view)},
   ask(text) { parent.postMessage({ hearth: "ask", text: String(text).slice(0, 2000) }, "*"); },
   open() { parent.postMessage({ hearth: "open" }, "*"); },
   ready(cb) { document.readyState === "loading" ? document.addEventListener("DOMContentLoaded", cb) : cb(); } };
-${view === "inline" ? `window.hearth.ready(() => { const tell = () => parent.postMessage({ hearth: "height", h: document.documentElement.scrollHeight }, "*");
-  new ResizeObserver(tell).observe(document.documentElement); tell(); });` : ""}
+${view === "inline" ? `window.hearth.ready(() => { const tell = () => parent.postMessage({ hearth: "height", h: Math.ceil(document.body.getBoundingClientRect().height) }, "*");
+  document.documentElement.style.height = "auto"; document.body.style.height = "auto"; document.body.style.minHeight = "0";
+  new ResizeObserver(tell).observe(document.body); tell(); });` : ""}
 </script>`;
 }
 

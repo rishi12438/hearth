@@ -1,0 +1,32 @@
+<!doctype html><html><head><style>
+*{box-sizing:border-box}html,body{margin:0;background:#fff;color:#1d1b19;font:15px/1.4 -apple-system,system-ui,sans-serif}
+.b{padding:14px 16px 12px}.sum{display:flex;align-items:baseline;gap:8px}.sum b{font-size:28px;letter-spacing:-.02em}.sum span{font-size:14px;color:#8c8781}
+.sum span.over{color:#d9534f;font-weight:700}
+.row{margin-top:12px}.row .l{display:flex;align-items:center;gap:8px;font-size:14.5px}.row .l img{width:22px;height:22px}.row .l b{flex:1;font-weight:600}
+.row .l em{font-style:normal;font-weight:700}.row .l em.over{color:#d9534f}
+.track{height:10px;border-radius:5px;background:#f2f0ec;margin-top:6px;overflow:hidden;position:relative}
+.track i{position:absolute;inset:0 auto 0 0;border-radius:5px;background:#1d1b19;width:0;transition:width .6s cubic-bezier(.2,.8,.2,1)}.track i.over{background:#d9534f}
+.row small{display:block;font-size:12.5px;color:#8c8781;margin-top:3px}
+</style></head><body><div class="b"><div class="sum" id="sum"></div><div id="rows"></div></div>
+<script>
+// Data: { currency?: "$", total_budget?, categories: [{ name, emoji?, amount, budget?, note? }] }
+const d = hearth.data || {}, cur = d.currency || "$", cats = d.categories || [];
+const money = (n) => cur + Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
+const el = (t, c, txt) => { const e = document.createElement(t); if (c) e.className = c; if (txt != null) e.textContent = txt; return e; };
+hearth.ready(() => {
+  const spent = cats.reduce((n, c) => n + (Number(c.amount) || 0), 0), budget = d.total_budget || cats.reduce((n, c) => n + (Number(c.budget) || 0), 0);
+  const sum = document.getElementById("sum"); sum.append(el("b", null, money(spent)));
+  if (budget) sum.append(el("span", spent > budget ? "over" : "", spent > budget ? `${money(spent - budget)} over ${money(budget)}` : `of ${money(budget)} · ${money(budget - spent)} left`));
+  const max = Math.max(...cats.map((c) => Math.max(Number(c.amount) || 0, Number(c.budget) || 0)), 1);
+  const rows = document.getElementById("rows"), bars = [];
+  for (const c of cats) {
+    const over = c.budget && c.amount > c.budget, row = el("div", "row"), l = el("div", "l");
+    if (c.emoji) { const im = el("img"); im.alt = ""; im.src = hearth.emoji(c.emoji); l.append(im); }
+    l.append(el("b", null, c.name), el("em", over ? "over" : "", money(c.amount)));
+    const t = el("div", "track"), bar = el("i", over ? "over" : ""); t.append(bar); bars.push([bar, (100 * (Number(c.amount) || 0)) / max]);
+    row.append(l, t); if (c.budget || c.note) row.append(el("small", null, [c.budget ? `budget ${money(c.budget)}` : "", c.note || ""].filter(Boolean).join(" · ")));
+    rows.append(row);
+  }
+  requestAnimationFrame(() => bars.forEach(([b, w]) => (b.style.width = w + "%")));
+});
+</script></body></html>

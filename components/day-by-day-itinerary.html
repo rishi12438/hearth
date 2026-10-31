@@ -1,0 +1,56 @@
+<!doctype html><html><head><style>
+*{box-sizing:border-box}html,body{margin:0;background:#fff;color:#1d1b19;font:15px/1.4 -apple-system,system-ui,sans-serif}
+.tabs{display:flex;gap:6px;padding:12px 12px 10px;overflow-x:auto;scrollbar-width:none}.tabs::-webkit-scrollbar{display:none}
+.tabs button{flex:none;border:0;border-radius:999px;padding:8px 13px;background:#f2f0ec;font:650 13.5px system-ui;color:#3b3834}
+.tabs button.on{background:#1d1b19;color:#fff}
+.map{position:relative;height:150px;margin:0 12px;border-radius:16px;overflow:hidden;background:#e9ecef}
+.map img.t{position:absolute;width:256px;height:256px;filter:saturate(.5) brightness(1.05)}
+.pin{position:absolute;left:50%;top:50%;width:38px;height:38px;transform:translate(-50%,-88%);filter:drop-shadow(0 3px 3px rgba(0,0,0,.3));animation:drop .45s cubic-bezier(.3,1.5,.5,1)}
+@keyframes drop{from{transform:translate(-50%,-150%);opacity:0}}
+.head{padding:14px 16px 2px}.head small{display:block;font-size:13px;font-weight:700;color:#8c8781}.head h2{margin:2px 0 0;font-size:20px;letter-spacing:-.01em}
+.leg{display:inline-block;margin-top:6px;font-size:13px;font-weight:600;color:#3b3834;background:#f2f0ec;border-radius:999px;padding:3px 10px}
+.items{padding:6px 16px 14px}.item{display:flex;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid #ebe8e3}.item:last-child{border:0}
+.item img{width:32px;height:32px;flex:none}.item b{display:block;font-size:15.5px}.item span{display:block;font-size:13.5px;color:#8c8781}
+</style></head><body>
+<div class="tabs" id="tabs"></div><div class="map" id="map"></div><div class="head" id="head"></div><div class="items" id="items"></div>
+<script>
+// Data: { days: [{ when, title, lat?, lon?, leg?, items: [{ emoji, name, note }] }] }
+const days = (hearth.data && hearth.data.days) || [];
+let cur = 0;
+const el = (t, c, txt) => { const e = document.createElement(t); if (c) e.className = c; if (txt != null) e.textContent = txt; return e; };
+const merc = (lat, lon, z) => { const n = 256 * 2 ** z, r = lat * Math.PI / 180; return [(lon + 180) / 360 * n, (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * n]; };
+function drawMap() {
+  const d = days[cur], m = document.getElementById("map"), W = m.clientWidth, H = m.clientHeight;
+  m.style.display = d && d.lat != null ? "" : "none";
+  if (!d || d.lat == null || !W) return;
+  m.textContent = "";
+  const z = d.zoom || 13, [cx, cy] = merc(d.lat, d.lon, z);
+  for (let tx = Math.floor((cx - W / 2) / 256); tx <= Math.floor((cx + W / 2) / 256); tx++)
+    for (let ty = Math.floor((cy - H / 2) / 256); ty <= Math.floor((cy + H / 2) / 256); ty++) {
+      const im = el("img", "t"); im.alt = ""; im.src = hearth.tile(z, tx, ty);
+      im.style.left = (tx * 256 - cx + W / 2) + "px"; im.style.top = (ty * 256 - cy + H / 2) + "px"; m.appendChild(im);
+    }
+  const pin = el("img", "pin"); pin.alt = ""; pin.src = hearth.emoji("📍"); m.appendChild(pin);
+}
+function show(i) {
+  cur = i;
+  [...document.querySelectorAll(".tabs button")].forEach((b, k) => b.classList.toggle("on", k === i));
+  const d = days[i] || { title: "", items: [] }, head = document.getElementById("head"), items = document.getElementById("items");
+  head.textContent = ""; head.append(el("small", null, d.when || ""), el("h2", null, d.title || ""));
+  if (d.leg) head.append(el("span", "leg", d.leg));
+  items.textContent = "";
+  for (const it of d.items || []) {
+    const row = el("div", "item"), im = el("img"); im.alt = ""; im.src = hearth.emoji(it.emoji || "📍");
+    const t = el("div"); t.append(el("b", null, it.name || ""), it.note ? el("span", null, it.note) : "");
+    row.append(im, t); items.appendChild(row);
+  }
+  drawMap();
+}
+hearth.ready(() => {
+  const tabs = document.getElementById("tabs");
+  days.forEach((d, i) => { const b = el("button", null, d.when || d.title || `Day ${i + 1}`); b.onclick = () => show(i); tabs.appendChild(b); });
+  if (days.length < 2) tabs.style.display = "none";
+  show(0);
+  new ResizeObserver(drawMap).observe(document.getElementById("map")); // draw once the frame has its real width
+});
+</script></body></html>

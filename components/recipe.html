@@ -1,0 +1,39 @@
+<!doctype html><html><head><style>
+*{box-sizing:border-box}html,body{margin:0;background:#fff;color:#1d1b19;font:15px/1.4 -apple-system,system-ui,sans-serif}
+.r{padding:14px 16px 12px}.top{display:flex;gap:12px;align-items:center}.top img{width:46px;height:46px}.top b{display:block;font-size:18px}.top small{color:#8c8781;font-size:13px}
+.serv{display:flex;align-items:center;gap:10px;margin:12px 0 4px;font-size:14px;font-weight:600}
+.serv button{width:32px;height:32px;border-radius:50%;border:0;background:#f2f0ec;font:700 18px system-ui;color:#1d1b19}.serv span{min-width:20px;text-align:center;font-size:16px}
+h4{margin:14px 0 6px;font-size:12.5px;text-transform:uppercase;letter-spacing:.06em;color:#8c8781}
+.ing{display:flex;gap:10px;padding:6px 0;border-bottom:1px solid #f2f0ec;font-size:15px}.ing b{min-width:70px;font-weight:700}
+.step{display:flex;gap:10px;padding:8px 0;cursor:pointer}.step i{width:24px;height:24px;border-radius:50%;background:#1d1b19;color:#fff;font:800 12px system-ui;display:grid;place-items:center;flex:none;font-style:normal}
+.step.done{color:#8c8781}.step.done i{background:#2f9e6b}
+</style></head><body><div class="r"><div class="top" id="top"></div>
+<div class="serv">Servings <button id="minus" aria-label="Fewer">–</button><span id="n"></span><button id="plus" aria-label="More">+</button></div>
+<h4>Ingredients</h4><div id="ings"></div><h4>Steps</h4><div id="steps"></div></div>
+<script>
+// Data: { title, emoji?, time?, servings, ingredients: [{ qty, unit?, item }], steps: [string] }. Ticked steps are saved.
+const d = hearth.data || {}, base = d.servings || 2;
+let n = (hearth.state && hearth.state.servings) || base;
+const done = new Set((hearth.state && hearth.state.steps) || []);
+const el = (t, c, txt) => { const e = document.createElement(t); if (c) e.className = c; if (txt != null) e.textContent = txt; return e; };
+const fmt = (q) => { if (q == null) return ""; const v = q * n / base; return Number.isInteger(v) ? String(v) : (Math.round(v * 4) / 4).toString().replace(/\.25$/, "¼").replace(/\.5$/, "½").replace(/\.75$/, "¾").replace(/^0(?=[¼½¾])/, ""); };
+const save = () => hearth.save({ servings: n, steps: [...done] });
+function draw() {
+  document.getElementById("n").textContent = n;
+  const ings = document.getElementById("ings"); ings.textContent = "";
+  for (const i of d.ingredients || []) { const r = el("div", "ing"); r.append(el("b", null, `${fmt(i.qty)} ${i.unit || ""}`.trim()), el("span", null, i.item)); ings.append(r); }
+}
+hearth.ready(() => {
+  const top = document.getElementById("top"), im = el("img"); im.alt = ""; im.src = hearth.emoji(d.emoji || "🍳");
+  const t = el("div"); t.append(el("b", null, d.title || ""), el("small", null, d.time || "")); top.append(im, t);
+  document.getElementById("minus").onclick = () => { if (n > 1) { n--; draw(); save(); } };
+  document.getElementById("plus").onclick = () => { n++; draw(); save(); };
+  const steps = document.getElementById("steps");
+  (d.steps || []).forEach((s, k) => {
+    const row = el("div", "step" + (done.has(k) ? " done" : "")); row.append(el("i", null, String(k + 1)), el("span", null, s));
+    row.onclick = () => { done.has(k) ? done.delete(k) : done.add(k); row.classList.toggle("done"); save(); };
+    steps.append(row);
+  });
+  draw();
+});
+</script></body></html>

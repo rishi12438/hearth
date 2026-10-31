@@ -1,0 +1,23 @@
+<!doctype html><html><head><style>
+*{box-sizing:border-box}html,body{margin:0;background:#fff;color:#1d1b19;font:15px/1.4 -apple-system,system-ui,sans-serif}
+.c{display:flex;align-items:center;gap:16px;padding:18px 18px}.c img{width:64px;height:64px;flex:none}
+.n{font-size:54px;font-weight:800;letter-spacing:-.04em;line-height:1}.u{font-size:15px;font-weight:700;color:#8c8781;margin-left:4px}
+.what{font-size:16px;font-weight:650;margin-top:4px}.when{font-size:13px;color:#8c8781}
+</style></head><body><div class="c"><img id="icon" alt=""><div><div><span class="n" id="n"></span><span class="u" id="u"></span></div><div class="what" id="what"></div><div class="when" id="when"></div></div></div>
+<script>
+// Data: { what, date: "2027-03-12" (or with a time), emoji? }
+const d = hearth.data || {};
+hearth.ready(() => {
+  document.getElementById("icon").src = hearth.emoji(d.emoji || "🗓️");
+  // "2027-03-12" means that day where you are, not midnight UTC.
+  const ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(d.date || ""));
+  const at = ymd ? new Date(+ymd[1], +ymd[2] - 1, +ymd[3]) : new Date(d.date), tick = () => {
+    const ms = at - Date.now(), days = Math.ceil(ms / 864e5), hrs = Math.ceil(ms / 36e5);
+    const [num, unit] = ms <= 0 ? ["🎉", ""] : days > 1 ? [days, "days"] : [hrs, hrs === 1 ? "hour" : "hours"];
+    document.getElementById("n").textContent = num; document.getElementById("u").textContent = unit;
+  };
+  document.getElementById("what").textContent = d.what || "";
+  document.getElementById("when").textContent = isNaN(at) ? "" : at.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: at.getFullYear() !== new Date().getFullYear() ? "numeric" : undefined });
+  tick(); setInterval(tick, 60000);
+});
+</script></body></html>

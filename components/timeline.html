@@ -1,0 +1,25 @@
+<!doctype html><html><head><style>
+*{box-sizing:border-box}html,body{margin:0;background:#fff;color:#1d1b19;font:15px/1.4 -apple-system,system-ui,sans-serif}
+.t{padding:14px 16px 10px}.title{font-size:17px;font-weight:700;margin-bottom:10px}
+.step{display:flex;gap:12px;position:relative;padding-bottom:16px}.step:last-child{padding-bottom:4px}
+.step::before{content:"";position:absolute;left:17px;top:38px;bottom:0;width:2px;background:#ebe8e3}.step:last-child::before{display:none}
+.dot{width:36px;height:36px;border-radius:50%;background:#f2f0ec;display:grid;place-items:center;flex:none}.dot img{width:24px;height:24px}
+.step.now .dot{background:#1d1b19;box-shadow:0 0 0 4px rgba(29,27,25,.12)}.step.done .dot{opacity:.55}
+.when{font-size:12.5px;font-weight:700;color:#8c8781;text-transform:uppercase;letter-spacing:.04em}.step.now .when{color:#e5603e}
+.what{font-size:15.5px;font-weight:650;line-height:1.3}.note{font-size:13.5px;color:#8c8781;margin-top:2px}
+</style></head><body><div class="t"><div class="title" id="title"></div><div id="steps"></div></div>
+<script>
+// Data: { title?, steps: [{ when, what, note?, emoji?, status?: "done"|"now"|"next" }] }
+const d = hearth.data || {};
+const el = (t, c, txt) => { const e = document.createElement(t); if (c) e.className = c; if (txt != null) e.textContent = txt; return e; };
+hearth.ready(() => {
+  const title = document.getElementById("title"); title.textContent = d.title || ""; if (!d.title) title.style.display = "none";
+  const box = document.getElementById("steps");
+  for (const s of d.steps || []) {
+    const row = el("div", "step " + (s.status || "")), dot = el("div", "dot"), im = el("img"); im.alt = ""; im.src = hearth.emoji(s.emoji || (s.status === "done" ? "✅" : "📍"));
+    dot.append(im);
+    const body = el("div"); body.append(el("div", "when", s.when || ""), el("div", "what", s.what || "")); if (s.note) body.append(el("div", "note", s.note));
+    row.append(dot, body); box.append(row);
+  }
+});
+</script></body></html>

@@ -1,3 +1,5 @@
+import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store, Collection } from "./store/index.ts";
@@ -145,6 +147,7 @@ export class Hub {
         you: teammate ? { name: teammate.name, role: teammate.prompt } : { name: "Hearth", role: "The user's main assistant." },
         now: describeLocal(now, prefs.tz), tz: prefs.tz, userName: prefs.userName || undefined, aboutYou: prefs.about || undefined,
         memory: recall(await this.store.all<Fact>("memory"), query, 8, now).map((f) => f.fact),
+        components: (await this.searchLibrary(query)).filter((x) => x.kind === "component"), // ready-made visuals it can fill with data
       };
     }
     const facts = await this.store.all<Fact>("memory");
@@ -1586,6 +1589,25 @@ export class Hub {
     return n ? (await this.store.all<Component>("components")).find((c) => c.name === n) || null : null;
   }
 
+  /**
+   * The starter components that ship with Hearth (components/*.html + starters.json): itinerary, comparison, checklist,
+   * timeline, budget, recipe, countdown. Added once; refreshed with new releases unless the team has improved one.
+   */
+  async ensureStarterComponents(dir = join(import.meta.dir, "..", "components")) {
+    let list: { name: string; title: string; description: string; example: unknown }[] = [];
+    try { list = JSON.parse(readFileSync(join(dir, "starters.json"), "utf8")); } catch { return; }
+    for (const s of list) {
+      let html = "";
+      try { html = readFileSync(join(dir, `${s.name}.html`), "utf8"); } catch { continue; }
+      const prev = await this.componentByName(s.name);
+      if (prev && (!prev.builtIn || prev.versions.length || prev.sha256 === sha256(html))) continue;
+      await this.store.put<Component>("components", {
+        ...(prev || { ...this.doc({}), uses: 0, versions: [] }), name: s.name, title: s.title, description: s.description,
+        shape: JSON.stringify(s.example).slice(0, 1500), html, sha256: sha256(html), builtIn: true, updatedAt: this.clock().toISOString(),
+      } as Component);
+    }
+  }
+
   /** Save (or improve) a component from an artifact's code. Missing descriptions are written by the quick model. */
   async saveComponent(input: { name: string; title?: string; description?: string; data?: unknown; html: string }, teammateId?: string) {
     const name = slugOf(input.name);
@@ -1776,6 +1798,7 @@ export class Hub {
   async start(intervalMs = 15_000) {
     await this.ensureTeammates();
     await this.ensureSystemHooks();
+    await this.ensureStarterComponents();
     // Rambles from before they had names: name them from their titles (Hearth refines it on the next message).
     for (const t of await this.store.all<Thread>("threads")) if (t.num && !t.channel && t.title) await this.renameThread(t.id, nameFrom(t.title), false);
     this.timer = setInterval(() => this.tick().catch((e) => console.error("tick failed", e)), intervalMs);

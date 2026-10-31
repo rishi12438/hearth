@@ -1,0 +1,37 @@
+<!doctype html><html><head><style>
+*{box-sizing:border-box}html,body{margin:0;background:#fff;color:#1d1b19;font:15px/1.4 -apple-system,system-ui,sans-serif}
+.top{display:flex;align-items:center;gap:10px;padding:14px 16px 6px}.top b{flex:1;font-size:17px}.top span{font-size:13px;font-weight:700;color:#8c8781}
+.bar{height:6px;margin:0 16px 6px;border-radius:3px;background:#f2f0ec;overflow:hidden}.bar i{display:block;height:100%;width:0;background:#2f9e6b;transition:width .3s}
+h4{margin:12px 16px 4px;font-size:12.5px;text-transform:uppercase;letter-spacing:.06em;color:#8c8781;display:flex;align-items:center;gap:6px}h4 img{width:18px;height:18px}
+label{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid #f2f0ec;cursor:pointer}
+input{appearance:none;width:22px;height:22px;border-radius:7px;border:2px solid #c9c3bb;flex:none;display:grid;place-items:center;margin:0}
+input:checked{background:#2f9e6b;border-color:#2f9e6b}input:checked::after{content:"";width:6px;height:11px;border:solid #fff;border-width:0 2.5px 2.5px 0;transform:rotate(45deg) translate(-1px,-1px)}
+label.done span{color:#8c8781;text-decoration:line-through}span small{display:block;font-size:12.5px;color:#8c8781;text-decoration:none}
+.pad{height:8px}
+</style></head><body><div class="top"><b id="title"></b><span id="count"></span></div><div class="bar"><i id="bar"></i></div><div id="list"></div><div class="pad"></div>
+<script>
+// Data: { title?, groups: [{ name, emoji?, items: [{ text, note? }] }] }   (or items: [...] for one group). Ticks are saved.
+const d = hearth.data || {}, groups = d.groups || [{ name: "", items: d.items || [] }];
+const ticked = new Set((hearth.state && hearth.state.done) || []);
+const el = (t, c, txt) => { const e = document.createElement(t); if (c) e.className = c; if (txt != null) e.textContent = txt; return e; };
+function count() {
+  const all = groups.reduce((n, g) => n + (g.items || []).length, 0), n = ticked.size;
+  document.getElementById("count").textContent = `${n} of ${all}`;
+  document.getElementById("bar").style.width = all ? (100 * n / all) + "%" : "0";
+}
+hearth.ready(() => {
+  document.getElementById("title").textContent = d.title || "";
+  const list = document.getElementById("list");
+  groups.forEach((g, gi) => {
+    if (g.name) { const h = el("h4"); if (g.emoji) { const im = el("img"); im.alt = ""; im.src = hearth.emoji(g.emoji); h.append(im); } h.append(g.name); list.append(h); }
+    (g.items || []).forEach((it, ii) => {
+      const key = `${gi}.${ii}`, lab = el("label"), box = el("input"); box.type = "checkbox"; box.checked = ticked.has(key);
+      const txt = el("span", null, typeof it === "string" ? it : it.text); if (it.note) txt.append(el("small", null, it.note));
+      lab.classList.toggle("done", box.checked);
+      box.onchange = () => { box.checked ? ticked.add(key) : ticked.delete(key); lab.classList.toggle("done", box.checked); hearth.save({ done: [...ticked] }); count(); };
+      lab.append(box, txt); list.append(lab);
+    });
+  });
+  count();
+});
+</script></body></html>
