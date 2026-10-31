@@ -416,3 +416,22 @@ test("map tiles keep real coordinates in order and drop stops without them", asy
   expect(t.data.route).toBe(true);
   expect(cleanTile({ type: "map", data: { stops: [{ name: "x", lat: 200, lon: 0 }] } })).toBeNull();
 });
+
+test("Hearth names rambles from the plan and renames them when the topic changes, but never over your own name", async () => {
+  await hub.ensureTeammates();
+  let channel = "japan-trip";
+  const real = (hub.brain as any).think.bind(hub.brain);
+  (hub.brain as any).think = async (b: any, p: any) => b.mode === "orchestrate" ? JSON.stringify({ title: "Trip", channel, reply: "On it", jobs: [] }) : real(b, p);
+  const t = (await hub.ramble("plan japan")).value!.thread;
+  await until(async () => !hub.thinking);
+  expect((await store.get<any>("threads", t.id)).channel).toBe("japan-trip");
+  channel = "kyoto-ryokan";
+  await hub.ramble("actually just kyoto, find a ryokan", t.id);
+  await until(async () => !hub.thinking);
+  expect((await store.get<any>("threads", t.id)).channel).toBe("kyoto-ryokan");
+  await hub.renameThread(t.id, "honeymoon");
+  channel = "something-else";
+  await hub.ramble("and a restaurant", t.id);
+  await until(async () => !hub.thinking);
+  expect((await store.get<any>("threads", t.id)).channel).toBe("honeymoon"); // yours sticks
+});

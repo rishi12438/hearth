@@ -219,7 +219,8 @@ test("rambles are numbered temporary channels that archive an hour after they're
   const b = await hub.ramble("two");
   await until(() => allDone(2));
   const list = await hub.listThreads();
-  expect(list.map((t: any) => t.name).sort()).toEqual(["ramble-1", "ramble-2"]);
+  expect(list.map((t: any) => t.name).sort()).toEqual(["t", "t-2"]); // named by Hearth from the plan, kept unique
+  expect(list.map((t: any) => t.num).sort()).toEqual([1, 2]);
   await hub.archiveQuietRambles();
   expect((await hub.listThreads()).every((t: any) => !t.archived)).toBe(true); // not quiet long enough
   const later = Date.now() + 61 * 60_000;
@@ -313,5 +314,5 @@ test("boards: each teammate's work in Up next / Working / Needs you / Done, or e
   const scout = await hub.board("scout");
   expect(scout.working.map((c: any) => c.title)).toEqual(["Gift for Priya"]);
   await until(() => allDone(2));
-  expect((await hub.board("scout")).done[0].where).toBe("#ramble-1");
+  expect((await hub.board("scout")).done[0].where).toBe("#t");
 });

@@ -68,7 +68,9 @@ export type Hook = Doc & {
 /** A ramble is a temporary channel (#ramble-N). It archives itself an hour after everything in it is done. */
 export type Thread = Doc & { title: string; updatedAt: string; preview?: string; num?: number; archivedAt?: string;
   /** The channel name ("japan-trip"): from the plan, or set by you. Falls back to ramble-N. */
-  channel?: string };
+  channel?: string;
+  /** Who named it: you (then it's never renamed for you) or Hearth. */
+  channelBy?: "you" | "hearth" };
 
 export type Job = Doc & {
   threadId: string;

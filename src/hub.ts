@@ -296,12 +296,12 @@ export class Hub {
   async renameThread(id: string, name: string, byUser = true) {
     const t = await this.store.get<Thread>("threads", id);
     if (!t || t.id.startsWith("tm-")) return { error: "No such ramble." };
-    const slug = String(name).toLowerCase().replace(/^#/, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30);
+    const slug = slugOf(name);
     if (!slug) return { error: "Give it a name with letters or numbers." };
     const taken = new Set((await this.store.all<Thread>("threads")).filter((x) => x.id !== id).map((x) => channelOf(x)));
     let unique = slug;
     for (let n = 2; taken.has(unique); n++) unique = `${slug.slice(0, 27)}-${n}`;
-    const saved = await this.store.put<Thread>("threads", { ...t, channel: unique });
+    const saved = await this.store.put<Thread>("threads", { ...t, channel: unique, channelBy: byUser ? "you" : "hearth" });
     if (byUser) await this.log("ramble.renamed", `#${unique}`);
     this.emit("threads");
     return { value: saved };
@@ -390,7 +390,7 @@ export class Hub {
         .map((j) => ({ id: j.id, label: j.label || shortLabel(undefined, j.task), teammate: team0.find((t) => t.id === j.teammateId)?.name, status: j.status, task: j.task.slice(0, 400) }));
       const history = (await this.store.all<Message>("messages")).filter((x) => x.threadId === thread.id && !batch.some((b) => b.id === x.id)).slice(-10)
         .map((x) => ({ role: x.role, text: x.text.slice(0, 500) }));
-      const raw = await this.brain.think({ mode: "orchestrate", context: { ...ctx, thisChat: history, openTasks }, input: said + attached }, brains.orchestrator);
+      const raw = await this.brain.think({ mode: "orchestrate", context: { ...ctx, thisChat: history, openTasks, thisChannel: thread.id.startsWith("tm-") ? undefined : (await this.store.get<Thread>("threads", thread.id))?.channel || null }, input: said + attached }, brains.orchestrator);
       plan = parsePlan(raw);
     } catch (err: any) {
       await this.log("orchestrator.failed", err.message);
@@ -433,7 +433,9 @@ export class Hub {
     for (const w of (Array.isArray(plan.newWorkflows) ? plan.newWorkflows : []).slice(0, 2)) await this.proposeWorkflow(w);
 
     const fresh = await this.store.get<Thread>("threads", thread.id);
-    if (fresh && !fresh.channel && !thread.id.startsWith("tm-") && typeof plan.channel === "string") await this.renameThread(thread.id, plan.channel, false);
+    // Hearth names the ramble from its topic, and renames it when the topic changes, unless you named it yourself.
+    const wanted = typeof plan.channel === "string" ? plan.channel : !fresh?.channel && typeof plan.title === "string" ? plan.title.split(/\s+/).slice(0, 3).join(" ") : "";
+    if (fresh && wanted && !thread.id.startsWith("tm-") && fresh.channelBy !== "you" && slugOf(wanted) && slugOf(wanted) !== fresh.channel) await this.renameThread(thread.id, wanted, false);
     if (plan.title && !thread.id.startsWith("tm-") && fresh?.title === batch[0].text.split(/\s+/).slice(0, 6).join(" ")) await this.touchThread(thread.id, { title: String(plan.title).slice(0, 60) });
     // Hearth's short reply, then one message per task; each task's thread (the teammate working, replies) hangs under it.
     // Keep Hearth's line short when there are task posts under it; they say the rest.
@@ -1727,6 +1729,8 @@ export class Hub {
   async start(intervalMs = 15_000) {
     await this.ensureTeammates();
     await this.ensureSystemHooks();
+    // Rambles from before they had names: name them from their titles (Hearth refines it on the next message).
+    for (const t of await this.store.all<Thread>("threads")) if (t.num && !t.channel && t.title) await this.renameThread(t.id, t.title.split(/[\s,]+/).slice(0, 3).join(" "), false);
     this.timer = setInterval(() => this.tick().catch((e) => console.error("tick failed", e)), intervalMs);
     await this.tick();
   }
@@ -1938,3 +1942,4 @@ export function cleanEmoji(v: unknown) {
 
 /** A ramble's channel name: its own ("japan-trip"), or ramble-N. */
 export const channelOf = (t: Thread) => t.channel || (t.num ? `ramble-${t.num}` : t.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 30));
+const slugOf = (name: string) => String(name).toLowerCase().replace(/^#/, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30);
