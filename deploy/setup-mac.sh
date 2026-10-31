@@ -65,7 +65,7 @@ cat > "$PLIST" <<PL
   <key>WorkingDirectory</key><string>$APP</string>
   <key>EnvironmentVariables</key><dict><key>PATH</key><string>$P</string></dict>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>StandardOutPath</key><string>$HOME/Library/Logs/hearth-computer.log</string>
   <key>StandardErrorPath</key><string>$HOME/Library/Logs/hearth-computer.log</string>
 </dict></plist>

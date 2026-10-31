@@ -61,6 +61,12 @@ id hearth >/dev/null 2>&1 || adduser --disabled-password --gecos "" hearth >/dev
 [ -x /home/hearth/.bun/bin/bun ] || sudo -iu hearth bash -c 'curl -fsSL https://bun.sh/install | bash' >/dev/null
 mkdir -p /home/hearth/.claude /home/hearth/.codex && chown hearth: /home/hearth/.claude /home/hearth/.codex
 
+say "Master key for the hub's encrypted API keys"
+# API keys (E2B, Deepgram, your VMs' SSH keys) are encrypted in data/keys/vault.db with this key. It lives outside the
+# data folder, so a copy of the data alone can't be read. Made once; kept on every later run.
+sudo -u hearth bash -c 'umask 077; mkdir -p ~/.hearth; [ -s ~/.hearth/master.key ] || head -c 32 /dev/urandom | base64 > ~/.hearth/master.key'
+echo "   /home/hearth/.hearth/master.key: save a copy somewhere safe, like a password manager."
+
 say "Installing Hearth to $APP"
 if [ "$SRC" != "$APP" ]; then
   mkdir -p "$APP"
