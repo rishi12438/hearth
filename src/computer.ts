@@ -1,10 +1,11 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir, hostname, platform } from "node:os";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, hostname, platform, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { sha256 } from "./auth.ts";
 import { Brain, availableHarnesses, type BrainProfile } from "./brain.ts";
 import { ALIVE_EVERY_MS, COPY_ITEMS, isCopyItem, type CopyItem } from "./computers.ts";
 import type { Config } from "./config.ts";
+import { TOKEN_RE } from "./tokenmint.ts";
 
 // The computer side of a link (run on your Mac): join a hub once, then keep a line open to it and run the work it sends,
 // with this computer's own Claude/Codex login. The hub never gets a shell here: it can only ask for a brain call, which
@@ -19,11 +20,12 @@ export function readLink(dataDir: string): Link | null {
 }
 
 /** Ask the hub to let this computer in. Your primary phone approves it, like any new device. */
-export async function joinHub(hubUrl: string, dataDir: string, name = computerName(), log = console.log) {
+export async function joinHub(hubUrl: string, dataDir: string, name = computerName(), log = console.log, opts: { offerShareKey?: boolean; onCode?: (code: string) => void } = {}) {
   const hub = new URL(hubUrl).origin;
   const res = await fetch(`${hub}/api/access/request`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deviceName: name, kind: "computer" }) });
   const r: any = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(r.error || `The hub answered ${res.status}`);
+  opts.onCode?.(r.code);
   log(`\n  On your primary phone, approve "${name}". It shows the code  ${r.code}  — only approve if it matches.\n  Waiting…`);
   const until = Date.now() + 10 * 60_000;
   while (Date.now() < until) {
@@ -35,11 +37,58 @@ export async function joinHub(hubUrl: string, dataDir: string, name = computerNa
     if (j.status === "approved" && j.token) {
       const link: Link = { hub, token: j.token, deviceId: j.deviceId, name };
       writeFileSync(linkFile(dataDir), JSON.stringify(link, null, 2), { mode: 0o600 });
-      log(`  Linked to ${hub}. Start it with:  bun run computer\n`);
+      log(`  Linked to ${hub}.`);
+      if (process.stdin.isTTY && opts.offerShareKey !== false && !opts.onCode) await offerShareKey(link, log);
+      log(`  Start it with:  bun run computer\n`);
       return link;
     }
   }
   throw new Error("Nobody approved it in 10 minutes. Run join again.");
+}
+
+/**
+ * Shared links (someone chatting with one of your teammates) need a Claude key in their sandbox. Joining is the easy
+ * moment to make one: this Mac has your browser and your Claude login, so `claude setup-token` is just "approve in the
+ * browser". The token can only talk to Claude (scope user:inference); it goes to your hub over this computer's own key.
+ */
+export async function offerShareKey(link: Link, log = console.log, ask = askYesNo) {
+  if (Bun.spawnSync(["claude", "--version"], { stdout: "ignore", stderr: "ignore" }).exitCode !== 0) return false;
+  const yes = await ask("  Use this Mac's Claude subscription for shared links (when you share a teammate)? [Y/n] ");
+  if (!yes) { log("  Skipped. You can do it later with:  bun run share-key"); return false; }
+  return sendShareKey(link, log);
+}
+
+export async function sendShareKey(link: Link, log = console.log, mint = mintToken) {
+  log("  Opening your browser to approve a token for shared links…");
+  const token = await mint();
+  if (!token) { log("  Didn't get a token. Try again with:  bun run share-key"); return false; }
+  const res = await fetch(`${link.hub}/computer/share-key`, { method: "POST", headers: { Authorization: `Bearer ${link.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ token }) });
+  if (!res.ok) { log(`  The hub didn't take it: ${(await res.text()).slice(0, 160)}`); return false; }
+  log("  Done: shared links will use your Claude subscription.");
+  return true;
+}
+
+/** Run `claude setup-token` in this terminal (so you see it and the browser opens), and pick the token out of its output. */
+export async function mintToken(): Promise<string | null> {
+  const dir = mkdtempSync(join(tmpdir(), "hearth-token-"));
+  chmodSync(dir, 0o700);
+  const typescript = join(dir, "out");
+  try {
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) if (v !== undefined && k !== "CLAUDECODE") env[k] = v;
+    // `script` gives setup-token a real terminal and keeps a copy of what it printed.
+    const cmd = platform() === "darwin" ? ["script", "-q", typescript, "claude", "setup-token"] : ["script", "-q", "-c", "claude setup-token", typescript];
+    const p = Bun.spawn(cmd, { stdin: "inherit", stdout: "inherit", stderr: "inherit", env });
+    await p.exited;
+    const out = existsSync(typescript) ? readFileSync(typescript, "utf8").replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "") : "";
+    return out.match(TOKEN_RE)?.[0] ?? null;
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+async function askYesNo(q: string) {
+  process.stdout.write(q);
+  for await (const line of console) return !/^n/i.test(line.trim());
+  return false;
 }
 
 /** What the phone calls this computer: the Mac's own name ("Rishi's MacBook Pro"), else the host name. */

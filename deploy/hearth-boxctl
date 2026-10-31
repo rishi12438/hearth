@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Starts and stops shared-teammate boxes. Runs as root, from hearth-boxctl.service, when the hub drops a request file
+# into its boxctl folder. It knows three requests, "start", "stop" and "remove" for a 24-hex-digit link id, and builds
+# every path and Docker flag itself. The hub never gets the Docker socket (that would be root).
+# Boxes are reached only through the hearth-gateway container on 127.0.0.1, and each one checks its link's secret.
+#
+# Install (root-owned, outside the hub's folder so the hub can't change what root runs):
+#   sudo install -m 0755 deploy/hearth-boxctl /usr/local/sbin/hearth-boxctl
+set -euo pipefail
+
+DATA=${HEARTH_DATA:-/opt/hearth/data}
+CTL=$DATA/boxctl
+BOXES=${HEARTH_BOXES_ROOT:-/var/lib/hearth-boxes}
+IMAGE=${HEARTH_BOX_IMAGE:-hearth-box:latest}
+NET=hearth-boxes
+BOX_UID=10001
+HUB_GROUP=${HEARTH_GROUP:-hearth}
+HUB_GID=${HEARTH_GID:-$(getent group "$HUB_GROUP" | cut -d: -f3)}
+
+log() { echo "hearth-boxctl: $*"; }
+
+ensure_network() {
+  # --internal: no route out, not even to the host or the cloud metadata address.
+  docker network inspect "$NET" >/dev/null 2>&1 || docker network create --internal "$NET" >/dev/null
+  if [[ "$(docker inspect -f '{{.State.Running}}' hearth-egress 2>/dev/null || true)" != "true" ]]; then
+    docker rm -f hearth-egress >/dev/null 2>&1 || true
+    # The only container on both networks. It tunnels HTTPS to api.anthropic.com and nothing else.
+    docker run -d --name hearth-egress --restart unless-stopped --read-only --cap-drop ALL \
+      --security-opt no-new-privileges --pids-limit 64 --memory 64m --cpus 0.25 --user "$BOX_UID:$BOX_UID" \
+      --entrypoint bun "$IMAGE" src/public/egress.ts >/dev/null
+    docker network connect "$NET" hearth-egress
+  fi
+  if [[ "$(docker inspect -f '{{.State.Running}}' hearth-gateway 2>/dev/null || true)" != "true" ]]; then
+    docker rm -f hearth-gateway >/dev/null 2>&1 || true
+    # The boxes' front door, on this machine's loopback only: the hub forwards visitors through it.
+    docker run -d --name hearth-gateway --restart unless-stopped --read-only --cap-drop ALL \
+      --security-opt no-new-privileges --pids-limit 64 --memory 64m --cpus 0.25 --user "$BOX_UID:$BOX_UID" \
+      -p "127.0.0.1:${HEARTH_BOX_GATEWAY_PORT:-18790}:8080" --entrypoint bun "$IMAGE" src/public/gateway.ts >/dev/null
+    docker network connect "$NET" hearth-gateway
+  fi
+}
+
+start() {
+  local id=$1 bundle="$DATA/shares/$1/bundle" dir="$BOXES/$1" key
+  # The bundle must be the real folder the hub wrote, not a symlink to somewhere root can read.
+  [[ -d "$bundle" && ! -L "$bundle" && "$(realpath "$bundle")" == "$(realpath "$DATA")/shares/$id/bundle" ]] || { log "no bundle for $id"; return 1; }
+  [[ -f "$bundle/current.json" ]] || { log "bundle for $id isn't published"; return 1; }
+  # The link's Claude key and secret, written by the hub. Every line is checked; nothing else gets through.
+  local envsrc="$DATA/shares/$id/box.env" envfile
+  [[ -f "$envsrc" && ! -L "$envsrc" ]] || { log "no key for $id: add a Claude key in the app (Settings → Shared links)"; return 1; }
+  envfile=$(mktemp); chmod 600 "$envfile"
+  while IFS= read -r line; do
+    [[ "$line" =~ ^(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|BOX_SECRET)=[A-Za-z0-9_-]{16,400}$ ]] && echo "$line" >> "$envfile"
+  done < "$envsrc"
+  grep -q '^BOX_SECRET=' "$envfile" || { rm -f "$envfile"; log "bad key file for $id"; return 1; }
+  install -d -o "$BOX_UID" -g "$HUB_GID" -m 2750 "$BOXES" "$dir" "$dir/run"
+  ensure_network
+  docker rm -f "hearth-box-$id" >/dev/null 2>&1 || true
+  docker run -d --name "hearth-box-$id" --label "hearth.box=$id" --restart unless-stopped \
+    --network "$NET" --read-only --tmpfs /tmp:size=16m,mode=1777 --cap-drop ALL --security-opt no-new-privileges \
+    --pids-limit 128 --memory 256m --cpus 0.5 --user "$BOX_UID:$HUB_GID" \
+    -v "$bundle:/bundle:ro" -v "$dir:/data" \
+    --env-file "$envfile" -e BOX_PORT=8080 -e BOX_PROXY=http://hearth-egress:3128 -e BOX_BUNDLE=/bundle -e BOX_DATA=/data \
+    "$IMAGE" >/dev/null
+  rm -f "$envfile"
+  log "started $id"
+}
+
+stop() { docker stop "hearth-box-$1" >/dev/null 2>&1 || true; log "stopped $1"; }
+remove() { docker rm -f "hearth-box-$1" >/dev/null 2>&1 || true; rm -rf "${BOXES:?}/$1"; log "removed $1"; }
+
+run() {
+  shopt -s nullglob
+  for f in "$CTL"/*.json; do
+    body=$(head -c 200 "$f"); rm -f "$f"
+    if [[ "$body" =~ ^\{\"action\":\"(start|stop|remove)\",\"id\":\"([0-9a-f]{24})\"\}$ ]]; then
+      "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" || log "${BASH_REMATCH[1]} ${BASH_REMATCH[2]} failed"
+    else
+      log "ignored a malformed request"
+    fi
+  done
+}
+
+case "${1:-run}" in
+  run) run ;;
+  start|stop|remove) [[ "${2:-}" =~ ^[0-9a-f]{24}$ ]] && "$1" "$2" ;;
+  *) echo "usage: hearth-boxctl [run|start ID|stop ID|remove ID]"; exit 1 ;;
+esac

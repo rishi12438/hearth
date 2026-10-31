@@ -174,3 +174,43 @@ Back up `/opt/hearth/data` (or your database), and turn on automatic snapshots i
 master key at `/home/hearth/.hearth/master.key` (or `HEARTH_MASTER_KEY`). The master key is deliberately *not* in the
 data folder, so a backup of the data can't reveal your keys. Keep a copy of the master key somewhere safe, apart from your
 backups, such as a password manager. If you lose it, nothing else is lost: paste your API keys into the app again.
+
+## Sharing teammates by link
+
+Optional. Each shared link runs in its own sealed Docker container (see [docs/design/public-teammates.md](../docs/design/public-teammates.md)).
+The hub never gets Docker access or the boxes' API key: a small root helper, `hearth-boxctl`, starts and stops boxes when
+the hub asks.
+
+1. **Install Docker** and build the box image:
+   ```bash
+   sudo apt install -y docker.io
+   sudo docker build -t hearth-box -f /opt/hearth/deploy/box.Dockerfile /opt/hearth
+   ```
+2. **The Claude key for links** is set in the app, not on the server: Settings → Shared links → Claude key. Easiest is
+   your subscription: say yes when you link your Mac with Hearth Client (or press "Use my Claude subscription" in the
+   client), approve in the browser, done. Or paste an API key with a spend limit. It's kept encrypted in the vault and
+   only goes into the sandboxes.
+3. **Install the helper** (root-owned, outside `/opt/hearth`, so the hub can't change what root runs):
+   ```bash
+   sudo install -m 0755 /opt/hearth/deploy/hearth-boxctl /usr/local/sbin/hearth-boxctl
+   sudo install -d -o hearth -g hearth -m 700 /opt/hearth/data/boxctl
+   sudo cp /opt/hearth/deploy/hearth-boxctl.path /opt/hearth/deploy/hearth-boxctl.service /etc/systemd/system/
+   sudo systemctl daemon-reload && sudo systemctl enable --now hearth-boxctl.path
+   ```
+4. **Check the seal.** Every line must say `ok`:
+   ```bash
+   sudo bash /opt/hearth/deploy/box-selftest.sh
+   ```
+5. **Turn it on.** `sudo systemctl restart hearth`. Settings → Shared links → Runs in now offers Docker (and E2B, if you
+   added an E2B key under Devices).
+6. **Share one.** In the app: Settings → Shared links. Or on the server:
+   ```bash
+   sudo -iu hearth bash -c 'cd /opt/hearth && ~/.bun/bin/bun src/cli.ts share Recipes --owner Rishi --notebook food'
+   sudo -iu hearth bash -c 'cd /opt/hearth && ~/.bun/bin/bun src/cli.ts shares'      # links, chats, spend
+   sudo -iu hearth bash -c 'cd /opt/hearth && ~/.bun/bin/bun src/cli.ts unshare <id>' # turn one off and delete its box
+   ```
+
+Visitors open `https://example.com/t/<link>/`. Caddy needs no change: the hub serves the page and forwards the link's API
+calls to that box through the gateway on 127.0.0.1, with the link's secret. After updating Hearth, rebuild the image (step 1); running boxes pick it up when they restart
+(`sudo docker restart $(sudo docker ps -q --filter label=hearth.box)`).
+

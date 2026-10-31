@@ -17,6 +17,8 @@ import { fetchPublic } from "./watch.ts";
 import { appCsp } from "./apps.ts";
 import { isActive, search } from "./memory.ts";
 import { isValidTimeZone } from "./time.ts";
+import type { Shares } from "./shares.ts";
+import { sharePage } from "./share-page.ts";
 import type { Component, Person, StoredFile, Approval, Device, Fact, Hook, LocationFix, MiniApp, Message, Notebook, Place, Prefs, Skill, Teammate, Workflow } from "./types.ts";
 import pkg from "../package.json" with { type: "json" };
 
@@ -61,7 +63,8 @@ class HttpError extends Error { constructor(public status: number, msg: string) 
 
 /** drivers: stand-ins for E2B and ssh in tests. */
 export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
-  drivers: { e2b?: E2b; ssh?: Ssh; readLogin?: typeof readLogin; allowLocalHub?: boolean; vault?: Vault } = {}) {
+  drivers: { e2b?: E2b; ssh?: Ssh; readLogin?: typeof readLogin; allowLocalHub?: boolean; vault?: Vault; shares?: Shares | null } = {}) {
+  const shares = drivers.shares ?? null;
   const voiceLimiter = new RateLimiter(5, 10 * 60_000);
   const liveTickets = new Map<string, number>();
   const tileKey = randomBytes(12).toString("base64url");
@@ -81,6 +84,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   const askGlobal = new RateLimiter(10, 10 * 60_000);
   const sessions = new Sessions(config.unlockHours * 3600_000);
   const access = new AccessRequests();
+  const visitorLimiter = new RateLimiter(60, 60_000);
   // Computers linked to this hub (your Mac): brain calls run there when one is online, here (the cloud) when none is.
   const computers = new Computers({ dataDir: config.dataDir, homeDir: homedir(), acceptCopies: config.target === "lightsail", readLogin: drivers.readLogin ?? readLogin,
     hasLogin: drivers.readLogin ? (i) => !!drivers.readLogin!(i) : hasLogin });
@@ -166,6 +170,40 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
     (config.behindProxy && req.headers.get("x-forwarded-for")?.split(",").pop()!.trim()) || server.requestIP(req)?.address || "?";
 
   const publicPrefs = (p: Prefs) => ({ userName: p.userName, tz: p.tz, quietStart: p.quietStart, quietEnd: p.quietEnd, maxProactivePerDay: p.maxProactivePerDay, proactiveToday: p.proactiveToday });
+
+  /** Visitor traffic for a shared link. Never authenticated as you, never touches the hub's API or data. */
+  async function visitor(req: Request, url: URL, server: Server, link: string, rest: string): Promise<Response> {
+    const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Content-Type, X-Visitor", "Access-Control-Allow-Methods": "GET, POST", "Access-Control-Max-Age": "600" };
+    const out = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { ...cors, "Content-Type": "application/json", "Cache-Control": "no-store", "Content-Security-Policy": "sandbox; default-src 'none'" } });
+    if (!rest) return new Response(null, { status: 301, headers: { Location: `/t/${link}/` } });
+    const box = await shares!.target(link);
+    if (rest === "/" && req.method === "GET") {
+      if (!box) return new Response("This link is turned off.", { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8", "Content-Security-Policy": "sandbox; default-src 'none'" } });
+      const proto = config.behindProxy ? req.headers.get("x-forwarded-proto") || "https" : url.protocol.replace(":", "");
+      return sharePage(`${proto}://${req.headers.get("x-forwarded-host") || req.headers.get("host")}`);
+    }
+    if (!rest.startsWith("/api/")) return out({ error: "Not found." }, 404);
+    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
+    if (req.method !== "GET" && req.method !== "POST") return out({ error: "Not allowed." }, 405);
+    if (!box) return out({ error: "This link is turned off." }, 404);
+    const ip = clientIp(req, server);
+    if (!visitorLimiter.allow(ip)) return out({ error: "Slow down a little." }, 429);
+    let payload: string | undefined;
+    if (req.method === "POST") {
+      payload = await req.text();
+      if (payload.length > 16 * 1024) return out({ error: "Too long." }, 413);
+    }
+    server.timeout(req, 300); // a turn can take a few minutes
+    try {
+      const res = await fetch(`${box.url}${rest}`, {
+        method: req.method, body: payload, signal: AbortSignal.timeout(290_000), redirect: "error",
+        headers: { "Content-Type": "application/json", "X-Box-Secret": box.secret, "X-Visitor": (req.headers.get("x-visitor") || "").slice(0, 100), "X-Visitor-Ip": ip },
+      });
+      const text = await res.text();
+      if (text.length > 2_000_000) return out({ error: "Too big." }, 502);
+      return new Response(text, { status: res.status, headers: { ...cors, "Content-Type": "application/json", "Cache-Control": "no-store", "Content-Security-Policy": "sandbox; default-src 'none'" } });
+    } catch { return out({ error: "This teammate is offline right now." }, 503); }
+  }
 
   async function api(req: Request, url: URL, server: Server): Promise<Response> {
     const path = url.pathname;
@@ -420,6 +458,42 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (method === "POST") { const r = await hub.addTeammate(await body(req)); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "PATCH" && id) { const r = await hub.updateTeammate(id, await body(req)); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "DELETE" && id) return json({ ok: await hub.removeTeammate(id) });
+        break;
+      }
+      case "shares": {
+        // Shared teammates. Everything here is about what you share; visitors never reach these routes.
+        if (!shares) throw new HttpError(503, "Sharing isn't available on this hub.");
+        ownerOnly(); // sharing hands your data to other people, so only the primary device decides
+        const verb = seg[3];
+        if (method === "GET" && !id) return json({ ...(await shares.overview()), shares: (await shares.list()).map((x) => shares.view(x)) });
+        if (method === "POST" && id === "mint") {
+          const b = await body(req);
+          const r = b.code ? await shares.mintFinish(b.code) : await shares.mintStart();
+          if (r.error) throw new HttpError(400, r.error);
+          return json(r.value);
+        }
+        if (method === "PATCH" && id === "settings") { const r = await shares.saveSettings(await body(req)); if (r.error) throw new HttpError(400, r.error); return json(await shares.overview()); }
+        if (method === "POST" && !id) { const r = await shares.create(await body(req)); if (r.error) throw new HttpError(400, r.error); return json(shares.view(r.value!)); }
+        if (!id) break;
+        const s = await shares.get(id);
+        if (!s) throw new HttpError(404, "No such link.");
+        if (method === "GET" && !verb) return json({ share: shares.view(s), running: await shares.alive(s), events: await shares.events(id) });
+        if (method === "PATCH" && !verb) { const r = await shares.update(id, await body(req)); if (r.error) throw new HttpError(400, r.error); return json(shares.view(r.value!)); }
+        if (method === "DELETE" && !verb) return json({ ok: await shares.revoke(id) });
+        if (method === "GET" && verb === "events" && seg[4]) { const e = await shares.event(id, seg[4]); if (!e) throw new HttpError(404, "Not found."); return json(e); }
+        if (method !== "POST") break;
+        const b = await body(req);
+        const ids = Array.isArray(b.ids) ? b.ids.filter((x: unknown) => typeof x === "string").slice(0, 200) : [];
+        if (verb === "publish") { await shares.publish(s); return json(shares.view((await shares.get(id))!)); }
+        if (verb === "pause") { const p = await shares.pause(id, b.paused !== false); return json(p ? shares.view(p) : null); }
+        if (verb === "apply") {
+          const mode = b.mode === "copy" || b.mode === "branch" ? b.mode : "apply";
+          const r: any = await shares.apply(id, ids, mode);
+          return json(r, r.error ? 409 : 200);
+        }
+        if (verb === "reject") return json({ rejected: await shares.reject(id, ids) });
+        if (verb === "undo") { const r = await shares.undo(id, String(b.applyId || "")); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (verb === "answer") { const r = await shares.answer(id, String(b.eventId || ""), b); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         break;
       }
       case "voice": {
@@ -776,11 +850,22 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         return new Response("Expected a WebSocket", { status: 426 });
       }
       // A linked computer dials in here and keeps the line open; work comes down it. Its key goes in a header.
-      if (url.pathname === "/computer" || url.pathname === "/computer/bundle") {
+      if (url.pathname === "/computer" || url.pathname === "/computer/bundle" || url.pathname === "/computer/share-key") {
         const ip = clientIp(req, server);
         if (badToken.blocked(ip)) return new Response("Too many wrong keys. Wait 10 minutes.", { status: 429 });
         const d = await deviceForToken(store, req.headers.get("authorization"));
         if (!d || d.role !== "computer") { badToken.allow(ip); return new Response("Not linked.", { status: 401 }); }
+        // Your Mac made a Claude token for shared links (bun run join / share-key): keep it in the vault.
+        if (url.pathname === "/computer/share-key") {
+          if (req.method !== "POST" || !shares || d.machine) return new Response("No.", { status: 403 }); // only your own computers, not cloud ones
+          let b: any;
+          try { b = await req.json(); } catch { return new Response("Bad JSON.", { status: 400 }); }
+          if (!/^sk-ant-oat01-[A-Za-z0-9_-]{20,}$/.test(String(b?.token))) return new Response("That isn't a setup-token.", { status: 400 });
+          const r = await shares.saveSettings({ key: String(b.token) });
+          if (r.error) return new Response(r.error, { status: 400 });
+          await hub.log("share", `${d.name} set up the Claude key for shared links`);
+          return new Response("ok");
+        }
         // A cloud computer being set up downloads Hearth from its own hub, so the two always run the same code.
         if (url.pathname === "/computer/bundle") {
           const root = resolve(import.meta.dir, "..");
@@ -795,6 +880,9 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       // A response that brings its own CSP or frame rules (sandboxed downloads, mini apps) keeps them.
       const finish = (res: Response) => { for (const [k, v] of Object.entries(headers)) if (!((k === "Content-Security-Policy" || k === "X-Frame-Options") && res.headers.has(k))) res.headers.set(k, v); return res; };
 
+      // A shared teammate: /t/<link>/. The page is ours; /api/* is forwarded to that link's sealed box as JSON only.
+      const share = url.pathname.match(/^\/t\/([A-Za-z0-9_-]{16,64})(\/.*)?$/);
+      if (share && shares) return finish(await visitor(req, url, server, share[1], share[2] || ""));
       if (url.pathname.startsWith("/api/")) {
         if (req.method === "OPTIONS") return finish(new Response(null, { status: 204 }));
         if (!sameOrigin && !config.allowedOrigins.includes(origin!)) return finish(json({ error: "Origin not allowed." }, 403));
