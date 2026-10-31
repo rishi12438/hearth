@@ -1,0 +1,19 @@
+src/public/guard.ts
+  s_d994421d2b64f1::t_9977eb81a8f381 35-39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "7d7d09ac9e0078560192b48c406afe4ad73e5fe9",
+  "prompts": {},
+  "sessions": {
+    "s_d994421d2b64f1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "86403106-4ceb-4bb5-ad21-404643c5be6c",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
