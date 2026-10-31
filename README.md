@@ -99,7 +99,7 @@ phone (home-screen web app) ──HTTPS──►  your hub (e.g. a $5 VPS)
 
 ### Where work runs
 
-Two things, set in **Settings → Where work runs**:
+Everything is on one screen, **Settings → Your hub & devices**: your hub, your phones, your Mac and the cloud, each with what it does underneath and the switches right there. Two things matter:
 
 | | Default | Options |
 |---|---|---|
@@ -111,7 +111,10 @@ Two things, set in **Settings → Where work runs**:
 - **Nothing secret goes there.** Your logins and API keys stay on the hub (or Mac). Docker containers can't see the hub's data; plain mode can, which is why it's never picked automatically.
 - **Every job's time on it is written down:** what came in, what ran, what it installed and what came back. It shows under *Recent work*, and the next job gets it so it carries on instead of starting over.
 
-<p align="center"><img src="docs/screenshots/where-work-runs.png" width="220" alt="Where work runs: teammates think on your Mac when it's on; code runs automatically on E2B or Docker"></p>
+<p align="center">
+  <img src="docs/screenshots/hub-and-devices.png" width="220" alt="Your hub: keeps your memory, thinks when your Mac is off, runs your teammates' code in Docker">
+  <img src="docs/screenshots/hub-and-devices-mac.png" width="220" alt="Your Mac: thinks with your Claude login when it's on, doesn't run code; Cloud: connect E2B">
+</p>
 
 ### Your Mac and the cloud
 

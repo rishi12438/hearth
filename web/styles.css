@@ -788,3 +788,14 @@ p.err { color: var(--danger); margin: 6px 2px 0; }
 .radio { width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--line); flex: none; }
 .radio.on { border: 6px solid var(--ink); }
 .item:disabled { opacity: .55; }
+.caps { display: flex; flex-direction: column; gap: 2px; }
+.cap { display: flex; align-items: center; gap: 10px; padding: 7px 2px; font-size: 14.5px; color: var(--muted); text-align: left; width: 100%; background: none; border: 0; }
+.cap.on { color: var(--ink); }
+.cap .capmark { width: 18px; display: grid; place-items: center; flex: none; color: var(--muted); }
+.cap.on .capmark { color: var(--ok); }
+.cap.tap { border-top: 1px solid var(--line); padding: 10px 2px; }
+.cap.tap .sub { display: block; color: var(--muted); font-size: 12.5px; margin-top: 1px; }
+.cap.tap:disabled { opacity: 1; }
+.cchead .ccsub { display: block; font-size: 12.5px; color: var(--muted); }
+.addrow { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 4px 0 8px; }
+.linkbtn.subtle { color: var(--muted); }

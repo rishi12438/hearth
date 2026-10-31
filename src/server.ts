@@ -248,7 +248,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       case "state": {
         const prefs = await hub.prefs();
         return json({
-          hub: { name: config.name, version: pkg.version, build: web.build, brain: hub.brain.label, storage: store.kind },
+          hub: { name: config.name, version: pkg.version, build: web.build, brain: hub.brain.label, storage: store.kind, target: config.target },
           device: { id: device.id, name: device.name, primary: owner, passkey: !!device.passkey }, requirePasskey: config.requirePasskey,
           pendingAccess: owner ? access.pending().length : 0, prefs: publicPrefs(prefs), thinking: hub.thinking,
           push: { available: !!hub.push, subscribed: hub.push ? await hub.push.hasDevice(device.id) : false },
