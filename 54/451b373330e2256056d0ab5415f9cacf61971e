@@ -1,0 +1,89 @@
+deploy/setup-lightsail.sh
+  s_842be64ddc7b43::t_7c732cfb6dc010 1-109
+src/types.ts
+  s_842be64ddc7b43::t_679ec001c62758 6,89-91
+  s_842be64ddc7b43::t_55b4fd1e97792f 7-9
+  s_842be64ddc7b43::t_d2e869667488e9 92
+src/computers.ts
+  s_842be64ddc7b43::t_2639da29c9024d 1-52,55-58,66-92,94-97,99-106,108-113,116,118-119,121-123,125-126,128-136,138-141,143-161,163-167,170-171,173-208,211-213,215-218,220-239
+  s_842be64ddc7b43::t_85feefd070644b 53-54,142
+  s_842be64ddc7b43::t_34ca2d86fc8244 59-65,93,98,107,120,137,162
+  s_842be64ddc7b43::t_55b4fd1e97792f 114-115,117,124,127
+  s_842be64ddc7b43::t_894d29fda440af 209-210,214,219
+  s_842be64ddc7b43::t_9fac04db645047 168-169,172
+src/cli.ts
+  s_842be64ddc7b43::t_861627fb5e7513 26-27
+  s_842be64ddc7b43::t_69dcde5a1e9d56 23-25,28-29
+  s_842be64ddc7b43::t_94323b1ed0aba2 6-8,19-22,30-41,75,89,99,103-116,123-124
+src/server.ts
+  s_842be64ddc7b43::t_9fac04db645047 86,509
+  s_842be64ddc7b43::t_e723c7a0dcbca2 10-11,76-85,90,163,165,189-190,212,507-508,511-518,520-524,536,546-547,549,601,603,631-633,640,646,650-658,674,677-686
+  s_842be64ddc7b43::t_12b57530a74056 519,768
+  s_842be64ddc7b43::t_6059ebfe2350c9 87-89,510
+web/src/dom.ts
+  s_842be64ddc7b43::t_679ec001c62758 65-66
+src/computer.ts
+  s_842be64ddc7b43::t_92146e72bb9347 1-20,22-43,45,52-106,114-115,117-119,121-139,146-151
+  s_842be64ddc7b43::t_e0ab4d975795ce 107-111,113,116,120,140-145
+  s_842be64ddc7b43::t_69dcde5a1e9d56 44,46-51
+  s_842be64ddc7b43::t_894d29fda440af 21
+  s_842be64ddc7b43::t_9fac04db645047 112
+src/hub.ts
+  s_842be64ddc7b43::t_ec533397bf5f36 7,536,625-629,699-705
+package.json
+  s_842be64ddc7b43::t_94323b1ed0aba2 16-17
+web/src/app.ts
+  s_842be64ddc7b43::t_bb7a65345ad214 156,667,1033,2267-2268,2271-2272,2278,2292-2369
+  s_a62c474b26f7ae::t_cf819fc2b71308 2370
+deploy/setup-mac.sh
+  s_842be64ddc7b43::t_7c732cfb6dc010 1-81
+src/brain.ts
+  s_842be64ddc7b43::t_2d8acc01c6de2f 302-311,357-358,390,399,404-417
+  s_842be64ddc7b43::t_8df05bc20ab21f 418-419
+src/auth.ts
+  s_842be64ddc7b43::t_fe0969e3b3a4e0 56
+  s_842be64ddc7b43::t_679ec001c62758 42,154,159,164
+test/computers.test.ts
+  s_842be64ddc7b43::t_90038f45a62cce 230-231
+  s_842be64ddc7b43::t_b0d2f75e0928a0 1-166,171-193,195-227,229,232-265
+  s_842be64ddc7b43::t_9071a3790567d4 167-170,194,228
+README.md
+  s_842be64ddc7b43::t_0b033879ba17d0 180
+  s_842be64ddc7b43::t_973e7d7e4a0017 46,65,67-68,96-97,100-123,150-151,162,175-176
+.env.example
+  s_842be64ddc7b43::t_973e7d7e4a0017 6-14
+SECURITY.md
+  s_842be64ddc7b43::t_0b033879ba17d0 44-51
+web/styles.css
+  s_842be64ddc7b43::t_6783de089cdc62 747-782
+deploy/setup.sh
+  s_842be64ddc7b43::t_7c732cfb6dc010 2,4-7,9,11-18
+deploy/lightsail.md
+  s_842be64ddc7b43::t_0b033879ba17d0 57,103-117
+src/config.ts
+  s_842be64ddc7b43::t_55b4fd1e97792f 4-9,12,46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "54451b373330e2256056d0ab5415f9cacf61971e",
+  "prompts": {},
+  "sessions": {
+    "s_842be64ddc7b43": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2b58baca-9866-4d7e-8d9a-756cd0841a98",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    },
+    "s_a62c474b26f7ae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4c826b8c-287f-4f16-ac8d-eafba60501f3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
