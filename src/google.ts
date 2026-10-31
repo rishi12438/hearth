@@ -1,10 +1,10 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { randomBytes } from "node:crypto";
+import type { Vault } from "./vault.ts";
 
 // Your Google account, connected with your own OAuth client (no Hearth app, no middleman): you make a client in
-// Google Cloud, paste its ID and secret, tap Connect, and Google hands this hub a refresh token. It lives in
-// <data>/google.json (0600) and never reaches the model, the app or an export. Read-only: Gmail and Calendar.
+// Google Cloud, paste its ID and secret, tap Connect, and Google hands this hub a refresh token. The client secret and
+// the token live in the hub's encrypted vault (vault.ts) with every other key, and never reach the model, the app or
+// an export. Read-only: Gmail and Calendar.
 
 export const GOOGLE_SCOPES = [
   "openid", "email",
@@ -36,18 +36,19 @@ export function mailText(payload: any, max = 4000): string {
 }
 
 export class Google {
-  private file: string;
   private access: { token: string; until: number } | null = null;
   private states = new Map<string, { redirectUri: string; until: number }>();
   /** Swapped in tests. */
   fetch: (url: string, init?: RequestInit) => Promise<Response> = (url, init) => fetch(url, init);
 
-  constructor(dataDir: string, private env: Record<string, string | undefined> = process.env) {
-    this.file = join(dataDir, "google.json");
-  }
+  /** No vault (a hub without one, as in some tests): nothing saved, and saving says why. */
+  constructor(private vault: Vault | null, private env: Record<string, string | undefined> = process.env) {}
 
-  private saved(): Saved { try { return existsSync(this.file) ? JSON.parse(readFileSync(this.file, "utf8")) : {}; } catch { return {}; } }
-  private save(s: Saved) { writeFileSync(this.file, JSON.stringify(s), { mode: 0o600 }); }
+  private saved(): Saved { try { return JSON.parse(this.vault?.get("google") || "{}"); } catch { return {}; } }
+  private save(s: Saved) {
+    if (!this.vault) throw new Error("This hub has no key vault.");
+    this.vault.set("google", JSON.stringify(s));
+  }
   private client() {
     const s = this.saved();
     const id = this.env.HEARTH_GOOGLE_CLIENT_ID || s.clientId, secret = this.env.HEARTH_GOOGLE_CLIENT_SECRET || s.clientSecret;
@@ -65,6 +66,7 @@ export class Google {
 
   setClient(id: string, secret: string) {
     if (this.env.HEARTH_GOOGLE_CLIENT_ID) return { error: "This hub's Google client is set in its .env." };
+    if (!this.vault) return { error: "This hub has no key vault." };
     const cid = String(id || "").trim(), cs = String(secret || "").trim();
     if (!/^[\w.-]+\.apps\.googleusercontent\.com$/.test(cid)) return { error: "That doesn't look like a Google client ID (it ends in .apps.googleusercontent.com)." };
     if (cs.length < 10 || /\s/.test(cs)) return { error: "That doesn't look like a client secret." };
@@ -110,7 +112,7 @@ export class Google {
     const s = this.saved();
     if (s.refreshToken) await this.fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(s.refreshToken)}`, { method: "POST" }).catch(() => {});
     this.access = null;
-    if (this.env.HEARTH_GOOGLE_CLIENT_ID) rmSync(this.file, { force: true });
+    if (this.env.HEARTH_GOOGLE_CLIENT_ID) this.vault?.delete("google");
     else this.save({ clientId: s.clientId, clientSecret: s.clientSecret });
     return this.status();
   }

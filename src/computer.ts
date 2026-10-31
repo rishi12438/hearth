@@ -4,11 +4,15 @@ import { dirname, join } from "node:path";
 import { sha256 } from "./auth.ts";
 import { Brain, availableHarnesses, type BrainProfile } from "./brain.ts";
 import { ALIVE_EVERY_MS, COPY_ITEMS, isCopyItem, type CopyItem } from "./computers.ts";
+import { readSiteCookiesAnywhere, canReadBrowser } from "./chrome.ts";
+import { requiredFor, labelFor, isValidDomain } from "./cookie-sites.ts";
 import type { Config } from "./config.ts";
 
 // The computer side of a link (run on your Mac): join a hub once, then keep a line open to it and run the work it sends,
 // with this computer's own Claude/Codex login. The hub never gets a shell here: it can only ask for a brain call, which
-// runs with the same slim, web-only tool set as on the hub, and for the login files you chose to copy.
+// runs with the same slim, web-only tool set as on the hub, and for the login files and browser cookies you chose to
+// copy. Cookies are read from your browser here (read-only) and sent up; your Mac never takes a shell or gives the hub
+// its files, and it re-copies when the hub asks (a session expired).
 
 /** cloud: the hub set this machine up (a sandbox or your VM) and may hand it logins. Your Mac's link never has it. */
 export type Link = { hub: string; token: string; deviceId: string; name: string; cloud?: boolean };
@@ -104,6 +108,7 @@ export function connect(opts: Opts) {
   let ws: WebSocket | null = null;
   let stopped = false, backoff = 1000, alive: ReturnType<typeof setInterval> | null = null, copyTimer: ReturnType<typeof setInterval> | null = null;
   let want: { items: CopyItem[]; have: Record<string, string> } = { items: [], have: {} };
+  let cookieWant: { sites: string[]; have: Record<string, string> } = { sites: [], have: {} };
   const send = (m: unknown) => { try { ws?.send(JSON.stringify(m)); } catch {} };
   const url = link.hub.replace(/^http/, "ws") + "/computer";
 
@@ -117,6 +122,22 @@ export function connect(opts: Opts) {
       send({ t: "copy", item, data, hash });
       want.have[item] = hash;
       log(`  copied your ${COPY_ITEMS[item].label} to the hub`);
+    }
+  };
+
+  // Browser cookies the hub asked for: read them here (read-only, decrypted locally) and send only what changed.
+  const copyCookiesUp = () => {
+    if (!cookieWant.sites.length) return;
+    if (!canReadBrowser()) { log("  the hub asked for a browser login, but this computer can't read the browser here"); return; }
+    for (const domain of cookieWant.sites) {
+      const found = readSiteCookiesAnywhere(domain, requiredFor(domain));
+      if (!found) continue;
+      const data = JSON.stringify({ cookies: found.cookies });
+      const hash = sha256(data);
+      if (cookieWant.have[domain] === hash) continue;
+      send({ t: "cookies", site: domain, data, hash });
+      cookieWant.have[domain] = hash;
+      log(`  copied your ${labelFor(domain)} login from ${found.profile} to the hub`);
     }
   };
 
@@ -152,7 +173,7 @@ export function connect(opts: Opts) {
       log(`  connected to ${link.hub}`);
       send({ t: "hello", harnesses: availableHarnesses(config), platform: platform() });
       alive = setInterval(() => send({ t: "alive" }), ALIVE_EVERY_MS);
-      copyTimer = setInterval(copyUp, opts.copyEveryMs ?? 5 * 60_000);
+      copyTimer = setInterval(() => { copyUp(); copyCookiesUp(); }, opts.copyEveryMs ?? 5 * 60_000);
     };
     ws.onmessage = (ev) => {
       let m: any;
@@ -161,6 +182,7 @@ export function connect(opts: Opts) {
       else if (m.t === "run" && typeof m.id === "string") run(m);
       else if (m.t === "stop") runs.get(m.id)?.abort();
       else if (m.t === "want") { want = { items: (m.items || []).filter(isCopyItem), have: m.have || {} }; copyUp(); }
+      else if (m.t === "wantCookies") { cookieWant = { sites: (m.sites || []).filter(isValidDomain), have: m.have || {} }; copyCookiesUp(); }
       else if (m.t === "logins" && link.cloud && m.items && typeof m.items === "object") {
         const wrote = writeLogins(opts.home || homedir(), m.items);
         if (wrote.length) log(`  got ${wrote.map((i) => COPY_ITEMS[i as CopyItem].label).join(" and ")} from the hub`);

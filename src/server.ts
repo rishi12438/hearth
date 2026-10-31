@@ -14,6 +14,7 @@ import { hasLogin, readLogin } from "./computer.ts";
 import { homedir } from "node:os";
 import { MAX_FILE_BYTES } from "./files.ts";
 import { fetchPublic } from "./watch.ts";
+import { COOKIE_SITES, isCookieSite } from "./connections.ts";
 import { appCsp } from "./apps.ts";
 import { isActive, search } from "./memory.ts";
 import { isValidTimeZone } from "./time.ts";
@@ -83,17 +84,23 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   const access = new AccessRequests();
   // Computers linked to this hub (your Mac): brain calls run there when one is online, here (the cloud) when none is.
   const computers = new Computers({ dataDir: config.dataDir, homeDir: homedir(), acceptCopies: config.target === "lightsail", readLogin: drivers.readLogin ?? readLogin,
-    hasLogin: drivers.readLogin ? (i) => !!drivers.readLogin!(i) : hasLogin });
+    hasLogin: drivers.readLogin ? (i) => !!drivers.readLogin!(i) : hasLogin,
+    // Browser logins (LinkedIn, X) the user chose to feed from their Mac: the Mac decrypts and copies them up here.
+    cookieSites: () => hub.connections.macSites(),
+    cookieHave: (site) => hub.connections.cookieHave(site),
+    onCookies: (site, data) => { hub.connections.receiveFromMac(site, data); hub.emit("connections"); } });
   const linkedComputers = async () => (await store.all<Device>("devices")).filter((d) => d.role === "computer");
   const recount = async () => { computers.known = (await linkedComputers()).length; };
   await recount();
   hub.brain.remote = computers;
+  hub.computers = computers;
   computers.onChange = () => hub.emit("computers", {});
   computers.onOnline = () => { hub.resumeForComputer().catch((e) => console.error(e)); };
   computers.start();
   // Cloud computers the hub sets up itself: an E2B sandbox or your VM. Each becomes a linked computer.
   const vault = drivers.vault ?? new Vault(config.dataDir);
   vault.migrate(config.dataDir);
+  hub.vault = vault;
   const machines = new Machines({
     dataDir: config.dataDir, vault,
     hubUrl: () => process.env.HEARTH_PUBLIC_URL || null,
@@ -478,6 +485,35 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           return json({ url: r.value });
         }
         if (method === "DELETE" && !id) { ownerOnly(); const st = await hub.google.disconnect(); await hub.log("google.disconnected", "Google disconnected"); hub.emit("connections"); return json({ ...st, redirectUri }); }
+        break;
+      }
+      case "connections": {
+        if (method === "GET" && !id) return json({ connections: hub.connections.status(), canCopyFromMac: hub.canCopyCookies() });
+        if (!isCookieSite(id)) break;
+        if (method === "POST" && seg[3] === "from-mac") {
+          ownerOnly();
+          const r = hub.copyFromMac(id);
+          if (r.error) throw new HttpError(400, r.error);
+          return json({ status: r.value, started: hub.canCopyCookies() });
+        }
+        if (method === "GET" && seg[3] === "browsers") { ownerOnly(); return json(hub.connections.browserOptions(id)); }
+        if (method === "POST" && seg[3] === "import") {
+          ownerOnly();
+          const r = hub.importFromBrowser(id, String((await body(req)).profile || ""));
+          if (r.error) throw new HttpError(400, r.error);
+          await hub.log("connection.saved", `${COOKIE_SITES[id].label} imported from browser`);
+          return json({ status: r.value, test: await hub.testConnection(id) });
+        }
+        if (method === "PUT" && !seg[3]) {
+          ownerOnly();
+          const r = hub.connections.saveCookies(id, String((await body(req)).cookies || ""));
+          if (r.error) throw new HttpError(400, r.error);
+          await hub.log("connection.saved", `${COOKIE_SITES[id].label} cookies saved`);
+          hub.emit("connections");
+          return json({ status: r.value, test: await hub.testConnection(id) });
+        }
+        if (method === "POST" && seg[3] === "test") { ownerOnly(); return json(await hub.testConnection(id)); }
+        if (method === "DELETE" && !seg[3]) { ownerOnly(); const st = hub.connections.remove(id); await hub.log("connection.removed", `${COOKIE_SITES[id].label} disconnected`); hub.emit("connections"); return json(st); }
         break;
       }
       case "trigger-recipes": {

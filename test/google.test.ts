@@ -1,5 +1,7 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { Vault } from "../src/vault.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createStore, COLLECTIONS, type Store } from "../src/store/index.ts";
@@ -62,6 +64,7 @@ beforeEach(async () => {
   hub = new Hub(config, store, new Brain(config), new Scripts(store, dir, join(dir, "none")), null);
   now = zonedToUtc(2026, 10, 30, 12, 0, TZ);
   hub.clock = () => now;
+  hub.vault = new Vault(dir, { masterKey: randomBytes(32) });
   await hub.setPrefs({ tz: TZ });
   inbox = [{ id: "m1", from: "Ms Rivera <office@lincoln.k12.ca.us>", subject: "Picture day", body: "Picture day is Monday." }];
   events = [{ id: "e1", summary: "Dentist", start: new Date(now.getTime() + 3 * 3600_000).toISOString(), created: "2026-10-01T00:00:00Z" }];
@@ -97,11 +100,14 @@ test("connecting: your client, Google's consent with read-only scopes, a refresh
   const status = JSON.stringify(g.status());
   expect(status).not.toContain("rt1");
   expect(status).not.toContain("GOCSPX");
-  expect(statSync(join(dir, "google.json")).mode & 0o777).toBe(0o600);
+  // Kept in the encrypted vault with every other key: not in plain text on disk, not in exports.
+  expect(hub.vault!.names()).toContain("google");
+  expect(readFileSync(hub.vault!.path).includes("rt1")).toBe(false);
+  expect(existsSync(join(dir, "google.json"))).toBe(false);
   expect(JSON.stringify(await hub.exportAll())).not.toContain("rt1");
   await g.disconnect();
   expect(g.status()).toMatchObject({ connected: false, hasClient: true });
-  expect(readFileSync(join(dir, "google.json"), "utf8")).not.toContain("rt1");
+  expect(hub.vault!.get("google")).not.toContain("rt1");
 });
 
 test("email text: the plain part, else the HTML without tags", () => {
@@ -151,4 +157,12 @@ test("source.read lets a teammate look things up", async () => {
   const out = await hub.readSource({ source: "gmail", config: { query: "from:k12.ca.us" } });
   expect(out).toContain("Picture day is Monday.");
   expect(out).toContain("<untrusted>");
+});
+
+test("a Google sign-in saved before the vault moves into it, and the plain file goes", () => {
+  const saved = JSON.stringify({ clientId: CLIENT, clientSecret: "GOCSPX-old", refreshToken: "rt-old", email: "old@example.com" });
+  writeFileSync(join(dir, "google.json"), saved, { mode: 0o600 });
+  hub.vault!.migrate(dir);
+  expect(existsSync(join(dir, "google.json"))).toBe(false);
+  expect(hub.google.status()).toMatchObject({ connected: true, email: "old@example.com" });
 });
