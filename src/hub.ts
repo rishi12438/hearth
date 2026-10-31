@@ -626,7 +626,9 @@ export class Hub {
       await finish({ how: failedSkill ? "repaired" : "fresh", tier, escalated, voiced, result: r.text.slice(0, 4000), did: r.did, tiles: r.tiles, fileIds: r.fileIds });
     } catch (err: any) {
       if (err instanceof NeedsComputer) {
-        // Parks instead of failing; resumeForComputer picks it up the moment a computer links in.
+        // Parks instead of failing; resumeForComputer picks it up the moment a computer links in. A cloud sandbox that's
+        // allowed to start on its own is woken for it.
+        this.onNeedsComputer?.();
         cur = await this.saveJob({ ...cur, blocked: { need: "Your Mac", why: err.message, unblock: "Open your Mac, or copy your login to the cloud in Settings → Devices", needs: "computer" } });
         return await finish({ how: "fresh", tier });
       }
@@ -698,6 +700,9 @@ export class Hub {
     if ((this.rambleSpend.get(messageId) || 0) >= caps.ramble) return `This ramble's spending cap ($${caps.ramble}) is reached`;
     return null;
   }
+
+  /** Set by the server: wake a cloud computer when a job is waiting for one. */
+  onNeedsComputer: (() => void) | null = null;
 
   /** A linked computer came online: run every job that was parked waiting for one. */
   async resumeForComputer() {

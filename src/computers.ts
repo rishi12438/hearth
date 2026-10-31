@@ -11,6 +11,7 @@ import { ComputerGone, MODEL_RE, type BrainInput, type BrainProfile, type Meter,
 // computer -> hub   hello {harnesses, platform}   alive   pong {ts}   step {id, text}   done {id, reply, costUsd?}
 //                   error {id, message}   copy {item, data, hash}
 // hub -> computer   ping {ts}   run {id, input, profile}   stop {id}   want {items, have}
+//                   logins {items}   (only to computers the hub set up itself, never to your Mac)
 
 /** What a computer can copy up so the cloud can work while it's off. Each is a login file the harness reads. */
 export const COPY_ITEMS = {
@@ -31,6 +32,8 @@ type Pending = { resolve: (s: string) => void; reject: (e: Error) => void; meter
 type Link = {
   deviceId: string; name: string; ws: Socket; harnesses: string[]; platform: string;
   connectedAt: number; lastAlive: number; rttMs: number | null; running: Map<string, Pending>; want: CopyItem[];
+  /** The hub set this computer up (a sandbox or your VM), so it gets the hub's logins. */
+  cloud: boolean;
 };
 export type ComputerStatus = {
   deviceId: string; name: string; state: "online" | "asleep" | "offline"; level: 0 | 1 | 2 | 3 | 4;
@@ -63,17 +66,18 @@ export class Computers implements Remote {
     if (sig !== this.shown) { this.shown = sig; this.onChange(); }
   }
 
-  constructor(private opts: { dataDir: string; homeDir: string; acceptCopies: boolean; now?: () => number }) {}
+  /** readLogin reads a login's secret (only when handing it to a cloud computer); hasLogin just checks it's there. */
+  constructor(private opts: { dataDir: string; homeDir: string; acceptCopies: boolean; now?: () => number; readLogin?: (item: CopyItem) => string | null; hasLogin?: (item: CopyItem) => boolean }) {}
   private now() { return this.opts.now ? this.opts.now() : Date.now(); }
 
   start() { this.timer ??= setInterval(() => this.tick(), 5000); }
   stop() { if (this.timer) clearInterval(this.timer); this.timer = null; for (const id of [...this.links.keys()]) this.drop(id, "hub stopping"); }
 
   /** A computer's socket opened. A second connection from the same computer replaces the first. */
-  attach(deviceId: string, name: string, ws: Socket, want: CopyItem[] = []) {
+  attach(deviceId: string, name: string, ws: Socket, want: CopyItem[] = [], cloud = false) {
     if (this.links.has(deviceId)) this.drop(deviceId, "replaced by a new connection");
     const t = this.now();
-    this.links.set(deviceId, { deviceId, name, ws, harnesses: [], platform: "", connectedAt: t, lastAlive: t, rttMs: null, running: new Map(), want });
+    this.links.set(deviceId, { deviceId, name, ws, harnesses: [], platform: "", connectedAt: t, lastAlive: t, rttMs: null, running: new Map(), want, cloud });
     this.seen.set(deviceId, t);
     this.send(deviceId, { t: "ping", ts: t });
   }
@@ -90,6 +94,7 @@ export class Computers implements Remote {
         link.harnesses = Array.isArray(m.harnesses) ? m.harnesses.filter((h: unknown) => typeof h === "string").slice(0, 8) : [];
         link.platform = String(m.platform || "").slice(0, 20);
         this.sendWant(link);
+        if (link.cloud) this.sendLogins(link);
         this.changed();
         this.onOnline(deviceId);
         return;
@@ -218,8 +223,22 @@ export class Computers implements Remote {
     const c = this.copied();
     c[item] = { hash: sha256(data), at: new Date(this.now()).toISOString(), from: link.deviceId };
     this.saveCopied(c);
+    // A fresher login just came up from your Mac: pass it on to the cloud computers.
+    for (const l of this.links.values()) if (l.cloud) this.sendLogins(l);
     this.onChange();
   }
+
+  /** Hand a computer the hub set up the logins this hub holds, so its brains work without you logging in there. */
+  private sendLogins(link: Link) {
+    const items: Record<string, string> = {};
+    for (const item of Object.keys(COPY_ITEMS) as CopyItem[]) {
+      const data = this.opts.readLogin?.(item);
+      if (data && data.length <= MAX_COPY) items[item] = data;
+    }
+    if (Object.keys(items).length) this.send(link.deviceId, { t: "logins", items });
+  }
+  /** Which logins a cloud computer would get from this hub. */
+  loginsHeld() { return (Object.keys(COPY_ITEMS) as CopyItem[]).filter((i) => (this.opts.hasLogin ? this.opts.hasLogin(i) : !!this.opts.readLogin?.(i))); }
 
   /** Delete the cloud's copy, but only if it's the one we wrote: never a login someone set up by hand. */
   removeCopy(item: CopyItem, fromDeviceId?: string) {

@@ -95,16 +95,18 @@ test("streamed tool calls become one-line progress the app can show", async () =
   expect(describeStep("ToolSearch", {})).toBeNull();
 });
 
-test("voice: a Deepgram key set from the app stays in a private file, is only shown as its last 4, and .env wins", async () => {
+test("voice: a Deepgram key set from the app is kept encrypted, is only shown as its last 4, and .env wins", async () => {
   const { VoiceSettings } = await import("../src/voice.ts");
-  const { writeFileSync, statSync } = await import("node:fs");
+  const { writeFileSync, existsSync, readFileSync } = await import("node:fs");
   const v = new VoiceSettings(dir, {});
   expect(v.status()).toEqual({ provider: null, source: null, hint: null });
   expect((await v.connect("nope")).error).toContain("doesn't look like");
+  // A key saved the old way, in plain voice.json, moves into the encrypted vault and the plain file is deleted.
   writeFileSync(join(dir, "voice.json"), JSON.stringify({ deepgramKey: "abcdefghijklmnopqrstuvwxyz1234" }), { mode: 0o600 });
   const again = new VoiceSettings(dir, {});
   expect(again.status()).toEqual({ provider: "deepgram", source: "app", hint: "••••1234" });
-  expect(statSync(join(dir, "voice.json")).mode & 0o777).toBe(0o600);
+  expect(existsSync(join(dir, "voice.json"))).toBe(false);
+  expect(readFileSync(join(dir, "keys/vault.db")).includes("abcdefghijklmnopqrstuvwxyz1234")).toBe(false);
   expect(again.disconnect().value!.provider).toBeNull();
   const env = new VoiceSettings(dir, { HEARTH_DEEPGRAM_API_KEY: "envkeyenvkeyenvkeyenvkey9999" });
   expect(env.status().source).toBe("env");
