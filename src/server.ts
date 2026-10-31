@@ -488,14 +488,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         break;
       }
       case "connections": {
-        if (method === "GET" && !id) return json({ connections: hub.connections.status(), canCopyFromMac: hub.canCopyCookies() });
+        if (method === "GET" && !id) return json({ connections: hub.connections.status() });
         if (!isCookieSite(id)) break;
-        if (method === "POST" && seg[3] === "from-mac") {
-          ownerOnly();
-          const r = hub.copyFromMac(id);
-          if (r.error) throw new HttpError(400, r.error);
-          return json({ status: r.value, started: hub.canCopyCookies() });
-        }
         if (method === "GET" && seg[3] === "browsers") { ownerOnly(); return json(hub.connections.browserOptions(id)); }
         if (method === "POST" && seg[3] === "import") {
           ownerOnly();

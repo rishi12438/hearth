@@ -1511,7 +1511,6 @@ async function openCookieSetup(c: Connector | { via: string; name: string; blurb
   const tile = (c as any).shapes ? connectorTile(c as Connector, 52) : connectorTile({ id: c.via!, name: c.name, blurb: c.blurb, group: "Social", via: c.via, bg: (c as any).bg || "#eef2f7", shapes: GENERIC_SHAPES } as Connector, 52);
   const [connResp, browsers] = await Promise.all([call("/api/connections").catch(() => ({})), call(`/api/connections/${c.via}/browsers`).catch(() => [])]);
   const conns: any[] = connResp.connections || [];
-  const canCopyFromMac = !!connResp.canCopyFromMac;
   const st = conns.find((x) => x.id === c.via);
   const help = COOKIE_HELP[c.via!] || { site: `https://${c.via}`, need: "a login (session) cookie" };
   const out0 = h("div", { class: "ctest" });
@@ -1528,14 +1527,6 @@ async function openCookieSetup(c: Connector | { via: string; name: string; blurb
     } } }, `Import from ${b.label}`)),
     out0,
     h("p", { class: "muted small" }, "The first time, macOS asks to let Hearth use the browser's Safe Storage key — choose Always Allow. Cookies only, kept encrypted in the hub, never shown.")) : null;
-  // Hub on a server: pull the login from your linked Mac, which decrypts it there and copies it up (and re-copies when it expires).
-  const macRow = canCopyFromMac ? h("div", { class: "stack" },
-    h("button", { class: "btn primary big", on: { click: async (e: Event) => {
-      const b = e.currentTarget as HTMLButtonElement; b.disabled = true; b.textContent = "Asking your Mac…"; clear(out0);
-      try { await call(`/api/connections/${c.via}/from-mac`, { body: {} }); clear(out0, h("p", { class: "okline" }, icon("check", 16), " Asked your Mac — it copied the login up.")); setTimeout(() => openCookieSetup(c), 2500); }
-      catch (err: any) { showResult({ ok: false, error: err.message }); b.disabled = false; b.textContent = "Copy from my Mac"; }
-    } } }, "Copy from my Mac"),
-    h("p", { class: "muted small" }, "Your Mac reads the login there (read-only) and copies it up. If it stops working, Hearth asks your Mac again — no background syncing.")) : null;
   const box = h("textarea", { class: "field mono", rows: 4, placeholder: `Paste cookies: the Cookie-Editor export, or ${help.need.replace(/ \(.*\)/, "")} as name=value; name=value`, autocapitalize: "off", spellcheck: false }) as HTMLTextAreaElement;
   const out = h("div", { class: "ctest" });
   const show = (t: any) => clear(out, t.ok
@@ -1555,8 +1546,6 @@ async function openCookieSetup(c: Connector | { via: string; name: string; blurb
     st?.connected ? h("div", { class: "stack" },
       h("button", { class: "btn ghost", on: { click: async (e: Event) => { const b = e.currentTarget as HTMLButtonElement; b.disabled = true; show(await call(`/api/connections/${c.via}/test`, { body: {} }).catch((x: any) => ({ ok: false, error: x.message }))); b.disabled = false; } } }, icon("play", 16), "Test now")) : null,
     out,
-    macRow,
-    macRow ? h("p", { class: "muted small", style: "text-align:center" }, importRow ? "— or —" : "") : null,
     importRow,
     importRow ? h("p", { class: "muted small", style: "text-align:center" }, "— or paste cookies —") : null,
     h("ol", { class: "steps" },

@@ -1279,13 +1279,10 @@ export class Hub {
             if (typeof a.source === "string") runs.push({ name: "@source", args: [JSON.stringify({ source: a.source, config: a.config || {} })] });
             break;
           case "connection.refresh": {
-            // Pull a fresh login for a site from the linked Mac (it decrypts there and copies it up). On demand only.
             const site = String(a.site || "").trim();
             if (!site) break;
-            if (!this.computers?.canCopyCookies()) { done.push({ kind: "memory", label: `No Mac online to refresh ${site}. Reconnect it in Connectors.` }); break; }
-            this.connections.wantFromMac(site);                                   // mark it Mac-fed
-            this.computers.refreshCookies(this.connections.domainFor(site) || site); // and pull it now
-            done.push({ kind: "memory", label: `Asked your Mac for a fresh ${site} login` });
+            const r = await this.refreshConnection(site);
+            done.push({ kind: "memory", label: r.ok ? `Refreshed the ${site} login (${r.how})` : `Couldn't refresh ${site} — reconnect it in Connectors` });
             break;
           }
           case "history.search":
@@ -2146,14 +2143,28 @@ export class Hub {
   }
 
   /** Connectors' "Save and test": read one list now and say what came back. */
-  /** Keep a connection fed from the linked Mac: mark it, then ask the Mac to copy it up now. */
-  copyFromMac(site: string) {
-    const r = this.connections.wantFromMac(site);
-    if (r.value) { this.computers?.refreshCookies(site); this.emit("connections"); }
-    return r;
+  /**
+   * The agent's one tool to (re)load a logged-in site's cookies on demand, wherever the hub runs:
+   * a server hub asks the linked Mac; a laptop hub reads its own browser. Logged every time.
+   */
+  async refreshConnection(site: string): Promise<{ ok: boolean; how: string }> {
+    const domain = this.connections.domainFor(site) || site;
+    if (this.computers?.canCopyCookies()) {
+      this.connections.wantFromMac(site);
+      this.computers.refreshCookies(domain);
+      this.emit("connections");
+      await this.log("connection.refresh", `${domain}: asked your Mac for a fresh login`);
+      return { ok: true, how: "mac" };
+    }
+    const opt = this.connections.browserOptions(site)[0];
+    if (opt) {
+      const r = this.importFromBrowser(site, opt.id);
+      await this.log("connection.refresh", `${domain}: ${r.value ? `read from ${opt.label}` : `couldn't read it (${r.error})`}`);
+      return { ok: !!r.value, how: "browser" };
+    }
+    await this.log("connection.refresh", `${domain}: no Mac online and no local browser to read`);
+    return { ok: false, how: "none" };
   }
-
-  canCopyCookies() { return !!this.computers?.canCopyCookies(); }
 
   importFromBrowser(site: string, profileId: string) {
     const r = this.connections.importFromBrowser(site, profileId);
