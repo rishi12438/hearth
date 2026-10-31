@@ -65,6 +65,9 @@ export class VoiceSettings {
     this.current = this.fromFile();
     return { value: this.status() };
   }
+  /** The Deepgram key, for the hub's own live relay (never sent to the app). */
+  deepgramKey() { return this.current?.name === "deepgram" ? this.env.HEARTH_DEEPGRAM_API_KEY || this.saved().deepgramKey || null : null; }
+
   disconnect() {
     if (this.fromEnv) return { error: "This hub's voice key is set in its .env." };
     rmSync(this.file, { force: true });
@@ -83,4 +86,43 @@ export function createSpeechToText(env: Record<string, string | undefined> = pro
     case "off": return null;
     default: throw new Error(`Unknown HEARTH_STT provider: ${provider}`);
   }
+}
+
+/**
+ * Live dictation: the app streams 16-bit mono PCM to the hub over a WebSocket; the hub relays it to Deepgram's streaming
+ * API (the key stays on the hub) and sends words back as they're heard: {t:"partial"|"final", text} then {t:"end"}.
+ */
+export type LiveClient = { send(data: string): void; close(): void };
+export function deepgramLive(key: string, sampleRate: number, client: LiveClient) {
+  const base = process.env.HEARTH_DEEPGRAM_LIVE_URL || "wss://api.deepgram.com/v1/listen";
+  const qs = new URLSearchParams({ model: process.env.HEARTH_DEEPGRAM_MODEL || "nova-3", encoding: "linear16", sample_rate: String(sampleRate),
+    channels: "1", smart_format: "true", punctuate: "true", interim_results: "true", endpointing: "400" });
+  const dg = new WebSocket(`${base}?${qs}`, { headers: { Authorization: `Token ${key}` } } as any);
+  dg.binaryType = "arraybuffer";
+  const waiting: (ArrayBuffer | Uint8Array | string)[] = [];
+  let bytes = 0, ended = false;
+  const end = () => { if (ended) return; ended = true; try { client.send(JSON.stringify({ t: "end" })); } catch {} client.close(); };
+  const keepAlive = setInterval(() => { if (dg.readyState === WebSocket.OPEN) dg.send(JSON.stringify({ type: "KeepAlive" })); }, 8000);
+  const limit = setTimeout(() => stop(), 15 * 60_000); // a ramble, not a podcast
+  dg.onopen = () => { for (const w of waiting.splice(0)) dg.send(w); };
+  dg.onmessage = (e) => {
+    try {
+      const m = JSON.parse(String(e.data));
+      if (m.type !== "Results") return;
+      const text = String(m.channel?.alternatives?.[0]?.transcript || "");
+      if (text || m.is_final) client.send(JSON.stringify({ t: m.is_final ? "final" : "partial", text }));
+    } catch {}
+  };
+  dg.onerror = () => { try { client.send(JSON.stringify({ t: "error", text: "Couldn't reach Deepgram for live text." })); } catch {} };
+  dg.onclose = () => { clearInterval(keepAlive); clearTimeout(limit); end(); };
+  const push = (d: ArrayBuffer | Uint8Array | string) => (dg.readyState === WebSocket.OPEN ? dg.send(d) : dg.readyState === WebSocket.CONNECTING ? waiting.push(d) : undefined);
+  function audio(chunk: ArrayBuffer | Uint8Array) {
+    bytes += chunk.byteLength;
+    if (bytes > 120 * 1024 * 1024) return stop();
+    push(chunk);
+  }
+  /** Finish: Deepgram flushes the last words, then closes. */
+  function stop() { push(JSON.stringify({ type: "CloseStream" })); setTimeout(() => { try { dg.close(); } catch {} end(); }, 4000); }
+  function abort() { clearInterval(keepAlive); clearTimeout(limit); ended = true; try { dg.close(); } catch {} }
+  return { audio, stop, abort };
 }

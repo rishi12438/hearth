@@ -110,3 +110,48 @@ test("voice: a Deepgram key set from the app stays in a private file, is only sh
   expect(env.status().source).toBe("env");
   expect((await env.connect("abcdefghijklmnopqrstuvwxyz1234")).error).toContain(".env");
 });
+
+test("live dictation: the hub relays audio to Deepgram with its key and streams words back; tickets are single-use", async () => {
+  let auth = "";
+  const fake = Bun.serve({
+    port: 0,
+    fetch(req, srv) { auth = req.headers.get("authorization") || ""; return srv.upgrade(req) ? undefined : new Response("no", { status: 400 }); },
+    websocket: {
+      message(ws, m) {
+        if (typeof m === "string") { if (m.includes("CloseStream")) ws.close(); return; }
+        ws.send(JSON.stringify({ type: "Results", is_final: false, channel: { alternatives: [{ transcript: "remind me" }] } }));
+        ws.send(JSON.stringify({ type: "Results", is_final: true, channel: { alternatives: [{ transcript: "Remind me at six." }] } }));
+      },
+    },
+  });
+  process.env.HEARTH_DEEPGRAM_LIVE_URL = `ws://127.0.0.1:${fake.port}/v1/listen`;
+  const { VoiceSettings } = await import("../src/voice.ts");
+  const { startServer } = await import("../src/server.ts");
+  const { newPairingCode, redeemPairingCode } = await import("../src/auth.ts");
+  (hub.config as any).port = 0;
+  const { server } = await startServer(hub, new VoiceSettings(dir, { HEARTH_DEEPGRAM_API_KEY: "testkeytestkeytestkey1234" }));
+  const { code } = await newPairingCode(store);
+  const { token } = (await redeemPairingCode(store, code, "test"))!;
+  const { ticket } = await (await fetch(`http://127.0.0.1:${server.port}/api/voice/live`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: "{}" })).json();
+  const got: any[] = [];
+  const ws = new WebSocket(`ws://127.0.0.1:${server.port}/voice-live?ticket=${ticket}&rate=48000`);
+  await new Promise<void>((res, rej) => {
+    ws.onopen = () => { ws.send(new Int16Array(4800).buffer); setTimeout(() => ws.send("stop"), 150); };
+    ws.onmessage = (e) => { const m = JSON.parse(String(e.data)); got.push(m); if (m.t === "end") res(); };
+    ws.onerror = () => rej(new Error("socket error"));
+    setTimeout(() => rej(new Error("timed out")), 5000);
+  });
+  expect(auth).toBe("Token testkeytestkeytestkey1234"); // the key stays on the hub
+  expect(got.map((m) => m.t)).toEqual(["partial", "final", "end"]);
+  expect(got[1].text).toBe("Remind me at six.");
+  expect((await fetch(`http://127.0.0.1:${server.port}/voice-live?ticket=${ticket}&rate=48000`)).status).toBe(401); // used up
+  ws.close(); server.stop(true); fake.stop(true);
+  delete process.env.HEARTH_DEEPGRAM_LIVE_URL;
+});
+
+test("dictation clean-up keeps the words when the model output looks wrong", async () => {
+  expect(await hub.cleanDictation("hi")).toBe("hi"); // too short to bother
+  const out = await hub.cleanDictation("um so uh remind me to call mom at five");
+  expect(out).toContain("remind me to call mom at five");
+  expect(out).not.toContain("uh");
+});

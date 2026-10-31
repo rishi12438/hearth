@@ -3,7 +3,8 @@ import { join, resolve, extname } from "node:path";
 type Server = Bun.Server<unknown>;
 import { sha256, deviceForToken, newPairingCode, redeemPairingCode, RateLimiter } from "./auth.ts";
 import type { Hub } from "./hub.ts";
-import type { VoiceSettings } from "./voice.ts";
+import { deepgramLive, type VoiceSettings } from "./voice.ts";
+import { randomBytes } from "node:crypto";
 import { availableHarnesses } from "./brain.ts";
 import { MAX_FILE_BYTES } from "./files.ts";
 import { appCsp } from "./apps.ts";
@@ -53,6 +54,7 @@ class HttpError extends Error { constructor(public status: number, msg: string) 
 
 export async function startServer(hub: Hub, voice: VoiceSettings | null = null) {
   const voiceLimiter = new RateLimiter(5, 10 * 60_000);
+  const liveTickets = new Map<string, number>();
   const { config, store } = hub;
   const web = await buildWeb();
   const pairLimiter = new RateLimiter(5, 10 * 60_000);
@@ -312,6 +314,15 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
           return json(r.value);
         }
         if (method === "DELETE") { const r = voice.disconnect(); if (r.error) throw new HttpError(400, r.error); hub.emit("voice"); return json(r.value); }
+        if (method === "POST" && seg[2] === "clean") return json({ text: await hub.cleanDictation(String((await body(req)).text || "")) });
+        if (method === "POST" && seg[2] === "live") {
+          // A one-time ticket for the live dictation socket (browsers can't put the device token on a WebSocket).
+          if (!voice.deepgramKey()) throw new HttpError(503, "Voice isn't set up yet. Connect Deepgram in Settings → Voice.");
+          const t = randomBytes(18).toString("base64url");
+          for (const [k, v] of liveTickets) if (v < Date.now()) liveTickets.delete(k);
+          liveTickets.set(t, Date.now() + 60_000);
+          return json({ ticket: t });
+        }
         break;
       }
       case "transcribe": {
@@ -443,15 +454,41 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
     throw new HttpError(404, "Not found.");
   }
 
-  const server = Bun.serve({
+  type LiveData = { rate: number; relay?: ReturnType<typeof deepgramLive> };
+  const server = Bun.serve<LiveData, never>({
     hostname: config.host,
     port: config.port,
     idleTimeout: 60,
+    websocket: {
+      maxPayloadLength: 1024 * 1024,
+      open(ws) {
+        const key = voice?.deepgramKey();
+        if (!key) { ws.close(1011, "voice off"); return; }
+        ws.data.relay = deepgramLive(key, ws.data.rate, { send: (d) => ws.send(d), close: () => ws.close() });
+      },
+      message(ws, msg) {
+        if (typeof msg === "string") { if (msg === "stop") ws.data.relay?.stop(); return; }
+        ws.data.relay?.audio(msg);
+      },
+      close(ws) { ws.data.relay?.abort(); },
+    },
     async fetch(req, server) {
       const url = new URL(req.url);
       const origin = req.headers.get("origin");
       const host = req.headers.get("x-forwarded-host") || req.headers.get("host");
       const sameOrigin = !origin || (() => { try { return new URL(origin).host === host; } catch { return false; } })();
+      // Live dictation socket: one-time ticket from POST /api/voice/live, same origin (or an allowed one) only.
+      if (url.pathname === "/voice-live") {
+        const t = url.searchParams.get("ticket") || "";
+        const exp = liveTickets.get(t);
+        liveTickets.delete(t);
+        const rate = Number(url.searchParams.get("rate"));
+        if (!exp || exp < Date.now()) return new Response("Ticket expired", { status: 401 });
+        if (origin && !sameOrigin && !config.allowedOrigins.includes(origin)) return new Response("Origin not allowed", { status: 403 });
+        if (!(rate >= 8000 && rate <= 96000)) return new Response("Bad sample rate", { status: 400 });
+        if (server.upgrade(req, { data: { rate: Math.round(rate) } })) return undefined as unknown as Response;
+        return new Response("Expected a WebSocket", { status: 426 });
+      }
       const headers = security(origin, sameOrigin);
       // A response that brings its own CSP or frame rules (sandboxed downloads, mini apps) keeps them.
       const finish = (res: Response) => { for (const [k, v] of Object.entries(headers)) if (!((k === "Content-Security-Policy" || k === "X-Frame-Options") && res.headers.has(k))) res.headers.set(k, v); return res; };

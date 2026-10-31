@@ -1540,6 +1540,16 @@ export class Hub {
     return true;
   }
 
+  /** Tidy a dictation on the quick model; if that fails, the raw words are fine. */
+  async cleanDictation(text: string) {
+    const raw = text.trim().slice(0, 8000);
+    if (raw.split(/\s+/).length < 4) return raw;
+    try {
+      const out = (await this.brain.think({ mode: "clean", context: {}, input: raw }, (await this.brains()).quick)).trim();
+      return out && out.length > raw.length * 0.3 && out.length < raw.length * 1.5 + 40 ? out : raw;
+    } catch { return raw; }
+  }
+
   // ---------- boards: everyone's (or one teammate's) work as a to-do board ----------
 
   /** Up next (queued tasks, upcoming reminders and routines), Working, Needs you, Done (last 7 days). */

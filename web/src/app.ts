@@ -1090,9 +1090,9 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
     clear(action, icon(hasText ? "send" : "mic", 20));
     action.setAttribute("aria-label", hasText ? "Send" : "Hold to talk");
   };
-  action.addEventListener("pointerdown", (e) => { if (box.value.trim() || pending.length) return; e.preventDefault(); micTarget = inThread; onMicDown(); });
-  action.addEventListener("pointerup", () => { if (recording) onMicUp(); });
-  action.addEventListener("pointerleave", () => { if (recording && Date.now() - pressAt > 350) onMicUp(); });
+  // Mic: tap to dictate (✓/✕ to finish), or hold and let go.
+  action.addEventListener("pointerdown", (e) => { if (box.value.trim() || pending.length || dict) return; e.preventDefault(); micTarget = inThread; onMicDown(box, swap, wrap); });
+  action.addEventListener("pointerup", () => { if (recording && Date.now() - pressAt > 600) finishDictation(true); });
   action.addEventListener("click", () => { if (box.value.trim() || pending.length) { submit(); drawChips(); } });
   clear(wrap, h("div", { class: "rec", id: targetId === "composerwrap" ? "rec" : undefined, hidden: true }), chips, h("div", { class: "composer", id: targetId === "composerwrap" ? "composerbox" : undefined }, clip, box, action, picker));
   swap();
@@ -1246,70 +1246,139 @@ async function openVoice() {
   setTimeout(() => key.focus(), 80);
 }
 
+// Dictation, Wispr Flow style: tap the mic and talk as long as you like. A panel takes the keyboard's place (✕, a live
+// waveform, ✓); your words stream into the message box as you speak; ✓ tidies them (fillers, self-corrections) and leaves
+// them ready to send. Holding the mic works too: let go to finish. Audio goes to your hub, which relays it to Deepgram.
+type Dictation = { box: HTMLTextAreaElement; swap: () => void; panel: HTMLElement; base: string; finals: string[]; interim: string;
+  ws: WebSocket | null; ctx: AudioContext | null; media: MediaStream | null; rec: MediaRecorder | null; chunks: Blob[]; raf: number; started: number; ended: Promise<void>; endNow: () => void };
+let dict: Dictation | null = null;
 let recording = false;
-let recorder: MediaRecorder | null = null;
-let chunks: Blob[] = [];
 let pressAt = 0;
-let timer: ReturnType<typeof setInterval> | null = null;
 
 function autosize(t: HTMLTextAreaElement) { t.style.height = "auto"; t.style.height = Math.min(150, t.scrollHeight) + "px"; }
 
-async function onMicDown() {
-  if (recording) { stopRecording(true); return; } // second tap ends open-mic
+const dictText = (d: Dictation) => [d.base.trim(), [...d.finals, d.interim].join(" ").replace(/\s+/g, " ").trim()].filter(Boolean).join(d.base.trim() ? " " : "");
+
+async function onMicDown(box: HTMLTextAreaElement, swap: () => void, panelHost: HTMLElement) {
+  if (dict) return;
   pressAt = Date.now();
   if (!S.state?.voice) { openVoice(); return; }
-  try {
-    const media = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const type = ["audio/webm;codecs=opus", "audio/mp4", "audio/webm"].find((t) => MediaRecorder.isTypeSupported(t)) || "";
-    recorder = new MediaRecorder(media, type ? { mimeType: type } : undefined);
-    chunks = [];
-    recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
-    recorder.start(250);
-    recording = true;
-    showRecording(true);
-  } catch { toast("Microphone permission is off", "err"); }
-}
+  let media: MediaStream;
+  try { media = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); }
+  catch { toast("Microphone permission is off", "err"); return; }
+  const bars = Array.from({ length: 11 }, () => h("i"));
+  const clock = h("span", { class: "dclock" }, "0:00");
+  const status = h("span", { class: "dstatus" }, "Listening");
+  let endNow = () => {};
+  const d: Dictation = { box, swap, panel: h("div"), base: box.value, finals: [], interim: "", ws: null, ctx: null, media, rec: null, chunks: [], raf: 0, started: Date.now(),
+    ended: new Promise<void>((res) => { endNow = res; }), endNow: () => endNow() };
+  d.endNow = () => endNow();
+  d.panel = h("div", { class: "dictate", role: "dialog", "aria-label": "Dictation" },
+    h("div", { class: "drow" },
+      h("button", { class: "dbtn", "aria-label": "Cancel", on: { click: () => finishDictation(false) } }, icon("x", 22)),
+      h("button", { class: "dbtn done", "aria-label": "Done", on: { click: () => finishDictation(true) } }, icon("check", 22))),
+    h("div", { class: "dwave" }, bars), h("div", { class: "dlabel" }, status, clock));
+  dict = d;
+  recording = true;
+  panelHost.appendChild(d.panel);
+  requestAnimationFrame(() => d.panel.classList.add("open"));
+  box.placeholder = "Say anything. Ramble on…";
 
-function onMicUp() {
-  if (Date.now() - pressAt < 350) { toast("Listening. Tap again when you're done."); return; } // a tap = open mic
-  stopRecording(true);
-}
-
-function showRecording(on: boolean) {
-  const rec = document.getElementById("rec")!;
-  document.getElementById("composerbox")?.classList.toggle("listening", on);
-  if (timer) clearInterval(timer);
-  if (!on) { rec.hidden = true; return; }
-  const start = Date.now();
-  const label = h("span", { class: "clock" }, "0:00");
-  clear(rec, h("i", { class: "wave" }, h("b"), h("b"), h("b"), h("b"), h("b")), h("span", { class: "grow" }, "Listening…"), label,
-    h("button", { class: "cancel", on: { click: () => stopRecording(false) } }, "Cancel"));
-  rec.hidden = false;
-  timer = setInterval(() => { const s = Math.floor((Date.now() - start) / 1000); label.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }, 250);
-}
-
-function stopRecording(sendIt: boolean) {
-  if (!recorder) return;
-  const r = recorder;
-  recorder = null;
-  recording = false;
-  showRecording(false);
-  r.onstop = async () => {
-    r.stream.getTracks().forEach((t) => t.stop());
-    if (!sendIt || !chunks.length) return;
-    const blob = new Blob(chunks, { type: (r.mimeType || "audio/webm").split(";")[0] });
-    const box = (document.getElementById("composer") as HTMLTextAreaElement | null) || document.createElement("textarea");
-    box.placeholder = "Transcribing…";
-    try {
-      const hub = activeHub()!;
-      const res = await fetch(hub.url + "/api/transcribe", { method: "POST", headers: { Authorization: `Bearer ${hub.token}`, "Content-Type": blob.type }, body: blob });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Transcription failed");
-      if (data.text) send(data.text, micTarget); else toast("I didn't catch that", "err");
-    } catch (e) { handleError(e); }
-    finally { box.placeholder = "Ramble. Hearth will hand it out…"; }
+  // Audio: a level meter for the waveform, raw PCM to the hub for live words, and a recording as a fallback.
+  const ctx = new AudioContext();
+  d.ctx = ctx;
+  const src = ctx.createMediaStreamSource(media);
+  const meter = ctx.createAnalyser();
+  meter.fftSize = 256;
+  src.connect(meter);
+  const proc = ctx.createScriptProcessor(4096, 1, 1);
+  const mute = ctx.createGain(); mute.gain.value = 0;
+  src.connect(proc); proc.connect(mute); mute.connect(ctx.destination);
+  proc.onaudioprocess = (e) => {
+    if (d.ws?.readyState !== WebSocket.OPEN) return;
+    const f = e.inputBuffer.getChannelData(0);
+    const pcm = new Int16Array(f.length);
+    for (let i = 0; i < f.length; i++) pcm[i] = Math.max(-1, Math.min(1, f[i])) * 0x7fff;
+    d.ws.send(pcm.buffer);
   };
-  r.stop();
+  const levels = new Uint8Array(meter.frequencyBinCount);
+  const draw = () => {
+    meter.getByteTimeDomainData(levels);
+    let peak = 0;
+    for (const v of levels) peak = Math.max(peak, Math.abs(v - 128) / 128);
+    bars.forEach((b, i) => { const shape = 1 - Math.abs(i - 5) / 6; const jitter = 0.6 + Math.random() * 0.4; b.style.setProperty("--h", `${Math.max(0.12, Math.min(1, peak * 2.2 * shape * jitter + 0.08))}`); });
+    const s = Math.floor((Date.now() - d.started) / 1000);
+    clock.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+    d.raf = requestAnimationFrame(draw);
+  };
+  draw();
+  try {
+    const type = ["audio/webm;codecs=opus", "audio/mp4", "audio/webm"].find((t) => MediaRecorder.isTypeSupported(t)) || "";
+    d.rec = new MediaRecorder(media, type ? { mimeType: type } : undefined);
+    d.rec.ondataavailable = (e) => { if (e.data.size) d.chunks.push(e.data); };
+    d.rec.start(500);
+  } catch {}
+  try {
+    const hub = activeHub()!;
+    const { ticket } = await call("/api/voice/live", { body: {} });
+    const ws = new WebSocket(`${hub.url.replace(/^http/, "ws")}/voice-live?ticket=${encodeURIComponent(ticket)}&rate=${ctx.sampleRate}`);
+    d.ws = ws;
+    ws.onmessage = (e) => {
+      try {
+        const m = JSON.parse(String(e.data));
+        if (m.t === "partial") d.interim = m.text;
+        else if (m.t === "final") { if (m.text) d.finals.push(m.text); d.interim = ""; }
+        else if (m.t === "end") d.endNow();
+        else if (m.t === "error") status.textContent = "Listening (words appear when you're done)";
+        if (dict === d) { box.value = dictText(d); autosize(box); box.scrollTop = box.scrollHeight; }
+      } catch {}
+    };
+    ws.onclose = () => d.endNow();
+  } catch { status.textContent = "Listening (words appear when you're done)"; }
+}
+
+/** ✓ (keep) or ✕ (throw away). Keep: wait for the last words, tidy them, leave them in the box to send. */
+async function finishDictation(keep: boolean) {
+  const d = dict;
+  if (!d) return;
+  dict = null;
+  recording = false;
+  cancelAnimationFrame(d.raf);
+  try { d.ws?.readyState === WebSocket.OPEN && d.ws.send("stop"); } catch {}
+  const recStopped = new Promise<void>((res) => { if (d.rec && d.rec.state !== "inactive") { d.rec.onstop = () => res(); d.rec.stop(); } else res(); });
+  d.media?.getTracks().forEach((t) => t.stop());
+  d.panel.classList.remove("open");
+  setTimeout(() => d.panel.remove(), 260);
+  d.box.placeholder = "Ramble. Hearth will hand it out…";
+  if (!keep) { try { d.ws?.close(); } catch {} d.ctx?.close(); d.box.value = d.base; d.box.dispatchEvent(new Event("input")); return; }
+  d.box.classList.add("cleaning");
+  await Promise.race([d.ended, new Promise((r) => setTimeout(r, 2500))]);
+  try { d.ws?.close(); } catch {}
+  d.ctx?.close();
+  let said = [...d.finals, d.interim].join(" ").replace(/\s+/g, " ").trim();
+  try {
+    if (!said) {
+      // No live words (no connection, or Deepgram streaming unavailable): transcribe the recording instead.
+      await recStopped;
+      if (d.chunks.length) {
+        const hub = activeHub()!;
+        const blob = new Blob(d.chunks, { type: (d.rec?.mimeType || "audio/webm").split(";")[0] });
+        const res = await fetch(hub.url + "/api/transcribe", { method: "POST", headers: { Authorization: `Bearer ${hub.token}`, "Content-Type": blob.type }, body: blob });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Transcription failed");
+        said = String(data.text || "").trim();
+      }
+    }
+    if (!said) { toast("I didn't catch that", "err"); d.box.value = d.base; return; }
+    const { text } = await call("/api/voice/clean", { body: { text: said } });
+    d.box.value = [d.base.trim(), text].filter(Boolean).join(" ");
+  } catch (e) { handleError(e); if (said) d.box.value = [d.base.trim(), said].filter(Boolean).join(" "); }
+  finally {
+    d.box.classList.remove("cleaning");
+    d.box.dispatchEvent(new Event("input"));
+    autosize(d.box);
+    d.box.focus();
+  }
 }
 
 // ---------------- menu ----------------
@@ -2158,10 +2227,13 @@ async function drawPins() {
   pinsKey = key;
   clear(el, pins.length ? h("div", { class: "widgets" }, pins.map((a) => {
     const size = pinSize(a);
-    const box = h("div", { class: "wbody" });
-    appFrame(a.id, a.title, size).then((f) => { f.setAttribute("scrolling", "no"); clear(box, f); }).catch(() => clear(box, h("p", { class: "muted center" }, "Couldn't open")));
+    // Like an iPhone widget: it stays live on Home, and a tap anywhere opens the full app.
+    const openIt = () => { location.hash = `#a/${a.id}`; };
+    const frameBox = h("div", { class: "wframe" });
+    appFrame(a.id, a.title, size).then((f) => { f.setAttribute("scrolling", "no"); f.tabIndex = -1; clear(frameBox, f); }).catch(() => clear(frameBox, h("p", { class: "muted center" }, "Couldn't open")));
+    const box = h("div", { class: "wbody" }, frameBox, h("button", { class: "wtap", "aria-label": `Open ${a.title}`, on: { click: openIt } }));
     return h("div", { class: `widget ${size}` }, box,
-      h("button", { class: "wcap", on: { click: () => { location.hash = `#a/${a.id}`; } } }, a.title));
+      h("button", { class: "wcap", on: { click: openIt } }, a.title));
   })) : null);
 }
 

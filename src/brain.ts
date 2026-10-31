@@ -10,7 +10,7 @@ import { wallParts, zonedToUtc } from "./time.ts";
 // and the agent runs in an empty folder with no file or shell tools and none of the hub's secrets.
 
 export type BrainInput = {
-  mode: "chat" | "hook" | "review" | "job" | "orchestrate" | "ideas" | "legwork" | "voice";
+  mode: "chat" | "hook" | "review" | "job" | "orchestrate" | "ideas" | "legwork" | "voice" | "clean";
   context: Record<string, unknown>;
   input: string;
   toolResults?: string;
@@ -20,7 +20,12 @@ export const QUIET = "[[quiet]]";
 export const ESCALATE = "[[escalate]]";
 export const REDO = "[[redo]]";
 /** Calls that only read and write text: no web tools. */
-const NO_TOOLS = new Set<BrainInput["mode"]>(["orchestrate", "voice", "review", "ideas"]);
+const NO_TOOLS = new Set<BrainInput["mode"]>(["orchestrate", "voice", "review", "ideas", "clean"]);
+/** Dictation clean-up (like Wispr Flow): tidy what was said without changing what it means. */
+const CLEAN = `Clean up this dictated text so it reads as if typed. Remove filler (um, uh, like, you know), false starts and repeated
+words. When the speaker corrects themselves ("at 5, no, 6"), keep only the correction. Fix punctuation, capitals and obvious
+mis-hearings. Keep their words, tone, language and every detail: names, numbers, dates, requests. Don't answer it, summarize it,
+add anything or drop anything they meant. Reply with only the cleaned text.`;
 const SYSTEM_PROMPT = "You are part of Hearth, the user's personal assistant hub. The message holds your instructions, context and task. Follow its format exactly: when it asks for JSON reply with only the JSON, and put any actions in the ```hearth block it describes.";
 
 const PROTOCOL = `
@@ -198,6 +203,7 @@ every job, and light jobs escalate on their own if they can't do it, so heavy is
 `.trim();
 
 export function buildPrompt(b: BrainInput) {
+  if (b.mode === "clean") return [CLEAN, "", "DICTATED:", b.input].join("\n");
   if (b.mode === "orchestrate") {
     return [ORCHESTRATOR, "", "CONTEXT (JSON):", JSON.stringify(b.context, null, 1), "", "USER RAMBLE:", b.input].join("\n");
   }
@@ -462,6 +468,7 @@ function echoOrchestrator(b: BrainInput): string {
 function echoBrain(b: BrainInput): string {
   const ctx = b.context as { tz: string; nowIso: string };
   if (b.mode === "review") return QUIET;
+  if (b.mode === "clean") return b.input.replace(/\b(um+|uh+|you know),?\s*/gi, "").replace(/\s+/g, " ").trim();
   if (b.mode === "voice") return (b.input.split("NOTES FROM THE LEGWORK:")[1] || b.input).replace(/<\/?untrusted>/g, "").trim();
   if (b.mode === "ideas") {
     const facts = ((b.context as any).memory || []) as { fact: string }[];
