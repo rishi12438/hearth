@@ -19,7 +19,7 @@ const PAGES: Record<What, Page> = {
 export const x: Source<Config> = {
   id: "x",
   label: "X",
-  needs: "x",
+  needs: "x.com",
   doc: `X (Twitter) through the user's logged-in session. config {"what":"notifications"}, {"what":"mentions"} or
            {"what":"messages"} (DMs). Minutes >= 15, default 30.`,
   validate(c) {
@@ -28,5 +28,5 @@ export const x: Source<Config> = {
   },
   minutes: () => ({ min: 15, default: 30 }),
   describe: (c) => (c.what === "messages" ? "new X DMs" : `new X ${c.what}`),
-  items: (c, ctx) => readList("X", PAGES[c.what], ctx.cookies("x"), ctx),
+  items: (c, ctx) => readList("X", PAGES[c.what], ctx.cookies("x.com"), ctx),
 };

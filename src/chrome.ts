@@ -99,9 +99,11 @@ export function readSiteCookies(prof: BrowserProfile, domain: string, env: Recor
   const tmp = copyToTemp(prof.cookiesDb);
   try {
     const db = new Database(tmp, { readonly: true });
-    const rows = db.query("SELECT host_key, name, encrypted_value, path, is_secure FROM cookies WHERE host_key LIKE ?").all(`%${domain}`) as any[];
+    const rows = db.query("SELECT host_key, name, encrypted_value, path, is_secure, expires_utc FROM cookies WHERE host_key LIKE ?").all(`%${domain}`) as any[];
     db.close();
-    return rows.map((r) => ({ name: r.name, value: decryptValue(key, r.encrypted_value), domain: r.host_key, path: r.path || "/", secure: !!r.is_secure }))
+    // Chrome stores expiry as microseconds since 1601-01-01; convert to unix seconds (0 = session cookie).
+    const toUnix = (us: number) => (us > 0 ? Math.round(us / 1e6 - 11_644_473_600) : undefined);
+    return rows.map((r) => ({ name: r.name, value: decryptValue(key, r.encrypted_value), domain: r.host_key, path: r.path || "/", secure: !!r.is_secure, expires: toUnix(Number(r.expires_utc)) }))
       .filter((c) => c.value);
   } catch { return []; } finally { rmSync(tmp, { force: true }); }
 }

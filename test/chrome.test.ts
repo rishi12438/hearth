@@ -28,8 +28,8 @@ function encryptValue(password: string, value: string, domainHash = false) {
 function makeProfile(cookies: { host: string; name: string; enc: Buffer }[], password: string): { prof: BrowserProfile; env: Record<string, string> } {
   const dir = mkdtempSync(join(tmpdir(), "hearth-chrome-test-"));
   const db = new Database(join(dir, "Cookies"), { create: true });
-  db.run("CREATE TABLE cookies (host_key TEXT, name TEXT, encrypted_value BLOB, path TEXT, is_secure INT)");
-  for (const c of cookies) db.query("INSERT INTO cookies VALUES (?,?,?,?,?)").run(c.host, c.name, c.enc, "/", 1);
+  db.run("CREATE TABLE cookies (host_key TEXT, name TEXT, encrypted_value BLOB, path TEXT, is_secure INT, expires_utc INT)");
+  for (const c of cookies) db.query("INSERT INTO cookies VALUES (?,?,?,?,?,?)").run(c.host, c.name, c.enc, "/", 1, 0);
   db.close();
   return {
     prof: { browser: "Chrome", profile: "Default", label: "Chrome", cookiesDb: join(dir, "Cookies") },

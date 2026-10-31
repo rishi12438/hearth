@@ -5,7 +5,7 @@ import { sha256 } from "./auth.ts";
 import { Brain, availableHarnesses, type BrainProfile } from "./brain.ts";
 import { ALIVE_EVERY_MS, COPY_ITEMS, isCopyItem, type CopyItem } from "./computers.ts";
 import { readSiteCookiesAnywhere, canReadBrowser } from "./chrome.ts";
-import { COOKIE_SITES, isCookieSite, type CookieSite } from "./cookie-sites.ts";
+import { requiredFor, labelFor, isValidDomain } from "./cookie-sites.ts";
 import type { Config } from "./config.ts";
 
 // The computer side of a link (run on your Mac): join a hub once, then keep a line open to it and run the work it sends,
@@ -108,7 +108,7 @@ export function connect(opts: Opts) {
   let ws: WebSocket | null = null;
   let stopped = false, backoff = 1000, alive: ReturnType<typeof setInterval> | null = null, copyTimer: ReturnType<typeof setInterval> | null = null;
   let want: { items: CopyItem[]; have: Record<string, string> } = { items: [], have: {} };
-  let cookieWant: { sites: CookieSite[]; have: Record<string, string> } = { sites: [], have: {} };
+  let cookieWant: { sites: string[]; have: Record<string, string> } = { sites: [], have: {} };
   const send = (m: unknown) => { try { ws?.send(JSON.stringify(m)); } catch {} };
   const url = link.hub.replace(/^http/, "ws") + "/computer";
 
@@ -129,16 +129,15 @@ export function connect(opts: Opts) {
   const copyCookiesUp = () => {
     if (!cookieWant.sites.length) return;
     if (!canReadBrowser()) { log("  the hub asked for a browser login, but this computer can't read the browser here"); return; }
-    for (const site of cookieWant.sites) {
-      const s = COOKIE_SITES[site];
-      const found = readSiteCookiesAnywhere(s.domain.replace(/^\./, ""), [...s.required]);
+    for (const domain of cookieWant.sites) {
+      const found = readSiteCookiesAnywhere(domain, requiredFor(domain));
       if (!found) continue;
       const data = JSON.stringify({ cookies: found.cookies });
       const hash = sha256(data);
-      if (cookieWant.have[site] === hash) continue;
-      send({ t: "cookies", site, data, hash });
-      cookieWant.have[site] = hash;
-      log(`  copied your ${s.label} login from ${found.profile} to the hub`);
+      if (cookieWant.have[domain] === hash) continue;
+      send({ t: "cookies", site: domain, data, hash });
+      cookieWant.have[domain] = hash;
+      log(`  copied your ${labelFor(domain)} login from ${found.profile} to the hub`);
     }
   };
 
@@ -183,7 +182,7 @@ export function connect(opts: Opts) {
       else if (m.t === "run" && typeof m.id === "string") run(m);
       else if (m.t === "stop") runs.get(m.id)?.abort();
       else if (m.t === "want") { want = { items: (m.items || []).filter(isCopyItem), have: m.have || {} }; copyUp(); }
-      else if (m.t === "wantCookies") { cookieWant = { sites: (m.sites || []).filter(isCookieSite), have: m.have || {} }; copyCookiesUp(); }
+      else if (m.t === "wantCookies") { cookieWant = { sites: (m.sites || []).filter(isValidDomain), have: m.have || {} }; copyCookiesUp(); }
       else if (m.t === "logins" && link.cloud && m.items && typeof m.items === "object") {
         const wrote = writeLogins(opts.home || homedir(), m.items);
         if (wrote.length) log(`  got ${wrote.map((i) => COPY_ITEMS[i as CopyItem].label).join(" and ")} from the hub`);

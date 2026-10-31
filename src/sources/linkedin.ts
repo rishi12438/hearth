@@ -20,7 +20,7 @@ const PAGES: Record<What, Page> = {
 export const linkedin: Source<Config> = {
   id: "linkedin",
   label: "LinkedIn",
-  needs: "linkedin",
+  needs: "linkedin.com",
   doc: `LinkedIn through the user's logged-in session. config {"what":"messages"} (a new message in any conversation),
            {"what":"notifications"} or {"what":"invitations"} (connection requests). Minutes >= 15, default 30.`,
   validate(c) {
@@ -29,5 +29,5 @@ export const linkedin: Source<Config> = {
   },
   minutes: () => ({ min: 15, default: 30 }),
   describe: (c) => `new LinkedIn ${c.what}`,
-  items: (c, ctx) => readList("LinkedIn", PAGES[c.what], ctx.cookies("linkedin"), ctx),
+  items: (c, ctx) => readList("LinkedIn", PAGES[c.what], ctx.cookies("linkedin.com"), ctx),
 };

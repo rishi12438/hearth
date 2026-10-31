@@ -6,7 +6,7 @@ import { join } from "node:path";
 // WebSocket. Each read starts a throwaway profile, loads your cookies, opens one page, takes its text and quits, so
 // nothing lingers and one site's cookies never meet another's.
 
-export type Cookie = { name: string; value: string; domain: string; path?: string; secure?: boolean; httpOnly?: boolean };
+export type Cookie = { name: string; value: string; domain: string; path?: string; secure?: boolean; httpOnly?: boolean; expires?: number };
 
 const CANDIDATES = [
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -28,7 +28,8 @@ export function parseCookies(raw: string, domain: string): Cookie[] {
       const j = JSON.parse(text);
       const list: any[] = Array.isArray(j) ? j : Array.isArray(j.cookies) ? j.cookies : [];
       return list.filter((c) => c && typeof c.name === "string" && typeof c.value === "string")
-        .map((c) => ({ name: c.name, value: c.value, domain: typeof c.domain === "string" && c.domain ? c.domain : domain, path: c.path || "/", secure: true, httpOnly: !!c.httpOnly }));
+        .map((c) => ({ name: c.name, value: c.value, domain: typeof c.domain === "string" && c.domain ? c.domain : domain, path: c.path || "/", secure: true, httpOnly: !!c.httpOnly,
+          expires: typeof c.expirationDate === "number" ? Math.round(c.expirationDate) : typeof c.expires === "number" ? c.expires : undefined }));
     } catch { return []; }
   }
   return text.replace(/^cookie:\s*/i, "").split(";").map((p) => p.trim()).filter((p) => p.includes("=")).map((p) => {

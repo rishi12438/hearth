@@ -1,10 +1,11 @@
 import type { Google } from "../google.ts";
 import type { Cookie, readPage } from "../browser.ts";
-import type { ConnectionId, CookieSite } from "../connections.ts";
+// (connection ids are plain strings now: a preset id, a domain, or "google")
 import { gmail } from "./gmail.ts";
 import { calendar } from "./calendar.ts";
 import { linkedin } from "./linkedin.ts";
 import { x } from "./x.ts";
+import { site } from "./site.ts";
 
 // Trigger modules: one file per source of "something new" (Gmail, Calendar…). A module only says how to fetch
 // recent items and give each a stable id. The hub does the rest: the timer, the first look (which only remembers
@@ -20,13 +21,13 @@ export type Item = {
   url?: string;
 };
 
-export type SourceCtx = { google: Google; cookies: (site: CookieSite) => Cookie[]; readPage: typeof readPage; now: Date; tz: string };
+export type SourceCtx = { google: Google; cookies: (domain: string) => Cookie[]; readPage: typeof readPage; now: Date; tz: string };
 
 export interface Source<C = Record<string, unknown>> {
   id: string;
   label: string;
-  /** The connection it reads through; the hub won't poll until it's connected. */
-  needs: ConnectionId;
+  /** The connection it reads through (hub won't poll until it's connected): a fixed id, or one derived from config. */
+  needs: string | ((config: C) => string);
   /** Shown to the brain: what config it takes, with an example. */
   doc: string;
   validate(config: any): C | string;
@@ -36,7 +37,12 @@ export interface Source<C = Record<string, unknown>> {
   items(config: C, ctx: SourceCtx): Promise<Item[]>;
 }
 
-export const SOURCES: Source<any>[] = [gmail, calendar, linkedin, x];
+export const SOURCES: Source<any>[] = [gmail, calendar, linkedin, x, site];
+
+/** The connection a source needs for this config (a preset id, a domain, or "google"). */
+export function needOf(src: Source<any>, config: any): string {
+  return typeof src.needs === "function" ? src.needs(config) : src.needs;
+}
 
 export const sourceById = (id: string) => SOURCES.find((s) => s.id === id) || null;
 

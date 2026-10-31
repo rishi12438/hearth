@@ -1391,7 +1391,7 @@ function tile(t: any) {
 
 type Shape = [string, Record<string, string | number>];
 /** A connector's tile: a brand color and a simple mark drawn as SVG (no images, no innerHTML). */
-type Connector = { id: string; name: string; blurb: string; group: "Featured" | "Social" | "Productivity"; via?: "google" | "linkedin" | "x"; bg: string; shapes: Shape[] };
+type Connector = { id: string; name: string; blurb: string; group: "Featured" | "Social" | "Productivity"; via?: string; bg: string; shapes: Shape[] };
 const CONNECTORS: Connector[] = [
   { id: "gmail", name: "Gmail", blurb: "New mail you care about, read-only", group: "Featured", via: "google", bg: "#fff", shapes: [
     ["path", { d: "M5 18V8.5l7 5 7-5V18", fill: "none", stroke: "#EA4335", "stroke-width": 2.4, "stroke-linejoin": "round" }],
@@ -1404,14 +1404,19 @@ const CONNECTORS: Connector[] = [
     ["text", { x: 12, y: 16.5, "text-anchor": "middle", "font-size": 12, "font-weight": 800, fill: "#fff", "font-family": "-apple-system, sans-serif" }]] },
   { id: "x", name: "X", blurb: "Notifications, mentions and DMs", group: "Social", via: "x", bg: "#000", shapes: [
     ["path", { d: "M6 6l12 12M18 6L6 18", stroke: "#fff", "stroke-width": 2.2, "stroke-linecap": "round" }]] },
-  { id: "instagram", name: "Instagram Messages", blurb: "DMs", group: "Social", bg: "#E1306C", shapes: [
+  { id: "instagram", name: "Instagram", blurb: "DMs and notifications", group: "Social", via: "instagram", bg: "#E1306C", shapes: [
     ["rect", { x: 6, y: 6, width: 12, height: 12, rx: 3.5, fill: "none", stroke: "#fff", "stroke-width": 1.8 }], ["circle", { cx: 12, cy: 12, r: 2.8, fill: "none", stroke: "#fff", "stroke-width": 1.8 }]] },
   { id: "outlook", name: "Outlook Mail", blurb: "New mail, read-only", group: "Productivity", bg: "#0F6CBD", shapes: [
     ["text", { x: 12, y: 16.5, "text-anchor": "middle", "font-size": 12, "font-weight": 800, fill: "#fff", "font-family": "-apple-system, sans-serif" }]] },
+  { id: "reddit", name: "Reddit", blurb: "Messages and replies", group: "Social", via: "reddit", bg: "#FF4500", shapes: [
+    ["circle", { cx: 12, cy: 13, r: 7, fill: "#fff" }], ["circle", { cx: 9.3, cy: 12.5, r: 1, fill: "#FF4500" }], ["circle", { cx: 14.7, cy: 12.5, r: 1, fill: "#FF4500" }]] },
+  { id: "github", name: "GitHub", blurb: "Notifications and mentions", group: "Productivity", via: "github", bg: "#111", shapes: [
+    ["circle", { cx: 12, cy: 12, r: 7, fill: "none", stroke: "#fff", "stroke-width": 2 }]] },
   { id: "drive", name: "Google Drive", blurb: "Find and read your files", group: "Productivity", bg: "#fff", shapes: [
     ["path", { d: "M9 5h6l5 9h-6z", fill: "#FBBC04" }], ["path", { d: "M9 5l-5 9 3 5 5-9z", fill: "#34A853" }], ["path", { d: "M7 19h10l3-5H10z", fill: "#4285F4" }]] },
 ];
 const TILE_TEXT: Record<string, string> = { calendar: "31", linkedin: "in", outlook: "O" };
+const GENERIC_SHAPES: Shape[] = [["circle", { cx: 12, cy: 12, r: 7, fill: "none", stroke: "#64748b", "stroke-width": 2 }], ["path", { d: "M5 12h14M12 5a11 11 0 0 1 0 14M12 5a11 11 0 0 0 0 14", fill: "none", stroke: "#64748b", "stroke-width": 1.3 }]];
 
 function connectorTile(c: Connector, size = 40) {
   const ns = "http://www.w3.org/2000/svg";
@@ -1441,6 +1446,30 @@ async function openConnections(tab: "available" | "connected" = "available") {
   let q = "";
   const action = (c: Connector) => !c.via ? h("span", { class: "csoon" }, "Soon")
     : h("button", { class: "clink", on: { click: () => open(c) } }, isOn(c) ? "Manage" : "Connect");
+  // Sites you connected that aren't one of the presets above (any domain).
+  const presetVias = new Set(CONNECTORS.map((c) => c.via).filter(Boolean));
+  const extraRows = () => {
+    const extra = conns.filter((x: any) => x.id !== "google" && x.connected && !presetVias.has(x.id) && !CONNECTORS.some((c) => c.via === x.domain));
+    if (!extra.length) return null;
+    return [h("h4", null, "Your sites"), h("div", { class: "list" }, extra.map((x: any) => h("div", { class: "crow" },
+      connectorTile({ id: x.id, name: x.label, blurb: "", group: "Social", via: x.id, bg: "#eef2f7", shapes: GENERIC_SHAPES } as Connector),
+      h("span", { class: "grow" }, h("b", null, x.label), h("small", { class: x.problem ? "err" : "" }, x.problem ? "Needs reconnecting" : (x.detail || ""))),
+      h("button", { class: "clink", on: { click: () => openCookieSetup({ via: x.domain, name: x.label, blurb: "this site" }) } }, "Manage"))))];
+  };
+  const addSite = () => {
+    const input = h("input", { class: "field", placeholder: "example.com or a full URL you're logged into", autocapitalize: "off", spellcheck: false }) as HTMLInputElement;
+    const err = h("p", { class: "err small", hidden: true });
+    openSheet("Add a site", [
+      h("p", { class: "muted" }, "Connect any site you're signed into in Chrome. A teammate can then watch a page on it or read it on request."),
+      input, err,
+      h("button", { class: "btn primary big", on: { click: () => {
+        const v = input.value.trim(); if (!v) return input.focus();
+        let dom = v.toLowerCase(); try { dom = new URL(v.includes("://") ? v : `https://${v}`).hostname.replace(/^www\./, ""); } catch {}
+        if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(dom)) { err.textContent = "That doesn't look like a site."; err.hidden = false; return; }
+        openCookieSetup({ via: dom, name: dom, blurb: "this site" });
+      } } }, "Next"),
+    ]);
+  };
   const draw = () => {
     const match = (c: Connector) => !q || `${c.name} ${c.blurb}`.toLowerCase().includes(q);
     const shown = CONNECTORS.filter((c) => match(c) && (tab === "available" || isOn(c)));
@@ -1461,6 +1490,8 @@ async function openConnections(tab: "available" | "connected" = "available") {
         list.length ? h("div", { class: "list" }, list.map(row))
           : h("p", { class: "empty" }, "Nothing connected yet. Connect Gmail or Calendar and your teammates can watch them for you."),
       ]),
+      extraRows(),
+      h("button", { class: "btn ghost", on: { click: addSite } }, icon("plus", 16), "Add any site you're logged into"),
       h("p", { class: "muted small" }, "Everything you connect stays on your hub. Sign-ins never go to the model, this app or your exports."));
   };
   draw();
@@ -1476,12 +1507,13 @@ const COOKIE_HELP: Record<string, { site: string; need: string }> = {
   linkedin: { site: "https://www.linkedin.com", need: "li_at (and JSESSIONID)" },
   x: { site: "https://x.com", need: "auth_token and ct0" },
 };
-async function openCookieSetup(c: Connector) {
+async function openCookieSetup(c: Connector | { via: string; name: string; blurb: string; bg?: string; shapes?: Shape[] }) {
+  const tile = (c as any).shapes ? connectorTile(c as Connector, 52) : connectorTile({ id: c.via!, name: c.name, blurb: c.blurb, group: "Social", via: c.via, bg: (c as any).bg || "#eef2f7", shapes: GENERIC_SHAPES } as Connector, 52);
   const [connResp, browsers] = await Promise.all([call("/api/connections").catch(() => ({})), call(`/api/connections/${c.via}/browsers`).catch(() => [])]);
   const conns: any[] = connResp.connections || [];
   const canCopyFromMac = !!connResp.canCopyFromMac;
   const st = conns.find((x) => x.id === c.via);
-  const help = COOKIE_HELP[c.via!];
+  const help = COOKIE_HELP[c.via!] || { site: `https://${c.via}`, need: "a login (session) cookie" };
   const out0 = h("div", { class: "ctest" });
   const showResult = (t: any) => clear(out0, t.ok
     ? h("p", { class: "okline" }, icon("check", 16), ` Works: read ${t.count} ${t.count === 1 ? "item" : "items"}${t.sample?.length ? `, like “${t.sample[0].replace(/^● /, "")}”` : ""}.`)
@@ -1518,7 +1550,7 @@ async function openCookieSetup(c: Connector) {
   } } }, "Save and test");
   openSheet(c.name, [
     h("button", { class: "btn ghost", on: { click: () => openConnections() } }, icon("back", 16), "All connectors"),
-    h("div", { class: "phero" }, connectorTile(c, 52), h("b", null, st?.connected ? (st.problem ? `${c.name} needs reconnecting` : `${c.name} is connected`) : `Connect ${c.name}`),
+    h("div", { class: "phero" }, tile, h("b", null, st?.connected ? (st.problem ? `${c.name} needs reconnecting` : `${c.name} is connected`) : `Connect ${c.name}`),
       h("small", null, st?.problem || (st?.connected ? `${st.detail} · read-only, checked at most every 15 min` : `Teammates read your ${c.blurb.toLowerCase()} through your own login. Read-only.`))),
     st?.connected ? h("div", { class: "stack" },
       h("button", { class: "btn ghost", on: { click: async (e: Event) => { const b = e.currentTarget as HTMLButtonElement; b.disabled = true; show(await call(`/api/connections/${c.via}/test`, { body: {} }).catch((x: any) => ({ ok: false, error: x.message }))); b.disabled = false; } } }, icon("play", 16), "Test now")) : null,

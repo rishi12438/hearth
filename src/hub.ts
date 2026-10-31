@@ -15,7 +15,7 @@ import { Connections } from "./connections.ts";
 import { readPage } from "./browser.ts";
 import { SignedOut } from "./sources/pages.ts";
 import type { Vault } from "./vault.ts";
-import { SOURCES, sourceById, formatItems } from "./sources/index.ts";
+import { SOURCES, sourceById, formatItems, needOf } from "./sources/index.ts";
 import { recall, isActive, validateFact } from "./memory.ts";
 import { describeLocal, inQuietHours, quietEndsAt, localDate, distanceMeters } from "./time.ts";
 import type { TriggerRecipe, Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
@@ -96,7 +96,7 @@ export class Hub {
   readPage = readPage;
   /** Linked computers (your Mac), set by the server. A Mac can copy browser logins up and be re-asked when one dies. */
   computers: { refreshCookies(site?: string): void; canCopyCookies(): boolean } | null = null;
-  private sourceCtx = async () => ({ google: this.google, cookies: (s: "linkedin" | "x") => this.connections.cookies(s), readPage: this.readPage, now: this.clock(), tz: (await this.prefs()).tz });
+  private sourceCtx = async () => ({ google: this.google, cookies: (domain: string) => this.connections.cookies(domain), readPage: this.readPage, now: this.clock(), tz: (await this.prefs()).tz });
   /** Webhook calls that arrived while their hook was still busy with the last one; handled together right after. */
   private webhookQueue = new Map<string, string[]>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -209,7 +209,7 @@ export class Hub {
       proactiveMessagesLeftToday: Math.max(0, prefs.maxProactivePerDay - used),
       location,
       places: places.map((p) => ({ name: p.name, radiusM: p.radiusM })),
-      sources: SOURCES.map((s) => ({ id: s.id, label: s.label, connected: this.connections.connected(s.needs) })),
+      sources: SOURCES.map((s) => ({ id: s.id, label: s.label, connected: typeof s.needs === "function" ? undefined : this.connections.connected(s.needs) })),
       memory: memory.map((f) => ({ id: f.id, fact: f.fact, notebook: f.notebook, importance: f.importance, ...(f.expiresAt ? { expiresAt: f.expiresAt } : {}) })),
       notebooks: (await this.store.all<Notebook>("notebooks")).map((n) => ({ name: n.name, summary: n.summary })),
       // Every plan while there are few; with many, the ones that match this request plus the newest (search finds the rest).
@@ -1972,6 +1972,8 @@ export class Hub {
     await this.archiveQuietRambles();
     const now = this.clock();
     const prefs = await this.prefs();
+    // Before a Mac-fed login lapses by its own expiry, ask the Mac for a fresh one (it may have been re-logged-in).
+    if (this.computers?.canCopyCookies()) for (const d of this.connections.expiringSoon()) this.computers.refreshCookies(d);
     for (const h of await this.store.all<Hook>("hooks")) {
       if (h.status !== "active" || this.firing.has(h.id)) continue;
       if (h.nextAt && new Date(h.nextAt) <= now) {
@@ -2088,13 +2090,14 @@ export class Hub {
     if (!src) return `## ${req.source}\nNo such source. Sources: ${SOURCES.map((s) => s.id).join(", ")}.`;
     const config = src.validate(req.config);
     if (typeof config === "string") return `## ${src.label}\n${config}`;
-    if (!this.connections.connected(src.needs)) return `## ${src.label}\n${src.label} isn't connected. Tell the user to connect it in Menu → Connectors.`;
+    const need = needOf(src, config);
+    if (!this.connections.connected(need)) return `## ${src.label}\n${src.label} isn't connected. Tell the user to connect it in Menu → Connectors.`;
     try {
       const items = await src.items(config, await this.sourceCtx());
-      this.connections.problem(src.needs, null);
+      this.connections.problem(need, null);
       return `## ${src.label}: ${src.describe(config)}\n<untrusted>\n${formatItems(items)}\n</untrusted>`;
     } catch (e: any) {
-      if (e instanceof SignedOut) this.connections.problem(src.needs, e.message);
+      if (e instanceof SignedOut) this.connections.problem(need, e.message);
       return `## ${src.label}\nCouldn't read it: ${e.message}`;
     }
   }
@@ -2103,12 +2106,13 @@ export class Hub {
   private async pollSource(h: Hook & { trigger: { type: "source" } }) {
     const t = h.trigger, src = sourceById(t.source);
     if (!src) { await this.log("hook.source", `${h.title}: unknown source ${t.source}`); return null; }
-    if (!this.connections.connected(src.needs)) { await this.log("hook.source", `${h.title}: ${src.label} isn't connected`); return null; }
+    const need = needOf(src, t.config);
+    if (!this.connections.connected(need)) { await this.log("hook.source", `${h.title}: ${src.label} isn't connected`); return null; }
     let items;
-    try { items = await src.items(t.config as never, await this.sourceCtx()); this.connections.problem(src.needs, null); }
+    try { items = await src.items(t.config as never, await this.sourceCtx()); this.connections.problem(need, null); }
     catch (e: any) {
       await this.log("hook.source", `${h.title}: ${String(e.message).slice(0, 200)}`);
-      if (e instanceof SignedOut) await this.signedOut(src.needs, e.message);
+      if (e instanceof SignedOut) await this.signedOut(need, e.message);
       return null;
     }
     const cur = (await this.store.get<Hook>("hooks", h.id)) || h;
@@ -2122,12 +2126,12 @@ export class Hub {
   }
 
   /** A site signed Hearth out: say so once (not on every check), until it's connected again. */
-  private async signedOut(id: "google" | "linkedin" | "x", message: string) {
-    const was = this.connections.status().find((c) => c.id === id)?.problem;
+  private async signedOut(id: string, message: string) {
+    const was = this.connections.problemFor(id);
     this.connections.problem(id, message);
     this.emit("connections");
     // Fed from your Mac and it's online? Ask it for a fresh login instead of bothering you.
-    if ((id === "linkedin" || id === "x") && this.connections.macSites().includes(id) && this.computers?.canCopyCookies()) {
+    if (id !== "google" && this.connections.macSites().includes(id) && this.computers?.canCopyCookies()) {
       this.computers.refreshCookies(id);
       await this.log("connection.refresh", `${id}: asked your Mac for a fresh login`);
       if (!was) return; // give the Mac a chance before we nag
@@ -2140,7 +2144,7 @@ export class Hub {
 
   /** Connectors' "Save and test": read one list now and say what came back. */
   /** Keep a connection fed from the linked Mac: mark it, then ask the Mac to copy it up now. */
-  copyFromMac(site: "linkedin" | "x") {
+  copyFromMac(site: string) {
     const r = this.connections.wantFromMac(site);
     if (r.value) { this.computers?.refreshCookies(site); this.emit("connections"); }
     return r;
@@ -2148,13 +2152,13 @@ export class Hub {
 
   canCopyCookies() { return !!this.computers?.canCopyCookies(); }
 
-  importFromBrowser(site: "linkedin" | "x", profileId: string) {
+  importFromBrowser(site: string, profileId: string) {
     const r = this.connections.importFromBrowser(site, profileId);
     if (r.value) this.emit("connections");
     return r;
   }
 
-  async testConnection(id: "linkedin" | "x") {
+  async testConnection(id: string) {
     const src = sourceById(id)!;
     try {
       const items = await src.items(src.validate({}), await this.sourceCtx());

@@ -140,23 +140,23 @@ test("a Mac copies a login up over the link; the hub stores it and re-asks on si
 
   // The user chooses "feed LinkedIn from my Mac": the hub records it and would ask any Mac for it.
   hub.connections.wantFromMac("linkedin");
-  expect(hub.connections.macSites()).toEqual(["linkedin"]);
+  expect(hub.connections.macSites()).toEqual(["linkedin.com"]);
 
   cmp.attach("mac1", "Rishi's Mac", ws as any);
   cmp.message("mac1", JSON.stringify({ t: "hello", harnesses: ["claude"], platform: "darwin" }));
   // On hello the hub asks the Mac which logins to copy up.
   const wc = sent.find((m) => m.t === "wantCookies");
-  expect(wc).toEqual({ t: "wantCookies", sites: ["linkedin"], have: {} });
+  expect(wc).toEqual({ t: "wantCookies", sites: ["linkedin.com"], have: {} });
 
   // The Mac decrypts the cookies there and copies them up.
   const payload = JSON.stringify({ cookies: [{ name: "li_at", value: "AQEDAR-real", domain: ".www.linkedin.com", path: "/", secure: true }] });
-  cmp.message("mac1", JSON.stringify({ t: "cookies", site: "linkedin", data: payload, hash: "h1" }));
+  cmp.message("mac1", JSON.stringify({ t: "cookies", site: "linkedin.com", data: payload, hash: "h1" }));
   expect(hub.connections.connected("linkedin")).toBe(true);
   expect(hub.connections.status().find((s) => s.id === "linkedin")).toMatchObject({ detail: expect.stringContaining("from your Mac") });
   expect(readFileSync(hub.vault!.path).includes("AQEDAR-real")).toBe(false); // encrypted at rest
 
   // A missing required cookie is refused (never stored half-connected).
-  cmp.message("mac1", JSON.stringify({ t: "cookies", site: "x", data: JSON.stringify({ cookies: [{ name: "ct0", value: "x", domain: ".x.com" }] }), hash: "h2" }));
+  cmp.message("mac1", JSON.stringify({ t: "cookies", site: "x.com", data: JSON.stringify({ cookies: [{ name: "ct0", value: "x", domain: ".x.com" }] }), hash: "h2" }));
   expect(hub.connections.connected("x")).toBe(false);
 
   // When the session dies, the hub asks the Mac again (fresh want, hash dropped) instead of only nagging.
@@ -166,5 +166,36 @@ test("a Mac copies a login up over the link; the hub stores it and re-asks on si
   await hub.fire(await get(r.value!.id), "check");
   const reask = sent.find((m) => m.t === "wantCookies");
   expect(reask).toBeTruthy();
-  expect(reask.have.linkedin).toBeUndefined(); // dropped, so the Mac re-copies even if it looks unchanged
+  expect(reask.have["linkedin.com"]).toBeUndefined(); // dropped, so the Mac re-copies even if it looks unchanged
+});
+
+test("any domain works, not just presets: save, read a logged-in page, and watch it change", async () => {
+  // An arbitrary site the user pasted cookies for.
+  expect(hub.connections.saveCookies("shop.example.com", "session=abc123; cart=1").value).toBeTruthy();
+  expect(hub.connections.connected("shop.example.com")).toBe(true);
+  expect(hub.connections.status().some((s) => s.id === "shop.example.com" && s.connected)).toBe(true);
+
+  // A generic "site" trigger watches it: one item = the page text, so a change makes it new.
+  page = { url: "https://shop.example.com/orders", data: null };
+  hub.readPage = (async () => ({ url: "https://shop.example.com/orders", text: "Order #1 shipped\nArrives Tuesday", data: null })) as any;
+  const r = await hub.addHook({ title: "My orders", trigger: { type: "source", source: "site", config: { url: "https://shop.example.com/orders", label: "My orders" } }, action: { type: "notify", text: "Orders changed:" } }, "assistant");
+  const id = r.value!.id;
+  await hub.fire(await get(id), "check"); // first look, silent
+  expect((await sent()).length).toBe(0);
+  hub.readPage = (async () => ({ url: "https://shop.example.com/orders", text: "Order #1 delivered\nOrder #2 shipped", data: null })) as any;
+  await hub.fire(await get(id), "check");
+  const out = await sent();
+  expect(out.length).toBe(1);
+  expect(out[0].text).toContain("Orders changed:");
+});
+
+test("a site with no cookies tells you to connect it, and expiry is read from the cookie", () => {
+  // from-mac works for an arbitrary domain too.
+  expect(hub.connections.wantFromMac("bank.example.com").value).toBeTruthy();
+  expect(hub.connections.macSites()).toContain("bank.example.com");
+  // Expiry carried through from a Cookie-Editor style export (expirationDate in seconds).
+  const soon = Math.floor(Date.now() / 1000) + 2 * 86400;
+  hub.connections.saveCookies("news.example.com", JSON.stringify([{ name: "sess", value: "x", domain: ".news.example.com", expirationDate: soon }]));
+  const row = hub.connections.status().find((s) => s.id === "news.example.com")!;
+  expect(row.expiresInDays).toBe(2);
 });
