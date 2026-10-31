@@ -185,6 +185,16 @@ export type Script = Doc & {
 
 export type Activity = Doc & { kind: string; text: string };
 
+/** Audit trail for every access to a connected account (who, what site, when), kept so you can always check later. */
+export type ConnAudit = Doc & {
+  action: "read" | "refresh" | "import" | "paste" | "mac-copy" | "remove";
+  site: string;
+  /** Who did it: a teammate's name, "you", "your Mac", or "system". */
+  by: string;
+  ok?: boolean;
+  detail?: string;
+};
+
 export type Prefs = {
   userName: string;
   tz: string;

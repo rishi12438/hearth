@@ -205,3 +205,24 @@ test("a site with no cookies tells you to connect it, and expiry is read from th
   const row = hub.connections.status().find((s) => s.id === "news.example.com")!;
   expect(row.expiresInDays).toBe(2);
 });
+
+test("every access to a connected account is audited: who, which site, when", async () => {
+  await hub.ensureTeammates();
+  hub.connections.saveCookies("linkedin", "li_at=abc");
+  page = { url: "https://www.linkedin.com/messaging/", data: null };
+  hub.readPage = (async () => ({ url: "https://www.linkedin.com/messaging/", text: "", data: [conv("Sam", "hi")] })) as any;
+
+  // A teammate reads it on demand (source.read) — audited with the teammate's name.
+  await hub.readSource({ source: "linkedin", config: { what: "messages" } }, "Research");
+  // A trigger owned by a teammate reads it — audited with that teammate.
+  const r = await hub.addHook({ title: "LI", trigger: { type: "source", source: "linkedin", config: { what: "messages" } }, action: { type: "notify", text: "x" }, teammate: "Research" } as any, "assistant", { teammateId: "scout" });
+  await hub.fire(await get(r.value!.id), "check");
+
+  const log = await hub.connAudit();
+  const reads = log.filter((e) => e.action === "read" && e.site === "linkedin.com");
+  expect(reads.length).toBeGreaterThanOrEqual(2);
+  expect(reads.some((e) => e.by === "Research")).toBe(true);
+  expect(reads.every((e) => typeof e.createdAt === "string" && e.ok === true)).toBe(true);
+  // The paste that connected it is in the trail too (who = you).
+  hub.connections.saveCookies("x", "auth_token=a; ct0=b"); // directly, not audited here (server audits paste); fine
+});

@@ -809,3 +809,7 @@ p.err { color: var(--danger); margin: 6px 2px 0; }
 .cfeat small { display: block; color: var(--muted); font-size: 14px; margin-top: 2px; }
 .okline { display: flex; align-items: center; gap: 6px; color: var(--ok); font-weight: 600; margin: 6px 0; }
 .crow small.err { color: var(--danger); }
+
+.auditlog { margin: 6px 0; }
+.auditlog summary { cursor: pointer; padding: 6px 2px; }
+.auditlog .list { margin-top: 6px; }

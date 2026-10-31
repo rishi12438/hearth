@@ -1507,9 +1507,20 @@ const COOKIE_HELP: Record<string, { site: string; need: string }> = {
   linkedin: { site: "https://www.linkedin.com", need: "li_at (and JSESSIONID)" },
   x: { site: "https://x.com", need: "auth_token and ct0" },
 };
+/** Who has touched this login, newest first: a plain audit trail the owner can always check. */
+function accessLog(entries: any[], domain: string) {
+  const mine = entries.filter((e) => e.site === domain).slice(-12).reverse();
+  if (!mine.length) return null;
+  const verb: Record<string, string> = { read: "read it", refresh: "refreshed it", import: "imported it", paste: "connected it", "mac-copy": "copied it from your Mac", remove: "disconnected it" };
+  return h("details", { class: "auditlog" },
+    h("summary", { class: "muted small" }, `Access log · ${mine.length}`),
+    h("div", { class: "list" }, mine.map((e) => h("div", { class: "item" },
+      h("span", { class: "grow" }, h("b", { class: "light" }, `${e.by} ${verb[e.action] || e.action}`), h("small", { class: "sub" }, `${relTime(e.createdAt)}${e.ok === false ? " · failed" : ""}${e.detail ? ` · ${e.detail}` : ""}`))))));
+}
+
 async function openCookieSetup(c: Connector | { via: string; name: string; blurb: string; bg?: string; shapes?: Shape[] }) {
   const tile = (c as any).shapes ? connectorTile(c as Connector, 52) : connectorTile({ id: c.via!, name: c.name, blurb: c.blurb, group: "Social", via: c.via, bg: (c as any).bg || "#eef2f7", shapes: GENERIC_SHAPES } as Connector, 52);
-  const [connResp, browsers] = await Promise.all([call("/api/connections").catch(() => ({})), call(`/api/connections/${c.via}/browsers`).catch(() => [])]);
+  const [connResp, browsers, auditAll] = await Promise.all([call("/api/connections").catch(() => ({})), call(`/api/connections/${c.via}/browsers`).catch(() => []), call("/api/conn-audit").catch(() => [])]);
   const conns: any[] = connResp.connections || [];
   const st = conns.find((x) => x.id === c.via);
   const help = COOKIE_HELP[c.via!] || { site: `https://${c.via}`, need: "a login (session) cookie" };
@@ -1546,6 +1557,7 @@ async function openCookieSetup(c: Connector | { via: string; name: string; blurb
     st?.connected ? h("div", { class: "stack" },
       h("button", { class: "btn ghost", on: { click: async (e: Event) => { const b = e.currentTarget as HTMLButtonElement; b.disabled = true; show(await call(`/api/connections/${c.via}/test`, { body: {} }).catch((x: any) => ({ ok: false, error: x.message }))); b.disabled = false; } } }, icon("play", 16), "Test now")) : null,
     out,
+    accessLog(auditAll as any[], st?.domain || c.via!),
     importRow,
     importRow ? h("p", { class: "muted small", style: "text-align:center" }, "— or paste cookies —") : null,
     h("ol", { class: "steps" },
@@ -1559,8 +1571,8 @@ async function openCookieSetup(c: Connector | { via: string; name: string; blurb
 }
 
 async function openGoogleSetup() {
-  let g: any;
-  try { g = await call("/api/google"); } catch (e) { return handleError(e); }
+  let g: any, auditAll: any[] = [];
+  try { [g, auditAll] = await Promise.all([call("/api/google"), call("/api/conn-audit").catch(() => [])]); } catch (e) { return handleError(e); }
   const copyRow = (text: string) => h("button", { class: "codeline", title: "Copy", on: { click: () => navigator.clipboard?.writeText(text).then(() => toast("Copied"), () => toast("Couldn't copy", "err")) } }, h("code", null, text), icon("clip", 14));
   const err = h("p", { class: "err small", hidden: true });
   const fail = (e: any) => { err.textContent = e.message; err.hidden = false; };
@@ -1581,6 +1593,7 @@ async function openGoogleSetup() {
       h("small", null, g.connected ? `${g.email || "Your account"} · read-only` : "Teammates can watch your inbox and calendar and tell you what matters. Read-only.")),
     g.connected ? [
       h("p", { class: "muted" }, "Ask for things like “tell me when the school emails”, “LinkedIn digest every 30 min” or “what's on tomorrow?”. They show up under Triggers in Plans."),
+      accessLog(auditAll, "google"),
       h("div", { class: "stack" },
         h("button", { class: "btn ghost", on: { click: connect } }, icon("repeat", 16), "Reconnect"),
         h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet("Disconnect Google?", "Hearth signs out of your Google account. Gmail and Calendar triggers stop until you connect again.", "Disconnect", async () => { await call("/api/google", { method: "DELETE" }); toast("Google disconnected"); openConnections(); }) } }, "Disconnect Google")),

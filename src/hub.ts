@@ -18,7 +18,7 @@ import type { Vault } from "./vault.ts";
 import { SOURCES, sourceById, formatItems, needOf } from "./sources/index.ts";
 import { recall, isActive, validateFact } from "./memory.ts";
 import { describeLocal, inQuietHours, quietEndsAt, localDate, distanceMeters } from "./time.ts";
-import type { TriggerRecipe, Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
+import type { ConnAudit, TriggerRecipe, Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
 import { Library, validateSkill, validateWorkflow, validateTriggerRecipe, fillDeep, fill, type LibraryItem } from "./library.ts";
 import { cleanTile, cleanOptions, extractTiles, type Tile } from "./tiles.ts";
 import { Files, extractFiles } from "./files.ts";
@@ -162,6 +162,21 @@ export class Hub {
     this.emit("activity", a);
   }
 
+  /** The audit trail for connected accounts: who touched which login, when. Kept long (not trimmed like activity). */
+  async audit(action: ConnAudit["action"], site: string, by: string, extra: { ok?: boolean; detail?: string } = {}) {
+    const e = await this.store.put<ConnAudit>("connAudit", this.doc({ action, site, by, ok: extra.ok, detail: extra.detail?.slice(0, 200) }));
+    await this.trim("connAudit", 5000);
+    this.emit("connAudit", e);
+  }
+  async connAudit() { return (await this.store.recent<ConnAudit>("connAudit", 200)).reverse(); }
+
+  /** A readable actor name for the audit: a teammate's name, else a fallback ("you", "system"). */
+  private async actorName(teammateId?: string | null, fallback = "a teammate") {
+    if (!teammateId) return fallback;
+    if (teammateId === "hearth") return "Hearth";
+    return (await this.teammate(teammateId))?.name || fallback;
+  }
+
   private async trim(col: Collection, keep: number) {
     const rows = await this.store.all(col);
     for (const r of rows.slice(0, Math.max(0, rows.length - keep))) await this.store.remove(col, r.id);
@@ -244,7 +259,7 @@ export class Hub {
     const results: string[] = [];
     for (const r of applied.runs.slice(0, 3)) {
       if (r.name === "@history") { results.push(`## Past conversations matching "${r.args[0]}"\n${await this.searchHistory(r.args[0])}`); continue; }
-      if (r.name === "@source") { results.push(await this.readSource(JSON.parse(r.args[0]))); continue; }
+      if (r.name === "@source") { results.push(await this.readSource(JSON.parse(r.args[0]), teammate?.name || "a teammate")); continue; }
       if (opts.allowedScripts && !opts.allowedScripts.includes(r.name)) {
         results.push(`## ${r.name}\nNot allowed: this recipe may only use ${opts.allowedScripts.join(", ") || "no scripts"}.`);
         continue;
@@ -1281,7 +1296,7 @@ export class Hub {
           case "connection.refresh": {
             const site = String(a.site || "").trim();
             if (!site) break;
-            const r = await this.refreshConnection(site);
+            const r = await this.refreshConnection(site, await this.actorName(where.teammateId));
             done.push({ kind: "memory", label: r.ok ? `Refreshed the ${site} login (${r.how})` : `Couldn't refresh ${site} — reconnect it in Connectors` });
             break;
           }
@@ -2090,7 +2105,7 @@ export class Hub {
   }
 
   /** source.read: what a trigger module sees right now, for a teammate answering a question. */
-  async readSource(req: { source: string; config: unknown }) {
+  async readSource(req: { source: string; config: unknown }, by = "a teammate") {
     const src = sourceById(req.source);
     if (!src) return `## ${req.source}\nNo such source. Sources: ${SOURCES.map((s) => s.id).join(", ")}.`;
     const config = src.validate(req.config);
@@ -2100,9 +2115,11 @@ export class Hub {
     try {
       const items = await src.items(config, await this.sourceCtx());
       this.connections.problem(need, null);
+      await this.audit("read", need, by, { ok: true, detail: `read ${src.label} (${items.length})` });
       return `## ${src.label}: ${src.describe(config)}\n<untrusted>\n${formatItems(items)}\n</untrusted>`;
     } catch (e: any) {
       if (e instanceof SignedOut) this.connections.problem(need, e.message);
+      await this.audit("read", need, by, { ok: false, detail: String(e.message).slice(0, 120) });
       return `## ${src.label}\nCouldn't read it: ${e.message}`;
     }
   }
@@ -2114,9 +2131,11 @@ export class Hub {
     const need = needOf(src, t.config);
     if (!this.connections.connected(need)) { await this.log("hook.source", `${h.title}: ${src.label} isn't connected`); return null; }
     let items;
-    try { items = await src.items(t.config as never, await this.sourceCtx()); this.connections.problem(need, null); }
+    const by = await this.actorName(h.teammateId, "Hearth");
+    try { items = await src.items(t.config as never, await this.sourceCtx()); this.connections.problem(need, null); await this.audit("read", need, by, { ok: true, detail: `${h.title} (${items.length})` }); }
     catch (e: any) {
       await this.log("hook.source", `${h.title}: ${String(e.message).slice(0, 200)}`);
+      await this.audit("read", need, by, { ok: false, detail: String(e.message).slice(0, 120) });
       if (e instanceof SignedOut) await this.signedOut(need, e.message);
       return null;
     }
@@ -2147,22 +2166,25 @@ export class Hub {
    * The agent's one tool to (re)load a logged-in site's cookies on demand, wherever the hub runs:
    * a server hub asks the linked Mac; a laptop hub reads its own browser. Logged every time.
    */
-  async refreshConnection(site: string): Promise<{ ok: boolean; how: string }> {
+  async refreshConnection(site: string, by = "a teammate"): Promise<{ ok: boolean; how: string }> {
     const domain = this.connections.domainFor(site) || site;
     if (this.computers?.canCopyCookies()) {
       this.connections.wantFromMac(site);
       this.computers.refreshCookies(domain);
       this.emit("connections");
-      await this.log("connection.refresh", `${domain}: asked your Mac for a fresh login`);
+      await this.log("connection.refresh", `${domain}: ${by} asked your Mac for a fresh login`);
+      await this.audit("refresh", domain, by, { ok: true, detail: "asked the Mac" });
       return { ok: true, how: "mac" };
     }
     const opt = this.connections.browserOptions(site)[0];
     if (opt) {
       const r = this.importFromBrowser(site, opt.id);
-      await this.log("connection.refresh", `${domain}: ${r.value ? `read from ${opt.label}` : `couldn't read it (${r.error})`}`);
+      await this.log("connection.refresh", `${domain}: ${by} ${r.value ? `read from ${opt.label}` : `couldn't read it (${r.error})`}`);
+      await this.audit("refresh", domain, by, { ok: !!r.value, detail: r.value ? `read from ${opt.label}` : r.error });
       return { ok: !!r.value, how: "browser" };
     }
     await this.log("connection.refresh", `${domain}: no Mac online and no local browser to read`);
+    await this.audit("refresh", domain, by, { ok: false, detail: "no Mac or local browser" });
     return { ok: false, how: "none" };
   }
 

@@ -14,7 +14,8 @@ import { hasLogin, readLogin } from "./computer.ts";
 import { homedir } from "node:os";
 import { MAX_FILE_BYTES } from "./files.ts";
 import { fetchPublic } from "./watch.ts";
-import { COOKIE_SITES, isCookieSite } from "./connections.ts";
+import { isCookieSite } from "./connections.ts";
+import { labelFor } from "./cookie-sites.ts";
 import { appCsp } from "./apps.ts";
 import { isActive, search } from "./memory.ts";
 import { isValidTimeZone } from "./time.ts";
@@ -88,7 +89,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
     // Browser logins (LinkedIn, X) the user chose to feed from their Mac: the Mac decrypts and copies them up here.
     cookieSites: () => hub.connections.macSites(),
     cookieHave: (site) => hub.connections.cookieHave(site),
-    onCookies: (site, data) => { hub.connections.receiveFromMac(site, data); hub.emit("connections"); } });
+    onCookies: (site, data) => { hub.connections.receiveFromMac(site, data); hub.emit("connections"); hub.audit("mac-copy", site, "your Mac", { ok: true }).catch(() => {}); } });
   const linkedComputers = async () => (await store.all<Device>("devices")).filter((d) => d.role === "computer");
   const recount = async () => { computers.known = (await linkedComputers()).length; };
   await recount();
@@ -495,19 +496,21 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           ownerOnly();
           const r = hub.importFromBrowser(id, String((await body(req)).profile || ""));
           if (r.error) throw new HttpError(400, r.error);
-          await hub.log("connection.saved", `${COOKIE_SITES[id].label} imported from browser`);
+          await hub.log("connection.saved", `${labelFor(id)} imported from browser`);
+          await hub.audit("import", hub.connections.domainFor(id) || id, "you", { ok: true });
           return json({ status: r.value, test: await hub.testConnection(id) });
         }
         if (method === "PUT" && !seg[3]) {
           ownerOnly();
           const r = hub.connections.saveCookies(id, String((await body(req)).cookies || ""));
           if (r.error) throw new HttpError(400, r.error);
-          await hub.log("connection.saved", `${COOKIE_SITES[id].label} cookies saved`);
+          await hub.log("connection.saved", `${labelFor(id)} cookies saved`);
+          await hub.audit("paste", hub.connections.domainFor(id) || id, "you", { ok: true });
           hub.emit("connections");
           return json({ status: r.value, test: await hub.testConnection(id) });
         }
         if (method === "POST" && seg[3] === "test") { ownerOnly(); return json(await hub.testConnection(id)); }
-        if (method === "DELETE" && !seg[3]) { ownerOnly(); const st = hub.connections.remove(id); await hub.log("connection.removed", `${COOKIE_SITES[id].label} disconnected`); hub.emit("connections"); return json(st); }
+        if (method === "DELETE" && !seg[3]) { ownerOnly(); const st = hub.connections.remove(id); await hub.log("connection.removed", `${labelFor(id)} disconnected`); await hub.audit("remove", hub.connections.domainFor(id) || id, "you", { ok: true }); hub.emit("connections"); return json(st); }
         break;
       }
       case "trigger-recipes": {
@@ -747,6 +750,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         break;
       }
       case "activity": return json((await store.recent("activity", 200)).reverse());
+      case "conn-audit": { ownerOnly(); return json(await hub.connAudit()); }
       case "export": {
         const data = await hub.exportAll();
         return new Response(JSON.stringify(data, null, 2), { headers: { "Content-Type": "application/json", "Content-Disposition": `attachment; filename="hearth-export-${new Date().toISOString().slice(0, 10)}.json"`, "Cache-Control": "no-store" } });
