@@ -75,6 +75,8 @@ export type Hook = Doc & {
   threadId?: string;
   /** Watch and check hooks: what the page or script said last time. */
   seen?: { hash: string; text: string; at: string };
+  /** A webhook call that came in during quiet hours, waiting to be handled when they end. */
+  held?: { reason: string; extra: string };
 };
 
 // ---- Rambles: each chat is a thread; the orchestrator splits what you say into jobs for teammates. ----

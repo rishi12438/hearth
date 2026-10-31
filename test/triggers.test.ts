@@ -103,3 +103,22 @@ test("a check hook runs its script with no model and speaks only when there's so
   expect(msgs.length).toBe(1);
   expect(msgs[0].text).toBe("New drops:\na\nb\nc");
 });
+
+test("a webhook call in quiet hours is held and handled when they end", async () => {
+  let now = zonedToUtc(2026, 10, 31, 2, 0, TZ); // 2am
+  hub.clock = () => now;
+  const r = await hub.addHook({ title: "School email", trigger: { type: "webhook" }, action: { type: "notify", text: "Email from school" } }, "assistant");
+  const token = (r.value!.trigger as { token: string }).token;
+  await hub.webhook(token, '{"subject":"Uniforms due"}');
+  for (let i = 0; i < 100 && !(await get(r.value!.id)).held; i++) await Bun.sleep(10);
+  const held = await get(r.value!.id);
+  expect(held.held?.extra).toContain("Uniforms due");
+  expect(held.nextAt).not.toBeNull();
+  expect((await sent()).length).toBe(0);
+  now = new Date(new Date(held.nextAt!).getTime() + 60_000);
+  await hub.tick();
+  expect((await sent()).map((m) => m.text)).toEqual(["Email from school"]);
+  const after = await get(r.value!.id);
+  expect(after.held).toBeUndefined();
+  expect(after.nextAt).toBeNull();
+});

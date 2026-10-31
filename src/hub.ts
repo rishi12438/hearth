@@ -1868,7 +1868,8 @@ export class Hub {
           await this.log("hook.missed", `${h.title}: missed while the hub was off`);
           continue;
         }
-        await this.fire(h, describeTrigger(h.trigger, prefs.tz), lateMin > 10);
+        if (h.held) await this.fire({ ...h, held: undefined }, h.held.reason, false, h.held.extra);
+        else await this.fire(h, describeTrigger(h.trigger, prefs.tz), lateMin > 10);
       } else if (h.trigger.type === "silence") {
         const since = prefs.lastUserAt || h.createdAt;
         const quietFor = (now.getTime() - new Date(since).getTime()) / 3.6e6;
@@ -1959,8 +1960,11 @@ export class Hub {
       const gate = isReview ? "ok" : await this.gate(h, now);
       if (gate !== "ok") {
         const prefs = await this.prefs();
-        if (gate === "quiet" && h.nextAt) {
-          await this.store.put<Hook>("hooks", { ...h, nextAt: quietEndsAt(now, prefs.tz, prefs.quietEnd).toISOString() });
+        if (gate === "quiet" && (h.nextAt || extra !== undefined)) {
+          // A webhook call keeps what it sent (calls during the night pile up, newest last) and is handled in the morning.
+          const cur = (await this.store.get<Hook>("hooks", h.id)) || h;
+          const held = extra === undefined ? cur.held : { reason, extra: [cur.held?.extra, extra].filter(Boolean).join("\n\n").slice(-30_000) };
+          await this.store.put<Hook>("hooks", { ...cur, held, nextAt: quietEndsAt(now, prefs.tz, prefs.quietEnd).toISOString() });
           await this.log("hook.held", `${h.title}: held until quiet hours end`);
         } else {
           await this.reschedule(h, now);
@@ -1969,6 +1973,7 @@ export class Hub {
         return;
       }
       await this.reschedule(h, now); // before running, so a slow brain can't double-fire
+      { const c = await this.store.get<Hook>("hooks", h.id); if (c?.held) await this.store.put<Hook>("hooks", { ...c, held: undefined }); }
       // A watch speaks only when its page changed. Looked at after the gate, so a change in quiet hours isn't lost.
       if (h.trigger.type === "watch" && extra === undefined) {
         const changed = await this.lookAt(h as Hook & { trigger: { type: "watch" } });
