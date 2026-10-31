@@ -636,7 +636,7 @@ function drawHome() {
     section("rambles", "Active rambles", active.length ? active.map(channelRow)
       : [h("p", { class: "hempty" }, "Tap + and ramble. Each ramble becomes a channel; it archives itself an hour after everything's done.")],
       h("button", { class: "chev", "aria-label": "New ramble", on: { click: () => { location.hash = "#c/new"; } } }, icon("plus", 20))),
-    section("apps", "Mini apps", S.apps.length ? [...S.apps].sort((a, b) => Number(b.pinned) - Number(a.pinned)).map((a) => h("button", { class: "hrow", on: { click: () => { location.hash = `#a/${a.id}`; } } },
+    section("apps", "Mini apps", S.apps.some((a) => !a.inline) ? [...S.apps].filter((a) => !a.inline).sort((a, b) => Number(b.pinned) - Number(a.pinned)).map((a) => h("button", { class: "hrow", on: { click: () => { location.hash = `#a/${a.id}`; } } },
       appIcon(a, 30), h("span", { class: "grow" }, a.title), h("small", null, mate(a.teammateId).name)))
       : [h("p", { class: "hempty" }, "Little apps your teammates build for you: flashcards, trackers, a today view. Ask for one anywhere, or say \"pin it to Home\".")],
       h("button", { class: "chev", "aria-label": "New app", on: { click: newApp } }, icon("plus", 20))),
@@ -977,6 +977,7 @@ function answer(j: any) {
   return row({ ...who, badge: h("small", { class: "jobmeta" }, metaLine(j)) }, at, [
     tiles.length && (j.how === "skill" || j.how === "workflow") ? null : richText(j.status === "failed" ? `Couldn't do it: ${j.result || "it failed"}` : j.result || "Done."),
     tiles.map(tile),
+    artifacts(j),
     appCards(j),
     (j.fileIds || []).map(fileCard),
     did.length ? h("div", { class: "did-line" }, icon("check", 12), did.join(" · ")) : null,
@@ -2297,9 +2298,25 @@ function appIcon(a: any, size = 30) {
 /** "Built Portuguese flashcards" in a job becomes a card you tap to open the app. */
 function appCards(j: any) {
   const ids = [...new Set((j.did || []).filter((d: any) => d.kind === "app" && d.id).map((d: any) => d.id))] as string[];
-  return ids.map((id) => S.apps.find((x) => x.id === id)).filter(Boolean).map((a: any) => {
+  return ids.map((id) => S.apps.find((x) => x.id === id)).filter((a: any) => a && !a.inline).map((a: any) => {
     return h("button", { class: "appcard", on: { click: (e: Event) => { e.stopPropagation(); location.hash = `#a/${a.id}`; } } },
       appIcon(a, 40), h("span", { class: "grow" }, h("b", null, a.title), h("small", null, a.description || "Tap to open")), h("span", { class: "openpill" }, "Open"));
+  });
+}
+
+/** Artifacts: one-off interactive pieces a teammate made for this answer, shown in place at their own height. */
+function artifacts(j: any) {
+  const ids = [...new Set((j.did || []).filter((d: any) => d.kind === "app" && d.id).map((d: any) => d.id))] as string[];
+  return ids.map((id) => S.apps.find((x) => x.id === id)).filter((a: any) => a?.inline).map((a: any) => {
+    const box = h("div", { class: "artframe" }, h("p", { class: "muted small center" }, "Loading…"));
+    appFrame(a.id, a.title, "inline").then((f) => { f.classList.add("autoh"); f.setAttribute("scrolling", "no"); clear(box, f); }).catch(() => clear(box, h("p", { class: "muted small center" }, "Couldn't open this")));
+    return h("div", { class: "artifact" }, box,
+      h("div", { class: "artfoot" }, h("b", null, a.title), a.versions ? h("small", null, `v${a.versions + 1}`) : null, h("span", { class: "grow" }),
+        h("button", { class: "linkbtn", on: { click: () => { location.hash = `#a/${a.id}`; } } }, "Full screen"),
+        h("button", { class: "linkbtn", on: { click: async (e: Event) => {
+          (e.currentTarget as HTMLButtonElement).disabled = true;
+          try { await call(`/api/apps/${a.id}`, { method: "PATCH", body: { inline: false } }); toast(`${a.title} is in your Mini apps`); } catch (err) { handleError(err); }
+        } } }, "Keep as app")));
   });
 }
 
@@ -2333,13 +2350,21 @@ window.addEventListener("message", (e: MessageEvent) => {
     const a = S.apps.find((x) => x.id === id);
     call(`/api/apps/${id}/ask`, { body: { text: String(e.data.text || "") } }).then(() => toast(`Asked ${mate(a?.teammateId).name}`)).catch(handleError);
   } else if (e.data.hearth === "open") location.hash = `#a/${id}`;
+  else if (e.data.hearth === "height") {
+    const f = frameEls.get(e.source as Window);
+    if (f?.classList.contains("autoh")) f.style.height = `${Math.max(80, Math.min(720, Number(e.data.h) || 0))}px`;
+  }
 });
 
 /** A sandboxed frame for an app (opaque origin, no network), registered so its messages are accepted. */
-async function appFrame(id: string, title: string, view: "full" | "small" | "wide" | "large" = "full") {
+const frameEls = new Map<Window, HTMLIFrameElement>();
+async function appFrame(id: string, title: string, view: "full" | "inline" | "small" | "wide" | "large" = "full") {
   const { url } = await call(`/api/apps/${id}/open`, { body: { view } });
   const f = h("iframe", { sandbox: "allow-scripts allow-forms", src: activeHub()!.url + url, title }) as HTMLIFrameElement;
-  f.addEventListener("load", () => { for (const [w, x] of appFrames) if (x === id && !w.parent) appFrames.delete(w); if (f.contentWindow) appFrames.set(f.contentWindow, id); });
+  f.addEventListener("load", () => {
+    for (const [w, x] of appFrames) if (x === id && !w.parent) { appFrames.delete(w); frameEls.delete(w); }
+    if (f.contentWindow) { appFrames.set(f.contentWindow, id); frameEls.set(f.contentWindow, f); }
+  });
   return f;
 }
 

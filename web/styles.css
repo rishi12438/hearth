@@ -729,3 +729,12 @@ p.err { color: var(--danger); margin: 6px 2px 0; }
 .mstop:last-child { border-bottom: 0; }
 .mstop b { display: block; font-size: 14.5px; color: var(--ink); }
 .mstop small { display: block; font-size: 12.5px; color: var(--muted); }
+
+/* ---------- artifacts: one-off interactive pieces inside an answer ---------- */
+.artifact { margin: 8px 0 4px; border-radius: 20px; overflow: hidden; background: var(--card); box-shadow: var(--shadow); max-width: 720px; }
+.artframe iframe { display: block; width: 100%; height: 320px; border: 0; background: transparent; transition: height .2s ease; }
+.artframe p { padding: 30px 0; margin: 0; }
+.artfoot { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--line); font-size: 13.5px; }
+.artfoot b { font-weight: 650; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.artfoot small { color: var(--muted); }
+.artfoot .linkbtn { margin-top: 0; font-size: 13.5px; color: var(--ink); }

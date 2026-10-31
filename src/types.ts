@@ -293,6 +293,8 @@ export type MiniApp = Doc & {
   pinned: boolean;
   size?: AppSize;
   order?: number;
+  /** An artifact: shown inside the answer that made it, not in Mini apps (until you keep it). */
+  inline?: boolean;
 };
 /** What an app saved for itself (flashcard progress, ticked boxes). */
 export type AppState = Doc & { state: unknown };

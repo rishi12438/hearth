@@ -155,3 +155,19 @@ test("dictation clean-up keeps the words when the model output looks wrong", asy
   expect(out).toContain("remind me to call mom at five");
   expect(out).not.toContain("uh");
 });
+
+test("artifacts: inline apps show in the answer at their own height, can use hub pictures, and can be kept as apps", async () => {
+  const r = await hub.applyActions([{ type: "app.save", name: "japan-days", title: "Japan, day by day", inline: true, html: "<html><head></head><body>days</body></html>", data: { days: 7 } }], "");
+  const a = (await hub.apps.byName("japan-days"))!;
+  expect(a.inline).toBe(true);
+  expect(r.done.some((d: any) => d.kind === "app" && d.id === a.id)).toBe(true);
+  const page = (await hub.apps.page(hub.apps.ticket(a.id, "inline"), { origin: "https://hub.example", tileKey: "k1" }))!;
+  expect(page).toContain('view: "inline"');
+  expect(page).toContain("ResizeObserver"); // reports its height to the app
+  expect(page).toContain('"https://hub.example" + "/emoji/"');
+  expect(appCsp("'self'", "https://hub.example")).toContain("img-src data: blob: https://hub.example");
+  expect(appCsp("'self'", "https://hub.example")).toContain("connect-src 'none'"); // still no network
+  await hub.applyActions([{ type: "app.save", name: "japan-days", html: "<html><head></head><body>days v2</body></html>" }], "");
+  const b = (await hub.apps.byName("japan-days"))!;
+  expect([b.inline, b.versions.length]).toEqual([true, 1]); // evolves in place
+});

@@ -263,7 +263,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
         break;
       }
       case "apps": {
-        const meta = (a: MiniApp) => ({ id: a.id, name: a.name, title: a.title, description: a.description, teammateId: a.teammateId, threadId: a.threadId, pinned: a.pinned, size: a.size === ("tall" as string) ? "large" : a.size || "small", order: a.order, createdAt: a.createdAt, updatedAt: a.updatedAt, versions: a.versions.length });
+        const meta = (a: MiniApp) => ({ id: a.id, name: a.name, title: a.title, description: a.description, teammateId: a.teammateId, threadId: a.threadId, pinned: a.pinned, inline: !!a.inline, size: a.size === ("tall" as string) ? "large" : a.size || "small", order: a.order, createdAt: a.createdAt, updatedAt: a.updatedAt, versions: a.versions.length });
         if (method === "GET" && !id) return json((await hub.apps.list()).map(meta).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))));
         const a = id ? await store.get<MiniApp>("apps", id) : null;
         if (!a) break;
@@ -276,6 +276,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
           const b = await body(req);
           if (b.pinned !== undefined || b.size !== undefined) await hub.apps.pin(a.name, b.pinned === undefined ? a.pinned : !!b.pinned, b.size);
           if (typeof b.title === "string" && b.title.trim()) await store.put<MiniApp>("apps", { ...(await store.get<MiniApp>("apps", a.id))!, title: b.title.trim().slice(0, 60) });
+          if (b.inline === false) await store.put<MiniApp>("apps", { ...(await store.get<MiniApp>("apps", a.id))!, inline: false }); // "Keep as app"
           hub.emit("apps");
           return json({ ok: true });
         }
@@ -510,11 +511,13 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
       if (req.method !== "GET" && req.method !== "HEAD") return finish(new Response("Method not allowed", { status: 405 }));
       // A mini app, by short-lived ticket: sandboxed (opaque origin), no network, framable only by the app itself.
       if (url.pathname.startsWith("/app-frame/")) {
-        const page = await hub.apps.page(url.pathname.slice("/app-frame/".length));
+        // The hub's own address, so an app may show its emoji and map pictures (and nothing else).
+        const hubOrigin = config.behindProxy && req.headers.get("x-forwarded-host") ? `${req.headers.get("x-forwarded-proto") || "https"}://${req.headers.get("x-forwarded-host")}` : `${url.protocol}//${host}`;
+        const page = await hub.apps.page(url.pathname.slice("/app-frame/".length), { origin: hubOrigin, tileKey });
         if (!page) return finish(new Response("This app link expired. Close it and open the app again.", { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8" } }));
         return finish(new Response(page, { headers: {
           "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Frame-Options": "SAMEORIGIN",
-          "Content-Security-Policy": appCsp(["'self'", ...config.allowedOrigins].join(" ")),
+          "Content-Security-Policy": appCsp(["'self'", ...config.allowedOrigins].join(" "), hubOrigin),
         } }));
       }
       // Map tiles (OpenStreetMap by default, HEARTH_MAP_TILES to change): fetched by the hub (the phone never talks to the map service), cached on disk.

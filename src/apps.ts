@@ -16,7 +16,7 @@ export const MAX_DATA = 256_000;
 export const MAX_STATE = 48_000;
 const KEEP_VERSIONS = 10;
 const TICKET_MS = 10 * 60_000;
-type View = "full" | AppSize;
+type View = "full" | "inline" | AppSize;
 
 /** A size from the model or the app ("tall" is the old name for large). */
 export function appSize(v: unknown, fallback: AppSize = "small"): AppSize {
@@ -24,21 +24,26 @@ export function appSize(v: unknown, fallback: AppSize = "small"): AppSize {
 }
 
 /** The bridge every app gets: window.hearth = { data, state, view, save(state), ask(text), open(), ready(cb) }. */
-function bridge(data: unknown, state: unknown, view: View) {
+function bridge(data: unknown, state: unknown, view: View, assets: { origin: string; tileKey: string }) {
   const j = (v: unknown) => JSON.stringify(v ?? null).replace(/</g, "\\u003c").replace(/\u2028|\u2029/g, " ");
   return `<script>
 window.hearth = { data: ${j(data)}, state: ${j(state)}, view: ${j(view)},
+  /** Pictures an app may show (the only things it can load): 3D emoji and map tiles from the hub. */
+  emoji(e) { return ${j(assets.origin)} + "/emoji/" + Array.from(String(e)).map((c) => c.codePointAt(0).toString(16)).join("-") + ".webp"; },
+  tile(z, x, y) { return ${j(assets.origin)} + "/tiles/" + z + "/" + x + "/" + y + ".png?k=" + ${j(assets.tileKey)}; },
   save(s) { this.state = s; parent.postMessage({ hearth: "save", state: s }, "*"); },
   ask(text) { parent.postMessage({ hearth: "ask", text: String(text).slice(0, 2000) }, "*"); },
   open() { parent.postMessage({ hearth: "open" }, "*"); },
   ready(cb) { document.readyState === "loading" ? document.addEventListener("DOMContentLoaded", cb) : cb(); } };
+${view === "inline" ? `window.hearth.ready(() => { const tell = () => parent.postMessage({ hearth: "height", h: document.documentElement.scrollHeight }, "*");
+  new ResizeObserver(tell).observe(document.documentElement); tell(); });` : ""}
 </script>`;
 }
 
-export function appCsp(frameAncestors: string) {
+export function appCsp(frameAncestors: string, hubOrigin = "") {
   return [
     "sandbox allow-scripts allow-forms", "default-src 'none'", "script-src 'unsafe-inline'", "style-src 'unsafe-inline'",
-    "img-src data: blob:", "media-src data: blob:", "font-src data:", "connect-src 'none'", "form-action 'none'",
+    `img-src data: blob: ${hubOrigin}`.trim(), "media-src data: blob:", "font-src data:", "connect-src 'none'", "form-action 'none'",
     "base-uri 'none'", `frame-ancestors ${frameAncestors}`,
   ].join("; ");
 }
@@ -56,7 +61,7 @@ export class Apps {
   }
 
   /** Create or change an app. html replaces the code (old version kept); data replaces the data. */
-  async save(input: { name?: unknown; title?: unknown; description?: unknown; html?: unknown; data?: unknown }, by: { teammateId?: string; threadId?: string; jobId?: string }) {
+  async save(input: { name?: unknown; title?: unknown; description?: unknown; html?: unknown; data?: unknown; inline?: unknown }, by: { teammateId?: string; threadId?: string; jobId?: string }) {
     const name = String(input.name || "").toLowerCase().trim();
     if (!APP_NAME_RE.test(name)) return { error: "App name must be lowercase letters, digits and dashes." };
     const html = typeof input.html === "string" ? input.html : undefined;
@@ -80,6 +85,7 @@ export class Apps {
       teammateId: by.teammateId || prev?.teammateId,
       threadId: prev?.threadId || by.threadId,
       jobId: by.jobId || prev?.jobId,
+      inline: prev ? prev.inline && input.inline !== false : input.inline === true,
       updatedAt: now,
     });
     return { value: app, created: !prev, changedCode: html !== undefined && (!prev || prev.sha256 !== app.sha256) };
@@ -120,17 +126,17 @@ export class Apps {
     const now = Date.now();
     for (const [k, v] of this.tickets) if (v.exp < now) this.tickets.delete(k);
     const t = randomBytes(24).toString("base64url");
-    this.tickets.set(t, { appId, exp: now + TICKET_MS, view: view === "full" || view === undefined ? "full" : appSize(view) });
+    this.tickets.set(t, { appId, exp: now + TICKET_MS, view: view === "full" || view === undefined ? "full" : view === "inline" ? "inline" : appSize(view) });
     return t;
   }
 
   /** The page for a ticket: the app's html with the bridge in front. */
-  async page(ticket: string) {
+  async page(ticket: string, assets: { origin: string; tileKey: string } = { origin: "", tileKey: "" }) {
     const t = this.tickets.get(ticket);
     if (!t || t.exp < Date.now()) return null;
     const a = await this.store.get<MiniApp>("apps", t.appId);
     if (!a) return null;
-    const head = `<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">${bridge(a.data, await this.state(a.id), t.view)}`;
+    const head = `<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">${bridge(a.data, await this.state(a.id), t.view, assets)}`;
     return /<head[^>]*>/i.test(a.html) ? a.html.replace(/<head[^>]*>/i, (m) => m + head) : head + a.html;
   }
 }
