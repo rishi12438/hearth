@@ -42,6 +42,9 @@
 
 **Think of it as Muse, but open source, and you own the data and the memory.**
 
+- **Use your own laptop and your own credentials.** Hearth runs on your machine and uses the Claude Code or Codex login you already have. No new account, no API keys handed to anyone.
+- **Don't want to keep your laptop open?** Put the same hub on a small always-on server or cloud sandbox, and it keeps working (reminders, routines, research) while your laptop is closed. Run both if you like: the app keeps a list of hubs and switches between them.
+
 Most assistants keep your life on someone else's servers and only answer when you ask. Hearth runs on a box you own and lives at an address you own, like `https://yournameassistant.com`. It uses `claude -p`, `codex exec` or any CLI you choose to do the thinking, and it speaks first when you've told it what matters: reminders, check-ins, a page that changed, a bill that's due.
 
 Everything it learns about you sits in a database on your server. You can read it, edit it, export it as one file or wipe it. There's no relay, no account and no middleman: your phone talks straight to your hub over HTTPS.
@@ -50,7 +53,7 @@ Everything it learns about you sits in a database on your server. You can read i
 
 | | What | Cost |
 |---|---|---|
-| **A server** | Anything always on that runs Linux or macOS: a small VPS (AWS Lightsail, Hetzner, DigitalOcean), a home server or a spare Mac. Your laptop works for trying it out, but reminders only fire while it's awake. | about $5/month |
+| **A machine** | Start on your own laptop. To use it without your laptop, add anything always on that runs Linux or macOS: a small VPS or cloud sandbox (AWS Lightsail, Hetzner, DigitalOcean), a home server or a spare Mac. | free on your laptop, about $5/month for a server |
 | **A domain** | So you can open it from anywhere at something like `https://yournameassistant.com`. Any registrar works; HTTPS certificates are automatic and free. | about $10/year |
 | **A brain** | [Claude Code](https://claude.com/claude-code) or [Codex](https://github.com/openai/codex), logged in on the server. Your existing subscription covers it, and the hub never stores model keys. | your plan |
 | **A phone** | Open your domain and tap **Add to Home Screen**. It runs like an app, with push notifications (iPhone needs iOS 16.4 or newer). | free |
