@@ -84,11 +84,16 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   const access = new AccessRequests();
   // Computers linked to this hub (your Mac): brain calls run there when one is online, here (the cloud) when none is.
   const computers = new Computers({ dataDir: config.dataDir, homeDir: homedir(), acceptCopies: config.target === "lightsail", readLogin: drivers.readLogin ?? readLogin,
-    hasLogin: drivers.readLogin ? (i) => !!drivers.readLogin!(i) : hasLogin });
+    hasLogin: drivers.readLogin ? (i) => !!drivers.readLogin!(i) : hasLogin,
+    // Browser logins (LinkedIn, X) the user chose to feed from their Mac: the Mac decrypts and copies them up here.
+    cookieSites: () => hub.connections.macSites(),
+    cookieHave: (site) => hub.connections.cookieHave(site),
+    onCookies: (site, data) => { hub.connections.receiveFromMac(site, data); hub.emit("connections"); } });
   const linkedComputers = async () => (await store.all<Device>("devices")).filter((d) => d.role === "computer");
   const recount = async () => { computers.known = (await linkedComputers()).length; };
   await recount();
   hub.brain.remote = computers;
+  hub.computers = computers;
   computers.onChange = () => hub.emit("computers", {});
   computers.onOnline = () => { hub.resumeForComputer().catch((e) => console.error(e)); };
   computers.start();
@@ -483,8 +488,14 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         break;
       }
       case "connections": {
-        if (method === "GET" && !id) return json(hub.connections.status());
+        if (method === "GET" && !id) return json({ connections: hub.connections.status(), canCopyFromMac: hub.canCopyCookies() });
         if (!isCookieSite(id)) break;
+        if (method === "POST" && seg[3] === "from-mac") {
+          ownerOnly();
+          const r = hub.copyFromMac(id);
+          if (r.error) throw new HttpError(400, r.error);
+          return json({ status: r.value, started: hub.canCopyCookies() });
+        }
         if (method === "GET" && seg[3] === "browsers") { ownerOnly(); return json(hub.connections.browserOptions(id)); }
         if (method === "POST" && seg[3] === "import") {
           ownerOnly();

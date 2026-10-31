@@ -1430,8 +1430,9 @@ function connectorTile(c: Connector, size = 40) {
 
 /** Connectors, laid out like an app store: search, Available / Connected, Featured, then groups. */
 async function openConnections(tab: "available" | "connected" = "available") {
-  let g: any, conns: any[];
-  try { [g, conns] = await Promise.all([call("/api/google"), call("/api/connections")]); } catch (e) { return handleError(e); }
+  let g: any, connResp: any;
+  try { [g, connResp] = await Promise.all([call("/api/google"), call("/api/connections")]); } catch (e) { return handleError(e); }
+  const conns: any[] = connResp.connections || connResp;
   const conn = (c: Connector) => conns.find((x) => x.id === c.via);
   const isOn = (c: Connector) => !!conn(c)?.connected;
   const open = (c: Connector) => (c.via === "google" ? openGoogleSetup() : openCookieSetup(c));
@@ -1476,8 +1477,10 @@ const COOKIE_HELP: Record<string, { site: string; need: string }> = {
   x: { site: "https://x.com", need: "auth_token and ct0" },
 };
 async function openCookieSetup(c: Connector) {
-  const [conns, browsers] = await Promise.all([call("/api/connections").catch(() => []), call(`/api/connections/${c.via}/browsers`).catch(() => [])]);
-  const st = (conns as any[]).find((x) => x.id === c.via);
+  const [connResp, browsers] = await Promise.all([call("/api/connections").catch(() => ({})), call(`/api/connections/${c.via}/browsers`).catch(() => [])]);
+  const conns: any[] = connResp.connections || [];
+  const canCopyFromMac = !!connResp.canCopyFromMac;
+  const st = conns.find((x) => x.id === c.via);
   const help = COOKIE_HELP[c.via!];
   const out0 = h("div", { class: "ctest" });
   const showResult = (t: any) => clear(out0, t.ok
@@ -1493,6 +1496,14 @@ async function openCookieSetup(c: Connector) {
     } } }, `Import from ${b.label}`)),
     out0,
     h("p", { class: "muted small" }, "The first time, macOS asks to let Hearth use the browser's Safe Storage key — choose Always Allow. Cookies only, kept encrypted in the hub, never shown.")) : null;
+  // Hub on a server: pull the login from your linked Mac, which decrypts it there and copies it up (and re-copies when it expires).
+  const macRow = canCopyFromMac ? h("div", { class: "stack" },
+    h("button", { class: "btn primary big", on: { click: async (e: Event) => {
+      const b = e.currentTarget as HTMLButtonElement; b.disabled = true; b.textContent = "Asking your Mac…"; clear(out0);
+      try { await call(`/api/connections/${c.via}/from-mac`, { body: {} }); clear(out0, h("p", { class: "okline" }, icon("check", 16), " Asked your Mac. It copies the login up and keeps it fresh.")); setTimeout(() => openCookieSetup(c), 2500); }
+      catch (err: any) { showResult({ ok: false, error: err.message }); b.disabled = false; b.textContent = "Copy from my Mac"; }
+    } } }, "Copy from my Mac"),
+    h("p", { class: "muted small" }, "Your Mac reads the login there (read-only) and copies it up. When it expires, the hub asks your Mac again.")) : null;
   const box = h("textarea", { class: "field mono", rows: 4, placeholder: `Paste cookies: the Cookie-Editor export, or ${help.need.replace(/ \(.*\)/, "")} as name=value; name=value`, autocapitalize: "off", spellcheck: false }) as HTMLTextAreaElement;
   const out = h("div", { class: "ctest" });
   const show = (t: any) => clear(out, t.ok
@@ -1512,6 +1523,8 @@ async function openCookieSetup(c: Connector) {
     st?.connected ? h("div", { class: "stack" },
       h("button", { class: "btn ghost", on: { click: async (e: Event) => { const b = e.currentTarget as HTMLButtonElement; b.disabled = true; show(await call(`/api/connections/${c.via}/test`, { body: {} }).catch((x: any) => ({ ok: false, error: x.message }))); b.disabled = false; } } }, icon("play", 16), "Test now")) : null,
     out,
+    macRow,
+    macRow ? h("p", { class: "muted small", style: "text-align:center" }, importRow ? "— or —" : "") : null,
     importRow,
     importRow ? h("p", { class: "muted small", style: "text-align:center" }, "— or paste cookies —") : null,
     h("ol", { class: "steps" },

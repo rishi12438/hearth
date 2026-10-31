@@ -94,6 +94,8 @@ export class Hub {
   }
   /** Headless Chrome for logged-in sites. Swapped in tests. */
   readPage = readPage;
+  /** Linked computers (your Mac), set by the server. A Mac can copy browser logins up and be re-asked when one dies. */
+  computers: { refreshCookies(site?: string): void; canCopyCookies(): boolean } | null = null;
   private sourceCtx = async () => ({ google: this.google, cookies: (s: "linkedin" | "x") => this.connections.cookies(s), readPage: this.readPage, now: this.clock(), tz: (await this.prefs()).tz });
   /** Webhook calls that arrived while their hook was still busy with the last one; handled together right after. */
   private webhookQueue = new Map<string, string[]>();
@@ -2124,12 +2126,28 @@ export class Hub {
     const was = this.connections.status().find((c) => c.id === id)?.problem;
     this.connections.problem(id, message);
     this.emit("connections");
+    // Fed from your Mac and it's online? Ask it for a fresh login instead of bothering you.
+    if ((id === "linkedin" || id === "x") && this.connections.macSites().includes(id) && this.computers?.canCopyCookies()) {
+      this.computers.refreshCookies(id);
+      await this.log("connection.refresh", `${id}: asked your Mac for a fresh login`);
+      if (!was) return; // give the Mac a chance before we nag
+      return;
+    }
     if (was) return;
     const msg = await this.addMessage({ role: "assistant", threadId: await this.updatesThread(), text: message });
     await this.push?.send({ title: "Reconnect needed", body: message.slice(0, 180), tag: `signedout-${id}`, url: threadLink(msg.threadId!) });
   }
 
   /** Connectors' "Save and test": read one list now and say what came back. */
+  /** Keep a connection fed from the linked Mac: mark it, then ask the Mac to copy it up now. */
+  copyFromMac(site: "linkedin" | "x") {
+    const r = this.connections.wantFromMac(site);
+    if (r.value) { this.computers?.refreshCookies(site); this.emit("connections"); }
+    return r;
+  }
+
+  canCopyCookies() { return !!this.computers?.canCopyCookies(); }
+
   importFromBrowser(site: "linkedin" | "x", profileId: string) {
     const r = this.connections.importFromBrowser(site, profileId);
     if (r.value) this.emit("connections");

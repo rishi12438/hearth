@@ -106,6 +106,16 @@ export function readSiteCookies(prof: BrowserProfile, domain: string, env: Recor
   } catch { return []; } finally { rmSync(tmp, { force: true }); }
 }
 
+/** The first local browser profile logged into a site, with its decrypted cookies — for copying up to a hub. */
+export function readSiteCookiesAnywhere(domain: string, required: string[], env: Record<string, string | undefined> = process.env): { profile: string; cookies: Cookie[] } | null {
+  for (const p of browserProfiles()) {
+    if (!profileHasSite(p.cookiesDb, domain, required)) continue;
+    const cookies = readSiteCookies(p, domain, env);
+    if (cookies.length && required.every((n) => cookies.some((c) => c.name === n && c.value))) return { profile: p.label, cookies };
+  }
+  return null;
+}
+
 /** Is a silent read possible at all (macOS, a browser present, and a Keychain helper)? */
 export function canReadBrowser(env: Record<string, string | undefined> = process.env) {
   if (platform() !== "darwin") return false;

@@ -123,3 +123,48 @@ test.skipIf(!chromePath())("headless Chrome reads a logged-in list with your coo
     await expect(readList("X", x, parseCookies("auth_token=bad; ct0=b", "localhost"), ctx)).rejects.toBeInstanceOf(SignedOut);
   } finally { server.stop(true); }
 }, 60_000);
+
+// A linked Mac copies LinkedIn/X cookies up to a server hub, and the hub re-asks when a session dies.
+test("a Mac copies a login up over the link; the hub stores it and re-asks on sign-out", async () => {
+  const { Computers } = await import("../src/computers.ts");
+  const sent: any[] = [];
+  const ws = { send: (d: string) => sent.push(JSON.parse(d)), close: () => {} };
+  let t = 1_000_000;
+  const cmp = new Computers({
+    dataDir: dir, homeDir: join(dir, "home"), acceptCopies: true, now: () => t,
+    cookieSites: () => hub.connections.macSites(),
+    cookieHave: (s) => hub.connections.cookieHave(s),
+    onCookies: (s, data) => hub.connections.receiveFromMac(s, data),
+  });
+  hub.computers = cmp;
+
+  // The user chooses "feed LinkedIn from my Mac": the hub records it and would ask any Mac for it.
+  hub.connections.wantFromMac("linkedin");
+  expect(hub.connections.macSites()).toEqual(["linkedin"]);
+
+  cmp.attach("mac1", "Rishi's Mac", ws as any);
+  cmp.message("mac1", JSON.stringify({ t: "hello", harnesses: ["claude"], platform: "darwin" }));
+  // On hello the hub asks the Mac which logins to copy up.
+  const wc = sent.find((m) => m.t === "wantCookies");
+  expect(wc).toEqual({ t: "wantCookies", sites: ["linkedin"], have: {} });
+
+  // The Mac decrypts the cookies there and copies them up.
+  const payload = JSON.stringify({ cookies: [{ name: "li_at", value: "AQEDAR-real", domain: ".www.linkedin.com", path: "/", secure: true }] });
+  cmp.message("mac1", JSON.stringify({ t: "cookies", site: "linkedin", data: payload, hash: "h1" }));
+  expect(hub.connections.connected("linkedin")).toBe(true);
+  expect(hub.connections.status().find((s) => s.id === "linkedin")).toMatchObject({ detail: expect.stringContaining("from your Mac") });
+  expect(readFileSync(hub.vault!.path).includes("AQEDAR-real")).toBe(false); // encrypted at rest
+
+  // A missing required cookie is refused (never stored half-connected).
+  cmp.message("mac1", JSON.stringify({ t: "cookies", site: "x", data: JSON.stringify({ cookies: [{ name: "ct0", value: "x", domain: ".x.com" }] }), hash: "h2" }));
+  expect(hub.connections.connected("x")).toBe(false);
+
+  // When the session dies, the hub asks the Mac again (fresh want, hash dropped) instead of only nagging.
+  sent.length = 0;
+  page = { url: "https://www.linkedin.com/login", data: null };
+  const r = await hub.addHook({ title: "LinkedIn", trigger: { type: "source", source: "linkedin", config: { what: "messages" } }, action: { type: "notify", text: "x" } }, "assistant");
+  await hub.fire(await get(r.value!.id), "check");
+  const reask = sent.find((m) => m.t === "wantCookies");
+  expect(reask).toBeTruthy();
+  expect(reask.have.linkedin).toBeUndefined(); // dropped, so the Mac re-copies even if it looks unchanged
+});
