@@ -323,7 +323,7 @@ export class Brain {
       return { harness, model: env[modelVar] ?? (harness === "claude" ? claudeDefault : "") };
     };
     return {
-      orchestrator: pick("HEARTH_ORCHESTRATOR_AGENT", "HEARTH_ORCHESTRATOR_MODEL", "claude-sonnet-5-5"),
+      orchestrator: pick("HEARTH_ORCHESTRATOR_AGENT", "HEARTH_ORCHESTRATOR_MODEL", "claude-opus-5-5"),
       quick: pick("HEARTH_QUICK_AGENT", "HEARTH_QUICK_MODEL", "claude-haiku-5-5"),
       workhorse: pick("HEARTH_WORKHORSE_AGENT", "HEARTH_WORKHORSE_MODEL", "claude-sonnet-5-5"),
       heavy: pick("HEARTH_HEAVY_AGENT", "HEARTH_HEAVY_MODEL", "claude-opus-5-5"),

@@ -66,7 +66,10 @@ export class Hub {
   private listeners = new Set<(e: HubEvent) => void>();
   private firing = new Set<string>();
   private timer: ReturnType<typeof setInterval> | null = null;
-  thinking = false;
+  // Planning runs one batch at a time per ramble: messages sent while it's planning wait and are planned together next.
+  private planning = new Set<string>();
+  private planQueue = new Map<string, Message[]>();
+  get thinking() { return this.planning.size > 0; }
   private prefsLock = new Lock();
   private memoryLock = new Lock();
   private started = new Set<string>();   // job ids already handed to runJob
@@ -325,8 +328,7 @@ export class Hub {
     const m = await this.addMessage({ role: "user", text: clean, threadId: thread.id, fileIds: files.map((f) => f.id) });
     await this.setPrefs({ lastUserAt: m.createdAt });
     await this.touchThread(thread.id, { preview: clean.slice(0, 120) });
-    this.inflight++;
-    this.orchestrate(thread, m).finally(() => this.inflight--);
+    this.queuePlan(thread, m);
     return { value: { thread, message: m } };
   }
 
@@ -343,27 +345,42 @@ export class Hub {
     return parts.length ? `\n\nAttached files:\n<untrusted>\n${parts.join("\n\n")}\n</untrusted>` : "";
   }
 
-  private async orchestrate(thread: Thread, m: Message) {
-    this.thinking = true;
-    this.emit("thinking", { threadId: thread.id });
+  /** Send as many messages as you like: if this ramble is being planned, the new one waits and joins the next batch. */
+  private queuePlan(thread: Thread, m: Message) {
+    if (this.planning.has(thread.id)) { this.planQueue.set(thread.id, [...(this.planQueue.get(thread.id) || []), m]); return; }
+    this.planning.add(thread.id);
+    this.inflight++;
+    this.emit("thinking", { threadId: thread.id, on: true });
+    (async () => {
+      let batch: Message[] = [m];
+      while (batch.length) {
+        try { await this.orchestrate(thread, batch); } catch (err: any) { await this.log("orchestrator.failed", err.message); }
+        batch = this.planQueue.get(thread.id) || [];
+        this.planQueue.delete(thread.id);
+      }
+    })().finally(() => { this.planning.delete(thread.id); this.inflight--; this.emit("thinking", { threadId: thread.id, on: false }); });
+  }
+
+  private async orchestrate(thread: Thread, batch: Message[]) {
+    const m = batch[batch.length - 1];
+    const said = batch.length === 1 ? m.text : `The user sent these messages in a row; plan them together:\n${batch.map((x, i) => `${i + 1}. ${x.text}`).join("\n")}`;
+    const attached = (await Promise.all(batch.map((x) => this.attachmentNote(x.fileIds)))).join("");
     let plan: any = null;
     try {
       const brains = await this.brains();
-      const ctx = await this.context(m.text, "orchestrate", null);
+      const ctx = await this.context(batch.map((x) => x.text).join(" "), "orchestrate", null);
       const team0 = await this.store.all<Teammate>("teammates");
       const openTasks = (await this.store.all<Job>("jobs"))
         .filter((j) => j.threadId === thread.id && !j.parentId && !j.followsUp && (j.status === "queued" || j.status === "working"))
         .map((j) => ({ id: j.id, label: j.label || shortLabel(undefined, j.task), teammate: team0.find((t) => t.id === j.teammateId)?.name, status: j.status, task: j.task.slice(0, 400) }));
-      const history = (await this.store.all<Message>("messages")).filter((x) => x.threadId === thread.id && x.id !== m.id).slice(-10)
+      const history = (await this.store.all<Message>("messages")).filter((x) => x.threadId === thread.id && !batch.some((b) => b.id === x.id)).slice(-10)
         .map((x) => ({ role: x.role, text: x.text.slice(0, 500) }));
-      const raw = await this.brain.think({ mode: "orchestrate", context: { ...ctx, thisChat: history, openTasks }, input: m.text + (await this.attachmentNote(m.fileIds)) }, brains.orchestrator);
+      const raw = await this.brain.think({ mode: "orchestrate", context: { ...ctx, thisChat: history, openTasks }, input: said + attached }, brains.orchestrator);
       plan = parsePlan(raw);
     } catch (err: any) {
       await this.log("orchestrator.failed", err.message);
     }
-    this.thinking = false;
-    this.emit("thinking", null);
-    if (!plan) plan = { reply: "On it.", facts: [], jobs: [{ task: m.text, teammate: "Hearth", effort: "light" }] };
+    if (!plan) plan = { reply: "On it.", facts: [], jobs: [{ task: batch.map((x) => x.text).join("\n"), teammate: "Hearth", effort: "light" }] };
 
     for (const f of (plan.facts || []).slice(0, 10)) await this.addFact({ ...f, evidence: m.text.slice(0, 300) }, "assistant");
     const team = await this.store.all<Teammate>("teammates");
@@ -400,7 +417,8 @@ export class Hub {
     }
     for (const w of (Array.isArray(plan.newWorkflows) ? plan.newWorkflows : []).slice(0, 2)) await this.proposeWorkflow(w);
 
-    if (plan.title && !thread.id.startsWith("tm-") && thread.title === m.text.split(/\s+/).slice(0, 6).join(" ")) await this.touchThread(thread.id, { title: String(plan.title).slice(0, 60) });
+    const fresh = await this.store.get<Thread>("threads", thread.id);
+    if (plan.title && !thread.id.startsWith("tm-") && fresh?.title === batch[0].text.split(/\s+/).slice(0, 6).join(" ")) await this.touchThread(thread.id, { title: String(plan.title).slice(0, 60) });
     // Hearth's short reply, then one message per task; each task's thread (the teammate working, replies) hangs under it.
     // Keep Hearth's line short when there are task posts under it; they say the rest.
     let reply = String(plan.reply || "On it.").trim();
@@ -452,7 +470,7 @@ export class Hub {
    */
   private async addToJob(id: string, threadId: string, addition: string, label?: unknown) {
     const j = await this.store.get<Job>("jobs", id);
-    if (!j || j.threadId !== threadId || j.parentId || j.followsUp || !["queued", "working"].includes(j.status)) return false;
+    if (!j || j.threadId !== threadId || j.parentId || !["queued", "working"].includes(j.status)) return false;
     const text = addition.trim().slice(0, 1000);
     const newLabel = typeof label === "string" && label.trim() ? shortLabel(label, j.task) : j.label;
     const stop = this.stops.get(id);
@@ -592,6 +610,9 @@ export class Hub {
     if (!clean) return { error: "Say something first." };
     const m = await this.addMessage({ role: "user", text: clean, threadId: root.threadId, replyTo: root.id, teammateId: root.teammateId });
     await this.setPrefs({ lastUserAt: m.createdAt });
+    // The teammate is still on this thread: fold the reply into what it's doing instead of queueing another answer.
+    const busy = (await this.store.all<Job>("jobs")).filter((j) => (j.id === root.id || j.followsUp === root.id) && (j.status === "queued" || j.status === "working")).at(-1);
+    if (busy && (await this.addToJob(busy.id, root.threadId, clean))) return { value: { message: m, job: busy } };
     const job = await this.store.put<Job>("jobs", { ...this.doc({}), threadId: root.threadId, messageId: m.id, task: clean, teammateId: root.teammateId, status: "queued", effort: root.effort, followsUp: root.id } as Job);
     await this.store.put<Message>("messages", { ...m, jobIds: [job.id] });
     this.emit("job", job);
@@ -1335,6 +1356,9 @@ export class Hub {
     const tid = (await this.dmThread(mate.id)).id;
     const m = await this.addMessage({ role: "user", text: clean, threadId: tid, teammateId: mate.id });
     await this.setPrefs({ lastUserAt: m.createdAt });
+    // Still working on your last message? This one goes into that task, so you get one answer.
+    const busy = (await this.store.all<Job>("jobs")).filter((j) => j.threadId === tid && !j.parentId && (j.status === "queued" || j.status === "working")).at(-1);
+    if (busy && (await this.addToJob(busy.id, tid, clean))) return { value: { message: m, job: busy } };
     const job = await this.store.put<Job>("jobs", { ...this.doc({}), threadId: tid, messageId: m.id, task: clean, teammateId: mate.id, status: "queued", effort: "light" } as Job);
     await this.store.put<Message>("messages", { ...m, jobIds: [job.id] });
     this.emit("job", job);
@@ -1514,6 +1538,31 @@ export class Hub {
     await this.store.put<Idea>("ideas", { ...i, status: "dismissed", decidedAt: this.clock().toISOString() });
     this.emit("ideas");
     return true;
+  }
+
+  // ---------- boards: everyone's (or one teammate's) work as a to-do board ----------
+
+  /** Up next (queued tasks, upcoming reminders and routines), Working, Needs you, Done (last 7 days). */
+  async board(teammateId?: string) {
+    const prefs = await this.prefs();
+    const now = this.clock().getTime();
+    const threads = new Map((await this.store.all<Thread>("threads")).map((t) => [t.id, t]));
+    const where = (id?: string) => !id ? "" : id.startsWith("tm-") ? "DM" : threads.get(id)?.num ? `#ramble-${threads.get(id)!.num}` : "";
+    const mine = (id?: string) => !teammateId || id === teammateId;
+    const jobs = (await this.store.all<Job>("jobs")).filter((j) => !j.parentId && mine(j.teammateId));
+    const card = (j: Job) => ({ kind: "task" as const, id: j.id, root: j.followsUp || j.id, title: j.label || shortLabel(undefined, j.task), teammateId: j.teammateId, threadId: j.threadId, where: where(j.threadId),
+      status: j.status, at: j.finishedAt || j.startedAt || j.createdAt, startedAt: j.startedAt, need: j.blocked?.need });
+    const by = (st: Job["status"][]) => jobs.filter((j) => st.includes(j.status));
+    const recent = (a: { at: string }, b: { at: string }) => b.at.localeCompare(a.at);
+    const plans = (await this.store.all<Hook>("hooks")).filter((h) => h.status === "active" && h.nextAt && h.source !== "system" && mine(h.teammateId || "hearth"))
+      .sort((a, b) => a.nextAt!.localeCompare(b.nextAt!)).slice(0, 15)
+      .map((h) => ({ kind: "plan" as const, id: h.id, title: h.title, teammateId: h.teammateId || "hearth", threadId: h.threadId, where: h.trigger.type === "at" ? "Reminder" : describeTrigger(h.trigger, prefs.tz), status: "planned", at: h.nextAt! }));
+    return {
+      next: [...by(["queued"]).map(card), ...plans],
+      working: by(["working"]).map(card).sort(recent),
+      needsYou: by(["waiting", "blocked"]).map(card).sort(recent),
+      done: by(["done", "failed"]).map(card).filter((c) => now - new Date(c.at).getTime() < 7 * 864e5).sort(recent).slice(0, 25),
+    };
   }
 
   // ---------- people: the relationship map ----------

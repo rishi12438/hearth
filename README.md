@@ -25,7 +25,7 @@ Run one hub on an always-on box so routines fire while your laptop sleeps. Run a
 
 ### Rambles, teammates and escalation
 
-1. You ramble into a chat. The **orchestrator** (default `claude-sonnet-5-5`, fast because you wait on it) returns a title, a short reply, facts to remember, and jobs. Each job has a teammate and an effort, `light` or `heavy`.
+1. You ramble into a chat. The **orchestrator** (default `claude-opus-5-5`) returns a title, a short reply, facts to remember, and jobs. Each job has a teammate and an effort, `light` or `heavy`.
 2. **The model deck.** Each job starts on the cheapest model that can do it: **quick** (Haiku: reminders, notes, pinning), **workhorse** (Sonnet: most jobs) or **heavy** (Opus: long research, careful writing). A job too hard for its model moves up a step on its own.
 3. **Smart voice (hybrid, on by default).** The cheaper model does the legwork (searches, pages, actions) and writes notes; **heavy** reads them and writes the answer you see, or redoes the job itself if the notes fall short. You never talk to the cheap model. Every `claude` call runs slim (own short system prompt, only the tools it needs, no MCP servers or settings), which cuts ~22k tokens of overhead per call. A real gift search: 29 s and $0.15, written by Opus.
 3. Teammates are a name plus a role prompt. If no teammate fits, the orchestrator creates one, which you can see and delete in the app.
@@ -123,7 +123,7 @@ All settings are environment variables; see [.env.example](.env.example). The ma
 | Variable | Default | |
 |---|---|---|
 | `HEARTH_AGENT` | `claude` | Default harness: `claude`, `codex`, `echo` (demo), or `custom` with `HEARTH_AGENT_CMD='["ollama","run","llama3.1"]'` |
-| `HEARTH_ORCHESTRATOR_MODEL` / `_WORKHORSE_` / `_HEAVY_` | Sonnet / Sonnet / Opus | Default models per role; `HEARTH_*_AGENT` sets the harness. Changeable in the app under Brains |
+| `HEARTH_ORCHESTRATOR_MODEL` / `_WORKHORSE_` / `_HEAVY_` | Opus / Sonnet / Opus | Default models per role; `HEARTH_*_AGENT` sets the harness. Changeable in the app under Brains |
 | `HEARTH_DEEPGRAM_API_KEY` | none | Turns on hold-to-talk |
 | `HEARTH_DB_URL` | SQLite in `./data` | `postgres://…`, `mysql://…`, `mongodb://…` (run `bun add mongodb`) |
 | `HEARTH_HOST` / `HEARTH_PORT` | `127.0.0.1:8790` | Keep it on localhost and put Caddy in front |

@@ -288,6 +288,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
         break;
       }
       case "roster": return json(await hub.roster());
+      case "board": return json(await hub.board(url.searchParams.get("teammate") || undefined));
       case "inbox": return json(await hub.inbox());
       case "teammates": {
         if (method === "GET" && id) { const d = await hub.teammateDetail(id); if (!d) break; return json(d); }

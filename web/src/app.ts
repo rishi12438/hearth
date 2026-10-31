@@ -38,7 +38,7 @@ const S = {
 
 let live: ReturnType<typeof stream> | null = null;
 const app = document.getElementById("app")!;
-type Route = { view: "home" } | { view: "dms" } | { view: "activity" } | { view: "chat"; id: string; job?: string } | { view: "dm"; id: string } | { view: "app"; id: string };
+type Route = { view: "home" } | { view: "dms" } | { view: "activity" } | { view: "board"; id?: string } | { view: "chat"; id: string; job?: string } | { view: "dm"; id: string } | { view: "app"; id: string };
 const route = (): Route => {
   if (location.hash === "#dms") return { view: "dms" };
   if (location.hash === "#activity") return { view: "activity" };
@@ -46,6 +46,8 @@ const route = (): Route => {
   if (m) return { view: "chat", id: m[1], job: m[2] };
   m = location.hash.match(/^#a\/([\w-]+)/);
   if (m) return { view: "app", id: m[1] };
+  m = location.hash.match(/^#b(?:\/([\w-]+))?$/);
+  if (m) return { view: "board", id: m[1] };
   m = location.hash.match(/^#t\/([\w-]+)/);
   return m ? { view: "dm", id: m[1] } : { view: "home" };
 };
@@ -74,7 +76,7 @@ function show() {
   closeSheet();
   const r = route();
   // Re-render the skeleton only when the layout changes (opening a thread beside the chat keeps the chat in place).
-  const layout = r.view === "chat" ? `chat:${r.id}:${r.job && !wide() ? "thread" : wide() && r.job ? "split" : "chat"}` : r.view === "dm" ? `dm:${r.id}` : r.view;
+  const layout = r.view === "chat" ? `chat:${r.id}:${r.job && !wide() ? "thread" : wide() && r.job ? "split" : "chat"}` : r.view === "dm" ? `dm:${r.id}` : r.view === "board" ? `board:${r.id || ""}` : r.view;
   if (layout !== lastLayout) {
     lastLayout = layout;
     if (r.view === "home") renderHome();
@@ -82,6 +84,7 @@ function show() {
     else if (r.view === "activity") renderActivity();
     else if (r.view === "dm") renderDm();
     else if (r.view === "app") renderApp(r.id);
+    else if (r.view === "board") renderBoard(r.id);
     else renderChatLayout(r);
   } else if (r.view === "chat") drawChat();
   refresh();
@@ -94,6 +97,7 @@ function refresh() {
   if (r.view === "chat") loadChat(r.id);
   else if (r.view === "dm") loadDm(r.id);
   else if (r.view === "activity") renderActivity();
+  else if (r.view === "board") loadBoard();
 }
 
 function connect() {
@@ -116,7 +120,10 @@ function onEvent(e: { type: string; data?: any }) {
   switch (e.type) {
     case "hello": if (e.data?.build && e.data.build !== __BUILD__) markUpdate(); return;
     case "unpaired": toast("This device was signed out of the hub.", "err"); removeHub(activeHub()!.id); location.reload(); return;
-    case "thinking": S.planning = e.data?.threadId || null; if (open) drawChat(); soon(); return;
+    case "thinking":
+      if (e.data?.on === false) { if (S.planning === e.data.threadId) S.planning = null; }
+      else S.planning = e.data?.threadId || null;
+      if (open) drawChat(); soon(); return;
     case "message":
       if (open && S.chat && e.data.threadId === open) { upsert(S.chat.messages, e.data); drawChat(); }
       else if (r.view === "dm" && e.data.threadId === `tm-${r.id}`) loadDm(r.id);
@@ -124,6 +131,7 @@ function onEvent(e: { type: string; data?: any }) {
       soon();
       return;
     case "job": {
+      if (r.view === "board") loadBoard();
       // A teammate finished something you're not looking at: an in-app banner you can tap, like a phone notification.
       const was = jobStatus.get(e.data.id);
       jobStatus.set(e.data.id, e.data.status);
@@ -400,7 +408,17 @@ function drawHeader() {
   const search = h("button", { class: "circle glass", "aria-label": "Search", on: { click: openJump } }, icon("search", 21));
   if (r.view === "dm") {
     const t = rosterEntry(r.id);
-    clear(top, h("div", { class: "toprow stagerow" }, back, stage("dm", t, t.state || "idle", t.name, t.status || role(t), null), search));
+    clear(top, h("div", { class: "toprow stagerow" }, back, stage("dm", t, t.state || "idle", t.name, t.status || role(t), () => { location.hash = `#b/${t.id}`; }),
+      h("button", { class: "circle glass", "aria-label": `${t.name}'s board`, on: { click: () => { location.hash = `#b/${t.id}`; } } }, icon("board", 21))));
+    return;
+  }
+  if (r.view === "board") {
+    const t = r.id ? rosterEntry(r.id) : null;
+    const others = t ? [] : S.roster.filter((x) => x.busy || x.needsYou).slice(0, 3);
+    clear(top, h("div", { class: "toprow stagerow" }, back,
+      t ? stage("board", t, t.state || "idle", `${t.name}'s board`, role(t), () => { location.hash = `#t/${t.id}`; })
+        : stage("board", rosterEntry("hearth"), "idle", "Everyone's board", "All teammates", null, false, others),
+      t ? h("button", { class: "circle glass", "aria-label": `Message ${t.name}`, on: { click: () => { location.hash = `#t/${t.id}`; } } }, icon("dms", 21)) : search));
     return;
   }
   const chat = S.chat;
@@ -442,6 +460,66 @@ function activeMates(chat: any): { t: any; state: string; jobId: string }[] {
     .sort((a: any, b: any) => order[a.status] - order[b.status] || (b.updatedAt || b.createdAt).localeCompare(a.updatedAt || a.createdAt));
   const seen = new Set<string>();
   return open.filter((j: any) => !seen.has(j.teammateId) && seen.add(j.teammateId)).map((j: any) => ({ t: mate(j.teammateId), state: jobState(j), jobId: j.id }));
+}
+
+// ---------------- boards: to-dos per teammate (or everyone), Trello-style ----------------
+
+function renderBoard(id?: string) {
+  frame({ header: h("div"), body: h("div", { id: "board" }), fab: true });
+  drawHeader();
+  loadBoard();
+}
+
+let boardTimer: ReturnType<typeof setTimeout> | null = null;
+async function loadBoard() {
+  const r = route();
+  if (r.view !== "board") return;
+  try { drawBoard(await call(`/api/board${r.id ? `?teammate=${encodeURIComponent(r.id)}` : ""}`), r.id); } catch (e) { handleError(e); }
+}
+
+function drawBoard(b: any, teammateId?: string) {
+  const el = document.getElementById("board");
+  if (!el) return;
+  drawHeader();
+  const open = (c: any) => {
+    if (c.kind === "plan") return openPlans();
+    location.hash = c.threadId?.startsWith("tm-") ? `#t/${c.teammateId}` : `#c/${c.threadId}/${c.root}`;
+  };
+  const card = (c: any) => {
+    const t = mate(c.teammateId);
+    return h("button", { class: `bcard ${c.status}`, on: { click: () => open(c) } },
+      h("span", { class: "btop" }, teammateId ? null : face(t, 22, c.kind === "task" ? jobState({ status: c.status }) : "idle"),
+        h("b", null, c.title)),
+      c.status === "working" ? h("span", { class: "bline" }, h("span", { "data-progress": c.id }, S.progress.get(c.id) || "On it"), c.startedAt ? h("time", { "data-since": c.startedAt }, elapsed(c.startedAt)) : null)
+        : c.need ? h("span", { class: "bline warn" }, `Stuck: ${c.need}`)
+        : h("span", { class: "bline" }, [c.where, c.kind === "plan" ? `${dayLabel(c.at)} ${clockTime(c.at)}` : c.status === "done" || c.status === "failed" ? shortAgo(c.at) : c.status === "waiting" ? "Needs your OK" : null].filter(Boolean).join(" · ")));
+  };
+  const col = (key: string, title: string, emoji: string, list: any[]) => h("section", { class: `bcol ${key}` },
+    h("div", { class: "bhead" }, emoji3d(emoji, "ideaicon small"), h("b", null, title), h("em", null, String(list.length))),
+    list.length ? list.map(card) : h("p", { class: "bempty" }, key === "next" ? "Nothing queued" : key === "working" ? "Nobody's on anything" : key === "needsYou" ? "Nothing waiting on you" : "Nothing this week"),
+    key === "next" ? h("button", { class: "badd", on: { click: () => addTodo(teammateId) } }, icon("plus", 16), "Add a to-do") : null);
+  clear(el, h("div", { class: "board" },
+    b.needsYou.length || wide() ? col("needsYou", "Needs you", "✋", b.needsYou) : null, col("working", "Working", "⚙️", b.working),
+    col("next", "Up next", "🗓️", b.next), col("done", "Done", "✅", b.done)));
+  // Keep it fresh while it's open.
+  if (boardTimer) clearTimeout(boardTimer);
+  boardTimer = setTimeout(() => loadBoard(), 8000);
+}
+
+/** A to-do for one teammate (sent to them as a DM) or for the team (a new ramble). */
+function addTodo(teammateId?: string) {
+  const t = teammateId ? mate(teammateId) : null;
+  const what = h("textarea", { class: "field", rows: 3, maxLength: 1000, placeholder: t ? `What should ${t.name} do?` : "What needs doing? Hearth gives it to the right teammate." });
+  openSheet(t ? `To-do for ${t.name}` : "New to-do", [what,
+    h("button", { class: "btn primary big", on: { click: async () => {
+      const text = what.value.trim();
+      if (!text) return what.focus();
+      try {
+        if (t) await call(`/api/teammates/${t.id}/messages`, { body: { text } }); else await call("/api/threads", { body: { text } });
+        closeSheet(); toast("Added"); loadBoard();
+      } catch (e) { handleError(e); }
+    } } }, "Add")]);
+  setTimeout(() => what.focus(), 60);
 }
 
 /** Who's "on stage" in a ramble right now. */
@@ -534,7 +612,7 @@ function drawHome() {
   const plans = S.roster.filter((t) => String(t.status).startsWith("Next:")).length;
   const tiles: [string, string, string, () => void, boolean][] = [
     ["lock", "Needs you", `${needsYouCount()} waiting`, () => { location.hash = "#activity"; }, needsYouCount() > 0],
-    ["sparkle", "Working", `${working} live`, () => { location.hash = "#activity"; }, working > 0],
+    ["board", "Board", working ? `${working} working` : "Everyone's to-dos", () => { location.hash = "#b"; }, working > 0],
     ["bell", "Plans", plans ? `${plans} coming up` : "Reminders", openPlans, false],
     ["clip", "Files", `${S.files.size} files`, openFiles, false],
     ["sparkle", "Ideas", S.ideas.length ? `${S.ideas.length} for you` : "Look now", lookForIdeas, false],
@@ -1317,7 +1395,7 @@ async function openBrains() {
   let data: any;
   try { data = await call("/api/brains"); } catch (e) { return handleError(e); }
   const roles: [string, string, string][] = [
-    ["orchestrator", "Orchestrator", "Reads every ramble, splits it into jobs, and picks who does each and which model. You wait on it, so fast matters."],
+    ["orchestrator", "Orchestrator", "Reads every message, splits it into tasks, and picks who does each and on which model. Use your smartest model."],
     ["quick", "Quick", "Simple jobs: reminders, notes, pinning, small app changes. Use your cheapest model."],
     ["workhorse", "Workhorse", "Most jobs: lookups, options, advice, building apps."],
     ["heavy", "Heavy", "Long research and careful writing, and anything the others can't finish (they move up on their own)."],

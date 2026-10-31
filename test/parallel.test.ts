@@ -273,3 +273,45 @@ test("the model deck: quick jobs run on the quick model and move up step by step
   expect([ok.effort, ok.tier, ok.escalated]).toEqual(["quick", "quick", false]);
   expect([bad.tier, bad.escalated, bad.status]).toEqual(["heavy", true, "failed"]); // quick -> workhorse -> heavy
 });
+
+test("messages sent while a ramble is being planned wait and are planned together, so nothing is duplicated", async () => {
+  await setup();
+  process.env.FAKE_MS = "50";
+  plan([{ label: "Gift for Priya", task: "find a gift", teammate: "Research" }]);
+  const r = await hub.ramble("find priya a gift");
+  const tid = r.value!.thread.id;
+  await hub.ramble("pottery, she loves pottery", tid);  // planning #1 still running
+  await hub.ramble("under $80 please", tid);
+  await until(async () => !hub.thinking && (await jobs()).every((j) => j.status === "done"));
+  const orchestrations = readFileSync(log, "utf8").split("\n").filter((l) => l.startsWith("start") && l.includes("?")).length;
+  expect((await jobs()).length).toBe(2); // one plan for the first message, one for the two that arrived during it
+  expect(orchestrations).toBeLessThanOrEqual(2);
+});
+
+test("a DM sent while the teammate is still working goes into its current task", async () => {
+  await setup();
+  process.env.FAKE_MS = "1500";
+  const first = (await hub.askTeammate("scout", "find a pottery studio")).value!;
+  await until(async () => (await jobs()).some((j) => j.status === "working"));
+  await Bun.sleep(200);
+  process.env.FAKE_MS = "50";
+  const second = (await hub.askTeammate("scout", "in Oakland please")).value!;
+  expect(second.job.id).toBe(first.job.id);
+  await until(() => allDone(1));
+  const [j] = await jobs();
+  expect(j.task).toContain("The user added: in Oakland please");
+});
+
+test("boards: each teammate's work in Up next / Working / Needs you / Done, or everyone's", async () => {
+  await setup();
+  process.env.FAKE_MS = "1200";
+  plan([{ label: "Gift for Priya", task: "find a gift", teammate: "Research" }, { label: "Friday reminder", task: "set a reminder", teammate: "Reminders" }]);
+  await hub.ramble("gift and a reminder");
+  await until(async () => (await jobs()).filter((j) => j.status === "working").length === 2);
+  const all = await hub.board();
+  expect(all.working.map((c: any) => c.title).sort()).toEqual(["Friday reminder", "Gift for Priya"]);
+  const scout = await hub.board("scout");
+  expect(scout.working.map((c: any) => c.title)).toEqual(["Gift for Priya"]);
+  await until(() => allDone(2));
+  expect((await hub.board("scout")).done[0].where).toBe("#ramble-1");
+});
