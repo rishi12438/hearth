@@ -153,6 +153,7 @@ function onEvent(e: { type: string; data?: any }) {
     case "unpaired": toast("This device was signed out of the hub.", "err"); removeHub(activeHub()!.id); location.reload(); return;
     case "locked": location.reload(); return;
     case "access": if (S.state?.device.primary && e.data?.pending) { toast("A new device wants in. Settings → Devices"); refreshState(); } return;
+    case "computers": computersChanged(); return;
     case "thinking":
       if (e.data?.on === false) { if (S.planning === e.data.threadId) S.planning = null; }
       else S.planning = e.data?.threadId || null;
@@ -663,6 +664,7 @@ function drawHome() {
     h("span", { class: "hicon" }, "#"), h("span", { class: "grow" }, channelName(t)),
     t.needsYou ? h("em", { class: "badge" }, String(t.needsYou)) : t.working ? h("i", { class: "spin" }) : fresh(t) ? h("i", { class: "udot", "aria-label": "New" }) : null);
   clear(top,
+    linkStrip(),
     S.ideas.length ? h("section", { class: "ideas" }, h("h2", { class: "bigtitle" }, "Ideas"), S.ideas.map(ideaRow)) : null,
     h("div", { class: "tiles" }, tiles.map(([ic, title, sub, fn, hot]) =>
       h("button", { class: `tilebtn ${hot ? "hot" : ""}`, on: { click: fn } }, h("span", { class: "ti" }, icon(ic, 22), hot ? h("i", { class: "dot" }) : null), h("b", null, title), h("small", null, sub)))));
@@ -1028,7 +1030,7 @@ function metaLine(j: any) {
     return `${n ? `used ${n} · ` : ""}${secs(j.durationMs)} · ${money(j.costUsd)}`;
   }
   const model = j.voiced ? `${j.tier === "quick" ? "quick" : "workhorse"} + heavy` : j.tier === "quick" ? "quick" : j.tier === "heavy" ? "heavy" : null;
-  return [j.escalated ? "moved up" : null, model, secs(j.durationMs), money(j.costUsd)].filter(Boolean).join(" · ");
+  return [j.escalated ? "moved up" : null, model, j.ranOn ? `on ${j.ranOn === "cloud" ? "the cloud" : j.ranOn}` : null, secs(j.durationMs), money(j.costUsd)].filter(Boolean).join(" · ");
 }
 
 function chatMenu() {
@@ -2246,7 +2248,7 @@ function openScript(s: any) {
 async function openDevices() {
   try {
     const primary = !!S.state?.device.primary;
-    const [devices, waiting] = await Promise.all([call("/api/devices"), primary ? call("/api/access") : Promise.resolve([])]);
+    const [devices, waiting, cloud] = await Promise.all([call("/api/devices"), primary ? call("/api/access") : Promise.resolve([]), primary ? call("/api/machines").catch(() => null) : Promise.resolve(null)]);
     const codeBox = h("div");
     const decide = async (r: any, verb: "approve" | "deny") => {
       try {
@@ -2262,16 +2264,18 @@ async function openDevices() {
         : "New devices join through your primary device. Each device has its own key; sign one out and it loses access at once."),
       waiting.length ? h("h4", null, "Waiting to join") : null,
       waiting.length ? h("div", { class: "list" }, waiting.map((r: any) => h("div", { class: "item" },
-        h("div", { class: "hicon" }, icon("phone", 16)),
-        h("div", { class: "grow" }, h("div", { class: "title" }, r.name, h("span", { class: "tag soft" }, `code ${r.code}`)), h("div", { class: "sub" }, `Asked ${relTime(r.createdAt)} · only approve if the same code is on its screen`)),
+        h("div", { class: "hicon" }, icon(r.kind === "computer" ? "laptop" : "phone", 16)),
+        h("div", { class: "grow" }, h("div", { class: "title" }, r.name, h("span", { class: "tag soft" }, `code ${r.code}`)), h("div", { class: "sub" }, `${r.kind === "computer" ? "Wants to link as a computer · " : ""}Asked ${relTime(r.createdAt)} · only approve if the same code is on its screen`)),
         h("button", { class: "btn small primary", on: { click: () => decide(r, "approve") } }, "Approve"),
         h("button", { class: "btn small danger-ghost", on: { click: () => decide(r, "deny") } }, "Deny")))) : null,
-      h("div", { class: "list" }, devices.map((d: any) => h("div", { class: "item" },
+      h("h4", null, "Phones and browsers"),
+      h("div", { class: "list" }, devices.filter((d: any) => d.role !== "computer").map((d: any) => h("div", { class: "item" },
         h("div", { class: "hicon" }, icon(d.passkey ? "lock" : "phone", 16)),
         h("div", { class: "grow" }, h("div", { class: "title" }, d.name, d.primary ? h("span", { class: "tag soft" }, "Primary") : null, d.current ? h("span", { class: "tag soft" }, "This device") : null), h("div", { class: "sub" }, `Paired ${dayLabel(d.createdAt)} · seen ${relTime(d.lastSeenAt)}${d.passkey ? " · Face ID" : ""}`)),
         primary && !d.primary ? h("button", { class: "btn small ghost", on: { click: () => confirmSheet(`Make ${d.name} primary?`, "It will be the one that lets new devices in. This device stays paired.", "Make primary", async () => { await call(`/api/devices/${d.id}/primary`, { body: {} }); toast(`${d.name} is primary`); refreshState(); }) } }, "Make primary") : null,
         primary || d.current ? h("button", { class: "btn small danger-ghost", on: { click: () => confirmSheet(`Sign out ${d.name}?`, "It will need to be let in again to come back.", "Sign out", async () => { await call(`/api/devices/${d.id}`, { method: "DELETE" }); if (d.current) { removeHub(activeHub()!.id); location.reload(); } toast("Signed out"); }) } }, "Sign out") : null))),
       codeBox,
+      computersSection(devices.filter((d: any) => d.role === "computer"), primary, cloud),
       primary ? h("button", { class: "btn ghost", on: { click: async () => {
         try {
           const { code, expiresInMin, qr } = await call("/api/devices/pair-code", { body: {} });
@@ -2283,6 +2287,175 @@ async function openDevices() {
       } } }, icon("plus", 16), "Add a device") : null,
     ]);
   } catch (e) { handleError(e); }
+}
+
+// ---- Linked computers: where work runs ----
+
+/** Four bars, like a phone's signal. */
+function bars(level: number, state: string) {
+  return h("span", { class: `bars ${state}`, "aria-label": `Signal ${level} of 4` }, [1, 2, 3, 4].map((n) => h("i", { class: n <= level ? "on" : "" })));
+}
+const STATE_LABEL: Record<string, string> = { online: "Online", asleep: "Not answering", offline: "Offline" };
+const shortName = (n: string) => n.replace(/ \((Mac)\)$/, "");
+
+/** Home: one line saying where work runs right now. Only shows once a computer is linked. */
+function linkStrip() {
+  const c = S.state?.computers;
+  if (!c?.linked) return null;
+  const best = c.list[0];
+  const on = best?.state === "online";
+  const text = on
+    ? [h("b", null, shortName(best.name)), ` is online · work runs there${best.running ? ` · ${best.running} running` : ""}`]
+    : [h("b", null, c.linked === 1 ? shortName(best.name) : "Your computers"), ` ${best?.state === "asleep" ? "isn't answering" : "is offline"} · the cloud is doing the work`];
+  return h("button", { class: `linkstrip ${best?.state || "offline"}`, on: { click: openDevices } },
+    h("span", { class: "lsicon" }, icon(on ? "laptop" : "cloud", 18)),
+    h("span", { class: "grow" }, text),
+    on ? bars(best.level, best.state) : null, icon("chevron", 14));
+}
+
+function computersSection(list: any[], primary: boolean, cloud: any) {
+  const accept = !!S.state?.computers?.acceptCopies;
+  const machineOf = (d: any) => (d.machine && cloud?.machines?.find((m: any) => m.id === d.machine)) || null;
+  const hub = activeHub()?.url || "https://yournameassistant.com";
+  const cmd = `bash deploy/setup.sh mac ${hub}`;
+  const card = (d: any) => {
+    const l = d.link;
+    const mc = machineOf(d);
+    const detail = mc && l.state !== "online" ? machineDetail(mc) : l.state === "online"
+      ? [`Connected ${relTime(l.connectedAt).replace(/ ago$/, "")}`, l.rttMs != null ? `${l.rttMs} ms` : null, l.running ? `running ${l.running} job${l.running > 1 ? "s" : ""}` : "idle"].filter(Boolean).join(" · ")
+      : l.lastAliveAt ? `Last seen ${relTime(l.lastAliveAt)} · the cloud is doing the work` : "Hasn't connected yet · run the setup on it";
+    const copyRow = (item: "claude" | "codex", label: string) => {
+      const on = d.copy.includes(item);
+      const at = d.copiedAt?.[item];
+      return h("button", { class: "item copyrow", disabled: !primary, on: { click: async () => {
+        try {
+          await call(`/api/devices/${d.id}/copy`, { method: "PUT", body: { ...Object.fromEntries(d.copy.map((i: string) => [i, true])), [item]: !on } });
+          toast(on ? `Stopped copying ${label}` : `Copying ${label} to the cloud`); openDevices();
+        } catch (e) { handleError(e); }
+      } } },
+        h("span", { class: "grow" }, h("b", { class: "light" }, label),
+          h("small", { class: "sub" }, on ? (at ? `Copied ${relTime(at)} · kept up to date` : l.state === "online" ? "Copying…" : "Copies next time it's online") : `So the cloud can use ${item === "claude" ? "Claude" : "Codex"} while this computer is off`)),
+        h("span", { class: `switch ${on ? "on" : ""}` }, h("i")));
+    };
+    const busy = mc?.state === "setting-up";
+    return h("div", { class: `ccard ${l.state}` },
+      h("div", { class: "cchead" },
+        h("span", { class: "ccicon" }, icon(mc ? "cloud" : "laptop", 20), h("i", { class: `cdot ${busy ? "asleep" : l.state}` })),
+        h("span", { class: "grow" }, h("b", null, d.name, mc ? h("span", { class: "tag soft" }, mc.kind === "e2b" ? "E2B sandbox" : `VM · ${mc.host}`) : null),
+          h("small", { class: `cstate ${busy ? "asleep" : l.state}` }, busy ? "Setting up" : mc?.state === "error" && l.state !== "online" ? "Needs attention" : mc?.state === "paused" && l.state !== "online" ? "Paused" : STATE_LABEL[l.state])),
+        busy ? h("i", { class: "spin" }) : bars(l.level, l.state)),
+      h("p", { class: `ccsub ${mc?.state === "error" && l.state !== "online" ? "err" : ""}` }, detail),
+      l.harnesses.filter((x: string) => x !== "echo").length ? h("div", { class: "ccbrains" }, h("small", null, "Brains here"), l.harnesses.filter((x: string) => x !== "echo").map((x: string) => h("span", { class: "tag soft" }, x))) : null,
+      accept && !mc ? h("div", { class: "cccopy" }, h("small", { class: "cclabel" }, "Copy to the cloud"),
+        h("div", { class: "list" }, copyRow("claude", "Claude login"), copyRow("codex", "Codex login"))) : null,
+      mc ? h("p", { class: "muted small" }, cloud.logins.length ? `Uses the ${cloud.logins.map((i: string) => (i === "claude" ? "Claude" : "Codex")).join(" and ")} login this hub holds.` : "No login to hand it yet: turn on Copy to the cloud on your Mac, or log in on the server.") : null,
+      mc && primary ? machineButtons(mc) : primary ? h("button", { class: "btn small danger-ghost", on: { click: () => confirmSheet(`Unlink ${d.name}?`, "It stops running work for this hub, and logins it copied to the cloud are removed.", "Unlink", async () => { await call(`/api/devices/${d.id}`, { method: "DELETE" }); toast("Unlinked"); refreshState(); }) } }, "Unlink") : null);
+  };
+  return h("div", null,
+    h("h4", null, "Computers"),
+    list.length ? list.map(card) : null,
+    h("div", { class: "ccinfo" },
+      h("p", { class: "muted small" }, list.length
+        ? "Work runs on a linked computer when it's online, with its own logins. When none is, this hub (the cloud) does it."
+        : "Link your Mac and teammates run on it, with your own Claude or Codex login. When it's off, the cloud does the work."),
+      primary ? h("button", { class: "codeline", title: "Copy", on: { click: () => { navigator.clipboard?.writeText(cmd); toast("Copied. Run it in the hearth folder on your Mac"); } } }, h("code", null, cmd), icon("clip", 14)) : null,
+      primary && cloud ? h("button", { class: "btn ghost", on: { click: () => openAddMachine(cloud) } }, icon("cloud", 16), "Add a cloud computer") : null));
+}
+
+/** What a cloud computer is doing when it isn't online. */
+function machineDetail(m: any) {
+  if (m.state === "setting-up") return `${m.step || "Starting"}…`;
+  if (m.state === "error") return `Couldn't set it up: ${m.error}`;
+  if (m.state === "paused") return `Paused · everything stays installed, wakes in seconds${m.autoStart ? " when a job needs it" : ""}`;
+  if (m.state === "stopped") return m.kind === "e2b" ? (m.autoStart ? "Stopped · starts on its own when a job needs it" : "Stopped · not costing anything") : "Stopped";
+  return "Starting the link…";
+}
+
+function machineButtons(m: any) {
+  const act = (verb: string, label: string) => async (e: Event) => {
+    (e.currentTarget as HTMLButtonElement).disabled = true;
+    try { await call(`/api/machines/${m.id}/${verb}`, { body: {} }); toast(label); } catch (err) { handleError(err); }
+    openDevices();
+  };
+  const running = m.state === "running" || m.state === "setting-up";
+  return h("div", { class: "ccbtns" },
+    m.kind === "e2b" && !running ? h("button", { class: "btn small primary", on: { click: act("start", m.state === "paused" ? "Waking the sandbox" : "Starting the sandbox") } }, m.state === "paused" ? "Wake" : "Start") : null,
+    m.kind === "e2b" && running ? h("button", { class: "btn small ghost", on: { click: act("stop", "Paused. Everything stays installed.") } }, "Pause") : null,
+    m.kind === "ssh" && m.state !== "setting-up" ? h("button", { class: "btn small ghost", on: { click: act("start", "Setting it up again") } }, "Set up again") : null,
+    h("button", { class: "btn small danger-ghost", on: { click: () => confirmSheet(`Remove ${m.name}?`, m.kind === "e2b" ? "The sandbox and its disk are deleted from E2B, and its key stops working." : "The link on the VM is stopped, its key stops working, and the SSH key is deleted from this hub. The VM itself keeps running.", "Remove", async () => { await call(`/api/machines/${m.id}`, { method: "DELETE" }); toast("Removed"); refreshState(); }) } }, "Remove"));
+}
+
+/** Add a computer the hub sets up itself: an E2B sandbox (your API key) or your own VM (its address and an SSH key). */
+function openAddMachine(cloud: any, kind: "e2b" | "ssh" = "e2b") {
+  const err = h("p", { class: "err small", hidden: true });
+  const fail = (b: HTMLButtonElement, label: string) => (e: any) => { err.textContent = e.message; err.hidden = false; b.disabled = false; b.textContent = label; };
+  const tabs = h("div", { class: "segmented" },
+    h("button", { class: kind === "e2b" ? "on" : "", on: { click: () => openAddMachine(cloud, "e2b") } }, "E2B sandbox"),
+    h("button", { class: kind === "ssh" ? "on" : "", on: { click: () => openAddMachine(cloud, "ssh") } }, "Your own VM"));
+  const warnings = [
+    !cloud.hubUrl ? h("p", { class: "err small" }, "This hub doesn't know its public address yet. Set HEARTH_PUBLIC_URL (deploy/setup.sh lightsail does) so a cloud computer can dial back to it.") : null,
+    !cloud.logins.length ? h("p", { class: "muted small" }, "Tip: turn on Copy to the cloud for your Mac's Claude login first. The hub hands that login to the computers it sets up.") : null,
+  ];
+  const name = h("input", { class: "field", placeholder: kind === "e2b" ? "Name (e.g. Sandbox)" : "Name (e.g. Hetzner)", maxLength: 40 });
+  let body: any[];
+  if (kind === "e2b" && !cloud.e2bKey) {
+    const key = h("input", { class: "field", type: "password", placeholder: "E2B API key", autocomplete: "off", autocapitalize: "off", spellcheck: false });
+    const save = h("button", { class: "btn primary big", on: { click: async () => {
+      if (!key.value.trim()) return key.focus();
+      save.disabled = true; save.textContent = "Checking with E2B…"; err.hidden = true;
+      try { const v = await call("/api/machines/e2b-key", { body: { key: key.value } }); toast("E2B connected"); openAddMachine(v, "e2b"); }
+      catch (e) { fail(save, "Connect E2B")(e); }
+    } } }, "Connect E2B");
+    body = [
+      h("ol", { class: "steps" },
+        h("li", null, "Make an account at ", h("a", { href: "https://e2b.dev/dashboard", target: "_blank", rel: "noopener noreferrer" }, "e2b.dev"), "."),
+        h("li", null, "Copy your API key from the dashboard."),
+        h("li", null, "Paste it here.")),
+      key, err, save,
+      h("p", { class: "muted small" }, "The key is checked with E2B, then stays on your hub in a private file. It's never stored in your data or exports and never sent back to this app."),
+    ];
+    setTimeout(() => key.focus(), 80);
+  } else if (kind === "e2b") {
+    let auto = true, idle = 30;
+    const sw = h("button", { class: "item", on: { click: () => { auto = !auto; sw.querySelector(".switch")!.classList.toggle("on", auto); } } },
+      h("span", { class: "grow" }, h("b", { class: "light" }, "Wake on its own when needed"), h("small", { class: "sub" }, "When a job needs a computer and none is online")), h("span", { class: "switch on" }, h("i")));
+    const idleSel = h("select", { class: "field", on: { change: (e: Event) => { idle = Number((e.target as HTMLSelectElement).value); } } },
+      [15, 30, 60, 120].map((n) => h("option", { value: String(n), selected: n === 30 }, `Pause after ${n < 60 ? `${n} minutes` : `${n / 60} hour${n > 60 ? "s" : ""}`} idle`)));
+    const add = h("button", { class: "btn primary big", on: { click: async () => {
+      add.disabled = true; add.textContent = "Starting…"; err.hidden = true;
+      try { await call("/api/machines", { body: { kind: "e2b", name: name.value, autoStart: auto, idleStopMin: idle } }); toast("Setting up your sandbox. It takes a minute or two."); openDevices(); }
+      catch (e) { fail(add, "Add sandbox")(e); }
+    } } }, "Add sandbox");
+    body = [name, h("div", { class: "list" }, sw), idleSel, err, add,
+      h("p", { class: "muted small" }, "Hearth makes a sandbox in your E2B account, installs itself and Claude Code there, and links it. When idle it's paused: it stops costing compute but keeps everything installed, so it wakes in seconds. Your memory and chats never live on it; they stay on your hub."),
+      h("button", { class: "linkbtn", on: { click: () => confirmSheet("Disconnect E2B?", "The key is removed from the hub. Sandboxes it made are left alone.", "Disconnect", async () => { await call("/api/machines/e2b-key", { method: "DELETE" }); toast("E2B disconnected"); }) } }, "Disconnect E2B")];
+  } else {
+    const host = h("input", { class: "field", placeholder: "IP address or host name", autocapitalize: "off", spellcheck: false });
+    const user = h("input", { class: "field", value: "ubuntu", placeholder: "User", autocapitalize: "off", spellcheck: false });
+    const port = h("input", { class: "field", value: "22", inputmode: "numeric", placeholder: "Port" });
+    const key = h("textarea", { class: "field mono", rows: 5, placeholder: "-----BEGIN OPENSSH PRIVATE KEY-----\n…\n-----END OPENSSH PRIVATE KEY-----", autocapitalize: "off", spellcheck: false });
+    const add = h("button", { class: "btn primary big", on: { click: async () => {
+      if (!host.value.trim()) return host.focus();
+      add.disabled = true; add.textContent = "Reaching it…"; err.hidden = true;
+      try { await call("/api/machines", { body: { kind: "ssh", name: name.value, host: host.value, user: user.value, port: Number(port.value), privateKey: key.value } }); toast("Setting up your VM. It takes a minute or two."); openDevices(); }
+      catch (e) { fail(add, "Connect and set up")(e); }
+    } } }, "Connect and set up");
+    body = [name, host, h("div", { class: "row2" }, user, port), key, err, add,
+      h("p", { class: "muted small" }, "Any Linux VM you can reach over SSH: Lightsail, Hetzner, DigitalOcean, a box at home. Hearth checks it can log in, remembers the machine's identity, installs itself and Claude Code, and links it. The key stays on your hub in a private file and is never shown again.")];
+  }
+  openSheet("Add a cloud computer", [tabs, ...warnings, ...body]);
+}
+
+let computersTimer: ReturnType<typeof setTimeout> | null = null;
+/** A computer came or went: refresh Home's strip, and the Devices sheet if it's open. */
+function computersChanged() {
+  if (computersTimer) return;
+  computersTimer = setTimeout(async () => {
+    computersTimer = null;
+    await refreshState();
+    if (route().view === "home") drawHome();
+    if (document.querySelector('.sheet[aria-label="Devices"]')) openDevices();
+  }, 400);
 }
 
 async function toggleFaceId() {

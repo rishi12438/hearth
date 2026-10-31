@@ -6,8 +6,7 @@ export interface SpeechToText {
   transcribe(audio: Uint8Array, mimeType: string): Promise<string>;
 }
 
-import { readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { Vault } from "./vault.ts";
 
 export class Deepgram implements SpeechToText {
   readonly name = "deepgram";
@@ -38,18 +37,19 @@ export async function checkDeepgramKey(key: string): Promise<string | null> {
 }
 
 /**
- * Voice settings the app can change: the Deepgram key lives in <data>/voice.json (mode 0600), never in the database,
- * exports or API responses. A key in the environment wins and can't be changed from the app.
+ * Voice settings the app can change: the Deepgram key lives in the hub's encrypted vault (vault.ts), never in the
+ * database, exports or API responses. A key in the environment wins and can't be changed from the app.
  */
 export class VoiceSettings {
-  private file: string;
+  private vault: Vault;
   current: SpeechToText | null;
-  constructor(dataDir: string, private env: Record<string, string | undefined> = process.env) {
-    this.file = join(dataDir, "voice.json");
+  constructor(dataDir: string, private env: Record<string, string | undefined> = process.env, vault?: Vault) {
+    this.vault = vault ?? new Vault(dataDir);
+    this.vault.migrate(dataDir);
     this.current = createSpeechToText(env) || this.fromFile();
   }
   get fromEnv() { return !!this.env.HEARTH_DEEPGRAM_API_KEY; }
-  private saved(): { deepgramKey?: string } { try { return existsSync(this.file) ? JSON.parse(readFileSync(this.file, "utf8")) : {}; } catch { return {}; } }
+  private saved(): { deepgramKey?: string } { const k = this.vault.get("deepgram"); return k ? { deepgramKey: k } : {}; }
   private fromFile() { const k = this.saved().deepgramKey; return k ? new Deepgram(k, this.env.HEARTH_DEEPGRAM_MODEL || "nova-3") : null; }
   /** What the app may see: provider, where the key came from, and its last 4 characters. */
   status() {
@@ -61,7 +61,7 @@ export class VoiceSettings {
     const clean = key.trim();
     const bad = await checkDeepgramKey(clean);
     if (bad) return { error: bad };
-    writeFileSync(this.file, JSON.stringify({ deepgramKey: clean }), { mode: 0o600 });
+    this.vault.set("deepgram", clean);
     this.current = this.fromFile();
     return { value: this.status() };
   }
@@ -70,7 +70,7 @@ export class VoiceSettings {
 
   disconnect() {
     if (this.fromEnv) return { error: "This hub's voice key is set in its .env." };
-    rmSync(this.file, { force: true });
+    this.vault.delete("deepgram");
     this.current = null;
     return { value: this.status() };
   }
