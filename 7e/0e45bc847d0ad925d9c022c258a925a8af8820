@@ -4,6 +4,7 @@ deploy/box-selftest.sh
   s_d994421d2b64f1::t_a05a8364a4c8cb 1-20
 README.md
   s_d994421d2b64f1::t_ac9993d4adcb77 112,114-115,118-119
+  s_d994421d2b64f1::t_2b93d756fab660 82,143,150,154
 package.json
   s_d994421d2b64f1::t_7d1351ca73789b 20
 src/public/rules.ts
@@ -14,6 +15,7 @@ src/public/egress.ts
 src/server.ts
   s_d994421d2b64f1::t_864d68bdd1ad32 14-15,58,76,126-159,391-393,395-419,694
   s_d994421d2b64f1::t_8f1387294a4c67 695-696
+  s_d994421d2b64f1::t_179e74dc6f3d6b 394
 src/types.ts
   s_d994421d2b64f1::t_13afde38ad163b 325-334,337-378
   s_d994421d2b64f1::t_f5afe6aeb8530f 335-336
@@ -22,6 +24,7 @@ src/share-page.ts
   s_d994421d2b64f1::t_864d68bdd1ad32 96
 src/cli.ts
   s_d994421d2b64f1::t_43b8c436e5f770 14-16,23-28,63-92,101-104,106,113
+  s_d994421d2b64f1::t_4669154750590b 117
 src/config.ts
   s_d994421d2b64f1::t_43b8c436e5f770 25-28,61-62
 src/public/box.ts
@@ -68,6 +71,7 @@ test/fake-model.ts
   s_d994421d2b64f1::t_1d61788d152f4c 1-24
 deploy/lightsail.md
   s_d994421d2b64f1::t_ac9993d4adcb77 148-179,181-186,190
+  s_d994421d2b64f1::t_2b93d756fab660 180,187-189
 src/store/types.ts
   s_d994421d2b64f1::t_13afde38ad163b 7
 bun.lock
