@@ -1,13 +1,19 @@
 import { readFileSync, readdirSync, existsSync, mkdirSync } from "node:fs";
 import { join, resolve, extname, dirname } from "node:path";
 type Server = Bun.Server<unknown>;
-import { sha256, deviceForToken, newPairingCode, redeemPairingCode, RateLimiter, addDevice, owners, isOwner, newChallenge, verifyPasskeyRegistration, verifyPasskeyAssertion, Sessions, AccessRequests } from "./auth.ts";
+import { rotateToken, sha256, deviceForToken, newPairingCode, redeemPairingCode, RateLimiter, addDevice, owners, isOwner, newChallenge, verifyPasskeyRegistration, verifyPasskeyAssertion, Sessions, AccessRequests } from "./auth.ts";
 import QRCode from "qrcode";
 import type { Hub } from "./hub.ts";
 import { deepgramLive, type VoiceSettings } from "./voice.ts";
 import { randomBytes } from "node:crypto";
 import { availableHarnesses } from "./brain.ts";
+import { Computers, COPY_ITEMS, isCopyItem } from "./computers.ts";
+import { Machines, realE2b, realSsh, type E2b, type Ssh } from "./machines.ts";
+import { Vault } from "./vault.ts";
+import { hasLogin, readLogin } from "./computer.ts";
+import { homedir } from "node:os";
 import { MAX_FILE_BYTES } from "./files.ts";
+import { fetchPublic } from "./watch.ts";
 import { appCsp } from "./apps.ts";
 import { isActive, search } from "./memory.ts";
 import { isValidTimeZone } from "./time.ts";
@@ -55,7 +61,10 @@ export async function buildWeb() {
 
 class HttpError extends Error { constructor(public status: number, msg: string) { super(msg); } }
 
-export async function startServer(hub: Hub, voice: VoiceSettings | null = null, shares: Shares | null = null) {
+/** drivers: stand-ins for E2B and ssh in tests. */
+export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
+  drivers: { e2b?: E2b; ssh?: Ssh; readLogin?: typeof readLogin; allowLocalHub?: boolean; vault?: Vault; shares?: Shares | null } = {}) {
+  const shares = drivers.shares ?? null;
   const voiceLimiter = new RateLimiter(5, 10 * 60_000);
   const liveTickets = new Map<string, number>();
   const tileKey = randomBytes(12).toString("base64url");
@@ -66,6 +75,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null, 
   const pairLimiter = new RateLimiter(5, 10 * 60_000);
   const pairGlobal = new RateLimiter(30, 10 * 60_000);
   const ideaLimiter = new RateLimiter(2, 10 * 60_000);
+  // Webhook hooks: anyone with the secret URL can call it, so each hook gets 30 calls a minute at most.
+  const webhookLimiter = new RateLimiter(30, 60_000);
   // Wrong device tokens: 20 in 10 minutes and that address is shut out of the API for the rest of the window.
   const badToken = new RateLimiter(20, 10 * 60_000);
   // Access requests notify your primary phone, so strangers can't spam it.
@@ -74,6 +85,43 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null, 
   const sessions = new Sessions(config.unlockHours * 3600_000);
   const access = new AccessRequests();
   const visitorLimiter = new RateLimiter(60, 60_000);
+  // Computers linked to this hub (your Mac): brain calls run there when one is online, here (the cloud) when none is.
+  const computers = new Computers({ dataDir: config.dataDir, homeDir: homedir(), acceptCopies: config.target === "lightsail", readLogin: drivers.readLogin ?? readLogin,
+    hasLogin: drivers.readLogin ? (i) => !!drivers.readLogin!(i) : hasLogin });
+  const linkedComputers = async () => (await store.all<Device>("devices")).filter((d) => d.role === "computer");
+  const recount = async () => { computers.known = (await linkedComputers()).length; };
+  await recount();
+  hub.brain.remote = computers;
+  computers.onChange = () => hub.emit("computers", {});
+  computers.onOnline = () => { hub.resumeForComputer().catch((e) => console.error(e)); };
+  computers.start();
+  // Cloud computers the hub sets up itself: an E2B sandbox or your VM. Each becomes a linked computer.
+  const vault = drivers.vault ?? new Vault(config.dataDir);
+  vault.migrate(config.dataDir);
+  const machines = new Machines({
+    dataDir: config.dataDir, vault,
+    hubUrl: () => process.env.HEARTH_PUBLIC_URL || null,
+    addComputer: async (name, machineId) => {
+      const { token, device } = await addDevice(store, name, "computer");
+      await store.put<Device>("devices", { ...device, machine: machineId });
+      await recount();
+      return { token, deviceId: device.id };
+    },
+    removeComputer: async (deviceId) => { computers.drop(deviceId, "removed", 4001); await store.remove("devices", deviceId); await recount(); },
+    rekey: async (deviceId) => { const t = await rotateToken(store, deviceId); computers.drop(deviceId, "new key"); return t; },
+    isOnline: (id) => computers.isOnline(id),
+    isBusy: (id) => computers.status(id, "").running > 0,
+    e2b: drivers.e2b ?? realE2b, ssh: drivers.ssh ?? realSsh, allowLocalHub: drivers.allowLocalHub,
+  });
+  machines.onChange = () => hub.emit("computers", {});
+  machines.startTimer();
+  hub.onNeedsComputer = () => { machines.wake().catch((e) => console.error(e)); };
+  const computerSummary = async () => {
+    const list = (await linkedComputers()).map((d) => computers.status(d.id, d.name, d.lastSeenAt));
+    const rank = { online: 0, asleep: 1, offline: 2 };
+    list.sort((x, y) => rank[x.state] - rank[y.state] || y.level - x.level);
+    return { linked: list.length, online: list.filter((c) => c.state === "online").map((c) => c.name), list, acceptCopies: config.target === "lightsail" };
+  };
   const streams = new Map<string, Set<ReadableStreamDefaultController>>();
   const enc = new TextEncoder();
 
@@ -180,15 +228,36 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null, 
       if (!askLimiter.allow(ip) || !askGlobal.allow("all")) throw new HttpError(429, "Too many requests. Wait 10 minutes.");
       if ((await store.all<Device>("devices")).length === 0) throw new HttpError(409, "This hub isn't set up yet. Use the setup code from the server.");
       const b = await body(req);
-      const { poll, request } = access.create(b.deviceName, ip);
+      const { poll, request } = access.create(b.deviceName, ip, b.kind);
       hub.emit("access", { pending: access.pending().length });
-      await hub.push?.send({ title: "New device wants in", body: `${request.name} · code ${request.code}. Open Hearth to approve or deny.`, tag: "access", url: "/#access" }, (await owners(store)).map((d) => d.id));
+      await hub.push?.send({ title: request.kind === "computer" ? "A computer wants to link" : "New device wants in", body: `${request.name} · code ${request.code}. Open Hearth to approve or deny.`, tag: "access", url: "/#access" }, (await owners(store)).map((d) => d.id));
       return json({ poll, code: request.code, expiresInMin: 10 });
     }
     if (path === "/api/access/poll" && method === "POST") {
       const r = access.poll((await body(req)).poll);
       if (!r) throw new HttpError(404, "That request expired. Ask again.");
       return json({ status: r.status, token: r.token, deviceId: r.deviceId, hub: { name: config.name, build: web.build } });
+    }
+    // A webhook hook's secret URL. The token is the password; it wakes that hook's teammate with whatever was sent.
+    if (seg[1] === "webhook" && seg[2] && !seg[3]) {
+      if (method !== "POST") throw new HttpError(405, "POST to this address.");
+      if (badToken.blocked(ip)) throw banned();
+      if (!webhookLimiter.allow(seg[2])) throw new HttpError(429, "Too many calls. Wait a minute.");
+      if (Number(req.headers.get("content-length") || 0) > 64_000) throw new HttpError(413, "Too large.");
+      const text = (await req.text()).slice(0, 64_000);
+      if (!(await hub.webhook(seg[2], text))) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(404, "No webhook here."); }
+      return json({ ok: true }, 202);
+    }
+    // Google sends the browser back here after you approve (no device key on a redirect; the state ties it to your Connect).
+    if (path === "/api/google/callback" && method === "GET") {
+      const err = url.searchParams.get("error");
+      const r = err ? { error: err === "access_denied" ? "You didn't allow access." : err }
+        : await hub.google.finish(url.searchParams.get("code") || "", url.searchParams.get("state") || "");
+      if (r.error && badToken.blocked(ip)) throw banned();
+      if (r.error) badToken.allow(ip);
+      else { await hub.log("google.connected", `Google connected (${hub.google.status().email || "account"})`); hub.emit("connections"); }
+      const to = `/#connections=${r.error ? `error:${encodeURIComponent(r.error)}` : "google"}`;
+      return new Response(null, { status: 302, headers: { Location: to, "Cache-Control": "no-store" } });
     }
     if (path === "/api/pair" && method === "POST") {
       if (!pairLimiter.allow(ip) || !pairGlobal.allow("all")) throw new HttpError(429, "Too many attempts. Wait 10 minutes.");
@@ -206,6 +275,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null, 
     // ---- everything else needs a paired device ----
     const device = await deviceForToken(store, req.headers.get("authorization"));
     if (!device) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not paired."); }
+    // A linked computer's key opens its link and nothing else: it can't read chats or memory through the API.
+    if (device.role === "computer") throw new HttpError(403, "This key only links a computer to the hub.");
     // Face ID lock: a device with a passkey (or every device, with HEARTH_REQUIRE_PASSKEY=1) needs a recent unlock.
     // A copied device token alone then gets nothing but this lock screen.
     if ((device.passkey || config.requirePasskey) && !sessions.valid(req.headers.get("x-hearth-unlock"), device.id)) {
@@ -227,6 +298,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null, 
           push: { available: !!hub.push, subscribed: hub.push ? await hub.push.hasDevice(device.id) : false },
           pendingScripts: (await hub.scripts.list()).filter((s) => s.status === "proposed").length,
           voice: voice?.current?.name ?? null,
+          computers: await computerSummary(),
           tileKey,
         });
       }
@@ -452,6 +524,34 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null, 
         try { return json({ text: await stt.transcribe(audio, type) }); }
         catch (err: any) { throw new HttpError(502, `Transcription failed: ${err.message}`); }
       }
+      case "google": {
+        // The redirect Google must allow: this hub's own address, as your browser sees it.
+        const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || url.host;
+        const proto = config.behindProxy ? (req.headers.get("x-forwarded-proto") || "https") : url.protocol.replace(":", "");
+        const redirectUri = `${proto}://${host}/api/google/callback`;
+        if (method === "GET" && !id) return json({ ...hub.google.status(), redirectUri });
+        if (method === "PUT" && id === "client") {
+          ownerOnly();
+          const b = await body(req);
+          const r = hub.google.setClient(String(b.clientId || ""), String(b.clientSecret || ""));
+          if (r.error) throw new HttpError(400, r.error);
+          hub.emit("connections");
+          return json({ ...r.value, redirectUri });
+        }
+        if (method === "POST" && id === "connect") {
+          ownerOnly();
+          const r = hub.google.authUrl(redirectUri);
+          if (r.error) throw new HttpError(400, r.error);
+          return json({ url: r.value });
+        }
+        if (method === "DELETE" && !id) { ownerOnly(); const st = await hub.google.disconnect(); await hub.log("google.disconnected", "Google disconnected"); hub.emit("connections"); return json({ ...st, redirectUri }); }
+        break;
+      }
+      case "trigger-recipes": {
+        if (method === "GET" && !id) return json(await hub.listTriggerRecipes());
+        if (method === "DELETE" && id) return json({ ok: await hub.removeTriggerRecipe(id) });
+        break;
+      }
       case "hooks": {
         if (method === "GET" && !id) return json(await hub.listHooks());
         if (method === "POST" && !id) { const r = await hub.addHook(await body(req), "you"); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
@@ -550,7 +650,24 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null, 
       }
       case "devices": {
         const primaries = (await owners(store)).map((d) => d.id);
-        if (method === "GET") return json((await store.all<Device>("devices")).map(({ tokenHash, passkey, ...d }) => ({ ...d, primary: primaries.includes(d.id), passkey: !!passkey, current: d.id === device.id })));
+        if (method === "GET") return json((await store.all<Device>("devices")).map(({ tokenHash, passkey, ...d }) => ({
+          ...d, primary: primaries.includes(d.id), passkey: !!passkey, current: d.id === device.id,
+          ...(d.role === "computer" ? { link: computers.status(d.id, d.name, d.lastSeenAt), copy: d.copy || [],
+            copiedAt: Object.fromEntries(Object.entries(computers.copied()).filter(([, v]) => v.from === d.id).map(([k, v]) => [k, v.at])) } : {}),
+        })));
+        // What a computer keeps copied up here, so the cloud can work while it's off. Only a server hub takes copies.
+        if (method === "PUT" && id && seg[3] === "copy") {
+          ownerOnly();
+          const target = await store.get<Device>("devices", id);
+          if (!target || target.role !== "computer") throw new HttpError(404, "No such computer.");
+          if (config.target !== "lightsail") throw new HttpError(409, "Only a server hub (HEARTH_TARGET=lightsail) takes copies of logins.");
+          const b = await body(req);
+          const items = Object.keys(COPY_ITEMS).filter((k) => isCopyItem(k) && b[k] === true) as NonNullable<Device["copy"]>;
+          await store.put<Device>("devices", { ...target, copy: items });
+          computers.setWant(id, items);
+          await hub.log("computer.copy", `${target.name} copies: ${items.map((i) => COPY_ITEMS[i].label).join(", ") || "nothing"}`);
+          return json({ ok: true, copy: items, copied: computers.copied() });
+        }
         if (method === "POST" && id === "pair-code") {
           ownerOnly();
           const r = await newPairingCode(store);
@@ -562,6 +679,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null, 
           ownerOnly();
           const target = await store.get<Device>("devices", id);
           if (!target) throw new HttpError(404, "No such device.");
+          if (target.role === "computer") throw new HttpError(409, "A linked computer can't be the primary device.");
           await store.put<Device>("devices", { ...target, role: "owner" });
           for (const d of await store.all<Device>("devices")) if (d.id !== id && (d.role === "owner" || primaries.includes(d.id))) await store.put<Device>("devices", { ...d, role: "member" });
           await hub.log("device.primary", `${target.name} is now the primary device`);
@@ -571,7 +689,11 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null, 
           if (id !== device.id) ownerOnly();
           if (primaries.length === 1 && primaries[0] === id && (await store.all<Device>("devices")).length > 1) throw new HttpError(409, "Make another device primary first.");
           sessions.endDevice(id);
+          const gone = await store.get<Device>("devices", id);
+          if (gone?.role === "computer") { computers.drop(id, "signed out", 4001); for (const i of gone.copy || []) computers.removeCopy(i, id); }
+          if (gone?.machine) await machines.deviceRemoved(id);
           const ok = await store.remove("devices", id);
+          await recount();
           await hub.push?.unsubscribeDevice(id);
           for (const c of streams.get(id) || []) { try { c.close(); } catch {} }
           streams.delete(id);
@@ -623,12 +745,34 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null, 
         if (seg[3] === "approve" && method === "POST") {
           const b = await body(req);
           if (device.passkey && !(pageOrigin && verifyPasskeyAssertion(b.passkey, device, pageOrigin))) throw new HttpError(401, "Confirm with Face ID to let a device in.");
-          const added = await addDevice(store, r.name, "member");
+          const added = await addDevice(store, r.name, r.kind === "computer" ? "computer" : "member");
           r.status = "approved"; r.token = added.token; r.deviceId = added.device.id;
+          await recount();
           await hub.log("device.paired", `${r.name} joined (approved from ${device.name})`);
           hub.emit("access", { pending: access.pending().length });
           return json({ ok: true });
         }
+        break;
+      }
+      // Cloud computers: an E2B sandbox (your API key) or your own VM (address + SSH key). Primary device only.
+      case "machines": {
+        ownerOnly();
+        const view = () => ({ e2bKey: machines.hasE2bKey(), logins: computers.loginsHeld(), hubUrl: process.env.HEARTH_PUBLIC_URL || null, machines: machines.list().map((m) => machines.view(m)) });
+        if (method === "GET" && !id) return json(view());
+        if (id === "e2b-key" && method === "POST") { const bad = await machines.setE2bKey(String((await body(req)).key || "")); if (bad) throw new HttpError(400, bad); await hub.log("machines.e2b", "E2B key connected"); return json(view()); }
+        if (id === "e2b-key" && method === "DELETE") { machines.forgetE2bKey(); return json(view()); }
+        if (!id && method === "POST") {
+          const b = await body(req);
+          const r = b.kind === "e2b" ? await machines.addE2b(b) : b.kind === "ssh" ? await machines.addSsh(b) : { error: "Pick E2B or your own VM." };
+          if ("error" in r && r.error) throw new HttpError(400, r.error);
+          await hub.log("machines.add", `${b.kind === "e2b" ? "E2B sandbox" : "VM"} ${(r as any).value?.name} added`);
+          return json(view());
+        }
+        const m = id ? machines.get(id) : null;
+        if (!m) throw new HttpError(404, "No such cloud computer.");
+        if (seg[3] === "start" && method === "POST") { void machines.start(m.id); return json({ ok: true }); }
+        if (seg[3] === "stop" && method === "POST") { await machines.stop(m.id); return json(view()); }
+        if (method === "DELETE") { await machines.remove(m.id); await hub.log("machines.remove", `${m.name} removed`); return json(view()); }
         break;
       }
       case "push": {
@@ -652,23 +796,34 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null, 
     throw new HttpError(404, "Not found.");
   }
 
-  type LiveData = { rate: number; relay?: ReturnType<typeof deepgramLive> };
-  const server = Bun.serve<LiveData, never>({
+  type LiveData = { kind: "voice"; rate: number; relay?: ReturnType<typeof deepgramLive> };
+  type ComputerData = { kind: "computer"; deviceId: string; name: string; want: NonNullable<Device["copy"]>; cloud: boolean };
+  const server = Bun.serve<LiveData | ComputerData, never>({
     hostname: config.host,
     port: config.port,
     idleTimeout: 60,
     websocket: {
       maxPayloadLength: 1024 * 1024,
       open(ws) {
+        if (ws.data.kind === "computer") { computers.attach(ws.data.deviceId, ws.data.name, ws, ws.data.want, ws.data.cloud); return; }
         const key = voice?.deepgramKey();
         if (!key) { ws.close(1011, "voice off"); return; }
         ws.data.relay = deepgramLive(key, ws.data.rate, { send: (d) => ws.send(d), close: () => ws.close() });
       },
       message(ws, msg) {
+        if (ws.data.kind === "computer") { computers.message(ws.data.deviceId, String(msg)); return; }
         if (typeof msg === "string") { if (msg === "stop") ws.data.relay?.stop(); return; }
         ws.data.relay?.audio(msg);
       },
-      close(ws) { ws.data.relay?.abort(); },
+      close(ws) {
+        if (ws.data.kind === "computer") {
+          const { deviceId } = ws.data;
+          computers.detach(deviceId, ws);
+          // Remember when it left, so "last seen" survives a hub restart.
+          store.get<Device>("devices", deviceId).then((d) => d && store.put<Device>("devices", { ...d, lastSeenAt: new Date().toISOString() })).catch(() => {});
+        }
+        else ws.data.relay?.abort();
+      },
     },
     async fetch(req, server) {
       const url = new URL(req.url);
@@ -684,8 +839,24 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null, 
         if (!exp || exp < Date.now()) return new Response("Ticket expired", { status: 401 });
         if (origin && !sameOrigin && !config.allowedOrigins.includes(origin)) return new Response("Origin not allowed", { status: 403 });
         if (!(rate >= 8000 && rate <= 96000)) return new Response("Bad sample rate", { status: 400 });
-        if (server.upgrade(req, { data: { rate: Math.round(rate) } })) return undefined as unknown as Response;
+        if (server.upgrade(req, { data: { kind: "voice", rate: Math.round(rate) } })) return undefined as unknown as Response;
         return new Response("Expected a WebSocket", { status: 426 });
+      }
+      // A linked computer dials in here and keeps the line open; work comes down it. Its key goes in a header.
+      if (url.pathname === "/computer" || url.pathname === "/computer/bundle") {
+        const ip = clientIp(req, server);
+        if (badToken.blocked(ip)) return new Response("Too many wrong keys. Wait 10 minutes.", { status: 429 });
+        const d = await deviceForToken(store, req.headers.get("authorization"));
+        if (!d || d.role !== "computer") { badToken.allow(ip); return new Response("Not linked.", { status: 401 }); }
+        // A cloud computer being set up downloads Hearth from its own hub, so the two always run the same code.
+        if (url.pathname === "/computer/bundle") {
+          const root = resolve(import.meta.dir, "..");
+          const tar = Bun.spawn(["tar", "-czf", "-", "-C", root, "src", "scripts", "package.json", "bun.lock", "tsconfig.json"], { stdout: "pipe", stderr: "ignore" });
+          return new Response(tar.stdout, { headers: { "Content-Type": "application/gzip", "Cache-Control": "no-store" } });
+        }
+        await store.put<Device>("devices", { ...d, lastSeenAt: new Date().toISOString() });
+        if (server.upgrade(req, { data: { kind: "computer", deviceId: d.id, name: d.name, want: d.copy || [], cloud: !!d.machine } })) return undefined as unknown as Response;
+        return new Response("This is the computer link; connect with a WebSocket.", { status: 426 });
       }
       const headers = security(origin, sameOrigin);
       // A response that brings its own CSP or frame rules (sandboxed downloads, mini apps) keeps them.
@@ -771,7 +942,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null, 
       return finish(new Response(asset.body as BodyInit, { headers: { "Content-Type": asset.type, "Cache-Control": cache } }));
     },
   });
-  return { server, build: web.build };
+  return { server, build: web.build, computers, machines };
 }
 
 const EMOJI_DIR = (() => { try { return join(resolve(import.meta.dir, ".."), "node_modules/@lobehub/fluent-emoji-3d/assets"); } catch { return ""; } })();
@@ -782,14 +953,6 @@ function emojiFile(name: string) {
   const tries = [name, bare.join("-"), [bare[0], "fe0f", ...bare.slice(1)].join("-"), bare.map((c, i) => (i === 0 || c === "200d" || bare[i - 1] !== "200d" ? c : `${c}-fe0f`)).join("-"), `${bare.join("-")}-fe0f`];
   for (const t of tries) { const f = join(EMOJI_DIR, `${t}.webp`); if (existsSync(f)) return f; }
   return null;
-}
-
-/** A public address only: not localhost, not a private, link-local or reserved network (checked after DNS too). */
-function publicIp(ip: string) {
-  if (/^(127\.|10\.|0\.|169\.254\.|192\.168\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(ip)) return false;
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return false;
-  if (/^(::1?|f[cd]|fe[89ab]|::ffff:(127|10|192\.168|169\.254)\.)/i.test(ip)) return false;
-  return true;
 }
 
 /** Fetch a web picture for an app, once: public hosts only, images only, 8 MB max, cached by URL. */
@@ -803,18 +966,7 @@ async function webImage(raw: string, dataDir: string, limiter: RateLimiter) {
   if (existsSync(file) && existsSync(meta)) return { file, type: readFileSync(meta, "utf8") };
   if (!limiter.allow("img")) return null;
   try {
-    // Follow up to 3 redirects by hand, checking every hop's address.
-    let res: Response | null = null;
-    for (let hop = 0; hop < 4; hop++) {
-      if (!/^https?:$/.test(u.protocol)) return null;
-      const addrs = await (await import("node:dns/promises")).lookup(u.hostname, { all: true });
-      if (!addrs.length || !addrs.every((a) => publicIp(a.address))) return null;
-      res = await fetch(u, { redirect: "manual", headers: { "User-Agent": `Hearth/${pkg.version} (self-hosted personal assistant)`, Accept: "image/*" }, signal: AbortSignal.timeout(10_000) });
-      const next = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
-      if (!next) break;
-      u = new URL(next, u);
-      res = null;
-    }
+    const res = await fetchPublic(u.toString(), "image/*", 10_000);
     if (!res) return null;
     const type = (res.headers.get("content-type") || "").split(";")[0].trim();
     if (!res.ok || !/^image\/(png|jpeg|gif|webp|avif)$/.test(type) || Number(res.headers.get("content-length") || 0) > 8e6) return null;

@@ -5,7 +5,6 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { BetaContentBlock, BetaMessageParam, BetaTool, BetaToolResultBlockParam } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import { AnthropicModel, type BoxModel } from "./model.ts";
-import { HubModel, PickModel } from "./relay.ts";
 import { checkReply, refusal, scopeText, screen } from "./guard.ts";
 import { accessFor, safePath } from "./rules.ts";
 import { countChanges } from "./diff.ts";
@@ -419,10 +418,10 @@ export class Box {
 if (import.meta.main) {
   const bundle = process.env.BOX_BUNDLE || "/bundle";
   const data = process.env.BOX_DATA || "/data";
-  const key = process.env.ANTHROPIC_API_KEY;
-  let box: Box;
-  const api = key ? new AnthropicModel(key, process.env.BOX_PROXY || undefined) : null;
-  box = new Box(bundle, data, new PickModel(() => (box.manifest().models.brain === "hub" ? "hub" : "api"), api, new HubModel(data, bundle)));
+  // A Claude API key, or a subscription token from `claude setup-token`. It only ever lives in this box's environment.
+  const key = process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  if (!key) { console.error("box: no ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN"); process.exit(1); }
+  const box = new Box(bundle, data, new AnthropicModel(key, process.env.BOX_PROXY || undefined));
   const sock = process.env.BOX_SOCKET || join(data, "run", "box.sock");
   mkdirSync(dirname(sock), { recursive: true });
   rmSync(sock, { force: true });

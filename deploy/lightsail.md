@@ -54,7 +54,7 @@ Any other Linux VPS works the same way.
 ```bash
 ssh ubuntu@<static IP>
 git clone https://github.com/<you>/hearth && cd hearth
-sudo bash deploy/setup.sh example.com you@example.com
+sudo bash deploy/setup.sh lightsail example.com you@example.com
 ```
 
 It checks that your domain points at this box, then installs and turns on everything below. You can run it again safely.
@@ -99,6 +99,30 @@ sudo -iu hearth bash -c 'cd /opt/hearth && ~/.bun/bin/bun run doctor'
 It checks HTTPS and HSTS, the redirect from http, that the hub isn't exposed directly, file permissions, and that your primary device has Face ID.
 
 For the strictest setup, add `HEARTH_REQUIRE_PASSKEY=1` to `/opt/hearth/.env` and restart. Every device then has to set up Face ID before it can see anything.
+
+## 7. Optional: link your Mac
+
+Want teammates to run on your Mac, with your own Claude or Codex login, whenever it's on? On the Mac, in a copy of the repo:
+
+```bash
+bash deploy/setup.sh mac https://example.com        # add --name "Studio" to choose what your phone calls it
+```
+
+It installs Bun if needed, asks your primary phone to approve the Mac (compare the 4-letter code), and starts it at login,
+kept awake while plugged in. The Mac connects out to your server and keeps the line open, so it needs no open ports.
+
+- Your phone shows it under **Settings → Devices → Computers**, with its signal and what it's running. Home says where work runs right now.
+- When the Mac is off, the server does the work. To let the server use Claude or Codex then, turn on **Copy to the cloud** for that login on the Mac's card.
+- Stop it: `launchctl bootout gui/$(id -u)/com.hearth.computer`. Unlink it from your phone to cut it off for good. Logs: `~/Library/Logs/hearth-computer.log`.
+
+## 8. Optional: cloud computers
+
+No Mac, or want a computer that's always there? On your phone: **Settings → Devices → Add a cloud computer**.
+
+- **E2B sandbox:** paste your [E2B](https://e2b.dev) API key once. Hearth makes a sandbox, installs itself and Claude Code there and links it. It pauses after the idle time you pick (no compute cost, everything stays installed) and wakes in seconds, on its own when a job is waiting for a computer. Remove deletes it from E2B.
+- **Your own VM:** any Linux machine you can SSH into (another Lightsail box, Hetzner, DigitalOcean). Enter its address, user and private key; Hearth checks it can log in, pins the machine's identity, and sets it up the same way.
+
+Both dial back to `HEARTH_PUBLIC_URL` (step 3 sets it). They use the logins this hub holds, so turn on **Copy to the cloud** for your Mac's Claude login first, or log in on the server.
 
 ## What protects you, in plain words
 
@@ -145,6 +169,11 @@ cd /opt/hearth && sudo -u hearth git pull && sudo -iu hearth bash -c 'cd /opt/he
 ```
 
 Back up `/opt/hearth/data` (or your database), and turn on automatic snapshots in Lightsail (Snapshots tab).
+
+**API keys are encrypted.** E2B, Deepgram and your VMs' SSH keys are kept in `data/keys/vault.db`, encrypted with the
+master key at `/home/hearth/.hearth/master.key` (or `HEARTH_MASTER_KEY`). The master key is deliberately *not* in the
+data folder, so a backup of the data can't reveal your keys. Keep a copy of the master key somewhere safe, apart from your
+backups, such as a password manager. If you lose it, nothing else is lost: paste your API keys into the app again.
 
 ## Sharing teammates by link
 

@@ -1,8 +1,15 @@
 import { resolve } from "node:path";
 
 // Bun loads .env on its own. Every setting has a safe default; nothing secret lives here.
+/**
+ * Where this hub runs. "lightsail": an always-on server with a public domain (computers link to it, and it can take
+ * copies of their logins). "mac": a computer that links to such a hub. "local": a hub on your own machine, just for you.
+ */
+export type Target = "local" | "lightsail" | "mac";
+
 export type Config = {
   name: string;
+  target: Target;
   dataDir: string;
   dbUrl: string | undefined;
   host: string;
@@ -40,6 +47,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   }
   return {
     name: env.HEARTH_NAME || "Hearth",
+    target: (["lightsail", "mac"] as const).find((t) => t === env.HEARTH_TARGET) ?? "local",
     dataDir: resolve(env.HEARTH_DATA || "./data"),
     dbUrl: env.HEARTH_DB_URL || undefined,
     host: env.HEARTH_HOST || "127.0.0.1",

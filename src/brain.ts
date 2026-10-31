@@ -3,6 +3,10 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import { wallParts, zonedToUtc } from "./time.ts";
+import { SOURCES } from "./sources/index.ts";
+
+/** Each trigger module's own description of its config, for the hook docs below. */
+const SOURCE_DOCS = SOURCES.map((s) => `        ${s.id}: ${s.doc}`).join("\n");
 
 // The brain is whatever coding agent you already use, run headless: one call per event.
 // It gets context in, and replies with text plus an optional ```hearth block of actions.
@@ -41,20 +45,45 @@ You can change things only by ending your reply with ONE fenced block tagged hea
 Mention what you did in your visible reply ("Done, I'll ping you at 6."). Never show the JSON otherwise.
 
 ACTIONS
-- hook.add {title, trigger, action, why, requestedByUser, cooldownMin?}
-    A hook is how you speak first later. Triggers:
+- hook.add {title, trigger, action, why, requestedByUser, cooldownMin?, teammate?}
+    A hook is how you speak first later. teammate: a teammate's name to hand it to (they speak when it fires); default you. Triggers:
       {"type":"at","at":"<ISO 8601 with offset>","repeat":"none|daily|weekdays|weekly|monthly"}
       {"type":"schedule","time":"HH:MM","days":[0-6, 0=Sunday]}
       {"type":"every","minutes":>=15}
       {"type":"place","place":"<saved place name>","event":"arrive|leave"}
       {"type":"silence","hours":>=6}
+      {"type":"watch","url":"https://…","minutes":>=15}   the hub reads the page and fires only when its text changes;
+                                                           you get the changed lines. Use "think" and stay quiet if the change doesn't matter.
+      {"type":"webhook"}   fires when something POSTs to the hook's secret URL (iOS Shortcuts, Zapier, IFTTT, GitHub,
+                           changedetection.io for pages that need a browser). You get what was sent. The URL shows on the
+                           hook in Plans; tell the user to copy it from there.
+      {"type":"check","script":"<name>","args":[],"minutes":>=5,"when":"changed|output"}
+                           your own code as a trigger: the hub runs the script every N minutes with NO model, and wakes
+                           you only when it prints something ("output") or its output differs from last time ("changed").
+                           The script gets its previous output in process.env.HEARTH_LAST, so it can print only what's new
+                           and print nothing when there's nothing to say. Use this for anything a page watch can't do:
+                           an API, a price under $X, a JSON field, several pages, a calculation. Write it with
+                           script.propose in the same reply; it starts once the user approves the code. Read-only only.
+      {"type":"source","source":"<id>","config":{…},"minutes":n}   a trigger module; CONTEXT.sources lists them and
+                           whether each is connected. You get only the items that are new since the last check. Modules:
+${SOURCE_DOCS}
+                           If a source isn't connected, tell the user to connect it in Menu → Connections first.
     Actions:
       {"type":"notify","text":"exact message to send"}            (plain reminders)
       {"type":"think","prompt":"what to do when it fires"}       (you will be called; you may stay quiet)
       {"type":"script","script":"<name>","args":[],"then":"notify|think"}
     "why" is shown to the user when it fires: say who asked and when, in a few words.
     requestedByUser = true only if the user explicitly asked for this reminder.
+- hook.update {id, title?, trigger?, action?, why?, teammate?}   change a plan instead of adding a near-copy
 - hook.remove {id} | hook.pause {id}
+    BEFORE hook.add, look for one that already covers it: CONTEXT.hooks (your plans; CONTEXT.hooksTotal says if only
+    some are shown) and CONTEXT.library entries of kind "trigger" (a live plan, id in "id") or "trigger-recipe".
+    Already covered: say so, or widen it with hook.update. A trigger-recipe fits: trigger.use it.
+- trigger.save {name, description, inputs:[{name,description}], hook:{title, trigger, action, why, teammate?}}
+    save a trigger setup worth reusing ("school-deadline-alerts", "linkedin-digest"). Put $input.<name> where the
+    details change (a sender, a URL, a time). Save one when the setup took thought and could come up again.
+- trigger.use {name, inputs:{…}}   make a plan from a saved setup with new details
+- trigger.forget {name}
 - memory.add {fact, notebook, importance, evidence, expiresAt?}
     One fact per entry, written as a standalone sentence. notebook: a short topic (people, health, work, food, home, travel, money, preferences…).
     importance: 3 = core identity or something they'd be upset you forgot (always loaded), 2 = useful, 1 = minor.
@@ -65,6 +94,8 @@ ACTIONS
 - memory.used {ids}   the memory ids you relied on for this reply (always include when you used any)
 - notebook.summary {name, summary}   1-2 sentence "where it stands" for a topic
 - place.add {name, here:true} or {name, lat, lon, radiusM?}   save a place for place hooks
+- source.read {source, config}   read a trigger module now (e.g. today's calendar, recent mail from someone);
+    you'll be called again with what it found. Same config as the trigger.
 - script.run {name, args}   run an approved script now; you'll be called again with its output
 - history.search {query}   search past conversations, answers and the daily log (exact wording, "what did I say about X");
     you'll be called again with what matched. Use it when memory doesn't have what you need.
@@ -299,7 +330,16 @@ function agentEnv() {
 export type BrainProfile = { harness: string; model: string };
 /** Collects model spend across calls. `unknown` flips when a harness can't report cost. */
 /** Spend for one job; signal stops its model process when the user changes the job mid-run. */
-export type Meter = { costUsd: number; unknown: boolean; signal?: AbortSignal; onProgress?: (what: string) => void };
+/** ranOn: set by Brain to the linked computer that ran the call, or "cloud" when this hub ran it while computers are linked. */
+export type Meter = { costUsd: number; unknown: boolean; signal?: AbortSignal; onProgress?: (what: string) => void; ranOn?: string };
+
+/** Somewhere else that can run a brain call: a computer linked to this hub (see computers.ts). */
+export type RemoteRunner = { name: string; run(b: BrainInput, p: BrainProfile, meter?: Meter): Promise<string> };
+export type Remote = { pick(p: BrainProfile): RemoteRunner | null; linked(): boolean };
+/** No linked computer is online for this harness, and this hub can't run it itself. The job parks until one is. */
+export class NeedsComputer extends Error {}
+/** The computer running a call dropped off mid-way. */
+export class ComputerGone extends Error {}
 
 /** One line on what the model is doing right now, from a streamed tool call ("Searching: pottery gifts"). */
 export function describeStep(name: string, input: any): string | null {
@@ -345,6 +385,8 @@ export class Brain {
   /** Brain processes running right now (for the UI and tests). */
   running = 0;
   private workDir: string;
+  /** Linked computers. When one is online with the harness, calls run there, on its own logins. */
+  remote: Remote | null = null;
 
   constructor(private config: Config) {
     this.global = new Semaphore(config.maxParallel);
@@ -376,7 +418,7 @@ export class Brain {
    */
   async think(b: BrainInput, profile?: BrainProfile, meter?: Meter): Promise<string> {
     const p = profile || this.defaults().workhorse;
-    if (b.mode === "orchestrate") return this.run(b, p, meter);
+    if (b.mode === "orchestrate") return this.dispatch(b, p, meter);
     const cap = this.config.maxParallelPerHarness[p.harness];
     if (cap && !this.perHarness.has(p.harness)) this.perHarness.set(p.harness, new Semaphore(cap));
     const own = this.perHarness.get(p.harness);
@@ -385,31 +427,25 @@ export class Brain {
     this.running++;
     try {
       if (meter?.signal?.aborted) throw new Error("Restarted with your new message.");
-      return await this.run(b, p, meter);
+      return await this.dispatch(b, p, meter);
     }
     finally { this.running--; own?.release(); this.global.release(); }
   }
 
-  /**
-   * For shared links set to use your subscription: one plain completion with your Claude login. No tools, no MCP
-   * servers, no settings or hooks, in the empty brain folder, with none of the hub's settings in its environment.
-   */
-  async relay(system: string, prompt: string, model: string): Promise<string> {
-    await this.global.acquire();
-    this.running++;
-    try {
-      const cmd = ["claude", "-p", "--output-format", "json", "--no-session-persistence", ...(model && MODEL_RE.test(model) ? ["--model", model] : []),
-        "--system-prompt", system, "--strict-mcp-config", "--setting-sources", "project", "--tools", ""];
-      const proc = Bun.spawn(cmd, { cwd: this.workDir, env: agentEnv(), stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe" });
-      const timer = setTimeout(() => proc.kill(), this.config.agentTimeoutMs);
-      const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-      const code = await proc.exited;
-      clearTimeout(timer);
-      let j: any = null;
-      try { j = JSON.parse(out.trim()); } catch {}
-      if (!j || j.is_error) throw new Error(j?.result ? String(j.result).slice(0, 200) : `claude exited with ${code}: ${err.trim().slice(-200)}`);
-      return String(j.result ?? "");
-    } finally { this.running--; this.global.release(); }
+  /** A linked computer if one is online with this harness, else this hub (the cloud). */
+  private async dispatch(b: BrainInput, p: BrainProfile, meter?: Meter): Promise<string> {
+    const r = this.remote?.pick(p);
+    if (r) {
+      if (meter) meter.ranOn = r.name;
+      try { return await r.run(b, p, meter); }
+      catch (e) { if (!(e instanceof ComputerGone)) throw e; }
+    }
+    const here = availableHarnesses(this.config).includes(p.harness);
+    if (!here && this.remote?.linked()) {
+      throw new NeedsComputer(`No linked computer is online to run ${p.harness}, and this hub can't run it. Open your Mac, or copy your ${p.harness} login to the cloud.`);
+    }
+    if (meter) meter.ranOn = this.remote?.linked() ? "cloud" : undefined;
+    return this.run(b, p, meter);
   }
 
   private async run(b: BrainInput, profile: BrainProfile, meter?: Meter): Promise<string> {

@@ -13,12 +13,15 @@
     "recover": "bun src/cli.ts recover",
     "status": "bun src/cli.ts status",
     "doctor": "bun src/cli.ts doctor",
+    "join": "bun src/cli.ts join",
+    "computer": "bun src/cli.ts computer",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.3.0",
     "@lobehub/fluent-emoji-3d": "1.1.0",
+    "e2b": "2.55.0",
     "qrcode": "1.5.4",
     "web-push": "^3.6.7"
   },

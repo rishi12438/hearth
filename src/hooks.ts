@@ -1,5 +1,8 @@
+import { randomBytes } from "node:crypto";
 import { REPEATS, type Repeat, nextOccurrence, nextScheduledRun, describeLocal } from "./time.ts";
 import type { Hook, HookAction, Trigger } from "./types.ts";
+import { NAME_RE } from "./scripts.ts";
+import { sourceById, SOURCES } from "./sources/index.ts";
 
 // A hook is a rule for when the assistant speaks first: a trigger, an action, and a reason.
 //   at        a moment, optionally repeating         -> reminders, follow-ups
@@ -7,6 +10,10 @@ import type { Hook, HookAction, Trigger } from "./types.ts";
 //   every     every N minutes (min 15)               -> watches: "tell me only if…"
 //   place     arriving at / leaving a saved place    -> "when I get to the office…"
 //   silence   no message from you for N hours        -> check-ins
+//   watch     a web page's text changed (checked every N min) -> "tell me when tickets drop"
+//   webhook   something POSTed to the hook's secret URL       -> Shortcuts, Zapier, changedetection.io, GitHub…
+//   check     an approved script, run every N min with no model -> any check you can write in code
+//   source    a trigger module (src/sources/): new Gmail, calendar events… -> "tell me when the school emails"
 // Actions: notify (send fixed text), think (run the brain; it may stay quiet), script (run an approved script).
 
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -45,6 +52,36 @@ export function validateTrigger(t: any): Trigger | string {
       if (!(hours >= 6 && hours <= 720)) return "Trigger 'silence' needs hours between 6 and 720.";
       return { type: "silence", hours };
     }
+    case "watch": {
+      let u: URL;
+      try { u = new URL(String(t.url || "")); } catch { return "Trigger 'watch' needs a web address."; }
+      if (!/^https?:$/.test(u.protocol)) return "Trigger 'watch' needs an http(s) address.";
+      const minutes = t.minutes === undefined ? 60 : Math.round(Number(t.minutes));
+      if (!(minutes >= 15 && minutes <= 10080)) return "Trigger 'watch' needs minutes between 15 and 10080.";
+      return { type: "watch", url: u.toString(), minutes };
+    }
+    case "webhook": {
+      // The token is the hook's password, so the hub makes it; a brain or a client can't pick one.
+      return { type: "webhook", token: randomBytes(24).toString("base64url") };
+    }
+    case "check": {
+      const script = String(t.script || "").toLowerCase();
+      if (!NAME_RE.test(script)) return "Trigger 'check' needs a script name.";
+      const minutes = t.minutes === undefined ? 30 : Math.round(Number(t.minutes));
+      if (!(minutes >= 5 && minutes <= 10080)) return "Trigger 'check' needs minutes between 5 and 10080.";
+      const args = Array.isArray(t.args) ? t.args.slice(0, 8).map((x: unknown) => String(x).slice(0, 200)) : [];
+      return { type: "check", script, args, minutes, when: t.when === "output" ? "output" : "changed" };
+    }
+    case "source": {
+      const src = sourceById(String(t.source || ""));
+      if (!src) return `Unknown source. Use one of: ${SOURCES.map((s) => s.id).join(", ")}.`;
+      const config = src.validate(t.config || {});
+      if (typeof config === "string") return config;
+      const m = src.minutes(config);
+      const minutes = t.minutes === undefined ? m.default : Math.round(Number(t.minutes));
+      if (!(minutes >= m.min && minutes <= 10080)) return `${src.label} checks need minutes between ${m.min} and 10080.`;
+      return { type: "source", source: src.id, config, minutes };
+    }
   }
   return "Unknown trigger type.";
 }
@@ -81,7 +118,7 @@ export function validateHook(input: any): { value?: Draft; error?: string } {
   return { value: { title, trigger, action, why, cooldownMin } };
 }
 
-/** When a time-driven hook should next fire. Place and silence hooks are event-driven (null). */
+/** When a time-driven hook should next fire. Place, silence and webhook hooks are event-driven (null). */
 export function computeNextAt(trigger: Trigger, tz: string, now = new Date(), firedJustNow = false): string | null {
   switch (trigger.type) {
     case "at": {
@@ -89,7 +126,7 @@ export function computeNextAt(trigger: Trigger, tz: string, now = new Date(), fi
       return nextOccurrence(trigger.at, trigger.repeat, tz, now)?.toISOString() ?? null;
     }
     case "schedule": return nextScheduledRun(trigger.time, trigger.days, tz, now)?.toISOString() ?? null;
-    case "every": return new Date(now.getTime() + trigger.minutes * 60000).toISOString();
+    case "every": case "watch": case "check": case "source": return new Date(now.getTime() + trigger.minutes * 60000).toISOString();
     default: return null;
   }
 }
@@ -110,8 +147,17 @@ export function describeTrigger(t: Trigger, tz: string) {
     case "every": return t.minutes % 60 === 0 ? `every ${t.minutes / 60}h` : `every ${t.minutes} min`;
     case "place": return `when you ${t.event === "arrive" ? "arrive at" : "leave"} ${t.place}`;
     case "silence": return `after ${t.hours}h without hearing from you`;
+    case "watch": return `when ${hostOf(t.url)} changes (checked every ${t.minutes % 60 === 0 ? `${t.minutes / 60}h` : `${t.minutes} min`})`;
+    case "webhook": return "when its webhook is called";
+    case "source": {
+      const src = sourceById(t.source);
+      return `${src ? src.describe(t.config as never) : t.source} (checked every ${t.minutes % 60 === 0 ? `${t.minutes / 60}h` : `${t.minutes} min`})`;
+    }
+    case "check": return `when ${t.script} ${t.when === "output" ? "finds something" : "sees a change"} (runs every ${t.minutes % 60 === 0 ? `${t.minutes / 60}h` : `${t.minutes} min`})`;
   }
 }
+
+const hostOf = (url: string) => { try { return new URL(url).host.replace(/^www\./, ""); } catch { return url; } };
 
 /** Plain user reminders fire even in quiet hours and don't count toward the daily cap. */
 export function isUserReminder(h: Hook) {

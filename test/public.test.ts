@@ -25,7 +25,7 @@ function writeBundle(over: Partial<Manifest> = {}, files: Record<string, string>
   const m: Manifest = {
     version: v, kind: "public", ownerName: "Rishi", teammate: { name: "Recipes", role: "Cooks things.", emoji: "🍳" },
     scope: { does: "Recipes and cooking.", examples: ["what can I make with eggs"], not: ["essays"], allowCode: false, allowLongForm: false },
-    knowledge: ["Rishi is vegetarian."], limits: { ...DEFAULT_LIMITS }, models: { teammate: "claude-opus-5-5", guard: "claude-haiku-5-5", effort: "medium", brain: "api" },
+    knowledge: ["Rishi is vegetarian."], limits: { ...DEFAULT_LIMITS }, models: { teammate: "claude-opus-5-5", guard: "claude-haiku-5-5", effort: "medium" },
     ...(Object.keys(files).length ? { folder: { name: "recipes-app", rules, files: manifestFiles } } : {}),
     ...over,
   };

@@ -31,15 +31,19 @@ export function costOf(model: string, usage: { input_tokens: number; output_toke
   return (input * i + usage.output_tokens * o) / 1e6;
 }
 
+export const isOauthToken = (key: string) => key.startsWith("sk-ant-oat");
+
 const FALLBACK_MODELS = new Set(["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-fable-5-1"]);
 
 export class AnthropicModel implements BoxModel {
   private client: Anthropic;
 
-  constructor(apiKey: string, proxy?: string) {
+  /** key: an API key (sk-ant-api…) or a subscription token from `claude setup-token` (sk-ant-oat…). */
+  constructor(key: string, proxy?: string) {
     // Bun's fetch takes a proxy per request; the SDK lets us hand it our own fetch.
     const viaProxy: typeof fetch = ((url: any, init?: any) => fetch(url, { ...init, proxy })) as typeof fetch;
-    this.client = new Anthropic({ apiKey, maxRetries: 2, timeout: 120_000, ...(proxy ? { fetch: viaProxy } : {}) });
+    const auth = isOauthToken(key) ? { apiKey: null, authToken: key, defaultHeaders: { "anthropic-beta": "oauth-2025-04-20" } } : { apiKey: key };
+    this.client = new Anthropic({ ...auth, maxRetries: 2, timeout: 120_000, ...(proxy ? { fetch: viaProxy } : {}) });
   }
 
   async guard(model: string, system: string, input: string, schema: Record<string, unknown>): Promise<GuardResult> {

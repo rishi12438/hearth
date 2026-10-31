@@ -70,6 +70,25 @@ Hearth holds personal data and can act on a schedule, so it is built to fail clo
   people this way may be against your plan's terms; the app says so where you choose it.
 - The `local` runner (a plain subprocess) is for trying the feature on your own machine and is not sealed.
 
+## Linked computers
+- A computer (your Mac) joins the way a phone does: it asks, shows a 4-letter code, and only your primary device can approve it. It gets its own key, stored on the hub only as a hash.
+- That key opens the computer link and nothing else. Every API call made with it gets `403`, so a computer can't read chats, memory or settings, and it can't be made primary.
+- The computer dials out to the hub over the hub's HTTPS address and sends its key in a header. Wrong keys count toward the same lockout as the API.
+- The hub can only ask a computer for a brain call. The computer runs it with its own code and the same slim, web-only tool set as on the hub, and only for harnesses it has installed. The hub never gets a shell on it.
+- **Copy to the cloud** is off by default and set per login (Claude, Codex) by the primary device. Only a server hub (`HEARTH_TARGET=lightsail`) accepts copies, only for the logins you turned on, at most 64 KB, and only valid JSON. They're written `0600` to the hub user's home. Turning a copy off deletes it, but only if the file is still the one the hub wrote, so a login set up by hand is never removed.
+- Unlinking a computer closes its line at once (the computer stops retrying) and deletes the logins it copied.
+- **Cloud computers** (an E2B sandbox or your VM) are set up by the hub, only from the primary device. The hub mints the machine's computer key and sends it to the setup script on stdin, never in a command line; each setup run gets a fresh key and the old one stops working. The script downloads Hearth from your own hub using that key.
+- The E2B key is checked with E2B, then kept in a `0600` file on the hub (or `HEARTH_E2B_API_KEY`); it's never in your data, exports or the app. A VM's SSH key is kept in its own `0600` file, used through a private temp folder per call, and the VM's host key is pinned the first time: a different host key later is refused.
+- The hub hands the logins it holds (for example, the Claude login your Mac copied up) only to computers it set up itself. Your Mac's link file has no `cloud` flag, so it ignores logins even if offered. Checking whether the hub has a login doesn't read the secret, so on a Mac there's no Keychain prompt just to show the screen; the secret is read only when a cloud computer links.
+- Removing a cloud computer shuts the sandbox down (or stops the link on the VM), unlinks its key and deletes its SSH key from the hub.
+
+## API keys (the vault)
+- The hub's API keys (E2B, Deepgram, your VMs' SSH keys) are kept in their own SQLite file, `data/keys/vault.db` (`0600`, folder `0700`), separate from your main data even when that's Postgres or MySQL. Each value is encrypted with AES-256-GCM under a fresh random IV and bound to its name, so a value copied to another row won't decrypt, and any tampering is detected.
+- The master key lives outside the data folder: `~/.hearth/master.key` (`0600`; the hub refuses it if others can read it), or `HEARTH_MASTER_KEY`. A copy or backup of the data folder alone can't reveal your keys. A wrong master key is reported at start rather than failing quietly.
+- Keys saved in plain files by older versions are moved into the vault on start, and the plain files deleted. `bun run doctor` checks all of this.
+- Keys are never in the database, exports, logs or anything sent to the app; the app only learns whether a key is set (and for Deepgram, its last 4 characters).
+- What's still a plain file, on purpose: the Claude/Codex login files, because those CLIs read them directly. They're `0600` in the hub user's home.
+
 ## Your data
 - SQLite files and the data folder are created with mode `0700`. Use a Postgres or MySQL user with access only to the Hearth tables.
 - Web Push VAPID keys are generated on first run and kept with your data; nothing is hard-coded. Push payloads go from your hub to your browser's push service, encrypted end to end per the Web Push standard.

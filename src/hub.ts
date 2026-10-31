@@ -4,15 +4,18 @@ import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store, Collection } from "./store/index.ts";
 import type { Brain, BrainInput, BrainProfile, Brains, Meter } from "./brain.ts";
-import { QUIET, ESCALATE, REDO, HARNESSES, MODEL_RE, availableHarnesses } from "./brain.ts";
+import { QUIET, ESCALATE, REDO, HARNESSES, MODEL_RE, availableHarnesses, NeedsComputer } from "./brain.ts";
 import type { Scripts } from "./scripts.ts";
 import type { Push } from "./push.ts";
 import { parseReply } from "./reply.ts";
 import { validateHook, computeNextAt, describeTrigger, isUserReminder } from "./hooks.ts";
+import { look, lineDiff } from "./watch.ts";
+import { Google } from "./google.ts";
+import { SOURCES, sourceById, formatItems } from "./sources/index.ts";
 import { recall, isActive, validateFact } from "./memory.ts";
 import { describeLocal, inQuietHours, quietEndsAt, localDate, distanceMeters } from "./time.ts";
-import type { Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
-import { Library, validateSkill, validateWorkflow, fill } from "./library.ts";
+import type { TriggerRecipe, Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
+import { Library, validateSkill, validateWorkflow, validateTriggerRecipe, fillDeep, fill, type LibraryItem } from "./library.ts";
 import { cleanTile, cleanOptions, extractTiles, type Tile } from "./tiles.ts";
 import { Files, extractFiles } from "./files.ts";
 import { Apps, appSize } from "./apps.ts";
@@ -68,6 +71,11 @@ export class Hub {
   clock = () => new Date();
   private listeners = new Set<(e: HubEvent) => void>();
   private firing = new Set<string>();
+  private _google: Google | null = null;
+  /** Your Google account (Gmail, Calendar), if you've connected one. */
+  get google() { return (this._google ??= new Google(this.config.dataDir)); }
+  /** Webhook calls that arrived while their hook was still busy with the last one; handled together right after. */
+  private webhookQueue = new Map<string, string[]>();
   private timer: ReturnType<typeof setInterval> | null = null;
   // Planning runs one batch at a time per ramble: messages sent while it's planning wait and are planned together next.
   private planning = new Set<string>();
@@ -178,9 +186,12 @@ export class Hub {
       proactiveMessagesLeftToday: Math.max(0, prefs.maxProactivePerDay - used),
       location,
       places: places.map((p) => ({ name: p.name, radiusM: p.radiusM })),
+      sources: SOURCES.map((s) => ({ id: s.id, label: s.label, connected: s.needs === "google" ? this.google.connected : false })),
       memory: memory.map((f) => ({ id: f.id, fact: f.fact, notebook: f.notebook, importance: f.importance, ...(f.expiresAt ? { expiresAt: f.expiresAt } : {}) })),
       notebooks: (await this.store.all<Notebook>("notebooks")).map((n) => ({ name: n.name, summary: n.summary })),
-      hooks: hooks.map((h) => ({ id: h.id, title: h.title, when: describeTrigger(h.trigger, prefs.tz), does: h.action.type, why: h.why, status: h.status })),
+      // Every plan while there are few; with many, the ones that match this request plus the newest (search finds the rest).
+      hooks: (hooks.length <= 30 ? hooks : await this.relevantHooks(hooks, query)).map((h) => ({ id: h.id, title: h.title, when: describeTrigger(h.trigger, prefs.tz), does: h.action.type, why: h.why, status: h.status, ...(h.teammateId ? { teammate: h.teammateId } : {}) })),
+      ...(hooks.length > 30 ? { hooksTotal: hooks.length } : {}),
       scripts: (await this.scripts.list()).filter((s) => s.status !== "rejected").map((s) => ({ name: s.name, description: s.description, status: s.status })),
       recentMessages: history.map((m) => ({ role: m.role, at: m.createdAt, text: m.text.slice(0, 600) })),
       library: mode === "review" ? undefined : await this.searchLibrary(query),
@@ -210,6 +221,7 @@ export class Hub {
     const results: string[] = [];
     for (const r of applied.runs.slice(0, 3)) {
       if (r.name === "@history") { results.push(`## Past conversations matching "${r.args[0]}"\n${await this.searchHistory(r.args[0])}`); continue; }
+      if (r.name === "@source") { results.push(await this.readSource(JSON.parse(r.args[0]))); continue; }
       if (opts.allowedScripts && !opts.allowedScripts.includes(r.name)) {
         results.push(`## ${r.name}\nNot allowed: this recipe may only use ${opts.allowedScripts.join(", ") || "no scripts"}.`);
         continue;
@@ -533,7 +545,7 @@ export class Hub {
       const status = patch.status === "failed" ? "failed" : blocked ? "blocked" : pending ? "waiting" : "done";
       await this.addSpend(job.messageId, meter.costUsd);
       cur = await this.saveJob({
-        ...cur, ...patch, blocked, status,
+        ...cur, ...patch, blocked, status, ranOn: meter.ranOn,
         durationMs: Date.now() - started, costUsd: meter.unknown ? null : +meter.costUsd.toFixed(4),
         finishedAt: status === "done" || status === "failed" ? this.clock().toISOString() : undefined,
       });
@@ -622,6 +634,13 @@ export class Hub {
       }
       await finish({ how: failedSkill ? "repaired" : "fresh", tier, escalated, voiced, result: r.text.slice(0, 4000), did: r.did, tiles: r.tiles, fileIds: r.fileIds });
     } catch (err: any) {
+      if (err instanceof NeedsComputer) {
+        // Parks instead of failing; resumeForComputer picks it up the moment a computer links in. A cloud sandbox that's
+        // allowed to start on its own is woken for it.
+        this.onNeedsComputer?.();
+        cur = await this.saveJob({ ...cur, blocked: { need: "Your Mac", why: err.message, unblock: "Open your Mac, or copy your login to the cloud in Settings → Devices", needs: "computer" } });
+        return await finish({ how: "fresh", tier });
+      }
       await finish({ status: "failed", how: "fresh", tier, escalated, result: err.message });
     }
   }
@@ -691,6 +710,16 @@ export class Hub {
     return null;
   }
 
+  /** Set by the server: wake a cloud computer when a job is waiting for one. */
+  onNeedsComputer: (() => void) | null = null;
+
+  /** A linked computer came online: run every job that was parked waiting for one. */
+  async resumeForComputer() {
+    const parked = (await this.store.all<Job>("jobs")).filter((j) => j.status === "blocked" && j.blocked?.needs === "computer");
+    for (const j of parked) await this.retryJob(j.id);
+    if (parked.length) await this.log("computer.resumed", `${parked.length} job(s) picked up by your computer`);
+  }
+
   /** You unblocked it (opened the laptop, logged in, tapped Allow): run the job again from the top. */
   async retryJob(id: string) {
     const job = await this.store.get<Job>("jobs", id);
@@ -708,8 +737,41 @@ export class Hub {
   async searchLibrary(query: string) {
     if (!query.trim()) return [];
     const [skills, workflows, scripts, components] = await Promise.all([this.store.all<Skill>("skills"), this.store.all<Workflow>("workflows"), this.scripts.list(), this.store.all<Component>("components")]);
-    return this.library.search(query, skills, workflows, scripts, 8, components);
+    return this.library.search(query, skills, workflows, scripts, 8, components, await this.triggerItems());
   }
+
+  /** Your live triggers and saved trigger setups, as library entries: searched before a new one is made. */
+  private async triggerItems(): Promise<Omit<LibraryItem, "score">[]> {
+    const tz = (await this.prefs()).tz;
+    const hooks = (await this.store.all<Hook>("hooks")).filter((h) => h.status !== "done" && h.source !== "system");
+    const recipes = await this.store.all<TriggerRecipe>("triggerRecipes");
+    const does = (h: Hook) => h.action.type === "think" ? h.action.prompt.slice(0, 160) : h.action.type === "notify" ? h.action.text.slice(0, 160) : `runs ${h.action.script}`;
+    return [
+      ...hooks.map((h) => ({ kind: "trigger" as const, id: h.id, name: h.title, description: `${describeTrigger(h.trigger, tz)}. ${h.why} ${does(h)}`.trim(), how: h.status })),
+      ...recipes.map((r) => ({ kind: "trigger-recipe" as const, name: r.name, description: r.description, inputs: r.inputs.map((i) => i.name), how: `${(r.hook.trigger as any)?.type || "?"} trigger, used ${r.uses}×` })),
+    ];
+  }
+
+  private async relevantHooks(hooks: Hook[], query: string) {
+    const hits = new Set((await this.searchLibrary(query)).filter((x) => x.kind === "trigger").map((x) => x.id));
+    const newest = [...hooks].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 20);
+    return [...hooks.filter((h) => hits.has(h.id)), ...newest.filter((h) => !hits.has(h.id))];
+  }
+
+  /** hook.add and trigger.use: route to a named teammate, add, and report it. */
+  private async addHookFrom(a: any, where: { teammateId?: string; threadId?: string }, done: Done[]) {
+    // "teammate": hand the hook to another teammate (by name), who then speaks when it fires.
+    const named = typeof a.teammate === "string" && a.teammate.trim()
+      ? (await this.store.all<Teammate>("teammates")).find((t) => t.name.toLowerCase() === a.teammate.trim().toLowerCase()) : undefined;
+    const r = await this.addHook(a, a.requestedByUser === true ? "you" : "assistant", named ? { ...where, teammateId: named.id } : where);
+    const t = r.value?.trigger.type;
+    const kind = t === "at" ? "Reminder" : t === "webhook" ? "Webhook" : t === "watch" || t === "check" || t === "source" ? "Watching" : "Hook";
+    if (r.value) done.push({ kind: "hook", label: `${kind}: ${r.value.title}`, id: r.value.id });
+    return r;
+  }
+
+  async listTriggerRecipes() { return this.store.all<TriggerRecipe>("triggerRecipes"); }
+  async removeTriggerRecipe(id: string) { const ok = await this.store.remove("triggerRecipes", id); if (ok) this.emit("hooks"); return ok; }
 
   async skillByName(name: string) {
     return (await this.store.all<Skill>("skills")).find((s) => s.name === name.toLowerCase()) || null;
@@ -1034,9 +1096,51 @@ export class Hub {
       try {
         switch (a.type) {
           case "hook.add": {
-            const r = await this.addHook(a, a.requestedByUser === true ? "you" : "assistant", where);
-            if (r.value) done.push({ kind: "hook", label: `${r.value.trigger.type === "at" ? "Reminder" : "Hook"}: ${r.value.title}`, id: r.value.id });
-            else await this.log("action.rejected", `hook.add: ${r.error}`);
+            const r = await this.addHookFrom(a, where, done);
+            if (!r.value) await this.log("action.rejected", `hook.add: ${r.error}`);
+            break;
+          }
+          case "hook.update": {
+            // Change a plan instead of adding a near-copy (a wider Gmail search, a new time, another teammate).
+            const cur = await this.store.get<Hook>("hooks", String(a.id));
+            if (!cur || cur.source === "system") break;
+            const patch: any = {};
+            for (const k of ["title", "trigger", "action", "why"]) if (a[k] !== undefined) patch[k] = a[k];
+            const h = await this.updateHook(cur.id, patch);
+            if (h && typeof a.teammate === "string") {
+              const t = (await this.store.all<Teammate>("teammates")).find((x) => x.name.toLowerCase() === a.teammate.trim().toLowerCase());
+              if (t) await this.store.put<Hook>("hooks", { ...h, teammateId: t.id });
+            }
+            if (h) done.push({ kind: "hook", label: `Updated: ${h.title}`, id: h.id });
+            else await this.log("action.rejected", `hook.update: couldn't apply to ${cur.title}`);
+            break;
+          }
+          case "trigger.save": {
+            if (where.recipe) break;
+            const v = validateTriggerRecipe(a);
+            if (!v.value) { await this.log("action.rejected", `trigger.save: ${v.error}`); break; }
+            // Check the setup works by filling every blank with a stand-in.
+            const sample = fillDeep(v.value.hook, Object.fromEntries(v.value.inputs.map((i) => [i.name, "x"])));
+            const ok = validateHook(sample);
+            if (ok.error) { await this.log("action.rejected", `trigger.save: ${ok.error}`); break; }
+            const prev = (await this.store.all<TriggerRecipe>("triggerRecipes")).find((r) => r.name === v.value.name);
+            await this.store.put<TriggerRecipe>("triggerRecipes", prev ? { ...prev, ...v.value, updatedAt: this.clock().toISOString() } : this.doc({ ...v.value, uses: 0 }));
+            done.push({ kind: "skill", label: `Saved setup: ${v.value.name}` });
+            this.emit("hooks");
+            break;
+          }
+          case "trigger.use": {
+            const rec = (await this.store.all<TriggerRecipe>("triggerRecipes")).find((r) => r.name === String(a.name || "").toLowerCase());
+            if (!rec) { await this.log("action.rejected", `trigger.use: no setup called ${a.name}`); break; }
+            const inputs = Object.fromEntries(Object.entries(a.inputs && typeof a.inputs === "object" ? a.inputs : {}).map(([k, x]) => [k, String(x).slice(0, 300)]));
+            const r = await this.addHookFrom({ ...fillDeep(rec.hook, inputs), requestedByUser: false }, where, done);
+            if (r.value) await this.store.put<TriggerRecipe>("triggerRecipes", { ...rec, uses: (rec.uses || 0) + 1, lastUsedAt: this.clock().toISOString() });
+            else await this.log("action.rejected", `trigger.use ${rec.name}: ${r.error}`);
+            break;
+          }
+          case "trigger.forget": {
+            const rec = (await this.store.all<TriggerRecipe>("triggerRecipes")).find((r) => r.name === String(a.name || "").toLowerCase());
+            if (rec && (await this.removeTriggerRecipe(rec.id))) done.push({ kind: "skill", label: `Forgot setup: ${rec.name}` });
             break;
           }
           case "hook.remove": {
@@ -1148,6 +1252,9 @@ export class Hub {
           case "script.run":
             if (typeof a.name === "string") runs.push({ name: a.name, args: Array.isArray(a.args) ? a.args.slice(0, 8).map(String) : [] });
             break;
+          case "source.read":
+            if (typeof a.source === "string") runs.push({ name: "@source", args: [JSON.stringify({ source: a.source, config: a.config || {} })] });
+            break;
           case "history.search":
             if (typeof a.query === "string" && a.query.trim()) runs.push({ name: "@history", args: [a.query.trim().slice(0, 200)] });
             break;
@@ -1253,6 +1360,9 @@ export class Hub {
       const v = validateHook({ ...h, ...patch });
       if (!v.value) return null;
       Object.assign(next, v.value);
+      // Editing a webhook hook keeps its URL working.
+      if (h.trigger.type === "webhook" && next.trigger.type === "webhook") next.trigger = h.trigger;
+      if (JSON.stringify(next.trigger) !== JSON.stringify(h.trigger)) delete next.seen;
       next.nextAt = computeNextAt(next.trigger, prefs.tz, this.clock());
     }
     if (patch.snoozeMin) {
@@ -1848,7 +1958,8 @@ export class Hub {
           await this.log("hook.missed", `${h.title}: missed while the hub was off`);
           continue;
         }
-        await this.fire(h, describeTrigger(h.trigger, prefs.tz), lateMin > 10);
+        if (h.held) await this.fire({ ...h, held: undefined }, h.held.reason, false, h.held.extra);
+        else await this.fire(h, describeTrigger(h.trigger, prefs.tz), lateMin > 10);
       } else if (h.trigger.type === "silence") {
         const since = prefs.lastUserAt || h.createdAt;
         const quietFor = (now.getTime() - new Date(since).getTime()) / 3.6e6;
@@ -1888,7 +1999,98 @@ export class Hub {
     await this.setPrefs({ proactiveToday: { date: today, n: n + 1 } });
   }
 
-  async fire(h: Hook, reason: string, late = false) {
+  /** Something POSTed to a webhook hook's secret URL: wake its teammate with what was sent. */
+  async webhook(token: string, payload: string) {
+    const h = (await this.store.all<Hook>("hooks")).find((x) => x.trigger.type === "webhook" && x.trigger.token === token);
+    if (!h || h.status !== "active") return false;
+    await this.log("hook.webhook", `${h.title}: called (${payload.length} bytes)`);
+    const sent = `## What the webhook sent\n<untrusted>\n${payload.slice(0, 20_000) || "(empty)"}\n</untrusted>`;
+    if (this.firing.has(h.id) || this.webhookQueue.has(h.id)) {
+      const q = this.webhookQueue.get(h.id) || [];
+      if (q.length < 20) q.push(sent);
+      this.webhookQueue.set(h.id, q);
+      if (!this.firing.has(h.id)) this.drainWebhook(h.id);
+      return true;
+    }
+    this.fireWebhook(h, sent);
+    return true;
+  }
+
+  private fireWebhook(h: Hook, sent: string) {
+    this.inflight++;
+    this.fire(h, "its webhook was called", false, sent).catch(() => {}).finally(() => { this.inflight--; this.drainWebhook(h.id); });
+  }
+
+  /** Calls that came in while the hook was busy go to it in one batch, so none are dropped. */
+  private async drainWebhook(id: string) {
+    const q = this.webhookQueue.get(id);
+    if (!q?.length || this.firing.has(id)) return;
+    this.webhookQueue.delete(id);
+    const h = await this.store.get<Hook>("hooks", id);
+    if (!h || h.status !== "active") return;
+    this.fireWebhook(h, q.length === 1 ? q[0] : `${q.length} calls came in:\n\n${q.join("\n\n")}`);
+  }
+
+  /** A watch hook's look at its page: what changed since last time, or null (first look, no change, or an error). */
+  private async lookAt(h: Hook & { trigger: { type: "watch" } }) {
+    const r = await look(h.trigger.url, this.clock());
+    const cur = (await this.store.get<Hook>("hooks", h.id)) || h;
+    if (!r.value) { await this.log("hook.watch", `${h.title}: couldn't read the page (${r.error})`); return null; }
+    await this.store.put<Hook>("hooks", { ...cur, seen: r.value });
+    if (!cur.seen) { await this.log("hook.watch", `${h.title}: first look saved`); return null; }
+    if (cur.seen.hash === r.value.hash) return null;
+    const d = lineDiff(cur.seen.text, r.value.text);
+    if (!d.added && !d.removed) return null;
+    return `## ${h.trigger.url} changed since ${cur.seen.at} (${d.added} lines added, ${d.removed} removed)\n<untrusted>\n${d.text}\n</untrusted>`;
+  }
+
+  /** A check hook's run of its script, with no model: its output if it should speak, else null. */
+  private async runCheck(h: Hook & { trigger: { type: "check" } }) {
+    const t = h.trigger;
+    const cur = (await this.store.get<Hook>("hooks", h.id)) || h;
+    // Unattended, so only scripts that just read: one that sends or changes things never runs from a check.
+    const out = await this.scripts.run(t.script, t.args, { last: cur.seen?.text ?? "" });
+    if (out.needsApproval) { await this.log("hook.check", `${h.title}: ${t.script} can change things, so it can't run on its own`); return null; }
+    if (!out.ok) { await this.log("hook.check", `${h.title}: ${out.output.slice(0, 200)}`); return null; }
+    const text = out.output === "(no output)" ? "" : out.output;
+    const seen = { hash: sha256(text), text, at: this.clock().toISOString() };
+    await this.store.put<Hook>("hooks", { ...cur, seen });
+    if (t.when === "output" ? !text : !cur.seen || cur.seen.hash === seen.hash || !text) return null;
+    return text;
+  }
+
+  /** source.read: what a trigger module sees right now, for a teammate answering a question. */
+  async readSource(req: { source: string; config: unknown }) {
+    const src = sourceById(req.source);
+    if (!src) return `## ${req.source}\nNo such source. Sources: ${SOURCES.map((s) => s.id).join(", ")}.`;
+    const config = src.validate(req.config);
+    if (typeof config === "string") return `## ${src.label}\n${config}`;
+    if (src.needs === "google" && !this.google.connected) return `## ${src.label}\nGoogle isn't connected. Tell the user to connect it in Menu → Connections.`;
+    try {
+      const items = await src.items(config, { google: this.google, now: this.clock(), tz: (await this.prefs()).tz });
+      return `## ${src.label}: ${src.describe(config)}\n<untrusted>\n${formatItems(items)}\n</untrusted>`;
+    } catch (e: any) { return `## ${src.label}\nCouldn't read it: ${e.message}`; }
+  }
+
+  /** A source hook's check: items it hasn't seen before, or null. The first check only remembers what's there. */
+  private async pollSource(h: Hook & { trigger: { type: "source" } }) {
+    const t = h.trigger, src = sourceById(t.source);
+    if (!src) { await this.log("hook.source", `${h.title}: unknown source ${t.source}`); return null; }
+    if (src.needs === "google" && !this.google.connected) { await this.log("hook.source", `${h.title}: Google isn't connected`); return null; }
+    let items;
+    try { items = await src.items(t.config as never, { google: this.google, now: this.clock(), tz: (await this.prefs()).tz }); }
+    catch (e: any) { await this.log("hook.source", `${h.title}: ${String(e.message).slice(0, 200)}`); return null; }
+    const cur = (await this.store.get<Hook>("hooks", h.id)) || h;
+    const known = new Set((cur.seen?.text || "").split("\n").filter(Boolean));
+    const fresh = cur.seen ? items.filter((i) => !known.has(i.id)) : [];
+    // Remember what we've seen, newest first, capped so the list doesn't grow forever.
+    const ids = [...new Set([...items.map((i) => i.id), ...known])].slice(0, 1000);
+    await this.store.put<Hook>("hooks", { ...cur, seen: { hash: sha256(ids.join("\n")), text: ids.join("\n"), at: this.clock().toISOString() } });
+    if (!cur.seen) { await this.log("hook.source", `${h.title}: first look saved (${items.length} already there)`); return null; }
+    return fresh.length ? { count: fresh.length, text: `## ${fresh.length} new from ${src.label}\n<untrusted>\n${formatItems(fresh)}\n</untrusted>`, items: fresh } : null;
+  }
+
+  async fire(h: Hook, reason: string, late = false, extra?: string) {
     if (this.firing.has(h.id)) return;
     this.firing.add(h.id);
     const now = this.clock();
@@ -1902,8 +2104,11 @@ export class Hub {
       const gate = isReview ? "ok" : await this.gate(h, now);
       if (gate !== "ok") {
         const prefs = await this.prefs();
-        if (gate === "quiet" && h.nextAt) {
-          await this.store.put<Hook>("hooks", { ...h, nextAt: quietEndsAt(now, prefs.tz, prefs.quietEnd).toISOString() });
+        if (gate === "quiet" && (h.nextAt || extra !== undefined)) {
+          // A webhook call keeps what it sent (calls during the night pile up, newest last) and is handled in the morning.
+          const cur = (await this.store.get<Hook>("hooks", h.id)) || h;
+          const held = extra === undefined ? cur.held : { reason, extra: [cur.held?.extra, extra].filter(Boolean).join("\n\n").slice(-30_000) };
+          await this.store.put<Hook>("hooks", { ...cur, held, nextAt: quietEndsAt(now, prefs.tz, prefs.quietEnd).toISOString() });
           await this.log("hook.held", `${h.title}: held until quiet hours end`);
         } else {
           await this.reschedule(h, now);
@@ -1912,6 +2117,25 @@ export class Hub {
         return;
       }
       await this.reschedule(h, now); // before running, so a slow brain can't double-fire
+      { const c = await this.store.get<Hook>("hooks", h.id); if (c?.held) await this.store.put<Hook>("hooks", { ...c, held: undefined }); }
+      // A watch speaks only when its page changed. Looked at after the gate, so a change in quiet hours isn't lost.
+      if (h.trigger.type === "watch" && extra === undefined) {
+        const changed = await this.lookAt(h as Hook & { trigger: { type: "watch" } });
+        if (!changed) return;
+        extra = changed;
+      }
+      let checked = "";
+      if (h.trigger.type === "source" && extra === undefined) {
+        const found = await this.pollSource(h as Hook & { trigger: { type: "source" } });
+        if (!found) return;
+        extra = found.text;
+        checked = found.items.slice(0, 5).map((i) => `• ${i.title}`).join("\n") + (found.count > 5 ? `\n…and ${found.count - 5} more` : "");
+      }
+      if (h.trigger.type === "check" && extra === undefined) {
+        checked = (await this.runCheck(h as Hook & { trigger: { type: "check" } })) || "";
+        if (!checked) return;
+        extra = `## ${h.trigger.script} printed\n<untrusted>\n${checked}\n</untrusted>`;
+      }
       const fresh = (await this.store.get<Hook>("hooks", h.id)) || h;
       await this.store.put<Hook>("hooks", { ...fresh, lastFiredAt: now.toISOString(), fireCount: (h.fireCount || 0) + 1 });
 
@@ -1931,9 +2155,9 @@ export class Hub {
       const teammate = await this.teammate(h.teammateId);
       const a = h.action;
       if (a.type === "notify") {
-        text = a.text;
+        text = h.trigger.type === "watch" ? `${a.text}\n${h.trigger.url}` : checked ? `${a.text}\n${checked.slice(0, 1200)}` : a.text;
       } else if (a.type === "think") {
-        const r = await this.turn("hook", `${h.title}\n${a.prompt}`, `hook: ${h.title}`, { teammate, threadId: h.threadId });
+        const r = await this.turn("hook", `${h.title}\n${a.prompt}`, `hook: ${h.title}`, { teammate, threadId: h.threadId, extra });
         text = r.text; did = r.did;
       } else if (a.type === "script") {
         const out = await this.scripts.run(a.script, a.args);

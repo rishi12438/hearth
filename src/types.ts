@@ -3,7 +3,12 @@ import type { Repeat } from "./time.ts";
 
 /** The primary device (role "owner") lets other devices in, like the admin of a router. */
 export type Passkey = { credId: string; spki: string; alg: number };
-export type Device = Doc & { name: string; tokenHash: string; lastSeenAt: string; role?: "owner" | "member"; passkey?: Passkey };
+/** "computer": a Mac (or any machine) linked to this hub to run work with its own logins. Its key opens only the link. */
+export type Device = Doc & { name: string; tokenHash: string; lastSeenAt: string; role?: "owner" | "member" | "computer"; passkey?: Passkey;
+  /** For a computer: which of its logins it keeps copied up to this hub, so the cloud can work while it's off. */
+  copy?: ("claude" | "codex")[];
+  /** For a computer the hub set up itself (an E2B sandbox or your VM): its machine id. The hub hands it its logins. */
+  machine?: string };
 export type PairingCode = Doc & { codeHash: string; expiresAt: number; role?: "owner" | "member" };
 
 export type Done = { kind: string; label: string; id?: string };
@@ -41,7 +46,15 @@ export type Trigger =
   | { type: "schedule"; time: string; days: number[] }
   | { type: "every"; minutes: number }
   | { type: "place"; place: string; event: "arrive" | "leave" }
-  | { type: "silence"; hours: number };
+  | { type: "silence"; hours: number }
+  /** Checks a web page every N minutes and fires only when its text changes. */
+  | { type: "watch"; url: string; minutes: number }
+  /** Fires when something POSTs to the hook's secret URL (/api/webhook/<token>). */
+  | { type: "webhook"; token: string }
+  /** Runs an approved script every N minutes (no model). Fires when it prints something, or when its output changes. */
+  | { type: "check"; script: string; args: string[]; minutes: number; when: "output" | "changed" }
+  /** A trigger module (src/sources/): Gmail, Calendar… polled every N minutes; fires on items it hasn't seen. */
+  | { type: "source"; source: string; config: Record<string, unknown>; minutes: number };
 
 export type HookAction =
   | { type: "notify"; text: string }
@@ -64,6 +77,10 @@ export type Hook = Doc & {
   teammateId?: string;
   /** The chat it was created in; it reports back there. */
   threadId?: string;
+  /** Watch and check hooks: what the page or script said last time. */
+  seen?: { hash: string; text: string; at: string };
+  /** A webhook call that came in during quiet hours, waiting to be handled when they end. */
+  held?: { reason: string; extra: string };
 };
 
 // ---- Rambles: each chat is a thread; the orchestrator splits what you say into jobs for teammates. ----
@@ -83,7 +100,10 @@ export type Job = Doc & {
   teammateId: string;
   status: "queued" | "working" | "waiting" | "blocked" | "done" | "failed";
   /** Set when the job can't go on without you (a login, your laptop, a permission). It parks until you unblock it. */
-  blocked?: { need: string; why: string; unblock: string };
+  /** needs "computer": parked until a linked computer is online, then it resumes on its own. */
+  blocked?: { need: string; why: string; unblock: string; needs?: "computer" };
+  /** Where the model ran: a linked computer's name, or "cloud" for this hub. */
+  ranOn?: string;
   effort: "quick" | "light" | "heavy";
   /** How it was done: reused a skill/workflow, or worked out fresh by a model. */
   how?: "skill" | "workflow" | "fresh" | "repaired";
@@ -215,6 +235,16 @@ export type DayLog = Doc & { summary: string };
 // ---- Skills: things the team already knows how to do, so it doesn't work them out again. ----
 
 export type SkillInput = { name: string; description: string };
+
+/** A trigger setup worth reusing ("school deadline alerts"): a hook with $input.x blanks, found by search like a skill. */
+export type TriggerRecipe = Doc & {
+  name: string;
+  description: string;
+  inputs: SkillInput[];
+  hook: { title: string; trigger: unknown; action: unknown; why: string; teammate?: string; cooldownMin?: number };
+  uses: number;
+  lastUsedAt?: string;
+};
 
 export type Skill = Doc & {
   name: string;
