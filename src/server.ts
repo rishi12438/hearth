@@ -9,6 +9,7 @@ import { randomBytes } from "node:crypto";
 import { availableHarnesses } from "./brain.ts";
 import { Computers, COPY_ITEMS, isCopyItem } from "./computers.ts";
 import { Machines, realE2b, realSsh, type E2b, type Ssh } from "./machines.ts";
+import { Vault } from "./vault.ts";
 import { hasLogin, readLogin } from "./computer.ts";
 import { homedir } from "node:os";
 import { MAX_FILE_BYTES } from "./files.ts";
@@ -59,7 +60,7 @@ class HttpError extends Error { constructor(public status: number, msg: string) 
 
 /** drivers: stand-ins for E2B and ssh in tests. */
 export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
-  drivers: { e2b?: E2b; ssh?: Ssh; readLogin?: typeof readLogin; allowLocalHub?: boolean } = {}) {
+  drivers: { e2b?: E2b; ssh?: Ssh; readLogin?: typeof readLogin; allowLocalHub?: boolean; vault?: Vault } = {}) {
   const voiceLimiter = new RateLimiter(5, 10 * 60_000);
   const liveTickets = new Map<string, number>();
   const tileKey = randomBytes(12).toString("base64url");
@@ -88,8 +89,10 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   computers.onOnline = () => { hub.resumeForComputer().catch((e) => console.error(e)); };
   computers.start();
   // Cloud computers the hub sets up itself: an E2B sandbox or your VM. Each becomes a linked computer.
+  const vault = drivers.vault ?? new Vault(config.dataDir);
+  vault.migrate(config.dataDir);
   const machines = new Machines({
-    dataDir: config.dataDir,
+    dataDir: config.dataDir, vault,
     hubUrl: () => process.env.HEARTH_PUBLIC_URL || null,
     addComputer: async (name, machineId) => {
       const { token, device } = await addDevice(store, name, "computer");

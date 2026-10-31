@@ -169,3 +169,8 @@ cd /opt/hearth && sudo -u hearth git pull && sudo -iu hearth bash -c 'cd /opt/he
 ```
 
 Back up `/opt/hearth/data` (or your database), and turn on automatic snapshots in Lightsail (Snapshots tab).
+
+**API keys are encrypted.** E2B, Deepgram and your VMs' SSH keys are kept in `data/keys/vault.db`, encrypted with the
+master key at `/home/hearth/.hearth/master.key` (or `HEARTH_MASTER_KEY`). The master key is deliberately *not* in the
+data folder, so a backup of the data can't reveal your keys. Keep a copy of the master key somewhere safe, apart from your
+backups, such as a password manager. If you lose it, nothing else is lost: paste your API keys into the app again.

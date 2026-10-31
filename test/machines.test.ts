@@ -9,6 +9,8 @@ import { Scripts } from "../src/scripts.ts";
 import { loadConfig } from "../src/config.ts";
 import { Machines, setupScript, type E2b, type Runner, type Ssh } from "../src/machines.ts";
 import { writeLogins } from "../src/computer.ts";
+import { Vault } from "../src/vault.ts";
+import { randomBytes } from "node:crypto";
 import { newPairingCode, redeemPairingCode } from "../src/auth.ts";
 import { startServer } from "../src/server.ts";
 import type { Device, Job } from "../src/types.ts";
@@ -41,14 +43,15 @@ function machines(over: Partial<ConstructorParameters<typeof Machines>[0]> = {})
   let t = 1_000_000, n = 0;
   const removed: string[] = [];
   const busy = new Set<string>();
+  const vault = new Vault(dir, { masterKey: randomBytes(32) });
   const m = new Machines({
-    dataDir: dir, hubUrl: () => "https://hub.example.com",
+    dataDir: dir, vault, hubUrl: () => "https://hub.example.com",
     addComputer: async () => ({ token: "first", deviceId: `dev-${++n}` }),
     removeComputer: async (id) => { removed.push(id); },
     rekey: async (id) => `token-for-${id}`,
     isOnline: () => false, isBusy: (id) => busy.has(id), now: () => t, ...over,
   });
-  return { m, dir, removed, busy, tick: (ms: number) => { t += ms; } };
+  return { m, dir, vault, removed, busy, tick: (ms: number) => { t += ms; } };
 }
 
 test("the setup script gets the key on stdin, never in the command, and quotes everything", () => {
@@ -68,7 +71,10 @@ test("E2B: needs a key, makes a sandbox, runs setup with a fresh key, and shows 
   expect(await m.setE2bKey("nope")).toContain("doesn't look like");
   expect(await m.setE2bKey("e2b_" + "x".repeat(30), async () => "E2B didn't accept that key.")).toContain("didn't accept");
   expect(await m.setE2bKey("e2b_" + "x".repeat(30), async () => null)).toBeNull();
-  expect(statSync(join((m as any).opts.dataDir, "keys/secrets.json")).mode & 0o777).toBe(0o600);
+  // In the encrypted vault, not in a plain file.
+  const vaultFile = readFileSync(join((m as any).opts.dataDir, "keys/vault.db"));
+  expect(vaultFile.includes("e2b_" + "x".repeat(30))).toBe(false);
+  expect(existsSync(join((m as any).opts.dataDir, "keys/secrets.json"))).toBe(false);
 
   const steps: string[] = [];
   m.onChange = () => { const s = m.list()[0]?.step; if (s && steps.at(-1) !== s) steps.push(s); };
@@ -135,7 +141,7 @@ test("your VM: checks the address and key, reaches it first, pins its host key, 
       return { async run(cmd, o) { seen.push({ t, cmd, stdin: o.stdin }); if (answer.code === 0 && !t.knownHosts) pin("1.2.3.4 ssh-ed25519 AAAAhost"); return answer; } };
     },
   };
-  const { m, dir } = machines({ ssh });
+  const { m, dir, vault } = machines({ ssh });
   expect((await m.addSsh({ host: "bad host!", privateKey: KEY })).error).toContain("IP address");
   expect((await m.addSsh({ host: "1.2.3.4", privateKey: "hello" })).error).toContain("BEGIN and END");
   expect((await m.addSsh({ host: "1.2.3.4", user: "Root;rm", privateKey: KEY })).error).toContain("user name");
@@ -149,14 +155,15 @@ test("your VM: checks the address and key, reaches it first, pins its host key, 
   expect(saved).toMatchObject({ kind: "ssh", host: "1.2.3.4", port: 22, user: "ubuntu", knownHosts: "1.2.3.4 ssh-ed25519 AAAAhost" });
   expect(m.view(saved)).not.toHaveProperty("knownHosts");
   expect(JSON.stringify(m.list())).not.toContain("PRIVATE KEY");
-  const keyFile = join(dir, "keys", `ssh-${saved.id}`);
-  expect(statSync(keyFile).mode & 0o777).toBe(0o600);
+  expect(vault.get(`ssh:${saved.id}`)).toContain("PRIVATE KEY");
+  expect(readFileSync(join(dir, "keys/vault.db")).includes("OPENSSH PRIVATE KEY")).toBe(false);
+  expect(existsSync(join(dir, "keys", `ssh-${saved.id}`))).toBe(false);
   // The setup run is pinned to the host key seen the first time.
   expect(seen.at(-1).t.knownHosts).toBe("1.2.3.4 ssh-ed25519 AAAAhost");
   expect(seen.at(-1).stdin).toBe(`token-for-${saved.deviceId}\n`);
 
   await m.remove(saved.id);
-  expect(existsSync(keyFile)).toBe(false);
+  expect(vault.has(`ssh:${saved.id}`)).toBe(false);
   expect(m.list()).toEqual([]);
 });
 

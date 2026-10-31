@@ -53,6 +53,13 @@ Hearth holds personal data and can act on a schedule, so it is built to fail clo
 - The hub hands the logins it holds (for example, the Claude login your Mac copied up) only to computers it set up itself. Your Mac's link file has no `cloud` flag, so it ignores logins even if offered. Checking whether the hub has a login doesn't read the secret, so on a Mac there's no Keychain prompt just to show the screen; the secret is read only when a cloud computer links.
 - Removing a cloud computer shuts the sandbox down (or stops the link on the VM), unlinks its key and deletes its SSH key from the hub.
 
+## API keys (the vault)
+- The hub's API keys (E2B, Deepgram, your VMs' SSH keys) are kept in their own SQLite file, `data/keys/vault.db` (`0600`, folder `0700`), separate from your main data even when that's Postgres or MySQL. Each value is encrypted with AES-256-GCM under a fresh random IV and bound to its name, so a value copied to another row won't decrypt, and any tampering is detected.
+- The master key lives outside the data folder: `~/.hearth/master.key` (`0600`; the hub refuses it if others can read it), or `HEARTH_MASTER_KEY`. A copy or backup of the data folder alone can't reveal your keys. A wrong master key is reported at start rather than failing quietly.
+- Keys saved in plain files by older versions are moved into the vault on start, and the plain files deleted. `bun run doctor` checks all of this.
+- Keys are never in the database, exports, logs or anything sent to the app; the app only learns whether a key is set (and for Deepgram, its last 4 characters).
+- What's still a plain file, on purpose: the Claude/Codex login files, because those CLIs read them directly. They're `0600` in the hub user's home.
+
 ## Your data
 - SQLite files and the data folder are created with mode `0700`. Use a Postgres or MySQL user with access only to the Hearth tables.
 - Web Push VAPID keys are generated on first run and kept with your data; nothing is hard-coded. Push payloads go from your hub to your browser's push service, encrypted end to end per the Web Push standard.

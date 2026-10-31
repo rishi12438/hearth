@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Vault } from "./vault.ts";
 
 // Cloud computers the hub sets up by itself: an E2B sandbox (paste an API key once, like the Deepgram key) or your own VM
 // (its address and an SSH key). The hub mints the machine a computer key, runs a setup script on it that downloads Hearth
@@ -97,6 +98,8 @@ type Opts = {
   rekey: (deviceId: string) => Promise<string>;
   isOnline: (deviceId: string) => boolean;
   isBusy: (deviceId: string) => boolean;
+  /** Where the E2B key and the VMs' SSH keys live, encrypted. */
+  vault: Vault;
   e2b?: E2b; ssh?: Ssh; now?: () => number;
   /** Tests only: let a machine dial back to a hub on 127.0.0.1. */
   allowLocalHub?: boolean;
@@ -109,7 +112,7 @@ export class Machines {
   constructor(private opts: Opts) { mkdirSync(join(opts.dataDir, "keys"), { recursive: true, mode: 0o700 }); }
   private now() { return this.opts.now ? this.opts.now() : Date.now(); }
 
-  // ---- what's saved: the list (no secrets), the E2B key, one SSH key file per machine; all 0600 ----
+  // ---- what's saved: the list (no secrets) in machines.json; the E2B key and each VM's SSH key in the encrypted vault ----
 
   private file() { return join(this.opts.dataDir, "machines.json"); }
   list(): Machine[] { try { return JSON.parse(readFileSync(this.file(), "utf8")); } catch { return []; } }
@@ -123,24 +126,22 @@ export class Machines {
     this.save(list);
     return list[i];
   }
-  private secrets(): { e2bKey?: string } { try { return JSON.parse(readFileSync(join(this.opts.dataDir, "keys", "secrets.json"), "utf8")); } catch { return {}; } }
-  hasE2bKey() { return !!(process.env.HEARTH_E2B_API_KEY || this.secrets().e2bKey); }
-  private e2bKey() { return process.env.HEARTH_E2B_API_KEY || this.secrets().e2bKey || ""; }
+  hasE2bKey() { return !!process.env.HEARTH_E2B_API_KEY || this.opts.vault.has("e2b"); }
+  private e2bKey() { return process.env.HEARTH_E2B_API_KEY || this.opts.vault.get("e2b") || ""; }
   async setE2bKey(key: string, check = checkE2bKey) {
     const k = key.trim();
     if (!/^[A-Za-z0-9_-]{10,200}$/.test(k)) return "That doesn't look like an E2B API key.";
     const bad = await check(k);
     if (bad) return bad;
-    writeFileSync(join(this.opts.dataDir, "keys", "secrets.json"), JSON.stringify({ ...this.secrets(), e2bKey: k }), { mode: 0o600 });
+    this.opts.vault.set("e2b", k);
     this.onChange();
     return null;
   }
   forgetE2bKey() {
-    const s = this.secrets(); delete s.e2bKey;
-    writeFileSync(join(this.opts.dataDir, "keys", "secrets.json"), JSON.stringify(s), { mode: 0o600 });
+    this.opts.vault.delete("e2b");
     this.onChange();
   }
-  private keyFile(id: string) { return join(this.opts.dataDir, "keys", `ssh-${id}`); }
+  private sshKey(id: string) { return `ssh:${id}`; }
 
   // ---- adding ----
 
@@ -170,7 +171,7 @@ export class Machines {
     const probe = await this.opts.ssh.runner({ host, port, user, privateKey }, (k) => { knownHosts = k; }).run("true", { timeoutMs: 20_000 });
     if (probe.code !== 0) return { error: sshError(probe.stderr) };
     const m = await this.create("ssh", input.name, host, { host, port, user, knownHosts });
-    writeFileSync(this.keyFile(m.id), privateKey + "\n", { mode: 0o600 });
+    this.opts.vault.set(this.sshKey(m.id), privateKey + "\n");
     void this.start(m.id);
     return { value: m };
   }
@@ -240,7 +241,7 @@ export class Machines {
     const m = this.get(id);
     if (!m) return false;
     await this.stop(id);
-    rmSync(this.keyFile(id), { force: true });
+    this.opts.vault.delete(this.sshKey(id));
     this.save(this.list().filter((x) => x.id !== id));
     await this.opts.removeComputer(m.deviceId);
     return true;
@@ -251,7 +252,7 @@ export class Machines {
     const m = this.list().find((x) => x.deviceId === deviceId);
     if (!m) return;
     await this.stop(m.id);
-    rmSync(this.keyFile(m.id), { force: true });
+    this.opts.vault.delete(this.sshKey(m.id));
     this.save(this.list().filter((x) => x.id !== m.id));
   }
 
@@ -286,9 +287,10 @@ export class Machines {
 
   private sshRunner(m: Machine): Runner {
     if (!this.opts.ssh) throw new Error("SSH isn't available on this hub.");
-    if (!existsSync(this.keyFile(m.id))) throw new Error("This machine's SSH key is missing. Remove it and add it again.");
+    const privateKey = this.opts.vault.get(this.sshKey(m.id));
+    if (!privateKey) throw new Error("This machine's SSH key is missing. Remove it and add it again.");
     return this.opts.ssh.runner(
-      { host: m.host!, port: m.port || 22, user: m.user || "ubuntu", privateKey: readFileSync(this.keyFile(m.id), "utf8"), knownHosts: m.knownHosts },
+      { host: m.host!, port: m.port || 22, user: m.user || "ubuntu", privateKey, knownHosts: m.knownHosts },
       () => {},
     );
   }

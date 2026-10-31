@@ -3,7 +3,8 @@ import { loadConfig } from "./config.ts";
 import { createStore, redactUrl } from "./store/index.ts";
 import { newPairingCode, owners } from "./auth.ts";
 import QRCode from "qrcode";
-import { mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { Brain, availableHarnesses } from "./brain.ts";
 import { connect, joinHub, readLink } from "./computer.ts";
 import { Scripts } from "./scripts.ts";
@@ -11,6 +12,7 @@ import { Push } from "./push.ts";
 import { Hub } from "./hub.ts";
 import { startServer } from "./server.ts";
 import { VoiceSettings } from "./voice.ts";
+import { Vault, masterKeyPath } from "./vault.ts";
 import { Library, createEmbeddings } from "./library.ts";
 import type { Device, Hook } from "./types.ts";
 
@@ -84,8 +86,10 @@ if (cmd === "setup" || cmd === "pair") {
   try { await push.init(); } catch (e: any) { console.warn(`Push disabled: ${e.message}`); }
   const library = new Library(createEmbeddings());
   const hub = new Hub(config, store, new Brain(config), scripts, push.publicKey ? push : null, library);
-  const stt = new VoiceSettings(config.dataDir);
-  const { server, build } = await startServer(hub, stt);
+  // API keys live encrypted in <data>/keys/vault.db; the master key is outside the data folder (vault.ts).
+  const vault = new Vault(config.dataDir);
+  const stt = new VoiceSettings(config.dataDir, process.env, vault);
+  const { server, build } = await startServer(hub, stt, { vault });
   await hub.start();
   console.log(`hearth · ${config.name} · ${config.target} · build ${build}`);
   console.log(`listening on http://${server.hostname}:${server.port}  storage: ${store.kind}  brain: ${hub.brain.label}  voice: ${stt.current?.name ?? "off"}  library search: ${library.mode}`);
@@ -129,6 +133,18 @@ async function doctor() {
   const env = mode(".env");
   check(env === -1 || (env & 0o077) === 0, ".env is readable only by its owner", "Run: chmod 600 .env");
   check((mode(config.dataDir) & 0o077) === 0, "Data folder is private (700)", `Run: chmod 700 ${config.dataDir}`);
+  // The vault: master key outside the data folder and private, the vault opens with it, and no API key left in a plain file.
+  const keyPath = masterKeyPath();
+  if (process.env.HEARTH_MASTER_KEY) check(true, "Master key comes from HEARTH_MASTER_KEY", "");
+  else {
+    check(existsSync(keyPath) && (mode(keyPath) & 0o077) === 0, `Master key is private (${keyPath})`, existsSync(keyPath) ? `Run: chmod 600 ${keyPath}` : `No master key at ${keyPath} yet; the hub makes one on first start`);
+    check(!resolve(keyPath).startsWith(resolve(config.dataDir) + "/"), "Master key is outside the data folder, so a data backup can't open the vault", "Move the master key out of the data folder (HEARTH_MASTER_KEY_FILE)");
+  }
+  try { if (process.env.HEARTH_MASTER_KEY || existsSync(keyPath)) { const v = new Vault(config.dataDir); check(true, `API keys are encrypted at rest (${v.names().length} in the vault)`, ""); v.close(); } }
+  catch (e: any) { check(false, "", e.message); }
+  const plain = ["voice.json", "keys/secrets.json"].filter((f) => existsSync(join(config.dataDir, f)));
+  check(plain.length === 0, "No API keys in plain files", `Plain key files left: ${plain.join(", ")}. Start the hub once to move them into the vault`);
+
   const devices = await store.all<Device>("devices");
   const primary = (await owners(store))[0];
   check(devices.length > 0, `Set up, ${devices.length} device(s)`, "Not set up yet: run `bun run setup` and scan the code with your phone");
