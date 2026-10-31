@@ -1278,6 +1278,16 @@ export class Hub {
           case "source.read":
             if (typeof a.source === "string") runs.push({ name: "@source", args: [JSON.stringify({ source: a.source, config: a.config || {} })] });
             break;
+          case "connection.refresh": {
+            // Pull a fresh login for a site from the linked Mac (it decrypts there and copies it up). On demand only.
+            const site = String(a.site || "").trim();
+            if (!site) break;
+            if (!this.computers?.canCopyCookies()) { done.push({ kind: "memory", label: `No Mac online to refresh ${site}. Reconnect it in Connectors.` }); break; }
+            this.connections.wantFromMac(site);       // mark it Mac-fed
+            this.computers.refreshCookies(site);       // and pull it now
+            done.push({ kind: "memory", label: `Asked your Mac for a fresh ${site} login` });
+            break;
+          }
           case "history.search":
             if (typeof a.query === "string" && a.query.trim()) runs.push({ name: "@history", args: [a.query.trim().slice(0, 200)] });
             break;
@@ -1972,8 +1982,6 @@ export class Hub {
     await this.archiveQuietRambles();
     const now = this.clock();
     const prefs = await this.prefs();
-    // Before a Mac-fed login lapses by its own expiry, ask the Mac for a fresh one (it may have been re-logged-in).
-    if (this.computers?.canCopyCookies()) for (const d of this.connections.expiringSoon()) this.computers.refreshCookies(d);
     for (const h of await this.store.all<Hook>("hooks")) {
       if (h.status !== "active" || this.firing.has(h.id)) continue;
       if (h.nextAt && new Date(h.nextAt) <= now) {

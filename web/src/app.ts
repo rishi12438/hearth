@@ -1532,10 +1532,10 @@ async function openCookieSetup(c: Connector | { via: string; name: string; blurb
   const macRow = canCopyFromMac ? h("div", { class: "stack" },
     h("button", { class: "btn primary big", on: { click: async (e: Event) => {
       const b = e.currentTarget as HTMLButtonElement; b.disabled = true; b.textContent = "Asking your Mac…"; clear(out0);
-      try { await call(`/api/connections/${c.via}/from-mac`, { body: {} }); clear(out0, h("p", { class: "okline" }, icon("check", 16), " Asked your Mac. It copies the login up and keeps it fresh.")); setTimeout(() => openCookieSetup(c), 2500); }
+      try { await call(`/api/connections/${c.via}/from-mac`, { body: {} }); clear(out0, h("p", { class: "okline" }, icon("check", 16), " Asked your Mac — it copied the login up.")); setTimeout(() => openCookieSetup(c), 2500); }
       catch (err: any) { showResult({ ok: false, error: err.message }); b.disabled = false; b.textContent = "Copy from my Mac"; }
     } } }, "Copy from my Mac"),
-    h("p", { class: "muted small" }, "Your Mac reads the login there (read-only) and copies it up. When it expires, the hub asks your Mac again.")) : null;
+    h("p", { class: "muted small" }, "Your Mac reads the login there (read-only) and copies it up. If it stops working, Hearth asks your Mac again — no background syncing.")) : null;
   const box = h("textarea", { class: "field mono", rows: 4, placeholder: `Paste cookies: the Cookie-Editor export, or ${help.need.replace(/ \(.*\)/, "")} as name=value; name=value`, autocapitalize: "off", spellcheck: false }) as HTMLTextAreaElement;
   const out = h("div", { class: "ctest" });
   const show = (t: any) => clear(out, t.ok

@@ -96,6 +96,8 @@ ${SOURCE_DOCS}
 - place.add {name, here:true} or {name, lat, lon, radiusM?}   save a place for place hooks
 - source.read {source, config}   read a trigger module now (e.g. today's calendar, recent mail from someone);
     you'll be called again with what it found. Same config as the trigger.
+- connection.refresh {site}   when a logged-in site (linkedin, x, a domain like amazon.com) stopped working, pull a
+    fresh login from the user's Mac (it reads the cookie there and copies it up). Use it if a read says "signed out".
 - script.run {name, args}   run an approved script now; you'll be called again with its output
 - history.search {query}   search past conversations, answers and the daily log (exact wording, "what did I say about X");
     you'll be called again with what matched. Use it when memory doesn't have what you need.

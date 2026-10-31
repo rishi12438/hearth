@@ -125,7 +125,7 @@ export function connect(opts: Opts) {
     }
   };
 
-  // Browser cookies the hub asked for: read them here (read-only, decrypted locally) and send only what changed.
+  // Browser cookies the hub asked for (on connect, on sign-out, or when a teammate asks): read them here, send once.
   const copyCookiesUp = () => {
     if (!cookieWant.sites.length) return;
     if (!canReadBrowser()) { log("  the hub asked for a browser login, but this computer can't read the browser here"); return; }
@@ -173,7 +173,7 @@ export function connect(opts: Opts) {
       log(`  connected to ${link.hub}`);
       send({ t: "hello", harnesses: availableHarnesses(config), platform: platform() });
       alive = setInterval(() => send({ t: "alive" }), ALIVE_EVERY_MS);
-      copyTimer = setInterval(() => { copyUp(); copyCookiesUp(); }, opts.copyEveryMs ?? 5 * 60_000);
+      copyTimer = setInterval(copyUp, opts.copyEveryMs ?? 5 * 60_000);
     };
     ws.onmessage = (ev) => {
       let m: any;

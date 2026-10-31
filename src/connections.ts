@@ -126,12 +126,6 @@ export class Connections {
   /** The current problem for a connection (sign-out message), by preset id or domain. */
   problemFor(id: string): string | null { return this.problems.get(this.key(id) || id) ?? null; }
 
-  /** Mac-fed domains whose stored login lapses within `days`, so the hub can ask the Mac for a fresh one early. */
-  expiringSoon(days = 2): string[] {
-    const cut = Date.now() + days * 86_400_000;
-    return this.macSites().filter((d) => { const e = this.saved(d)?.expiresAt; return e && e * 1000 <= cut; });
-  }
-
   /** Days until the stored login lapses by its own expiry (not sign-out), or null if session-only / not set. */
   private expiresInDays(s: Saved | null): number | null {
     if (!s?.expiresAt) return null;
