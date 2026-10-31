@@ -119,7 +119,7 @@ export class Scripts {
    * Runs an approved script. Scripts with external effects only run with `approvedRun` set, which the hub
    * sets only after you tap Approve on that specific run.
    */
-  async run(name: string, args: string[] = [], opts: { approvedRun?: boolean; timeoutMs?: number } = {}): Promise<{ ok: boolean; output: string; needsApproval?: boolean }> {
+  async run(name: string, args: string[] = [], opts: { approvedRun?: boolean; timeoutMs?: number; last?: string } = {}): Promise<{ ok: boolean; output: string; needsApproval?: boolean }> {
     const timeoutMs = opts.timeoutMs ?? 60_000;
     const s = await this.byName(name);
     if (!s) return { ok: false, output: `No script called ${name}.` };
@@ -136,7 +136,8 @@ export class Scripts {
     try { chmodSync(this.workDir, 0o700); } catch {}
     const proc = Bun.spawn([process.execPath, file, ...args.map(String)], {
       cwd: this.workDir,
-      env: { PATH: process.env.PATH || "/usr/bin:/bin", HOME: this.workDir, LANG: process.env.LANG || "en_US.UTF-8", TZ: process.env.TZ || "" },
+      // HEARTH_LAST: what this script printed last time, for check hooks (so it can say only what's new).
+      env: { PATH: process.env.PATH || "/usr/bin:/bin", HOME: this.workDir, LANG: process.env.LANG || "en_US.UTF-8", TZ: process.env.TZ || "", ...(opts.last !== undefined ? { HEARTH_LAST: opts.last } : {}) },
       stdin: "ignore", stdout: "pipe", stderr: "pipe",
     });
     const timer = setTimeout(() => proc.kill(), timeoutMs);

@@ -46,7 +46,13 @@ export type Trigger =
   | { type: "schedule"; time: string; days: number[] }
   | { type: "every"; minutes: number }
   | { type: "place"; place: string; event: "arrive" | "leave" }
-  | { type: "silence"; hours: number };
+  | { type: "silence"; hours: number }
+  /** Checks a web page every N minutes and fires only when its text changes. */
+  | { type: "watch"; url: string; minutes: number }
+  /** Fires when something POSTs to the hook's secret URL (/api/webhook/<token>). */
+  | { type: "webhook"; token: string }
+  /** Runs an approved script every N minutes (no model). Fires when it prints something, or when its output changes. */
+  | { type: "check"; script: string; args: string[]; minutes: number; when: "output" | "changed" };
 
 export type HookAction =
   | { type: "notify"; text: string }
@@ -69,6 +75,10 @@ export type Hook = Doc & {
   teammateId?: string;
   /** The chat it was created in; it reports back there. */
   threadId?: string;
+  /** Watch and check hooks: what the page or script said last time. */
+  seen?: { hash: string; text: string; at: string };
+  /** A webhook call that came in during quiet hours, waiting to be handled when they end. */
+  held?: { reason: string; extra: string };
 };
 
 // ---- Rambles: each chat is a thread; the orchestrator splits what you say into jobs for teammates. ----

@@ -785,3 +785,9 @@ p.err { color: var(--danger); margin: 6px 2px 0; }
 .row2 { display: grid; grid-template-columns: 1fr 96px; gap: 8px; }
 .field.mono { font: 13px/1.4 var(--mono); }
 .sheetbody > .field, .sheetbody > .row2, .sheetbody > select.field { margin: 6px 0; }
+
+/* A webhook plan's secret URL wraps instead of running off the sheet. */
+.hookurl { min-width: 0; }
+.hookurl .codeline { max-width: 100%; }
+.hookurl .codeline code { white-space: normal; word-break: break-all; text-align: left; }
+.hookurl small { display: block; margin-top: 4px; }

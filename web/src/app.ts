@@ -1560,7 +1560,7 @@ function openMenu() {
       h("i", { class: `status ${S.conn}` })),
     h("nav", null,
       item("search", "Jump to…", "Find a teammate, chat or task (⌘K)", openJump),
-      item("bell", "Plans", "Reminders, routines, watches", openPlans),
+      item("bell", "Plans", "Reminders, routines, triggers", openPlans),
       item("brain", "Memory", "What I know about you", openMemory),
       item("dms", "People", "Your relationship map", openPeople),
       item("users", "Teammates", "Who the orchestrator can hand work to", openTeammates),
@@ -1742,16 +1742,23 @@ function openPlans() {
 function drawPlans() {
   const el = document.getElementById("plans");
   if (!el) return;
-  const active = S.hooks.filter((x) => x.status !== "done" && x.source !== "system").sort((a, b) => (a.nextAt || "~").localeCompare(b.nextAt || "~"));
+  // Triggers wait for something to happen (a page change, a webhook call, a script finding something, a place, a silence).
+  const EVENT = ["watch", "webhook", "check", "place", "silence"];
+  const live = S.hooks.filter((x) => x.status !== "done" && x.source !== "system");
+  const triggers = live.filter((x) => EVENT.includes(x.trigger.type));
+  const active = live.filter((x) => !EVENT.includes(x.trigger.type)).sort((a, b) => (a.nextAt || "~").localeCompare(b.nextAt || "~"));
   const done = S.hooks.filter((x) => x.status === "done").slice(-5).reverse();
   const row = (hk: any) => h("button", { class: `item ${hk.status}`, on: { click: () => openHook(hk) } },
     h("span", { class: "dotwrap" }, face(mate(hk.teammateId), 30, "idle")),
     h("span", { class: "grow" },
       h("b", null, hk.title, hk.status === "paused" ? h("span", { class: "tag" }, "Paused") : null),
-      h("small", { class: "sub" }, hk.nextAt && hk.status === "active" ? `${dayLabel(hk.nextAt)} ${clockTime(hk.nextAt)} · ${hk.when}` : hk.when)));
+      h("small", { class: "sub" }, EVENT.includes(hk.trigger.type) ? triggerStatus(hk) : hk.nextAt && hk.status === "active" ? `${dayLabel(hk.nextAt)} ${clockTime(hk.nextAt)} · ${hk.when}` : hk.when)));
   clear(el,
     h("p", { class: "muted" }, "When your teammates will speak up, and why."),
     active.length ? h("div", { class: "list" }, active.map(row)) : h("p", { class: "empty" }, "Nothing planned. Just say “remind me…” or “every morning…”."),
+    h("h4", null, "Triggers"),
+    triggers.length ? h("div", { class: "list" }, triggers.map(row))
+      : h("p", { class: "empty" }, "Nothing watching yet. Say “tell me when this page changes…”, “give me a webhook for…” or “check every hour if…”."),
     done.length ? [h("h4", null, "Done"), h("div", { class: "list" }, done.map(row))] : null,
     h("button", { class: "btn ghost", on: { click: openNewPlan } }, icon("plus", 16), "Add a reminder or routine"));
 }
@@ -1999,9 +2006,17 @@ function renderPairing(code: string) {
 }
 
 
+/** One line on what a trigger has been doing: when it last looked or was called, and when it last spoke. */
+function triggerStatus(hk: any) {
+  const t = hk.trigger.type;
+  const looked = t === "watch" || t === "check" ? (hk.seen ? `checked ${relTime(hk.seen.at)}` : "not checked yet") : t === "webhook" ? (hk.lastFiredAt ? `called ${relTime(hk.lastFiredAt)}` : "never called") : null;
+  const spoke = hk.fireCount ? `spoke ${hk.fireCount}×` : t === "webhook" ? null : "quiet so far";
+  return [hk.when, looked, t === "webhook" ? null : spoke].filter(Boolean).join(" · ");
+}
+
 function hookIcon(hk: any) {
   const t = hk.trigger?.type;
-  return t === "at" ? (hk.trigger.repeat !== "none" ? "repeat" : "clock") : t === "schedule" ? "repeat" : t === "place" ? "pin" : t === "silence" ? "moon" : "eye";
+  return t === "at" ? (hk.trigger.repeat !== "none" ? "repeat" : "clock") : t === "schedule" ? "repeat" : t === "place" ? "pin" : t === "silence" ? "moon" : t === "webhook" ? "clip" : "eye";
 }
 
 
@@ -2012,6 +2027,13 @@ function openHook(hk: any) {
   openSheet(hk.title, [
     h("dl", { class: "facts" },
       h("dt", null, "When"), h("dd", null, hk.when),
+      hk.trigger.type === "watch" ? [h("dt", null, "Page"), h("dd", null, h("a", { href: hk.trigger.url, target: "_blank", rel: "noopener noreferrer" }, hk.trigger.url)),
+        h("dt", null, "Looked"), h("dd", null, hk.seen ? relTime(hk.seen.at) : "Not yet")] : null,
+      hk.trigger.type === "webhook" ? (() => {
+        const hookUrl = `${activeHub()!.url}/api/webhook/${hk.trigger.token}`;
+        return [h("dt", null, "URL"), h("dd", { class: "hookurl" }, h("button", { class: "codeline", title: "Copy", on: { click: () => navigator.clipboard?.writeText(hookUrl).then(() => toast("Copied. POST anything to it to wake this plan"), () => toast("Couldn't copy", "err")) } }, h("code", null, hookUrl), icon("clip", 14)),
+          h("small", { class: "muted" }, "Keep it secret: anyone with it can wake this plan."))];
+      })() : null,
       hk.nextAt && hk.status === "active" ? [h("dt", null, "Next"), h("dd", null, `${dayLabel(hk.nextAt)} ${clockTime(hk.nextAt)} (${relTime(hk.nextAt)})`)] : null,
       h("dt", null, "Does"), h("dd", null, actionText),
       h("dt", null, "Why"), h("dd", null, hk.why),
