@@ -1,0 +1,73 @@
+web/src/app.ts
+  s_842be64ddc7b43::t_b3a34df4f7a4e4 87-88,2316-2317
+  s_e9c398b1a531e7::t_657f65855d0397 2248-2249,2251-2258,2260-2264,2266-2273,2275-2283,2288-2315
+  s_e9c398b1a531e7::t_8d9a177af331ca 2,64-67,77,89-102,154-155,228,289,1142,1530,1918-1919,1984-1985,2329
+  s_e9c398b1a531e7::t_6bb91941cfb9bf 78-86
+src/server.ts
+  s_e9c398b1a531e7::t_f720459c7afc45 119,129-132,171,565-567
+  s_e9c398b1a531e7::t_dbb6f7ff6b5474 4-5,67-73,99,128,133-138,140-155,157,172-179,188-189,486-503,505-507,517-564
+package.json
+  s_e9c398b1a531e7::t_6318185ce7f5ca 11,13,15
+  s_e9c398b1a531e7::t_073791d782d877 21,26
+web/src/api.ts
+  s_e9c398b1a531e7::t_8d9a177af331ca 35,42,118
+  s_842be64ddc7b43::t_b3a34df4f7a4e4 36
+  s_e9c398b1a531e7::t_ffb8ecc4f2416d 37-41,43-106,113,149,151
+src/types.ts
+  s_e9c398b1a531e7::t_09ef5d85cf4624 4-7
+src/cli.ts
+  s_842be64ddc7b43::t_b3a34df4f7a4e4 107
+  s_e9c398b1a531e7::t_6318185ce7f5ca 4-6,21-26,29-46,68-69,75,78-106
+deploy/Caddyfile
+  s_e9c398b1a531e7::t_ea2820a8f96e23 1-2,5-8,11-12
+src/auth.ts
+  s_842be64ddc7b43::t_b3a34df4f7a4e4 57-58,180
+  s_e9c398b1a531e7::t_0d6126a8dc31b5 1,3,7-8,19,25,38-42,44,46-47,52-56,59-60,78-179,181
+test/auth.test.ts
+  s_842be64ddc7b43::t_2e3d67493dfb40 13,25
+  s_e9c398b1a531e7::t_a50636c98960d4 1-12,14-24,26-114
+web/styles.css
+  s_e9c398b1a531e7::t_657f65855d0397 359
+src/push.ts
+  s_e9c398b1a531e7::t_dbb6f7ff6b5474 47-48
+deploy/lightsail.md
+  s_842be64ddc7b43::t_a67d1e07ea9b9d 45
+  s_842be64ddc7b43::t_2e3d67493dfb40 1,3,31,49,57,87
+  s_e9c398b1a531e7::t_33089b49e3310c 4,6-30,32-44,46-47,51-56,58-86,88-133,135-145,147
+SECURITY.md
+  s_e9c398b1a531e7::t_04f586c857463f 6-10
+src/config.ts
+  s_e9c398b1a531e7::t_dbb6f7ff6b5474 16-18,49-50
+deploy/setup.sh
+  s_e9c398b1a531e7::t_223bfd552b4cb8 1-4,6-97,99-107
+  s_842be64ddc7b43::t_2e3d67493dfb40 5
+  s_e9c398b1a531e7::t_0967ea1fea5ea1 98
+.env.example
+  s_e9c398b1a531e7::t_04f586c857463f 39-44
+bun.lock
+  s_842be64ddc7b43::t_3ce62faf409360 9,14,27-28,33-36,45-52,55-58,61-66,73-74,79-80,87-102,107-112,119-128
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "f546083e4ecb171226f7e827168d02d2c4df4139",
+  "prompts": {},
+  "sessions": {
+    "s_842be64ddc7b43": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2b58baca-9866-4d7e-8d9a-756cd0841a98",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    },
+    "s_e9c398b1a531e7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "24ef66c2-332b-4015-81b3-f9ada296ae8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
