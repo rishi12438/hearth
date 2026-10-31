@@ -434,7 +434,7 @@ export class Hub {
 
     const fresh = await this.store.get<Thread>("threads", thread.id);
     // Hearth names the ramble from its topic, and renames it when the topic changes, unless you named it yourself.
-    const wanted = typeof plan.channel === "string" ? plan.channel : !fresh?.channel && typeof plan.title === "string" ? plan.title.split(/\s+/).slice(0, 3).join(" ") : "";
+    const wanted = typeof plan.channel === "string" ? plan.channel : !fresh?.channel && typeof plan.title === "string" ? nameFrom(plan.title) : "";
     if (fresh && wanted && !thread.id.startsWith("tm-") && fresh.channelBy !== "you" && slugOf(wanted) && slugOf(wanted) !== fresh.channel) await this.renameThread(thread.id, wanted, false);
     if (plan.title && !thread.id.startsWith("tm-") && fresh?.title === batch[0].text.split(/\s+/).slice(0, 6).join(" ")) await this.touchThread(thread.id, { title: String(plan.title).slice(0, 60) });
     // Hearth's short reply, then one message per task; each task's thread (the teammate working, replies) hangs under it.
@@ -1730,7 +1730,7 @@ export class Hub {
     await this.ensureTeammates();
     await this.ensureSystemHooks();
     // Rambles from before they had names: name them from their titles (Hearth refines it on the next message).
-    for (const t of await this.store.all<Thread>("threads")) if (t.num && !t.channel && t.title) await this.renameThread(t.id, t.title.split(/[\s,]+/).slice(0, 3).join(" "), false);
+    for (const t of await this.store.all<Thread>("threads")) if (t.num && !t.channel && t.title) await this.renameThread(t.id, nameFrom(t.title), false);
     this.timer = setInterval(() => this.tick().catch((e) => console.error("tick failed", e)), intervalMs);
     await this.tick();
   }
@@ -1943,3 +1943,6 @@ export function cleanEmoji(v: unknown) {
 /** A ramble's channel name: its own ("japan-trip"), or ramble-N. */
 export const channelOf = (t: Thread) => t.channel || (t.num ? `ramble-${t.num}` : t.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 30));
 const slugOf = (name: string) => String(name).toLowerCase().replace(/^#/, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30);
+/** A short channel name from a title: its first three words that carry meaning ("Lisbon trip and Portuguese" -> lisbon-trip-portuguese). */
+const FILLER = new Set(["a", "an", "the", "and", "or", "in", "on", "at", "to", "for", "of", "with", "before", "after", "from", "my", "your", "about", "this", "that"]);
+const nameFrom = (title: string) => title.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w && !FILLER.has(w)).slice(0, 3).join(" ");
