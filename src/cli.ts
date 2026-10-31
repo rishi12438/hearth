@@ -74,14 +74,14 @@ if (cmd === "setup" || cmd === "pair") {
     const t = (await store.all<Teammate>("teammates")).find((x) => x.name.toLowerCase() === (args[0] || "").toLowerCase());
     if (!t) { console.log(`usage: hearth share <teammate> [--guest NAME] [--owner NAME] [--does TEXT] [--example TEXT]... [--not TEXT]...
                     [--notebook NAME]... [--note TEXT]... [--folder PATH] [--edit GLOB]... [--read GLOB]... [--hidden GLOB]...
-                    [--cap-usd N] [--auto-apply]`); process.exit(1); }
+                    [--cap-usd N] [--auto-apply] [--subscription]`); process.exit(1); }
     const folder = flag("folder")[0];
     const r = await shares.create({
       teammateId: t.id, kind: flag("guest").length ? "guest" : "public", label: flag("guest")[0], ownerName: flag("owner")[0],
       scope: { does: flag("does")[0], examples: flag("example"), not: flag("not") }, notebooks: flag("notebook"), notes: flag("note"),
       ...(folder ? { folder: { path: folder, rules: { edit: flag("edit"), read: flag("read").length ? flag("read") : ["**"], hidden: flag("hidden") } } } : {}),
       ...(flag("cap-usd").length ? { limits: { costCapDayUsd: Number(flag("cap-usd")[0]) } } : {}),
-      autoApply: args.includes("--auto-apply"),
+      autoApply: args.includes("--auto-apply"), ...(args.includes("--subscription") ? { models: { brain: "hub" } } : {}),
     }, { start: false });
     if (r.error) { console.log(r.error); process.exit(1); }
     const s = r.value as Share;

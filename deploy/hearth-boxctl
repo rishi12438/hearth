@@ -15,7 +15,7 @@ IMAGE=${HEARTH_BOX_IMAGE:-hearth-box:latest}
 NET=hearth-boxes
 BOX_UID=10001
 HUB_GROUP=${HEARTH_GROUP:-hearth}
-HUB_GID=$(getent group "$HUB_GROUP" | cut -d: -f3)
+HUB_GID=${HEARTH_GID:-$(getent group "$HUB_GROUP" | cut -d: -f3)}
 
 log() { echo "hearth-boxctl: $*"; }
 
@@ -38,7 +38,8 @@ start() {
   [[ -d "$bundle" && ! -L "$bundle" && "$(realpath "$bundle")" == "$(realpath "$DATA")/shares/$id/bundle" ]] || { log "no bundle for $id"; return 1; }
   [[ -f "$bundle/current.json" ]] || { log "bundle for $id isn't published"; return 1; }
   key="$KEYS/$id.env"; [[ -f "$key" ]] || key="$KEYS/default.env"
-  [[ -f "$key" ]] || { log "no API key: put ANTHROPIC_API_KEY=... in $KEYS/default.env (mode 600)"; return 1; }
+  # No key is fine for links on your subscription (the hub runs those); links on "API key" will say they have none.
+  local keyflag=(); [[ -f "$key" ]] && keyflag=(--env-file "$key") || log "no API key file for $id: only links on your subscription will answer"
   install -d -o "$BOX_UID" -g "$HUB_GID" -m 2750 "$BOXES" "$dir" "$dir/run"
   ensure_network
   docker rm -f "hearth-box-$id" >/dev/null 2>&1 || true
@@ -46,7 +47,7 @@ start() {
     --network "$NET" --read-only --tmpfs /tmp:size=16m,mode=1777 --cap-drop ALL --security-opt no-new-privileges \
     --pids-limit 128 --memory 256m --cpus 0.5 --user "$BOX_UID:$HUB_GID" \
     -v "$bundle:/bundle:ro" -v "$dir:/data" \
-    --env-file "$key" -e BOX_PROXY=http://hearth-egress:3128 -e BOX_BUNDLE=/bundle -e BOX_DATA=/data \
+    "${keyflag[@]}" -e BOX_PROXY=http://hearth-egress:3128 -e BOX_BUNDLE=/bundle -e BOX_DATA=/data \
     "$IMAGE" >/dev/null
   log "started $id"
 }

@@ -63,6 +63,11 @@ Hearth holds personal data and can act on a schedule, so it is built to fail clo
 - A guard model screens each message for scope, rule-change attempts and abuse, and a reply check blocks code and essays
   where the scope doesn't allow them. These keep the teammate on its job; they are not what protects your data. The
   container is: assume anything in the bundle can be read out word for word.
+- A link can run on **your Claude subscription** instead of an API key. The box then writes each model request into its
+  own folder and the hub answers into its read-only bundle: still no network path to the hub, and your login never enters
+  the box. The hub runs each request as `claude -p` with no tools, no MCP and no settings, only with the models that link
+  is set to, and at most 400 calls a day per link. The cost is that visitors spend your subscription, and serving other
+  people this way may be against your plan's terms; the app says so where you choose it.
 - The `local` runner (a plain subprocess) is for trying the feature on your own machine and is not sealed.
 
 ## Your data

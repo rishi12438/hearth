@@ -27,7 +27,11 @@ export const DEFAULT_LIMITS: BoxLimits = {
   costCapDayUsd: 2, perVisitorPer10Min: 12, perVisitorPerDay: 60, perIpPer10Min: 30, perLinkPerHour: 300, maxMessageChars: 2000,
 };
 
-export type BoxModels = { teammate: string; guard: string; effort: "low" | "medium" | "high" };
+export type BoxModels = {
+  teammate: string; guard: string; effort: "low" | "medium" | "high";
+  /** "api": the box's own API key (sealed, allowed for serving others). "hub": your Claude subscription, run by the hub. */
+  brain: "api" | "hub";
+};
 
 export type Manifest = {
   version: number;

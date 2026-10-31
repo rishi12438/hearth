@@ -1,7 +1,7 @@
 # Sharing a teammate with other people
 
-Status: built (hub side, sealed box, deploy, tests). Not built yet: the phone screens for sharing (use the CLI or
-`/api/shares` for now), free/busy-style summaries, captchas, and device approval for guests (a guest link is a named link).
+Status: built (hub side, sealed box, phone screens, deploy, tests). Not built yet: free/busy-style summaries, captchas,
+and device approval for guests (a guest link is a named link).
 
 Goal: send someone a link (or post it publicly) and they can chat with one teammate, say "Recipes" or "Book a call with
 Rishi". They get only what you chose to share, and that's a hard block, not a polite one: no prompt, trick or bug on
@@ -80,6 +80,9 @@ What makes it sealed:
   hub pulls it on a timer and shows it to you as untrusted text. It never goes into your memory.
 - **Own key with a provider-side cap.** Each box uses a separate model API key with a monthly limit set at the provider,
   so even a bug in our own limits can't run up your bill.
+- **Or your subscription, by choice.** Per link you can pick "My subscription" instead. The box writes model requests into
+  its own folder and the hub answers into the read-only bundle, running each as `claude -p` with no tools, capped at 400
+  calls a day per link. Your login stays on the hub; the trade-off (your plan's usage and terms) is shown where you pick it.
 - **Kill switch.** Revoking the link stops and deletes the container. The hub works the same with or without boxes.
 
 ### One container per link, not per visitor

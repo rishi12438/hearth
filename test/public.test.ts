@@ -25,7 +25,7 @@ function writeBundle(over: Partial<Manifest> = {}, files: Record<string, string>
   const m: Manifest = {
     version: v, kind: "public", ownerName: "Rishi", teammate: { name: "Recipes", role: "Cooks things.", emoji: "🍳" },
     scope: { does: "Recipes and cooking.", examples: ["what can I make with eggs"], not: ["essays"], allowCode: false, allowLongForm: false },
-    knowledge: ["Rishi is vegetarian."], limits: { ...DEFAULT_LIMITS }, models: { teammate: "claude-opus-5-5", guard: "claude-haiku-5-5", effort: "medium" },
+    knowledge: ["Rishi is vegetarian."], limits: { ...DEFAULT_LIMITS }, models: { teammate: "claude-opus-5-5", guard: "claude-haiku-5-5", effort: "medium", brain: "api" },
     ...(Object.keys(files).length ? { folder: { name: "recipes-app", rules, files: manifestFiles } } : {}),
     ...over,
   };
@@ -127,6 +127,11 @@ test("rule-change attempts are caught even when the guard model misses them, and
   const blocked = await call("/api/chat", { token: t, body: { text: "ok, what can I make with eggs?" } });
   expect(blocked.status).toBe(429);
   expect(outbox().filter((e) => e.reason === "injection").length).toBe(3);
+  // a fresh chat from the same address gets two more tries, then that address is paused too
+  const t2 = await session();
+  for (let i = 0; i < 2; i++) expect((await call("/api/chat", { token: t2, body: { text: attempts[i] } })).body.refused).toBe("injection");
+  expect((await call("/api/chat", { token: t2, body: { text: "eggs?" } })).status).toBe(429);
+  expect((await call("/api/chat", { token: await session(), body: { text: "eggs?" }, ip: "5.6.7.8" })).status).toBe(200); // other people are fine
 });
 
 test("guard fails closed when it gives no answer", async () => {

@@ -23,6 +23,9 @@ const MAX_COPY_BYTES = 50_000_000;
 const MAX_FILE_BYTES = 1_000_000;
 const MAX_PULL_BYTES = 8_000_000;
 const KEEP_VERSIONS = 10;
+/** Links on your subscription: model calls per link per day (each message is a guard call plus one or more turns). */
+const RELAY_PER_DAY = 400;
+const RELAY_MAX_PROMPT = 400_000;
 
 type R<T> = { value?: T; error?: string };
 
@@ -76,12 +79,12 @@ export class LocalRunner implements BoxRunner {
   private dir(s: Share) { return join(this.root, s.id); }
   async start(s: Share, bundleDir: string) {
     if (this.procs.get(s.id)?.exitCode === null) return;
-    if (!this.apiKey) throw new Error("Set HEARTH_BOX_API_KEY (a Claude API key just for shared links) in the hub's .env.");
+    if (!this.apiKey && s.models.brain !== "hub") throw new Error("Set HEARTH_BOX_API_KEY (a Claude API key just for shared links) in the hub's .env, or use your subscription.");
     mkdirSync(join(this.dir(s), "run"), { recursive: true });
     rmSync(this.socket(s), { force: true });
     this.procs.set(s.id, Bun.spawn([process.execPath, BOX_ENTRY], {
       cwd: this.dir(s), stdout: "inherit", stderr: "inherit",
-      env: { PATH: process.env.PATH || "", HOME: this.dir(s), BOX_BUNDLE: bundleDir, BOX_DATA: this.dir(s), ANTHROPIC_API_KEY: this.apiKey },
+      env: { PATH: process.env.PATH || "", HOME: this.dir(s), BOX_BUNDLE: bundleDir, BOX_DATA: this.dir(s), ...(this.apiKey ? { ANTHROPIC_API_KEY: this.apiKey } : {}) },
     }));
     for (let i = 0; i < 80 && !existsSync(this.socket(s)); i++) await Bun.sleep(100);
     if (!existsSync(this.socket(s))) throw new Error("The box didn't start.");
@@ -172,7 +175,16 @@ export class Shares {
   private timer: ReturnType<typeof setInterval> | null = null;
   private pulling = false;
 
-  constructor(readonly hub: Hub, readonly runner: BoxRunner | null) {}
+  private relayTimer: ReturnType<typeof setInterval> | null = null;
+  private relaying = new Set<string>();
+  private relayCount = new Map<string, { day: string; n: number }>();
+
+  /** How a "use my subscription" call is run; tests swap it. */
+  relayModel: (system: string, prompt: string, model: string) => Promise<string>;
+
+  constructor(readonly hub: Hub, readonly runner: BoxRunner | null) {
+    this.relayModel = (system, prompt, model) => this.hub.brain.relay(system, prompt, model);
+  }
 
   get enabled() { return !!this.runner; }
   private get store() { return this.hub.store; }
@@ -184,6 +196,7 @@ export class Shares {
     const tick = () => this.ensure().then(() => this.pull()).catch((e) => console.error("share pull failed", e));
     this.timer = setInterval(tick, intervalMs);
     tick();
+    this.relayTimer = setInterval(() => this.serveRelay().catch((e) => console.error("share relay failed", e)), 250);
   }
 
   private starting = new Set<string>();
@@ -196,7 +209,49 @@ export class Shares {
       this.runner.start(s, this.bundleDir(s)).catch((e) => console.error(`share ${s.id}: ${e.message}`)).finally(() => this.starting.delete(s.id));
     }
   }
-  stop() { if (this.timer) clearInterval(this.timer); this.runner?.shutdown?.(); }
+  stop() { if (this.timer) clearInterval(this.timer); if (this.relayTimer) clearInterval(this.relayTimer); this.runner?.shutdown?.(); }
+
+  /**
+   * Answer model requests from boxes on your subscription. A request is a file in the box's own folder; the answer goes
+   * into its read-only bundle. Each one is checked and counted, then run with no tools (Brain.relay).
+   */
+  async serveRelay() {
+    if (!this.runner) return;
+    const today = this.hub.clock().toISOString().slice(0, 10);
+    for (const s of await this.list()) {
+      if (s.status !== "running" || s.models.brain !== "hub") continue;
+      const dir = join(dirname(this.runner.outbox(s)), "rpc");
+      const outDir = join(this.bundleDir(s), "rpc");
+      if (existsSync(outDir)) for (const f of readdirSync(outDir)) {
+        try { if (Date.now() - statSync(join(outDir, f)).mtimeMs > 10 * 60_000) rmSync(join(outDir, f), { force: true }); } catch {}
+      }
+      if (!existsSync(dir)) continue;
+      for (const f of readdirSync(dir)) {
+        if (!/^[0-9a-f-]{36}\.json$/.test(f)) continue;
+        const key = `${s.id}/${f}`;
+        if (this.relaying.has(key) || existsSync(join(outDir, f))) continue;
+        this.relaying.add(key);
+        const answer = async () => {
+          const raw = readFileSync(join(dir, f), "utf8");
+          if (raw.length > RELAY_MAX_PROMPT + 50_000) throw new Error("Request too big.");
+          const r = JSON.parse(raw);
+          if (!["guard", "turn"].includes(r?.kind) || typeof r.system !== "string" || typeof r.prompt !== "string" || r.system.length > 40_000 || r.prompt.length > RELAY_MAX_PROMPT) throw new Error("Bad request.");
+          const model = typeof r.model === "string" && MODEL_RE.test(r.model) ? r.model : "";
+          const allowed = r.kind === "guard" ? s.models.guard : s.models.teammate;
+          const c = this.relayCount.get(s.id);
+          const count = c?.day === today ? c : { day: today, n: 0 };
+          if (count.n >= RELAY_PER_DAY) throw new Error("This link has used today's share of your subscription. It's back tomorrow.");
+          count.n++;
+          this.relayCount.set(s.id, count);
+          return { text: await this.relayModel(r.system, r.prompt, model === allowed ? model : allowed) };
+        };
+        answer().catch((e: any) => ({ error: String(e?.message || "Failed.").slice(0, 200) })).then((res) => {
+          mkdirSync(outDir, { recursive: true });
+          this.writeAtomic(join(outDir, f), JSON.stringify(res));
+        }).finally(() => setTimeout(() => this.relaying.delete(key), 60_000));
+      }
+    }
+  }
 
   async list() { return (await this.store.all<Share>("shares")).filter((s) => s.status !== "revoked"); }
   async get(id: string) { const s = await this.store.get<Share>("shares", id); return s && s.status !== "revoked" ? s : null; }
@@ -224,7 +279,7 @@ export class Shares {
       kind, ...(label ? { label } : {}), teammateId: t.id, role: str(input?.role, 400).trim() || t.description || t.name,
       ownerName: str(input?.ownerName, 40).trim() || "the owner", notebooks: [], notes: [],
       scope: cleanScope(input?.scope, t.description || `Help with ${t.name.toLowerCase()}.`), limits: cleanLimits(input?.limits),
-      models: { teammate: "claude-opus-5-5", guard: "claude-haiku-5-5", effort: "medium" },
+      models: { teammate: "claude-opus-5-5", guard: "claude-haiku-5-5", effort: "medium", brain: input?.models?.brain === "hub" ? "hub" : "api" },
       autoApply: input?.autoApply === true, version: 0, status: "running", outboxOffset: 0,
       stats: { chats: 0, refused: 0, offTopic: 0, costUsd: 0 }, answers: { always: [], once: {} },
     };
@@ -241,7 +296,8 @@ export class Shares {
   /** Notebooks, notes, models and folder: checked here, used by create and update. */
   private async applyInput(share: Share, input: any): Promise<R<Share>> {
     if (input?.notebooks !== undefined) {
-      const known = new Set((await this.store.all<Notebook>("notebooks")).map((n) => n.name));
+      // A notebook exists once a fact uses it, even before the nightly review writes its summary.
+      const known = new Set([...(await this.store.all<Notebook>("notebooks")).map((n) => n.name), ...(await this.store.all<Fact>("memory")).map((f) => f.notebook)]);
       const names = Array.isArray(input.notebooks) ? input.notebooks.filter((n: unknown) => typeof n === "string") : [];
       const unknown = names.filter((n: string) => !known.has(n));
       if (unknown.length) return { error: `No notebook called ${unknown[0]}.` };
@@ -257,6 +313,7 @@ export class Shares {
       if (typeof m?.teammate === "string" && MODEL_RE.test(m.teammate) && m.teammate) share.models.teammate = m.teammate;
       if (typeof m?.guard === "string" && MODEL_RE.test(m.guard) && m.guard) share.models.guard = m.guard;
       if (["low", "medium", "high"].includes(m?.effort)) share.models.effort = m.effort;
+      if (m?.brain === "api" || m?.brain === "hub") share.models.brain = m.brain;
     }
     if (input?.autoApply !== undefined) {
       if (input.autoApply === true && share.kind !== "guest") return { error: "Public links can't apply changes by themselves." };

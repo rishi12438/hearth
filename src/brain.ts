@@ -390,6 +390,28 @@ export class Brain {
     finally { this.running--; own?.release(); this.global.release(); }
   }
 
+  /**
+   * For shared links set to use your subscription: one plain completion with your Claude login. No tools, no MCP
+   * servers, no settings or hooks, in the empty brain folder, with none of the hub's settings in its environment.
+   */
+  async relay(system: string, prompt: string, model: string): Promise<string> {
+    await this.global.acquire();
+    this.running++;
+    try {
+      const cmd = ["claude", "-p", "--output-format", "json", "--no-session-persistence", ...(model && MODEL_RE.test(model) ? ["--model", model] : []),
+        "--system-prompt", system, "--strict-mcp-config", "--setting-sources", "project", "--tools", ""];
+      const proc = Bun.spawn(cmd, { cwd: this.workDir, env: agentEnv(), stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe" });
+      const timer = setTimeout(() => proc.kill(), this.config.agentTimeoutMs);
+      const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+      const code = await proc.exited;
+      clearTimeout(timer);
+      let j: any = null;
+      try { j = JSON.parse(out.trim()); } catch {}
+      if (!j || j.is_error) throw new Error(j?.result ? String(j.result).slice(0, 200) : `claude exited with ${code}: ${err.trim().slice(-200)}`);
+      return String(j.result ?? "");
+    } finally { this.running--; this.global.release(); }
+  }
+
   private async run(b: BrainInput, profile: BrainProfile, meter?: Meter): Promise<string> {
     const { harness } = profile;
     const model = MODEL_RE.test(profile.model) ? profile.model : "";

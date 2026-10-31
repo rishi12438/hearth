@@ -5,6 +5,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { BetaContentBlock, BetaMessageParam, BetaTool, BetaToolResultBlockParam } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import { AnthropicModel, type BoxModel } from "./model.ts";
+import { HubModel, PickModel } from "./relay.ts";
 import { checkReply, refusal, scopeText, screen } from "./guard.ts";
 import { accessFor, safePath } from "./rules.ts";
 import { countChanges } from "./diff.ts";
@@ -42,6 +43,9 @@ export class Box {
   private tenMin = new Window(10 * 60_000);
   private hour = new Window(60 * 60_000);
   private cached: { version: number; manifest: Manifest } | null = null;
+  /** Strikes per address per day, so starting a new chat doesn't wipe the slate. */
+  private ipStrikes = new Map<string, { day: string; n: number }>();
+  private ipStruck(ip: string) { const x = this.ipStrikes.get(ip); return x?.day === this.today() ? x.n : 0; }
 
   constructor(readonly bundleDir: string, readonly dataDir: string, readonly model: BoxModel) {
     mkdirSync(join(dataDir, "work"), { recursive: true });
@@ -215,7 +219,7 @@ export class Box {
     const text = typeof raw === "string" ? raw.trim() : "";
     if (!text) throw new Http(400, "Say something.");
     if (text.length > m.limits.maxMessageChars) throw new Http(413, `Keep it under ${m.limits.maxMessageChars} characters.`);
-    if (s.blockedUntil && new Date(s.blockedUntil) > now) throw new Http(429, "This chat is paused until tomorrow.");
+    if ((s.blockedUntil && new Date(s.blockedUntil) > now) || this.ipStruck(ip) >= 5) throw new Http(429, "This chat is paused until tomorrow.");
     if (this.busy.has(s.id)) throw new Http(409, "Still answering your last message.");
     const t = now.getTime();
     const perVisitor = s.offTopic >= 3 ? Math.ceil(m.limits.perVisitorPer10Min / 3) : m.limits.perVisitorPer10Min; // keep trying off-topic, get slowed down
@@ -242,6 +246,7 @@ export class Box {
       };
       if (v.injection || v.abuse !== "none") {
         s.strikes++;
+        this.ipStrikes.set(ip, { day: this.today(), n: this.ipStruck(ip) + 1 });
         if (s.strikes >= 3) s.blockedUntil = new Date(t + 24 * 3600_000).toISOString();
         this.save(s);
         return refuse(v.abuse !== "none" ? "abuse" : "injection", v.reason || "rule change attempt");
@@ -405,7 +410,7 @@ export class Box {
       throw new Http(404, "Not found.");
     } catch (e: any) {
       if (e instanceof Http) return json({ error: e.message }, e.status);
-      console.error("box error", e);
+      console.error("box error", e?.message || e);
       return json({ error: "Something went wrong." }, 500);
     }
   }
@@ -415,8 +420,9 @@ if (import.meta.main) {
   const bundle = process.env.BOX_BUNDLE || "/bundle";
   const data = process.env.BOX_DATA || "/data";
   const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) { console.error("box: ANTHROPIC_API_KEY is not set"); process.exit(1); }
-  const box = new Box(bundle, data, new AnthropicModel(key, process.env.BOX_PROXY || undefined));
+  let box: Box;
+  const api = key ? new AnthropicModel(key, process.env.BOX_PROXY || undefined) : null;
+  box = new Box(bundle, data, new PickModel(() => (box.manifest().models.brain === "hub" ? "hub" : "api"), api, new HubModel(data, bundle)));
   const sock = process.env.BOX_SOCKET || join(data, "run", "box.sock");
   mkdirSync(dirname(sock), { recursive: true });
   rmSync(sock, { force: true });

@@ -34,7 +34,7 @@ const S = {
   planning: null as null | string, // chat id the orchestrator is reading
   updateReady: false,
   sheetOpen: false,
-  panel: null as null | "plans" | "memory" | "skills" | "people",
+  panel: null as null | "plans" | "memory" | "skills" | "people" | "shares" | `share:${string}`,
 };
 
 let live: ReturnType<typeof stream> | null = null;
@@ -202,6 +202,10 @@ function onEvent(e: { type: string; data?: any }) {
     case "files": loadFiles().then(() => { const r2 = route(); if (r2.view === "chat") drawChat(false); else if (r2.view === "dm") drawDm(false); }); return;
     case "hooks": if (S.panel === "plans") loadHooks(); if (r.view === "dm") loadDm(r.id); return;
     case "memory": if (S.panel === "memory") loadMemory(); return;
+    case "shares":
+      if (document.activeElement?.tagName === "INPUT" || document.activeElement?.tagName === "TEXTAREA") return; // don't wipe what you're typing
+      if (S.panel === "shares") openShares(); else if (S.panel?.startsWith("share:")) openShare(S.panel.slice(6));
+      return;
     case "scripts": refreshState(); return;
     case "reset": refresh(); return;
   }
@@ -1917,6 +1921,7 @@ function openSettings() {
     h("div", { class: "list" },
       row("Devices", st.device.primary ? (st.pendingAccess ? `${st.pendingAccess} waiting to join` : "This is your primary device") : "Who can talk to this hub", openDevices),
       passkeysWork() ? row("Face ID lock", st.device.passkey ? "On · asked each time you open the app" : "Off · a copied key alone could open this hub", toggleFaceId, sw(st.device.passkey)) : null,
+      st.device.primary ? row("Shared links", "Let someone chat with one teammate", openShares) : null,
       row("Activity log", "Everything the hub did", openActivity),
       row("Export everything", "One JSON file", exportData),
       row("Delete my data", "Chats, memory, plans, places", openWipe)),
@@ -1924,6 +1929,195 @@ function openSettings() {
   ]);
 }
 
+
+// ---------------- shared links ----------------
+
+const BRAIN_NOTE = {
+  api: "Its own Claude API key, with a spend limit you set in the Claude Console. Sealed, and the way Anthropic intends you to serve other people.",
+  hub: "Your Claude login, run by your hub. The login never enters the box, but visitors spend your subscription (up to 400 model calls a day per link), and serving other people this way may be against your plan's terms. Your call.",
+};
+const REFUSED: Record<string, string> = { out: "off-topic", injection: "tried to change its rules", abuse: "abusive", check: "reply blocked", limit: "over a limit" };
+const shareUrl = (s: any) => `${activeHub()!.url}/t/${s.link}/`;
+const lines = (t: string) => t.split("\n").map((x) => x.trim()).filter(Boolean);
+const labeled = (text: string, el: Node) => h("label", { class: "flabel" }, h("span", null, text), el);
+
+async function openShares() {
+  let data: any, team: any[];
+  try { [data, team] = await Promise.all([call("/api/shares"), call("/api/teammates")]); } catch (e) { return handleError(e); }
+  S.panel = "shares";
+  const who = (id: string) => team.find((t) => t.id === id);
+  openSheet("Shared links", [
+    h("p", { class: "muted" }, "Let someone chat with one teammate. It only gets what you pick here, and can't reach anything else on your hub."),
+    !data.enabled ? h("p", { class: "notice" }, "Sharing is off on this hub. Set HEARTH_BOX_RUNNER (see deploy/lightsail.md).")
+      : !data.sealed ? h("p", { class: "notice" }, "Test mode: links run as plain processes on this computer, not sealed in a container. Use HEARTH_BOX_RUNNER=docker on a server.") : null,
+    data.shares.length ? h("div", { class: "list" }, data.shares.map((s: any) => {
+      const t = who(s.teammateId);
+      return h("button", { class: "item", on: { click: () => openShare(s.id) } },
+        h("div", { class: "hicon emoji" }, t?.emoji || "🔗"),
+        h("span", { class: "grow left" },
+          h("b", { class: "light" }, t?.name || "Teammate", h("span", { class: "tag soft" }, s.kind === "guest" ? `Guest · ${s.label}` : "Public"), s.status === "paused" ? h("span", { class: "tag warn" }, "Paused") : null),
+          h("small", { class: "sub" }, `${s.stats.chats} chats · ${s.stats.refused} blocked${s.models.brain === "hub" ? " · your subscription" : ` · $${s.stats.costUsd.toFixed(2)}`}${s.stats.lastAt ? ` · ${relTime(s.stats.lastAt)}` : ""}`)),
+        icon("chevron", 16));
+    })) : h("p", { class: "empty" }, "No shared links yet."),
+    data.enabled ? h("button", { class: "btn primary big", on: { click: () => openShareForm(team) } }, icon("plus", 16), "Share a teammate") : null,
+  ], { onClose: () => { S.panel = null; } });
+}
+
+async function openShareForm(team: any[]) {
+  let notebooks: any[] = [];
+  try {
+    const m = await call("/api/memory");
+    notebooks = m.notebooks || [];
+    for (const f of m.facts || []) if (!notebooks.some((n) => n.name === f.notebook)) notebooks.push({ name: f.notebook, summary: "" });
+    for (const n of notebooks) n.count = (m.facts || []).filter((f: any) => f.notebook === n.name).length;
+  } catch {}
+  const st: any = { teammateId: team[0]?.id, kind: "public", brain: "api", notebooks: new Set<string>(), autoApply: false };
+  const teammate = h("select", { class: "field", on: { change: () => { st.teammateId = teammate.value; does.value = team.find((t) => t.id === st.teammateId)?.description || ""; } } },
+    team.map((t) => h("option", { value: t.id }, `${t.emoji || ""} ${t.name}`)));
+  const label = h("input", { class: "field", placeholder: "Who is it for? (e.g. Sam)", maxLength: 40 });
+  const guestRow = h("div", { hidden: true }, labeled("Their name", label));
+  const seg = (opts: [string, string][], key: string, after: () => void) => {
+    const box = h("div", { class: "segmented" }, opts.map(([v, text]) => {
+      const b = h("button", { class: st[key] === v ? "on" : "", on: { click: () => { st[key] = v; box.querySelectorAll("button").forEach((x) => x.classList.remove("on")); b.classList.add("on"); after(); } } }, text);
+      return b;
+    }));
+    return box;
+  };
+  const autoRow = h("button", { class: "item", hidden: true, on: { click: () => { st.autoApply = !st.autoApply; autoRow.querySelector(".switch")!.classList.toggle("on", st.autoApply); } } },
+    h("span", { class: "grow left" }, h("b", { class: "light" }, "Apply their changes by themselves"), h("small", { class: "sub" }, "Changes land in your folder as they come, each with a backup and Undo. Only for people you trust.")),
+    h("span", { class: "switch" }, h("i")));
+  const kind = seg([["public", "Public link"], ["guest", "Someone I trust"]], "kind", () => { guestRow.hidden = st.kind !== "guest"; autoRow.hidden = st.kind !== "guest"; });
+  const owner = h("input", { class: "field", placeholder: "How it refers to you (e.g. Rishi)", value: S.state?.prefs?.userName || "", maxLength: 40 });
+  const does = h("textarea", { class: "field", rows: 2, placeholder: "What it helps with" }, team[0]?.description || "");
+  const examples = h("textarea", { class: "field", rows: 2, placeholder: "Example questions, one per line" });
+  const not = h("textarea", { class: "field", rows: 2, placeholder: "Won't do, one per line" }, "essays or homework\nanything about me beyond this");
+  const nb = h("div", { class: "list" }, notebooks.length ? notebooks.map((n: any) => {
+    const row = h("button", { class: "item", on: { click: () => { st.notebooks.has(n.name) ? st.notebooks.delete(n.name) : st.notebooks.add(n.name); row.querySelector(".switch")!.classList.toggle("on", st.notebooks.has(n.name)); } } },
+      h("span", { class: "grow left" }, h("b", { class: "light" }, n.name), h("small", { class: "sub" }, n.summary || `${n.count} fact${n.count === 1 ? "" : "s"}`)), h("span", { class: "switch" }, h("i")));
+    return row;
+  }) : h("div", { class: "item muted" }, "No notebooks yet."));
+  const notes = h("textarea", { class: "field", rows: 2, placeholder: "Anything else it should know, one per line" });
+  const folder = h("input", { class: "field", placeholder: "/full/path/to/project (optional)", autocapitalize: "off", spellcheck: false });
+  const edit = h("textarea", { class: "field", rows: 2, placeholder: "Can edit, e.g. recipes/**" });
+  const read = h("textarea", { class: "field", rows: 1, placeholder: "Can read" }, "**");
+  const hidden = h("textarea", { class: "field", rows: 1, placeholder: "Hidden, e.g. deploy/**" });
+  const brainNote = h("p", { class: "muted small" }, BRAIN_NOTE.api);
+  const cap = h("input", { class: "field", type: "number", min: "0.1", max: "50", step: "0.5", value: "2" });
+  const capRow = labeled("Daily spend cap (USD)", cap);
+  const brain = seg([["api", "API key"], ["hub", "My subscription"]], "brain", () => { brainNote.textContent = BRAIN_NOTE[st.brain as "api" | "hub"]; capRow.hidden = st.brain !== "api"; });
+  const err = h("p", { class: "error", role: "alert" });
+  openSheet("Share a teammate", [
+    h("h4", null, "Teammate"), teammate,
+    h("h4", null, "Who"), kind, guestRow, labeled("How it refers to you", owner),
+    h("h4", null, "What it does"), does, labeled("Example questions", examples), labeled("Won't do", not),
+    h("h4", null, "What it knows"), h("p", { class: "muted small" }, "Only the notebooks you turn on are copied in. Nothing else from your memory, people, chats or location is."), nb, labeled("Notes", notes),
+    h("h4", null, "A folder (optional)"), folder, labeled("Can edit", edit), labeled("Can read", read), labeled("Hidden", hidden), h("p", { class: "muted small" }, "Anything not listed is hidden. Keys, .env files, .git and node_modules never leave your hub. They edit their own copy; changes come back to you."),
+    h("div", { class: "list" }, autoRow),
+    h("h4", null, "Runs on"), brain, brainNote, capRow,
+    err,
+    h("button", { class: "btn primary big", on: { click: async () => {
+      err.textContent = "";
+      try {
+        const s = await call("/api/shares", { body: {
+          teammateId: st.teammateId, kind: st.kind, label: label.value, ownerName: owner.value,
+          scope: { does: does.value, examples: lines(examples.value), not: lines(not.value) },
+          notebooks: [...st.notebooks], notes: lines(notes.value), autoApply: st.autoApply,
+          models: { brain: st.brain }, limits: { costCapDayUsd: Number(cap.value) || 2 },
+          ...(folder.value.trim() ? { folder: { path: folder.value.trim(), rules: { edit: lines(edit.value), read: lines(read.value), hidden: lines(hidden.value) } } } : {}),
+        } });
+        toast("Link ready");
+        openShare(s.id);
+      } catch (e: any) { err.textContent = e.message; }
+    } } }, "Create link"),
+  ]);
+}
+
+function diffView(text: string) {
+  return h("pre", { class: "code diff" }, text.split("\n").map((l) => h("span", { class: l.startsWith("+") && !l.startsWith("+++") ? "add" : l.startsWith("-") && !l.startsWith("---") ? "del" : l.startsWith("@@") ? "hunk" : "" }, `${l}\n`)));
+}
+
+async function openShare(id: string) {
+  let d: any, team: any[];
+  try { [d, team] = await Promise.all([call(`/api/shares/${id}`), call("/api/teammates")]); } catch (e) { return handleError(e); }
+  S.panel = `share:${id}`;
+  const s = d.share, t = team.find((x) => x.id === s.teammateId);
+  const act = async (path: string, body: any, done: string) => {
+    try { const r = await call(`/api/shares/${id}/${path}`, { body }); toast(done); openShare(id); return r; }
+    catch (e: any) { handleError(e); openShare(id); }
+  };
+  const editCard = (e: any) => {
+    const ev = e.event;
+    const diffs = h("div");
+    const showing = { on: false };
+    return h("div", { class: "sharecard" },
+      h("div", { class: "title" }, `${ev.visitor} changed ${ev.files.length} file${ev.files.length === 1 ? "" : "s"}`, h("span", { class: "tag soft" }, relTime(ev.at))),
+      h("p", { class: "small" }, h("b", null, "Asked: "), ev.asked),
+      ev.note ? h("p", { class: "small muted" }, h("b", null, "Why: "), ev.note) : null,
+      h("div", { class: "files" }, ev.files.map((f: any) => h("div", { class: "mono small" }, h("span", { class: "dplus" }, `+${f.added}`), " ", h("span", { class: "dminus" }, `−${f.removed}`), `  ${f.path}${f.deleted ? " (deleted)" : ""}`))),
+      e.status === "conflict" ? h("p", { class: "notice" }, `Clashes with your edits: ${e.result}`) : null,
+      h("button", { class: "btn small ghost", on: { click: async () => {
+        showing.on = !showing.on;
+        if (!showing.on) { clear(diffs); return; }
+        const full = await call(`/api/shares/${id}/events/${e.id}`);
+        clear(diffs, full.diffs.map((x: any) => diffView(x.diff)));
+      } } }, "Show changes"),
+      diffs,
+      h("div", { class: "row gap wrap" },
+        h("button", { class: "btn small primary", on: { click: () => act("apply", { ids: [e.id], mode: "apply" }, "Applied") } }, "Apply"),
+        h("button", { class: "btn small ghost", on: { click: async () => { const r: any = await act("apply", { ids: [e.id], mode: "copy" }, "Saved as a copy"); if (r?.copiedTo) toast(`Copy: ${r.copiedTo}`); } } }, "Save as a copy"),
+        h("button", { class: "btn small ghost", on: { click: () => act("apply", { ids: [e.id], mode: "branch" }, "Branch made") } }, "Open as branch"),
+        h("button", { class: "btn small danger-ghost", on: { click: () => act("reject", { ids: [e.id] }, "Rejected") } }, "Reject")));
+  };
+  const askCard = (e: any) => {
+    const ev = e.event;
+    const answer = h("input", { class: "field", placeholder: "Your answer" });
+    return h("div", { class: "sharecard" },
+      h("div", { class: "title" }, `${ev.visitor} asked ${t?.name || "it"}`, h("span", { class: "tag soft" }, relTime(ev.at))),
+      h("p", null, `“${ev.question}”`), ev.why ? h("p", { class: "small muted" }, ev.why) : null,
+      answer,
+      h("div", { class: "row gap wrap" },
+        h("button", { class: "btn small primary", on: { click: () => act("answer", { eventId: e.id, mode: "once", answer: answer.value }, "Shared with them") } }, "Share once"),
+        h("button", { class: "btn small ghost", on: { click: () => act("answer", { eventId: e.id, mode: "always", answer: answer.value }, "Shared with everyone") } }, "Always"),
+        h("button", { class: "btn small danger-ghost", on: { click: () => act("answer", { eventId: e.id, mode: "no" }, "Declined") } }, "Don't share")));
+  };
+  const historyRow = (e: any) => {
+    const ev = e.event;
+    let text = "", extra: Node | null = null;
+    if (e.kind === "refused") text = `Blocked ${ev.visitor}: “${ev.text}” · ${REFUSED[ev.reason] || ev.reason}`;
+    else if (e.kind === "edit") {
+      text = `${ev.visitor}: ${ev.asked} · ${e.status === "applied" ? "applied" : e.status === "copied" ? `copied to ${e.result}` : e.status === "branched" ? `branch ${e.result}` : e.status}`;
+      if (e.status === "applied") extra = h("button", { class: "btn small ghost", on: { click: () => act("undo", { applyId: e.result }, "Undone") } }, "Undo");
+    } else if (e.kind === "ask") text = `${ev.visitor} asked “${ev.question}” · ${e.result === "no" ? "declined" : `answered (${e.result})`}`;
+    else if (e.kind === "paused") text = `Paused: ${ev.reason}`;
+    else return null;
+    return h("div", { class: "item" }, h("span", { class: "grow left small" }, text, h("small", { class: "sub" }, relTime(ev.at))), extra);
+  };
+  const needs = d.events.filter((e: any) => (e.kind === "edit" || e.kind === "ask") && (e.status === "pending" || e.status === "conflict"));
+  const past = d.events.filter((e: any) => !needs.includes(e) && e.kind !== "chat").slice(0, 30);
+  openSheet(`${t?.emoji || ""} ${t?.name || "Shared link"}`, [
+    h("div", { class: "sharelink" }, h("code", null, shareUrl(s)),
+      h("div", { class: "row gap" },
+        h("button", { class: "btn small primary", on: { click: () => navigator.clipboard?.writeText(shareUrl(s)).then(() => toast("Link copied")) } }, "Copy link"),
+        h("a", { class: "btn small ghost", href: shareUrl(s), target: "_blank", rel: "noopener" }, "Open"))),
+    h("div", { class: "chips" },
+      h("span", { class: "chip" }, s.kind === "guest" ? `Guest · ${s.label}` : "Public"),
+      h("span", { class: "chip" }, s.models.brain === "hub" ? "Your subscription" : "API key"),
+      s.status === "paused" ? h("span", { class: "chip" }, "Paused") : null,
+      s.autoApply ? h("span", { class: "chip" }, "Auto-applies changes") : null),
+    h("p", { class: "muted small" }, `${s.stats.chats} chats · ${s.stats.refused} blocked (${s.stats.offTopic} off-topic)${s.models.brain === "api" ? ` · $${s.stats.costUsd.toFixed(2)} spent` : ""}`),
+    h("h4", null, "What it knows"),
+    h("p", { class: "small" }, [s.scope.does, s.notebooks.length ? `Notebooks: ${s.notebooks.join(", ")}.` : "No notebooks.", s.notes.length ? `${s.notes.length} note${s.notes.length === 1 ? "" : "s"}.` : ""].filter(Boolean).join(" ")),
+    s.folder ? h("p", { class: "small" }, `Folder ${s.folder.path} · edit: ${(s.folder.rules.edit || []).join(", ") || "nothing"} · read: ${(s.folder.rules.read || []).join(", ") || "nothing"}${s.folder.excluded.length ? ` · ${s.folder.excluded.length} left out (${s.folder.excluded.slice(0, 2).map((x: any) => `${x.path}: ${x.why}`).join("; ")})` : ""}`) : null,
+    needs.length ? h("h4", null, "Needs you") : null,
+    needs.map((e: any) => (e.kind === "edit" ? editCard(e) : askCard(e))),
+    past.length ? h("h4", null, "History") : null,
+    past.length ? h("div", { class: "list" }, past.map(historyRow)) : null,
+    h("div", { class: "row gap wrap" },
+      h("button", { class: "btn small ghost", on: { click: () => act("publish", {}, "Copy updated") } }, "Update its copy"),
+      h("button", { class: "btn small ghost", on: { click: () => act("pause", { paused: s.status !== "paused" }, s.status === "paused" ? "Back on" : "Paused") } }, s.status === "paused" ? "Resume" : "Pause"),
+      h("button", { class: "btn small danger-ghost", on: { click: () => confirmSheet("Turn off this link?", "The link stops working and its box and visitor chats are deleted. Changes you already applied stay.", "Turn off", async () => { await call(`/api/shares/${id}`, { method: "DELETE" }); toast("Turned off"); openShares(); }) } }, "Turn off link")),
+  ], { onClose: () => { S.panel = null; } });
+}
 
 function openSheet(title: string, body: Node | any[], opts: { onClose?: () => void } = {}) {
   closeSheet();

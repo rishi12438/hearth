@@ -164,7 +164,8 @@ the hub asks.
    echo 'ANTHROPIC_API_KEY=sk-ant-...' | sudo tee /etc/hearth/box-keys/default.env >/dev/null
    sudo chmod 600 /etc/hearth/box-keys/default.env
    ```
-   For a different key per link, add `/etc/hearth/box-keys/<link id>.env`.
+   For a different key per link, add `/etc/hearth/box-keys/<link id>.env`. Links set to run on your subscription don't
+   need a key: the hub runs them with the `claude` login of the `hearth` user.
 3. **Install the helper** (root-owned, outside `/opt/hearth`, so the hub can't change what root runs):
    ```bash
    sudo install -m 0755 /opt/hearth/deploy/hearth-boxctl /usr/local/sbin/hearth-boxctl
@@ -177,7 +178,7 @@ the hub asks.
    sudo bash /opt/hearth/deploy/box-selftest.sh
    ```
 5. **Turn it on.** Add `HEARTH_BOX_RUNNER=docker` to `/opt/hearth/.env` and `sudo systemctl restart hearth`.
-6. **Share one.** On the server (phone screens for this are still to come):
+6. **Share one.** In the app: Settings → Shared links. Or on the server:
    ```bash
    sudo -iu hearth bash -c 'cd /opt/hearth && ~/.bun/bin/bun src/cli.ts share Recipes --owner Rishi --notebook food'
    sudo -iu hearth bash -c 'cd /opt/hearth && ~/.bun/bin/bun src/cli.ts shares'      # links, chats, spend
