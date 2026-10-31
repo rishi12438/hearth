@@ -405,13 +405,36 @@ function drawHeader() {
     return;
   }
   // A ramble: Hearth while it's sorting things out, then whoever is doing the work takes the stage.
-  const who = speaker(chat);
+  // Two or more at work: they all stand on the stage, each acting out its own state; tap one for its thread.
   const jobs = (chat?.jobs || []).filter((j: any) => !j.parentId);
   const open = jobs.filter((j: any) => !["done", "failed"].includes(j.status)).length;
+  const busy = activeMates(chat);
+  if (busy.length >= 2 && !(chat?.thread && S.planning === chat.thread.id)) {
+    stages.delete("chat");
+    const names = busy.length === 2 ? `${busy[0].t.name} & ${busy[1].t.name}` : `${busy[0].t.name}, ${busy[1].t.name} +${busy.length - 2}`;
+    clear(top, h("div", { class: "toprow stagerow" }, back,
+      h("div", { class: "stage crowd" },
+        h("div", { class: "crowdfaces" }, busy.slice(0, 4).map((a) =>
+          h("button", { class: "crowdface", "aria-label": `${a.t.name}: open thread`, on: { click: () => { location.hash = `#c/${chat.thread.id}/${a.jobId}`; } } }, face(a.t, 46, a.state)))),
+        h("button", { class: "stagepill", on: { click: chatMenu } }, h("b", null, names)),
+        h("small", null, [`#${name}`, `${open} working`].join(" · "))),
+      h("button", { class: "circle glass", "aria-label": "Files", on: { click: openFiles } }, icon("clip", 21))));
+    return;
+  }
+  const who = speaker(chat);
   const others = [...new Set(jobs.map((j: any) => j.teammateId))].filter((id) => id !== who.t.id).slice(0, 3).map((id) => mate(id as string));
   clear(top, h("div", { class: "toprow stagerow" }, back,
     stage("chat", who.t, who.state, who.t.name, [`#${name}`, open ? `${open} working` : null].filter(Boolean).join(" · "), chatMenu, false, others),
     h("button", { class: "circle glass", "aria-label": "Files", on: { click: openFiles } }, icon("clip", 21))));
+}
+
+/** Teammates with something open in this ramble (one entry each, their most recent task), busiest first. */
+function activeMates(chat: any): { t: any; state: string; jobId: string }[] {
+  const order: Record<string, number> = { working: 0, waiting: 1, blocked: 1, queued: 2 };
+  const open = (chat?.jobs || []).filter((j: any) => !j.parentId && j.status in order)
+    .sort((a: any, b: any) => order[a.status] - order[b.status] || (b.updatedAt || b.createdAt).localeCompare(a.updatedAt || a.createdAt));
+  const seen = new Set<string>();
+  return open.filter((j: any) => !seen.has(j.teammateId) && seen.add(j.teammateId)).map((j: any) => ({ t: mate(j.teammateId), state: jobState(j), jobId: j.id }));
 }
 
 /** Who's "on stage" in a ramble right now. */
@@ -794,7 +817,14 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
   const t = mate(j.teammateId);
   const follow = S.chat.jobs.filter((x: any) => x.followsUp === j.id);
   const n = (j.status === "done" || j.status === "failed" ? 1 : 0) + follow.length * 2;
+  // The ramble's other threads, one tap away (like switching threads in Slack).
+  const roots = S.chat.jobs.filter((x: any) => !x.parentId && !x.followsUp);
+  const switcher = roots.length > 1 ? h("div", { class: "threadtabs" }, roots.map((x: any) =>
+    h("button", { class: `threadtab ${x.id === j.id ? "on" : ""}`, on: { click: () => { location.hash = `#c/${S.chat.thread.id}/${x.id}`; } } },
+      face(mate(x.teammateId), 20, jobState(x)), h("span", null, jobLabel(x)), x.status === "done" ? null : h("i", { class: `tdot ${x.status}` })))) : null;
+  if (switcher) requestAnimationFrame(() => switcher.querySelector(".on")?.scrollIntoView({ inline: "center", block: "nearest" }));
   const nodes: (Node | null)[] = [
+    switcher,
     row(mateWho("hearth"), j.createdAt, [h("div", { class: "ttitle" }, jobLabel(j)), h("div", { class: "brief" }, withMentions(`@${t.name} ${j.task}`))]),
     h("div", { class: "repdiv" }, n ? `${n} repl${n === 1 ? "y" : "ies"}` : "No replies yet"),
     answer(j),

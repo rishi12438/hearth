@@ -584,3 +584,23 @@ a.place:active { background: var(--surface-2); }
 .aboutcard .row b { font-size: 17px; }
 .abouttext .rich { font-size: 15.5px; }
 .ideabtns .btn { width: auto; flex: none; height: 36px; padding: 0 16px; border-radius: 999px; font-size: 14.5px; font-weight: 650; }
+
+/* several teammates at work: they share the stage */
+.stage.crowd { gap: 0; }
+.crowdfaces { display: flex; align-items: flex-end; }
+.crowdface { padding: 0; margin: 0 3px; border-radius: 50%; }
+.crowdface .face { --s: 46px; }
+.crowdface:nth-child(2) .face { animation-delay: .15s; } .crowdface:nth-child(3) .face { animation-delay: .3s; }
+.stage.crowd .stagepill { margin-top: -6px; }
+/* threads in this ramble, at the top of a thread */
+.threadtabs { display: flex; gap: 8px; overflow-x: auto; padding: 4px 16px 12px; scrollbar-width: none; }
+.threadtabs::-webkit-scrollbar { display: none; }
+.threadtab { flex: none; display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px 6px 7px; border-radius: 999px; background: var(--card); box-shadow: var(--shadow);
+  font-size: 14px; font-weight: 600; color: var(--ink-2); max-width: 70vw; }
+.threadtab span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.threadtab.on { background: var(--ink); color: #fff; }
+.threadtab .face::after { display: none; }
+.tdot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+.tdot.working, .tdot.queued { background: var(--ok); animation: pulse 1.4s infinite; }
+.tdot.waiting, .tdot.blocked { background: var(--warn); }
+.tdot.failed { background: var(--danger); }
