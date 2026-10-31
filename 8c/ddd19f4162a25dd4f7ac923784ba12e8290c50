@@ -1,0 +1,38 @@
+src/types.ts
+  s_a62c474b26f7ae::t_a9b2afecb87e63 188-197
+src/server.ts
+  s_a62c474b26f7ae::t_a1648ce507358e 17-18,499,507
+  s_a62c474b26f7ae::t_ad2706c09eb6f8 753
+  s_a62c474b26f7ae::t_f3872e8ad9d52c 500,508,513
+  s_a62c474b26f7ae::t_8dec07e9b194ce 92
+web/src/app.ts
+  s_a62c474b26f7ae::t_a4b20f94ce206b 1510-1520,1523,1560
+  s_a62c474b26f7ae::t_ec05b42fe0dc77 1574-1575,1596
+src/store/types.ts
+  s_a62c474b26f7ae::t_a9b2afecb87e63 6
+web/styles.css
+  s_a62c474b26f7ae::t_ec05b42fe0dc77 812-815
+src/hub.ts
+  s_a62c474b26f7ae::t_ede4a25a7306bc 21,165-179
+  s_a62c474b26f7ae::t_4c50be476b1917 1299,2169,2175-2176,2182-2183,2187
+  s_a62c474b26f7ae::t_8dec07e9b194ce 262
+  s_a62c474b26f7ae::t_630ade9ba22499 2108,2118,2122,2134-2135,2138
+test/social.test.ts
+  s_a62c474b26f7ae::t_ad2706c09eb6f8 208-228
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "8cddd19f4162a25dd4f7ac923784ba12e8290c50",
+  "prompts": {},
+  "sessions": {
+    "s_a62c474b26f7ae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4c826b8c-287f-4f16-ac8d-eafba60501f3",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
