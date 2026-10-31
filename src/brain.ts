@@ -10,7 +10,7 @@ import { wallParts, zonedToUtc } from "./time.ts";
 // and the agent runs in an empty folder with no file or shell tools and none of the hub's secrets.
 
 export type BrainInput = {
-  mode: "chat" | "hook" | "review" | "job" | "orchestrate" | "ideas" | "legwork" | "voice" | "clean";
+  mode: "chat" | "hook" | "review" | "job" | "orchestrate" | "ideas" | "legwork" | "voice" | "clean" | "describe";
   context: Record<string, unknown>;
   input: string;
   toolResults?: string;
@@ -20,7 +20,7 @@ export const QUIET = "[[quiet]]";
 export const ESCALATE = "[[escalate]]";
 export const REDO = "[[redo]]";
 /** Calls that only read and write text: no web tools. */
-const NO_TOOLS = new Set<BrainInput["mode"]>(["orchestrate", "voice", "review", "ideas", "clean"]);
+const NO_TOOLS = new Set<BrainInput["mode"]>(["orchestrate", "voice", "review", "ideas", "clean", "describe"]);
 /** Dictation clean-up (like Wispr Flow): tidy what was said without changing what it means. */
 const CLEAN = `Clean up this dictated text so it reads as if typed. Remove filler (um, uh, like, you know), false starts and repeated
 words. When the speaker corrects themselves ("at 5, no, 6"), keep only the correction. Fix punctuation, capitals and obvious
@@ -127,6 +127,12 @@ ACTIONS
     renders at its content's height (window.hearth.view === "inline", ~340-700px wide; keep it under ~700px tall). When the
     user asks to change it ("add prices", "make day 3 lighter"), app.save the same name: it evolves in place, old versions
     kept. The user can keep it as an app. Same rules and style as apps.
+    COMPONENTS: every artifact is also saved as a reusable component, like a skill for visuals. So build it GENERAL: the code
+    draws any data of its shape, with every word, place and number in data, nothing hard-coded. Give "component": a name for
+    what it shows, not this case ("day-by-day-itinerary", not "japan-feb-trip"), and "componentDescription": one sentence on
+    what it shows and when to use it. CONTEXT.library lists existing components (kind "component", with the data they take):
+    to reuse one, send app.save {name, title, inline: true, component: "<its name>", data} with NO code block. If one almost
+    fits, improve it: send code with the same component name (it stays general, old versions kept).
 - teammate.update {name, emoji?, description?}   change a teammate's badge (one emoji) or what it does, when the user asks
     ("give Fitness a volleyball", "make Travel's badge a globe") or a lane clearly changed.
 - app.pin {name, size?: "small"|"wide"|"large"} / app.unpin {name} / app.delete {name}   pinned apps show LIVE on the user's Home
@@ -223,6 +229,9 @@ every job, and light jobs escalate on their own if they can't do it, so heavy is
 
 export function buildPrompt(b: BrainInput) {
   if (b.mode === "clean") return [CLEAN, "", "DICTATED:", b.input].join("\n");
+  if (b.mode === "describe") return ["Write ONE sentence describing this reusable UI component for a library: what it shows and when to use it, so a",
+    "teammate searching later can tell if it fits (e.g. \"Tabs per day with a zoomed map and a short list of things to do; use for any multi-day trip.\").",
+    "Reply with only the sentence.", "", b.input].join("\n");
   if (b.mode === "orchestrate") {
     return [ORCHESTRATOR, "", "CONTEXT (JSON):", JSON.stringify(b.context, null, 1), "", "USER RAMBLE:", b.input].join("\n");
   }
@@ -490,6 +499,7 @@ function echoOrchestrator(b: BrainInput): string {
 function echoBrain(b: BrainInput): string {
   const ctx = b.context as { tz: string; nowIso: string };
   if (b.mode === "review") return QUIET;
+  if (b.mode === "describe") return `Shows ${(b.input.match(/^Title: (.*)$/m)?.[1] || "a view").trim()}.`;
   if (b.mode === "clean") return b.input.replace(/\b(um+|uh+|you know),?\s*/gi, "").replace(/\s+/g, " ").trim();
   if (b.mode === "voice") return (b.input.split("NOTES FROM THE LEGWORK:")[1] || b.input).replace(/<\/?untrusted>/g, "").trim();
   if (b.mode === "ideas") {

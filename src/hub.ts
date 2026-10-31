@@ -9,11 +9,12 @@ import { parseReply } from "./reply.ts";
 import { validateHook, computeNextAt, describeTrigger, isUserReminder } from "./hooks.ts";
 import { recall, isActive, validateFact } from "./memory.ts";
 import { describeLocal, inQuietHours, quietEndsAt, localDate, distanceMeters } from "./time.ts";
-import type { DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
+import type { Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
 import { Library, validateSkill, validateWorkflow, fill } from "./library.ts";
 import { cleanTile, cleanOptions, extractTiles, type Tile } from "./tiles.ts";
 import { Files, extractFiles } from "./files.ts";
 import { Apps, appSize } from "./apps.ts";
+import { sha256 } from "./auth.ts";
 
 const DEFAULT_PREFS: Prefs = {
   userName: "", tz: "UTC", quietStart: "23:00", quietEnd: "07:30",
@@ -703,8 +704,8 @@ export class Hub {
 
   async searchLibrary(query: string) {
     if (!query.trim()) return [];
-    const [skills, workflows, scripts] = await Promise.all([this.store.all<Skill>("skills"), this.store.all<Workflow>("workflows"), this.scripts.list()]);
-    return this.library.search(query, skills, workflows, scripts);
+    const [skills, workflows, scripts, components] = await Promise.all([this.store.all<Skill>("skills"), this.store.all<Workflow>("workflows"), this.scripts.list(), this.store.all<Component>("components")]);
+    return this.library.search(query, skills, workflows, scripts, 8, components);
   }
 
   async skillByName(name: string) {
@@ -1084,7 +1085,15 @@ export class Hub {
           }
           case "app.save": {
             if (where.recipe) break;
+            // Artifacts reuse a component's code with new data, or (with code) become a component others can reuse.
+            if (a.inline && typeof a.component === "string" && typeof a.html !== "string") {
+              const c = await this.componentByName(a.component);
+              if (c) { a.html = c.html; await this.store.put<Component>("components", { ...c, uses: c.uses + 1, lastUsedAt: this.clock().toISOString() }); }
+            }
             const r = await this.apps.save(a, where);
+            if (r.value && a.inline && typeof a.html === "string" && !(typeof a.component === "string" && (await this.componentByName(a.component))?.html === a.html)) {
+              await this.saveComponent({ name: a.component || a.name, title: a.title || r.value.title, description: a.componentDescription || a.description, data: r.value.data, html: a.html }, where.teammateId);
+            }
             if (r.error) { await this.log("action.rejected", `app.save: ${r.error}`); done.push({ kind: "note", label: `Couldn't build the app: ${r.error}` }); break; }
             const app = r.value!;
             done.push({ kind: "app", label: `${r.created ? "Built" : r.changedCode ? "Updated" : "Updated content of"} ${app.title}`, id: app.id });
@@ -1570,6 +1579,42 @@ export class Hub {
     } catch { return raw; }
   }
 
+  // ---------- components: reusable artifacts ----------
+
+  async componentByName(name: string) {
+    const n = slugOf(name);
+    return n ? (await this.store.all<Component>("components")).find((c) => c.name === n) || null : null;
+  }
+
+  /** Save (or improve) a component from an artifact's code. Missing descriptions are written by the quick model. */
+  async saveComponent(input: { name: string; title?: string; description?: string; data?: unknown; html: string }, teammateId?: string) {
+    const name = slugOf(input.name);
+    if (!name || !input.html.trim()) return null;
+    const prev = await this.componentByName(name);
+    const shape = JSON.stringify(input.data ?? null).slice(0, 1500);
+    const sha = sha256(input.html);
+    const now = this.clock().toISOString();
+    const c = await this.store.put<Component>("components", {
+      ...(prev || { ...this.doc({}), uses: 0, versions: [] }),
+      name, title: String(input.title || prev?.title || name).slice(0, 60), shape: shape !== "null" ? shape : prev?.shape || "",
+      description: String(input.description || prev?.description || "").slice(0, 300),
+      html: input.html, sha256: sha, uses: (prev?.uses || 0) + 1, lastUsedAt: now, teammateId: prev?.teammateId || teammateId,
+      versions: prev && prev.sha256 !== sha ? [...prev.versions, { html: prev.html, at: prev.updatedAt || prev.createdAt }].slice(-5) : prev?.versions || [],
+      updatedAt: now,
+    } as Component);
+    await this.log("component.saved", `${name}${prev ? " (improved)" : ""}`);
+    if (!c.description) this.describeComponent(c.id).catch(() => {});
+    return c;
+  }
+
+  /** One sentence on what a component shows and when to use it, so it can be found later. */
+  async describeComponent(id: string) {
+    const c = await this.store.get<Component>("components", id);
+    if (!c) return;
+    const text = (await this.brain.think({ mode: "describe", context: {}, input: `Title: ${c.title}\nName: ${c.name}\nData it draws: ${c.shape.slice(0, 800)}\nCode (start): ${c.html.replace(/\s+/g, " ").slice(0, 1500)}` }, (await this.brains()).quick)).trim();
+    if (text) await this.store.put<Component>("components", { ...c, description: text.split("\n")[0].slice(0, 300) });
+  }
+
   // ---------- boards: everyone's (or one teammate's) work as a to-do board ----------
 
   /** Up next (queued tasks, upcoming reminders and routines), Working, Needs you, Done (last 7 days). */
@@ -1903,7 +1948,7 @@ export class Hub {
 
   async exportAll() {
     const out: Record<string, unknown> = { exportedAt: this.clock().toISOString(), hub: this.config.name, storage: this.store.kind };
-    for (const col of ["threads", "messages", "jobs", "teammates", "skills", "workflows", "approvals", "hooks", "memory", "notebooks", "places", "locations", "activity", "scripts", "apps", "appState", "ideas", "days", "people"] as const) out[col] = await this.store.all(col);
+    for (const col of ["threads", "messages", "jobs", "teammates", "skills", "workflows", "approvals", "hooks", "memory", "notebooks", "places", "locations", "activity", "scripts", "apps", "appState", "ideas", "days", "people", "components"] as const) out[col] = await this.store.all(col);
     out.devices = (await this.store.all<any>("devices")).map(({ tokenHash, ...d }) => d);
     out.prefs = await this.prefs();
     return out;

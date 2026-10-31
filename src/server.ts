@@ -10,7 +10,7 @@ import { MAX_FILE_BYTES } from "./files.ts";
 import { appCsp } from "./apps.ts";
 import { isActive, search } from "./memory.ts";
 import { isValidTimeZone } from "./time.ts";
-import type { Person, StoredFile, Approval, Device, Fact, Hook, LocationFix, MiniApp, Message, Notebook, Place, Prefs, Skill, Teammate, Workflow } from "./types.ts";
+import type { Component, Person, StoredFile, Approval, Device, Fact, Hook, LocationFix, MiniApp, Message, Notebook, Place, Prefs, Skill, Teammate, Workflow } from "./types.ts";
 import pkg from "../package.json" with { type: "json" };
 
 const WEB = resolve(import.meta.dir, "../web");
@@ -227,8 +227,9 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
       }
       case "skills": {
         if (method === "GET") {
-          const [skills, workflows] = await Promise.all([store.all<Skill>("skills"), store.all<Workflow>("workflows")]);
-          return json({ skills, workflows, search: hub.library.mode });
+          const [skills, workflows, components] = await Promise.all([store.all<Skill>("skills"), store.all<Workflow>("workflows"), store.all<Component>("components")]);
+          return json({ skills, workflows, search: hub.library.mode,
+            components: components.map(({ html, versions, ...c }) => ({ ...c, versions: versions.length })).sort((a, b) => b.uses - a.uses) });
         }
         if (method === "PATCH" && id) {
           const sk = await store.get<Skill>("skills", id);
@@ -369,6 +370,18 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
           return json(r.value);
         }
         if (method === "DELETE" && id) { const ok = await store.remove("people", id); hub.emit("people"); return json({ ok }); }
+        break;
+      }
+      case "components": {
+        if (method === "DELETE" && id) { const ok = await store.remove("components", id); hub.emit("skills"); return json({ ok }); }
+        if (method === "PATCH" && id) {
+          const c = await store.get<Component>("components", id);
+          if (!c) break;
+          const b = await body(req);
+          await store.put<Component>("components", { ...c, description: typeof b.description === "string" ? b.description.slice(0, 300) : c.description });
+          hub.emit("skills");
+          return json({ ok: true });
+        }
         break;
       }
       case "about": {

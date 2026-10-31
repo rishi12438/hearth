@@ -21,6 +21,7 @@ const S = {
   files: new Map<string, any>(),
   apps: [] as any[],
   ideas: [] as any[],
+  components: [] as any[],
   progress: new Map<string, string>(), // jobId -> what it's doing right now
   skills: [] as any[],
   workflows: [] as any[],
@@ -184,7 +185,7 @@ async function refreshState() {
 }
 
 async function loadSkills() {
-  try { const r = await call("/api/skills"); S.skills = r.skills; S.workflows = r.workflows; if (S.panel === "skills") drawSkills(); } catch {}
+  try { const r = await call("/api/skills"); S.skills = r.skills; S.workflows = r.workflows; S.components = r.components || []; if (S.panel === "skills") drawSkills(); } catch {}
 }
 
 async function loadTeammates() {
@@ -1657,7 +1658,14 @@ function drawSkills() {
       w.status === "proposed" ? h("button", { class: "btn small primary", on: { click: async () => { await call(`/api/workflows/${w.id}/activate`, { body: {} }); toast("Switched on"); } } }, "Switch on")
         : h("button", { class: "btn small primary", on: { click: async () => { closeSheet(); const r = await call("/api/threads", { body: { text: `Run my "${w.name}" workflow` } }); location.hash = `#c/${r.thread.id}`; } } }, "Run"),
       h("button", { class: `star ${w.pinned ? "on" : ""}`, "aria-label": w.pinned ? "Unpin" : "Pin (never clean up)", on: { click: async () => { await call(`/api/workflows/${w.id}`, { method: "PATCH", body: { pinned: !w.pinned } }); } } }, icon("pin", 16)),
-      h("button", { class: "iconbtn", "aria-label": "Delete workflow", on: { click: () => confirmSheet(`Delete ${w.name}?`, "The skills it uses stay.", "Delete", async () => { await call(`/api/workflows/${w.id}`, { method: "DELETE" }); }) } }, icon("trash", 16)))))] : null);
+      h("button", { class: "iconbtn", "aria-label": "Delete workflow", on: { click: () => confirmSheet(`Delete ${w.name}?`, "The skills it uses stay.", "Delete", async () => { await call(`/api/workflows/${w.id}`, { method: "DELETE" }); }) } }, icon("trash", 16)))))] : null,
+    // Components: reusable artifacts (visual skills). The team reuses them with new data instead of writing new code.
+    S.components.length ? [h("h4", null, "Components"), h("p", { class: "muted small" }, "Visuals your team built once and reuses with new data, like an itinerary with a map or a comparison."),
+      h("div", { class: "list" }, S.components.map((c: any) => h("div", { class: "item" },
+        h("span", { class: "hicon" }, icon("sparkle", 16)),
+        h("span", { class: "grow" }, h("b", null, c.title), h("small", { class: "sub" }, c.description || "Writing a description…"),
+          h("small", { class: "sub" }, [c.name, `${c.uses} use${c.uses === 1 ? "" : "s"}`, c.versions ? `improved ${c.versions}×` : null].filter(Boolean).join(" · "))),
+        h("button", { class: "iconbtn", "aria-label": `Delete ${c.title}`, on: { click: () => confirmSheet(`Delete ${c.title}?`, "Answers that already used it keep working.", "Delete", async () => { await call(`/api/components/${c.id}`, { method: "DELETE" }); loadSkills(); }) } }, icon("trash", 16)))))] : null);
 }
 
 function openSkill(sk: any) {

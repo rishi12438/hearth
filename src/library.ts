@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { tokens } from "./memory.ts";
-import type { Script, Skill, Workflow } from "./types.ts";
+import type { Component, Script, Skill, Workflow } from "./types.ts";
 
 // The library is everything the team already knows how to do: skills, workflows and approved scripts.
 // Before anyone writes something new, the orchestrator and teammates get a shortlist from here.
@@ -38,7 +38,7 @@ export function createEmbeddings(env: Record<string, string | undefined> = proce
   throw new Error(`Unknown HEARTH_EMBEDDINGS provider: ${provider}`);
 }
 
-export type LibraryItem = { kind: "skill" | "workflow" | "script"; name: string; description: string; inputs?: string[]; how?: string; score: number };
+export type LibraryItem = { kind: "skill" | "workflow" | "script" | "component"; name: string; description: string; inputs?: string[]; how?: string; score: number };
 
 const cosine = (a: number[], b: number[]) => {
   let dot = 0, na = 0, nb = 0;
@@ -53,18 +53,20 @@ export class Library {
 
   get mode() { return this.embeddings?.name ?? "keywords"; }
 
-  private items(skills: Skill[], workflows: Workflow[], scripts: Script[]): Omit<LibraryItem, "score">[] {
+  private items(skills: Skill[], workflows: Workflow[], scripts: Script[], components: Component[] = []): Omit<LibraryItem, "score">[] {
     const covered = new Set(skills.map((s) => s.script).filter(Boolean));
     return [
       ...skills.filter((s) => s.status === "active").map((s) => ({ kind: "skill" as const, name: s.name, description: s.description, inputs: s.inputs.map((i) => i.name), how: s.kind })),
       ...workflows.filter((w) => w.status === "active").map((w) => ({ kind: "workflow" as const, name: w.name, description: w.description, inputs: w.inputs.map((i) => i.name), how: w.steps.map((x) => x.skill || "task").join(" → ") })),
       ...scripts.filter((s) => s.status === "approved" && !covered.has(s.name)).map((s) => ({ kind: "script" as const, name: s.name, description: s.description, how: s.effects })),
+      // Artifact components: "how" is the data they expect, so a teammate can reuse one with new data and no new code.
+      ...components.map((c) => ({ kind: "component" as const, name: c.name, description: c.description || c.title, how: `data like ${c.shape}` })),
     ];
   }
 
   /** Top matches for a request. Falls back to keywords if the embedding provider fails. */
-  async search(query: string, skills: Skill[], workflows: Workflow[], scripts: Script[], k = 6): Promise<LibraryItem[]> {
-    const items = this.items(skills, workflows, scripts);
+  async search(query: string, skills: Skill[], workflows: Workflow[], scripts: Script[], k = 6, components: Component[] = []): Promise<LibraryItem[]> {
+    const items = this.items(skills, workflows, scripts, components);
     if (!items.length || !query.trim()) return [];
     const texts = items.map((i) => `${i.name}: ${i.description}`);
     if (this.embeddings) {

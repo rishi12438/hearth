@@ -171,3 +171,20 @@ test("artifacts: inline apps show in the answer at their own height, can use hub
   const b = (await hub.apps.byName("japan-days"))!;
   expect([b.inline, b.versions.length]).toEqual([true, 1]); // evolves in place
 });
+
+test("components: an artifact becomes a reusable component with a description, found in the library and reused with new data", async () => {
+  const html = "<html><head></head><body><script>document.body.textContent = hearth.data.days.length + ' days'</script></body></html>";
+  await hub.applyActions([{ type: "app.save", name: "japan-days", title: "Japan, day by day", inline: true, component: "day-by-day-itinerary", html, data: { days: [{ title: "Osaka" }] } }], "");
+  let c = (await hub.componentByName("day-by-day-itinerary"))!;
+  expect([c.title, c.uses, c.shape]).toEqual(["Japan, day by day", 1, '{"days":[{"title":"Osaka"}]}']);
+  for (let i = 0; i < 50 && !(c = (await hub.componentByName("day-by-day-itinerary"))!).description; i++) await Bun.sleep(10);
+  expect(c.description).toBe("Shows Japan, day by day."); // written by the quick model (demo brain here)
+  const found = await hub.searchLibrary("day by day itinerary for my lisbon trip");
+  expect(found.some((x: any) => x.kind === "component" && x.name === "day-by-day-itinerary")).toBe(true);
+  // Reuse: new data, no code; the new artifact gets the component's code.
+  await hub.applyActions([{ type: "app.save", name: "lisbon-days", title: "Lisbon, day by day", inline: true, component: "day-by-day-itinerary", data: { days: [{ title: "Alfama" }, { title: "Belém" }] } }], "");
+  const lisbon = (await hub.apps.byName("lisbon-days"))!;
+  expect([lisbon.html, lisbon.inline]).toEqual([html, true]);
+  expect((await hub.componentByName("day-by-day-itinerary"))!.uses).toBe(2);
+  expect((await store.all<any>("components")).length).toBe(1); // reused, not copied
+});

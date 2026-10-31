@@ -298,5 +298,23 @@ export type MiniApp = Doc & {
   /** An artifact: shown inside the answer that made it, not in Mini apps (until you keep it). */
   inline?: boolean;
 };
+/**
+ * A reusable artifact component, like a skill for visuals: general code that draws any data of its shape
+ * ("day-by-day-itinerary", "option-comparison"). Teammates find it in the library and reuse it with new data.
+ */
+export type Component = Doc & {
+  name: string;
+  title: string;
+  description: string;
+  /** Example of the data it expects (trimmed JSON), so a teammate knows what to send. */
+  shape: string;
+  html: string;
+  sha256: string;
+  uses: number;
+  lastUsedAt?: string;
+  teammateId?: string;
+  versions: { html: string; at: string }[];
+};
+
 /** What an app saved for itself (flashcard progress, ticked boxes). */
 export type AppState = Doc & { state: unknown };
