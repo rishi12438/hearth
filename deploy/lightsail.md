@@ -186,15 +186,10 @@ the hub asks.
    sudo apt install -y docker.io
    sudo docker build -t hearth-box -f /opt/hearth/deploy/box.Dockerfile /opt/hearth
    ```
-2. **Give the boxes their own Claude API key.** Make a separate key in the Claude Console (ideally in its own workspace)
-   and set a monthly spend limit on it there. That limit holds even if everything else fails.
-   ```bash
-   sudo install -d -m 700 /etc/hearth/box-keys
-   echo 'ANTHROPIC_API_KEY=sk-ant-...' | sudo tee /etc/hearth/box-keys/default.env >/dev/null
-   sudo chmod 600 /etc/hearth/box-keys/default.env
-   ```
-   For a different key per link, add `/etc/hearth/box-keys/<link id>.env`. Links set to run on your subscription don't
-   need a key: the hub runs them with the `claude` login of the `hearth` user.
+2. **The Claude key for links** is set in the app, not on the server: Settings → Shared links → Claude key. Easiest is
+   your subscription: say yes when you link your Mac with Hearth Client (or press "Use my Claude subscription" in the
+   client), approve in the browser, done. Or paste an API key with a spend limit. It's kept encrypted in the vault and
+   only goes into the sandboxes.
 3. **Install the helper** (root-owned, outside `/opt/hearth`, so the hub can't change what root runs):
    ```bash
    sudo install -m 0755 /opt/hearth/deploy/hearth-boxctl /usr/local/sbin/hearth-boxctl
@@ -206,7 +201,8 @@ the hub asks.
    ```bash
    sudo bash /opt/hearth/deploy/box-selftest.sh
    ```
-5. **Turn it on.** Add `HEARTH_BOX_RUNNER=docker` to `/opt/hearth/.env` and `sudo systemctl restart hearth`.
+5. **Turn it on.** `sudo systemctl restart hearth`. Settings → Shared links → Runs in now offers Docker (and E2B, if you
+   added an E2B key under Devices).
 6. **Share one.** In the app: Settings → Shared links. Or on the server:
    ```bash
    sudo -iu hearth bash -c 'cd /opt/hearth && ~/.bun/bin/bun src/cli.ts share Recipes --owner Rishi --notebook food'
@@ -215,6 +211,6 @@ the hub asks.
    ```
 
 Visitors open `https://example.com/t/<link>/`. Caddy needs no change: the hub serves the page and forwards the link's API
-calls to that box's socket. After updating Hearth, rebuild the image (step 1); running boxes pick it up when they restart
+calls to that box through the gateway on 127.0.0.1, with the link's secret. After updating Hearth, rebuild the image (step 1); running boxes pick it up when they restart
 (`sudo docker restart $(sudo docker ps -q --filter label=hearth.box)`).
 

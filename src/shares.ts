@@ -2,7 +2,6 @@ import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rea
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import type { Subprocess } from "bun";
 import type { Hub } from "./hub.ts";
 import { isActive } from "./memory.ts";
 import { MODEL_RE } from "./brain.ts";
@@ -10,6 +9,12 @@ import { ALWAYS_HIDDEN, accessFor, cleanRules, findSecret, gitignorePatterns, ma
 import { unifiedDiff } from "./public/diff.ts";
 import { DEFAULT_LIMITS, type BoxLimits, type Manifest, type OutboxEvent, type Scope } from "./public/types.ts";
 import type { Fact, Notebook, Share, ShareApply, ShareEvent, Teammate } from "./types.ts";
+import { ping, type BoxEnv, type Sandbox, type SandboxKind } from "./sandboxes.ts";
+import { TokenMint } from "./tokenmint.ts";
+
+/** Where the hub keeps keys (the vault): the Claude key for shared links lives there as "shareKey". */
+export type KeyStore = { get(name: string): string | null; set(name: string, v: string): void; has(name: string): boolean; delete(name: string): void };
+export type ShareSettings = { sandbox: SandboxKind; workspace?: string };
 
 // Sharing a teammate: the hub's side. It copies what you chose into a bundle, starts a sealed box for the link,
 // pulls the box's outbox, and applies changes to your folder only when you say so. The box never gets anything else,
@@ -17,7 +22,6 @@ import type { Fact, Notebook, Share, ShareApply, ShareEvent, Teammate } from "./
 // against your rules again here, whatever the box claims.
 
 const sha256 = (s: string | Uint8Array) => createHash("sha256").update(s).digest("hex");
-const BOX_ENTRY = resolve(import.meta.dir, "public/box.ts");
 const MAX_COPY_FILES = 5000;
 const MAX_COPY_BYTES = 50_000_000;
 const MAX_FILE_BYTES = 1_000_000;
@@ -26,74 +30,6 @@ const KEEP_VERSIONS = 10;
 
 
 type R<T> = { value?: T; error?: string };
-
-/** Starts and stops boxes. The hub never touches Docker itself: the sealed runner asks a root helper to. */
-export interface BoxRunner {
-  readonly kind: string;
-  /** True when boxes run in their own container with no way back to the hub. */
-  readonly sealed: boolean;
-  start(s: Share, bundleDir: string): Promise<void>;
-  stop(s: Share): Promise<void>;
-  remove(s: Share): Promise<void>;
-  socket(s: Share): string;
-  outbox(s: Share): string;
-  /** Whether the box looks up (it may still be starting). */
-  alive(s: Share): boolean;
-  /** The hub is shutting down. */
-  shutdown?(): void;
-}
-
-/**
- * Sealed: one Docker container per link, started by `hearth-boxctl` (root, via a systemd path unit). The hub drops a
- * request file; the helper only knows "start/stop/remove <id>" and builds every path and flag itself.
- */
-export class DockerRunner implements BoxRunner {
-  readonly kind = "docker";
-  readonly sealed = true;
-  constructor(private ctlDir: string, private boxesRoot = "/var/lib/hearth-boxes") { mkdirSync(ctlDir, { recursive: true, mode: 0o700 }); }
-  private request(action: "start" | "stop" | "remove", id: string) {
-    const name = `${Date.now()}-${randomUUID()}.json`;
-    writeFileSync(join(this.ctlDir, `.${name}`), JSON.stringify({ action, id }));
-    renameSync(join(this.ctlDir, `.${name}`), join(this.ctlDir, name)); // the helper only sees complete files
-  }
-  async start(s: Share) {
-    this.request("start", s.id);
-    for (let i = 0; i < 120 && !existsSync(this.socket(s)); i++) await Bun.sleep(250);
-    if (!existsSync(this.socket(s))) throw new Error("The box didn't start. Check `journalctl -u hearth-boxctl` on the server.");
-  }
-  async stop(s: Share) { this.request("stop", s.id); }
-  async remove(s: Share) { this.request("remove", s.id); }
-  socket(s: Share) { return join(this.boxesRoot, s.id, "run", "box.sock"); }
-  outbox(s: Share) { return join(this.boxesRoot, s.id, "outbox.jsonl"); }
-  alive(s: Share) { return existsSync(this.socket(s)); } // containers outlive the hub
-}
-
-/** For trying it out on a laptop: the box runs as a plain subprocess. Same code, but NOT sealed. */
-export class LocalRunner implements BoxRunner {
-  readonly kind = "local";
-  readonly sealed = false;
-  private procs = new Map<string, Subprocess>();
-  constructor(private root: string, private apiKey: string | undefined) {}
-  private dir(s: Share) { return join(this.root, s.id); }
-  async start(s: Share, bundleDir: string) {
-    if (this.procs.get(s.id)?.exitCode === null) return;
-    if (!this.apiKey) throw new Error("Set HEARTH_BOX_API_KEY (a Claude API key just for shared links) in the hub's .env.");
-    mkdirSync(join(this.dir(s), "run"), { recursive: true });
-    rmSync(this.socket(s), { force: true });
-    this.procs.set(s.id, Bun.spawn([process.execPath, BOX_ENTRY], {
-      cwd: this.dir(s), stdout: "inherit", stderr: "inherit",
-      env: { PATH: process.env.PATH || "", HOME: this.dir(s), BOX_BUNDLE: bundleDir, BOX_DATA: this.dir(s), ...(this.apiKey ? { ANTHROPIC_API_KEY: this.apiKey } : {}) },
-    }));
-    for (let i = 0; i < 80 && !existsSync(this.socket(s)); i++) await Bun.sleep(100);
-    if (!existsSync(this.socket(s))) throw new Error("The box didn't start.");
-  }
-  async stop(s: Share) { this.procs.get(s.id)?.kill(); this.procs.delete(s.id); }
-  async remove(s: Share) { await this.stop(s); rmSync(this.dir(s), { recursive: true, force: true }); }
-  socket(s: Share) { return join(this.dir(s), "run", "box.sock"); }
-  outbox(s: Share) { return join(this.dir(s), "outbox.jsonl"); }
-  alive(s: Share) { return this.procs.get(s.id)?.exitCode === null; }
-  shutdown() { for (const p of this.procs.values()) p.kill(); this.procs.clear(); }
-}
 
 // ---------- checking what comes back ----------
 
@@ -173,15 +109,101 @@ export class Shares {
   private timer: ReturnType<typeof setInterval> | null = null;
   private pulling = false;
 
-  constructor(readonly hub: Hub, readonly runner: BoxRunner | null) {}
+  /** Mints a subscription token with `claude setup-token` for you (tests swap it). */
+  mint = new TokenMint();
 
-  get enabled() { return !!this.runner; }
+  constructor(readonly hub: Hub, readonly sandboxes: Partial<Record<SandboxKind, Sandbox>>, private keys: KeyStore | null = null) {}
+
+  /** "Use my Claude subscription": step 1, the link to approve. */
+  async mintStart(): Promise<R<{ url: string }>> {
+    if (!this.keys) return { error: "This hub can't store keys." };
+    try { return { value: await this.mint.start() }; } catch (e: any) { return { error: e.message }; }
+  }
+
+  /** Step 2: the code Claude showed you. The token goes straight into the vault; the app only hears that it's set. */
+  async mintFinish(code: unknown): Promise<R<ReturnType<Shares["keyInfo"]>>> {
+    try {
+      const token = await this.mint.finish(String(code || ""));
+      this.keys!.set("shareKey", token);
+      await this.hub.log("share", "Shared links now use your Claude subscription");
+      this.hub.emit("shares");
+      return { value: this.keyInfo() };
+    } catch (e: any) { return { error: e.message }; }
+  }
+
+  get enabled() { return Object.keys(this.sandboxes).length > 0; }
   private get store() { return this.hub.store; }
   private root(s: Share) { return join(this.hub.config.dataDir, "shares", s.id); }
   bundleDir(s: Share) { return join(this.root(s), "bundle"); }
 
+  // ---------- your setup: where links run, the Claude key, the primary workspace ----------
+
+  async settings(): Promise<ShareSettings> {
+    const d = await this.store.get<any>("settings", "shares");
+    const sandbox: SandboxKind = d?.sandbox && this.sandboxes[d.sandbox as SandboxKind] ? d.sandbox : (Object.keys(this.sandboxes)[0] as SandboxKind) || "docker";
+    return { sandbox, ...(d?.workspace ? { workspace: d.workspace } : {}) };
+  }
+
+  /** The Claude key boxes use: an API key, or a subscription token from `claude setup-token`. Never sent to the app. */
+  private boxKey() { return process.env.HEARTH_BOX_API_KEY || this.keys?.get("shareKey") || ""; }
+  keyInfo() {
+    const k = this.boxKey();
+    return k ? { set: true, kind: k.startsWith("sk-ant-oat") ? "subscription" : "api", last4: k.slice(-4) } : { set: false };
+  }
+
+  async saveSettings(input: any): Promise<R<ShareSettings>> {
+    const cur = await this.settings();
+    const next: any = { id: "shares", createdAt: "1970-01-01T00:00:00.000Z", ...cur };
+    if (input?.sandbox !== undefined) {
+      const hasE2b = !!process.env.HEARTH_E2B_API_KEY || !!this.keys?.has("e2b");
+      if (!this.sandboxes[input.sandbox as SandboxKind] || (input.sandbox === "e2b" && !hasE2b)) return { error: input.sandbox === "e2b" ? "Add your E2B key first (Settings → Devices → Add a cloud computer)." : "Docker isn't available on this hub." };
+      next.sandbox = input.sandbox;
+    }
+    if (input?.workspace !== undefined) {
+      if (input.workspace === "" || input.workspace === null) delete next.workspace;
+      else {
+        const v = this.checkFolder(str(input.workspace, 1000));
+        if (v.error) return { error: v.error };
+        next.workspace = v.value;
+      }
+    }
+    if (input?.key !== undefined) {
+      const k = str(input.key, 400).trim();
+      if (!k) this.keys?.delete("shareKey");
+      else if (!/^sk-ant-(api|oat)[A-Za-z0-9_-]{20,}$/.test(k)) return { error: "That doesn't look like a Claude API key (sk-ant-api…) or a token from `claude setup-token` (sk-ant-oat…)." };
+      else if (!this.keys) return { error: "This hub can't store keys." };
+      else this.keys.set("shareKey", k);
+    }
+    await this.store.put("settings", next);
+    this.hub.emit("shares");
+    return { value: await this.settings() };
+  }
+
+  /** What the app sees: everything but the secret. */
+  view(s: Share) { const { secret: _secret, ...rest } = s; return rest; }
+
+  /** Your setup, for the app: where links can run, which is chosen, whether a key is set, the workspace. */
+  async overview() {
+    const st = await this.settings();
+    return {
+      enabled: this.enabled, settings: st, key: this.keyInfo(),
+      sandboxes: { docker: !!this.sandboxes.docker, e2b: !!this.sandboxes.e2b && (!!process.env.HEARTH_E2B_API_KEY || !!this.keys?.has("e2b")) },
+    };
+  }
+
+  private env(s: Share): BoxEnv { return { key: this.boxKey(), secret: s.secret }; }
+  private sandbox(s: Share) { return this.sandboxes[s.sandbox] || null; }
+
+  /** Start (or restart) a link's box and remember where it is. */
+  private async startBox(s: Share) {
+    const sb = this.sandbox(s);
+    if (!sb) throw new Error(`${s.sandbox === "e2b" ? "E2B" : "Docker"} isn't available on this hub any more.`);
+    const extra = await sb.start(s, this.bundleDir(s), this.env(s));
+    if (Object.keys(extra).length) { const cur = (await this.store.get<Share>("shares", s.id)) || s; await this.store.put<Share>("shares", { ...cur, ...extra }); Object.assign(s, extra); }
+  }
+
   start(intervalMs = 5000) {
-    if (!this.runner) return;
+    if (!this.enabled) return;
     const tick = () => this.ensure().then(() => this.pull()).catch((e) => console.error("share pull failed", e));
     this.timer = setInterval(tick, intervalMs);
     tick();
@@ -190,29 +212,42 @@ export class Shares {
   private starting = new Set<string>();
   /** Every running link has a box: after a restart, or a link made from the command line. */
   async ensure() {
-    if (!this.runner) return;
     for (const s of await this.list()) {
-      if (s.status !== "running" || this.starting.has(s.id) || this.runner.alive(s)) continue;
+      if (s.status !== "running" || this.starting.has(s.id) || s.sandbox === "e2b") continue; // E2B boxes wake on demand
+      if (await ping(this.sandbox(s)?.url(s) ?? null, s.secret, 1500)) continue;
       this.starting.add(s.id);
-      this.runner.start(s, this.bundleDir(s)).catch((e) => console.error(`share ${s.id}: ${e.message}`)).finally(() => this.starting.delete(s.id));
+      this.startBox(s).catch((e) => console.error(`share ${s.id}: ${e.message}`)).finally(() => this.starting.delete(s.id));
     }
   }
-  stop() { if (this.timer) clearInterval(this.timer); this.runner?.shutdown?.(); }
+  stop() { if (this.timer) clearInterval(this.timer); for (const sb of Object.values(this.sandboxes)) sb?.shutdown?.(); }
 
   async list() { return (await this.store.all<Share>("shares")).filter((s) => s.status !== "revoked"); }
   async get(id: string) { const s = await this.store.get<Share>("shares", id); return s && s.status !== "revoked" ? s : null; }
 
-  /** The box behind a link, for the hub to forward visitor API calls to. */
-  async socketFor(link: string) {
-    if (!this.runner || !/^[A-Za-z0-9_-]{16,64}$/.test(link)) return null;
+  /** The box behind a link, for the hub to forward visitor API calls to. Wakes a paused E2B box. */
+  async target(link: string): Promise<{ url: string; secret: string } | null> {
+    if (!/^[A-Za-z0-9_-]{16,64}$/.test(link)) return null;
     const s = (await this.store.all<Share>("shares")).find((x) => x.status === "running" && x.link.length === link.length && sha256(x.link) === sha256(link));
-    return s ? this.runner.socket(s) : null;
+    const sb = s && this.sandbox(s);
+    if (!s || !sb) return null;
+    let url = sb.url(s);
+    if (sb.wake && !(await ping(url, s.secret, 3000))) {
+      const extra = await sb.wake(s, this.env(s)).catch(() => null);
+      if (!extra) return null;
+      await this.store.put<Share>("shares", { ...s, ...extra });
+      url = extra.sandboxUrl || url;
+    }
+    return url ? { url, secret: s.secret } : null;
   }
+
+  /** Is this link's box up? (For the app.) */
+  async alive(s: Share) { return ping(this.sandbox(s)?.url(s) ?? null, s.secret); }
 
   // ---------- create, change, publish, revoke ----------
 
   async create(input: any, opts: { start?: boolean } = {}): Promise<R<Share>> {
-    if (!this.runner) return { error: "Sharing is off on this hub. Set HEARTH_BOX_RUNNER (see deploy/lightsail.md)." };
+    if (!this.enabled) return { error: "Sharing needs a sandbox: Docker on this hub, or an E2B key (Settings → Devices)." };
+    if (!this.boxKey()) return { error: "Add a Claude key for shared links first (Settings → Shared links)." };
     const t = await this.store.get<Teammate>("teammates", str(input?.teammateId, 64));
     if (!t) return { error: "Pick one of your teammates to share." };
     const kind = input?.kind === "guest" ? "guest" : "public";
@@ -227,12 +262,13 @@ export class Shares {
       scope: cleanScope(input?.scope, t.description || `Help with ${t.name.toLowerCase()}.`), limits: cleanLimits(input?.limits),
       models: { teammate: "claude-opus-5-5", guard: "claude-haiku-5-5", effort: "medium" },
       autoApply: input?.autoApply === true, version: 0, status: "running", outboxOffset: 0,
+      secret: randomBytes(32).toString("base64url"), sandbox: (await this.settings()).sandbox,
       stats: { chats: 0, refused: 0, offTopic: 0, costUsd: 0 }, answers: { always: [], once: {} },
     };
     const r = await this.applyInput(share, input);
     if (r.error) return r;
     await this.publish(share);
-    if (opts.start !== false) try { await this.runner.start(share, this.bundleDir(share)); }
+    if (opts.start !== false) try { await this.startBox(share); }
     catch (e: any) { await this.store.put<Share>("shares", { ...share, status: "paused" }); return { error: e.message }; }
     await this.hub.log("share", `Shared ${t.name}${kind === "guest" ? ` with ${label}` : " by public link"}`);
     this.hub.emit("shares");
@@ -264,21 +300,33 @@ export class Shares {
       if (input.autoApply === true && share.kind !== "guest") return { error: "Public links can't apply changes by themselves." };
       share.autoApply = input.autoApply === true;
     }
-    if (input?.folder === null) delete share.folder;
+    if (input?.workspace === true) {
+      // "Can edit your primary workspace": the folder you set once in Settings, editable (changes still come back to you).
+      const ws = (await this.settings()).workspace;
+      if (!ws) return { error: "Set your primary workspace first (Settings → Shared links)." };
+      share.folder = { path: ws, rules: { edit: ["**"] }, published: share.folder?.path === ws ? share.folder.published : {}, excluded: [] };
+    } else if (input?.workspace === false || input?.folder === null) delete share.folder;
     else if (input?.folder !== undefined) {
-      const path = str(input.folder?.path, 1000);
-      if (!path || !path.startsWith("/")) return { error: "Give the folder's full path." };
-      let real: string;
-      try { real = realpathSync(path); } catch { return { error: "That folder doesn't exist." }; }
-      if (!statSync(real).isDirectory()) return { error: "That's a file, not a folder." };
-      const data = realpathSync(this.hub.config.dataDir);
-      if (real === "/" || real === realpathSync(process.env.HOME || "/") || data.startsWith(real + sep) || real === data || real.startsWith(data + sep)) {
-        return { error: "Share a project folder, not your home folder, the whole disk or the hub's data." };
-      }
+      const v = this.checkFolder(str(input.folder?.path, 1000));
+      if (v.error) return { error: v.error };
+      const real = v.value!;
       const rules = input.folder?.rules ? cleanRules(input.folder.rules) : (share.folder?.rules || { read: ["**"] });
       share.folder = { path: real, rules, published: share.folder?.path === real ? share.folder.published : {}, excluded: [] };
     }
     return { value: share };
+  }
+
+  /** A real project folder: not the disk, your home folder or the hub's own data. */
+  private checkFolder(path: string): R<string> {
+    if (!path || !path.startsWith("/")) return { error: "Give the folder's full path." };
+    let real: string;
+    try { real = realpathSync(path); } catch { return { error: "That folder doesn't exist." }; }
+    if (!statSync(real).isDirectory()) return { error: "That's a file, not a folder." };
+    const data = realpathSync(this.hub.config.dataDir);
+    if (real === "/" || real === realpathSync(process.env.HOME || "/") || data.startsWith(real + sep) || real === data || real.startsWith(data + sep)) {
+      return { error: "Pick a project folder, not your home folder, the whole disk or the hub's data." };
+    }
+    return { value: real };
   }
 
   async update(id: string, input: any): Promise<R<Share>> {
@@ -326,6 +374,7 @@ export class Shares {
     }
     s.version = version;
     await this.store.put<Share>("shares", { ...s, updatedAt: this.hub.clock().toISOString() });
+    if (s.sandboxId) await this.sandbox(s)?.sync?.(s, root).catch((e) => console.error(`share ${s.id}: ${e.message}`));
     return manifest;
   }
 
@@ -375,7 +424,7 @@ export class Shares {
     const s = await this.store.get<Share>("shares", id);
     if (!s || s.status === "revoked") return false;
     await this.store.put<Share>("shares", { ...s, status: "revoked", updatedAt: this.hub.clock().toISOString() });
-    await this.runner?.remove(s);
+    await this.sandbox(s)?.remove(s).catch(() => {});
     rmSync(this.root(s), { recursive: true, force: true });
     await this.hub.log("share", "Turned off a shared link");
     this.hub.emit("shares");
@@ -384,8 +433,8 @@ export class Shares {
 
   async pause(id: string, paused: boolean) {
     const s = await this.get(id);
-    if (!s || !this.runner) return null;
-    if (paused) await this.runner.stop(s); else await this.runner.start(s, this.bundleDir(s));
+    if (!s || !this.sandbox(s)) return null;
+    if (paused) await this.sandbox(s)!.stop(s); else await this.startBox(s);
     const next = { ...s, status: paused ? "paused" as const : "running" as const };
     await this.store.put<Share>("shares", next);
     this.hub.emit("shares");
@@ -396,19 +445,23 @@ export class Shares {
 
   /** Read new outbox lines from every box. The box only ever appends; the hub keeps its own place in the file. */
   async pull() {
-    if (!this.runner || this.pulling) return;
+    if (this.pulling) return;
     this.pulling = true;
     try {
       for (const s of await this.list()) {
-        const file = this.runner.outbox(s);
-        if (!existsSync(file)) continue;
-        const size = statSync(file).size;
-        const from = size < s.outboxOffset ? 0 : s.outboxOffset;
-        if (size === from) continue;
-        const buf = new Uint8Array(await Bun.file(file).slice(from, Math.min(size, from + MAX_PULL_BYTES)).arrayBuffer());
-        let end = buf.lastIndexOf(10);
-        if (end < 0) { if (buf.length >= MAX_PULL_BYTES) end = buf.length - 1; else continue; } // one huge line: skip it
-        const lines = new TextDecoder().decode(buf.subarray(0, end + 1)).split("\n");
+        const url = this.sandbox(s)?.url(s);
+        if (!url || s.status !== "running") continue;
+        let got: { text: string; next: number; size: number };
+        try {
+          const res = await fetch(`${url}/_hub/outbox?from=${s.outboxOffset}`, { headers: { "X-Box-Secret": s.secret }, signal: AbortSignal.timeout(10_000) });
+          if (!res.ok) continue;
+          const raw = await res.json() as any;
+          if (typeof raw?.text !== "string" || typeof raw.next !== "number" || raw.text.length > MAX_PULL_BYTES * 2) continue;
+          got = raw;
+        } catch { continue; }
+        if (!got.text) { if (got.next !== s.outboxOffset && got.next >= 0) await this.store.put<Share>("shares", { ...s, outboxOffset: got.next }); continue; }
+        const from = s.outboxOffset, end = got.next - from - 1;
+        const lines = got.text.split("\n");
         const fresh: ShareEvent[] = [];
         for (const line of lines) {
           if (!line.trim() || line.length > 2 * MAX_FILE_BYTES * 200) continue;
@@ -498,6 +551,7 @@ export class Shares {
     else (s.answers.once[e.event.session] ||= []).push(q);
     this.writeAtomic(join(this.bundleDir(s), "answers.json"), JSON.stringify(s.answers));
     await this.store.put<Share>("shares", s);
+    if (s.sandboxId) await this.sandbox(s)?.sync?.(s, this.bundleDir(s)).catch((e) => console.error(`share ${s.id}: ${e.message}`));
     const done = await this.store.put<ShareEvent>("shareEvents", { ...e, status: "answered", result: mode });
     this.hub.emit("shares");
     return { value: done };

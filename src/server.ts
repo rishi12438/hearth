@@ -176,16 +176,16 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
     const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Content-Type, X-Visitor", "Access-Control-Allow-Methods": "GET, POST", "Access-Control-Max-Age": "600" };
     const out = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { ...cors, "Content-Type": "application/json", "Cache-Control": "no-store", "Content-Security-Policy": "sandbox; default-src 'none'" } });
     if (!rest) return new Response(null, { status: 301, headers: { Location: `/t/${link}/` } });
-    const sock = await shares!.socketFor(link);
+    const box = await shares!.target(link);
     if (rest === "/" && req.method === "GET") {
-      if (!sock) return new Response("This link is turned off.", { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8", "Content-Security-Policy": "sandbox; default-src 'none'" } });
+      if (!box) return new Response("This link is turned off.", { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8", "Content-Security-Policy": "sandbox; default-src 'none'" } });
       const proto = config.behindProxy ? req.headers.get("x-forwarded-proto") || "https" : url.protocol.replace(":", "");
       return sharePage(`${proto}://${req.headers.get("x-forwarded-host") || req.headers.get("host")}`);
     }
     if (!rest.startsWith("/api/")) return out({ error: "Not found." }, 404);
     if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
     if (req.method !== "GET" && req.method !== "POST") return out({ error: "Not allowed." }, 405);
-    if (!sock) return out({ error: "This link is turned off." }, 404);
+    if (!box) return out({ error: "This link is turned off." }, 404);
     const ip = clientIp(req, server);
     if (!visitorLimiter.allow(ip)) return out({ error: "Slow down a little." }, 429);
     let payload: string | undefined;
@@ -195,10 +195,10 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
     }
     server.timeout(req, 300); // a turn can take a few minutes
     try {
-      const res = await fetch(`http://box${rest}`, {
-        unix: sock, method: req.method, body: payload, signal: AbortSignal.timeout(290_000),
-        headers: { "Content-Type": "application/json", "X-Visitor": (req.headers.get("x-visitor") || "").slice(0, 100), "X-Visitor-Ip": ip },
-      } as RequestInit);
+      const res = await fetch(`${box.url}${rest}`, {
+        method: req.method, body: payload, signal: AbortSignal.timeout(290_000), redirect: "error",
+        headers: { "Content-Type": "application/json", "X-Box-Secret": box.secret, "X-Visitor": (req.headers.get("x-visitor") || "").slice(0, 100), "X-Visitor-Ip": ip },
+      });
       const text = await res.text();
       if (text.length > 2_000_000) return out({ error: "Too big." }, 502);
       return new Response(text, { status: res.status, headers: { ...cors, "Content-Type": "application/json", "Cache-Control": "no-store", "Content-Security-Policy": "sandbox; default-src 'none'" } });
@@ -465,20 +465,27 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (!shares) throw new HttpError(503, "Sharing isn't available on this hub.");
         ownerOnly(); // sharing hands your data to other people, so only the primary device decides
         const verb = seg[3];
-        if (method === "GET" && !id) return json({ enabled: shares.enabled, runner: shares.runner?.kind ?? null, sealed: !!shares.runner?.sealed, shares: await shares.list() });
-        if (method === "POST" && !id) { const r = await shares.create(await body(req)); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "GET" && !id) return json({ ...(await shares.overview()), shares: (await shares.list()).map((x) => shares.view(x)) });
+        if (method === "POST" && id === "mint") {
+          const b = await body(req);
+          const r = b.code ? await shares.mintFinish(b.code) : await shares.mintStart();
+          if (r.error) throw new HttpError(400, r.error);
+          return json(r.value);
+        }
+        if (method === "PATCH" && id === "settings") { const r = await shares.saveSettings(await body(req)); if (r.error) throw new HttpError(400, r.error); return json(await shares.overview()); }
+        if (method === "POST" && !id) { const r = await shares.create(await body(req)); if (r.error) throw new HttpError(400, r.error); return json(shares.view(r.value!)); }
         if (!id) break;
         const s = await shares.get(id);
         if (!s) throw new HttpError(404, "No such link.");
-        if (method === "GET" && !verb) return json({ share: s, events: await shares.events(id) });
-        if (method === "PATCH" && !verb) { const r = await shares.update(id, await body(req)); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "GET" && !verb) return json({ share: shares.view(s), running: await shares.alive(s), events: await shares.events(id) });
+        if (method === "PATCH" && !verb) { const r = await shares.update(id, await body(req)); if (r.error) throw new HttpError(400, r.error); return json(shares.view(r.value!)); }
         if (method === "DELETE" && !verb) return json({ ok: await shares.revoke(id) });
         if (method === "GET" && verb === "events" && seg[4]) { const e = await shares.event(id, seg[4]); if (!e) throw new HttpError(404, "Not found."); return json(e); }
         if (method !== "POST") break;
         const b = await body(req);
         const ids = Array.isArray(b.ids) ? b.ids.filter((x: unknown) => typeof x === "string").slice(0, 200) : [];
-        if (verb === "publish") { await shares.publish(s); return json(await shares.get(id)); }
-        if (verb === "pause") return json(await shares.pause(id, b.paused !== false));
+        if (verb === "publish") { await shares.publish(s); return json(shares.view((await shares.get(id))!)); }
+        if (verb === "pause") { const p = await shares.pause(id, b.paused !== false); return json(p ? shares.view(p) : null); }
         if (verb === "apply") {
           const mode = b.mode === "copy" || b.mode === "branch" ? b.mode : "apply";
           const r: any = await shares.apply(id, ids, mode);
@@ -843,11 +850,22 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         return new Response("Expected a WebSocket", { status: 426 });
       }
       // A linked computer dials in here and keeps the line open; work comes down it. Its key goes in a header.
-      if (url.pathname === "/computer" || url.pathname === "/computer/bundle") {
+      if (url.pathname === "/computer" || url.pathname === "/computer/bundle" || url.pathname === "/computer/share-key") {
         const ip = clientIp(req, server);
         if (badToken.blocked(ip)) return new Response("Too many wrong keys. Wait 10 minutes.", { status: 429 });
         const d = await deviceForToken(store, req.headers.get("authorization"));
         if (!d || d.role !== "computer") { badToken.allow(ip); return new Response("Not linked.", { status: 401 }); }
+        // Your Mac made a Claude token for shared links (bun run join / share-key): keep it in the vault.
+        if (url.pathname === "/computer/share-key") {
+          if (req.method !== "POST" || !shares || d.machine) return new Response("No.", { status: 403 }); // only your own computers, not cloud ones
+          let b: any;
+          try { b = await req.json(); } catch { return new Response("Bad JSON.", { status: 400 }); }
+          if (!/^sk-ant-oat01-[A-Za-z0-9_-]{20,}$/.test(String(b?.token))) return new Response("That isn't a setup-token.", { status: 400 });
+          const r = await shares.saveSettings({ key: String(b.token) });
+          if (r.error) return new Response(r.error, { status: 400 });
+          await hub.log("share", `${d.name} set up the Claude key for shared links`);
+          return new Response("ok");
+        }
         // A cloud computer being set up downloads Hearth from its own hub, so the two always run the same code.
         if (url.pathname === "/computer/bundle") {
           const root = resolve(import.meta.dir, "..");

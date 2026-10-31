@@ -2088,10 +2088,6 @@ function openSettings() {
 
 // ---------------- shared links ----------------
 
-const BRAIN_NOTE = {
-  api: "Its own Claude API key, with a spend limit you set in the Claude Console. Sealed, and the way Anthropic intends you to serve other people.",
-  hub: "Your Claude login, run by your hub. The login never enters the box, but visitors spend your subscription (up to 400 model calls a day per link), and serving other people this way may be against your plan's terms. Your call.",
-};
 const REFUSED: Record<string, string> = { out: "off-topic", injection: "tried to change its rules", abuse: "abusive", check: "reply blocked", limit: "over a limit" };
 const shareUrl = (s: any) => `${activeHub()!.url}/t/${s.link}/`;
 const lines = (t: string) => t.split("\n").map((x) => x.trim()).filter(Boolean);
@@ -2103,9 +2099,9 @@ async function openShares() {
   S.panel = "shares";
   const who = (id: string) => team.find((t) => t.id === id);
   openSheet("Shared links", [
-    h("p", { class: "muted" }, "Every teammate you've shared. Turn a link off here; to share one, open the teammate and tap Share."),
-    !data.enabled ? h("p", { class: "notice" }, "Sharing is off on this hub. Set HEARTH_BOX_RUNNER (see deploy/lightsail.md).")
-      : !data.sealed ? h("p", { class: "notice" }, "Test mode: links run as plain processes on this computer, not sealed in a container. Use HEARTH_BOX_RUNNER=docker on a server.") : null,
+    h("p", { class: "muted" }, "Every teammate you've shared. To share one, open the teammate and tap Share."),
+    shareSetup(data),
+    h("h4", null, "Links"),
     data.shares.length ? h("div", { class: "list" }, data.shares.map((s: any) => {
       const t = who(s.teammateId);
       const on = s.status !== "paused";
@@ -2117,18 +2113,81 @@ async function openShares() {
         h("div", { class: "hicon emoji" }, t?.emoji || "🔗"),
         h("span", { class: "grow left" },
           h("b", { class: "light" }, t?.name || "Teammate", h("span", { class: "tag soft" }, s.kind === "guest" ? `Guest · ${s.label}` : "Public"), s.status === "paused" ? h("span", { class: "tag warn" }, "Paused") : null),
-          h("small", { class: "sub" }, `${s.stats.chats} chats · ${s.stats.refused} blocked${s.models.brain === "hub" ? " · your subscription" : ` · $${s.stats.costUsd.toFixed(2)}`}${s.stats.lastAt ? ` · ${relTime(s.stats.lastAt)}` : ""}`)),
+          h("small", { class: "sub" }, `${s.stats.chats} chats · ${s.stats.refused} blocked${s.sandbox === "e2b" ? " · E2B" : " · Docker"}${s.stats.lastAt ? ` · ${relTime(s.stats.lastAt)}` : ""}`)),
         toggle);
     })) : h("p", { class: "empty" }, "No shared links yet."),
     data.enabled ? h("button", { class: "btn ghost", on: { click: () => openShareForm(team) } }, icon("plus", 16), "Share a teammate") : null,
   ], { onClose: () => { S.panel = null; } });
 }
 
+/** Where links run, the Claude key they use, and the workspace they can edit. Shared by Settings and the first share. */
+function shareSetup(data: any) {
+  const save = async (body: any, done: string) => { try { await call("/api/shares/settings", { method: "PATCH", body }); toast(done); openShares(); } catch (e) { handleError(e); } };
+  const row = (label: string, sub: string, fn: () => void) =>
+    h("button", { class: "item", on: { click: fn } }, h("span", { class: "grow left" }, h("b", { class: "light" }, label), h("small", { class: "sub" }, sub)), icon("chevron", 16));
+  const where = h("div", { class: "segmented" },
+    ([["docker", "Docker on this hub"], ["e2b", "E2B cloud sandbox"]] as const).map(([k, label]) => h("button", {
+      class: data.settings.sandbox === k ? "on" : "", disabled: !data.sandboxes[k],
+      on: { click: () => save({ sandbox: k }, k === "e2b" ? "New links run in E2B" : "New links run in Docker") } }, label)));
+  const key = data.key.set ? `${data.key.kind === "subscription" ? "Subscription token" : "API key"} ····${data.key.last4}` : "Not set: links can't answer yet";
+  return h("div", null,
+    h("h4", null, "Runs in"), where,
+    h("p", { class: "muted small" }, data.sandboxes.e2b ? "Each link gets its own sandbox. Nothing else from your hub is in it." : "Each link gets its own sandbox. To use E2B, add your E2B key in Settings → Devices."),
+    h("div", { class: "list" },
+      row("Claude key for shared links", key, () => openShareKey(data)),
+      row("Primary workspace", data.settings.workspace || "Not set: the folder a link may edit", () => {
+        const input = h("input", { class: "field", value: data.settings.workspace || "", placeholder: "/full/path/to/your/project", autocapitalize: "off", spellcheck: false });
+        openSheet("Primary workspace", [
+          h("p", { class: "muted" }, "The folder a shared teammate may edit, if you turn that on for its link. They edit their own copy; you apply changes, with Undo. Keys, .env files, .git and node_modules never leave your hub."),
+          input,
+          h("button", { class: "btn primary big", on: { click: () => save({ workspace: input.value.trim() }, "Workspace set") } }, "Save"),
+        ]);
+      })));
+}
+
+/** The Claude key shared links use. Easiest: Hearth mints a subscription token for you (claude setup-token, run by the hub). */
+function openShareKey(data: any) {
+  const steps = h("div");
+  const paste = h("input", { class: "field", placeholder: "sk-ant-api…", autocapitalize: "off", spellcheck: false, type: "password" });
+  const done = (msg: string) => { toast(msg); openShares(); };
+  const begin = async (btn: HTMLButtonElement) => {
+    btn.disabled = true; btn.textContent = "Asking Claude…";
+    try {
+      const { url } = await call("/api/shares/mint", { body: {} });
+      const code = h("input", { class: "field", placeholder: "Paste the code here", autocapitalize: "off", autocomplete: "off", spellcheck: false });
+      const err = h("p", { class: "error", role: "alert" });
+      const finish = h("button", { class: "btn primary big", on: { click: async () => {
+        finish.disabled = true; finish.textContent = "Checking…"; err.textContent = "";
+        try { await call("/api/shares/mint", { body: { code: code.value } }); done("Shared links now use your Claude subscription"); }
+        catch (e: any) { err.textContent = e.message; finish.disabled = false; finish.textContent = "Finish"; }
+      } } }, "Finish");
+      clear(steps,
+        h("div", { class: "mintstep" }, h("b", null, "1"), h("span", { class: "grow left" }, "Approve on Claude. Sign in with the account whose subscription links should use."),
+          h("a", { class: "btn small primary", href: url, target: "_blank", rel: "noopener" }, "Open Claude")),
+        h("div", { class: "mintstep" }, h("b", null, "2"), h("span", { class: "grow left" }, "Claude then shows a code. Copy it and paste it here.")),
+        code, err, finish);
+      btn.remove();
+    } catch (e) { handleError(e); btn.disabled = false; btn.textContent = "Use my Claude subscription"; }
+  };
+  const start = h("button", { class: "btn primary big", on: { click: () => begin(start) } }, "Use my Claude subscription from here");
+  openSheet("Claude key for shared links", [
+    h("p", { class: "muted" }, data.key.set ? `Links use ${data.key.kind === "subscription" ? "your subscription" : "an API key"} (····${data.key.last4}). You can switch any time.` : "Shared links need a way to talk to Claude. When you connect your Mac (bun run join), Hearth sets this up there with your subscription: you just approve in the browser. No Mac? Do it here instead."),
+    h("div", { class: "mintstep" }, h("b", null, "💻"), h("span", { class: "grow left" }, "On your Mac: ", h("code", null, "bun run share-key"), " (or say yes when you join). Your browser opens; approve, done.")),
+    start, steps,
+    h("p", { class: "muted small" }, "It's a token that can only talk to Claude (it can't see or change your account), valid for a year. It's kept encrypted on your hub and only goes into the sandboxes."),
+    h("details", { class: "advanced" }, h("summary", null, "Or paste an API key"),
+      paste,
+      h("button", { class: "btn ghost", on: { click: async () => { try { await call("/api/shares/settings", { method: "PATCH", body: { key: paste.value.trim() } }); done("Key saved"); } catch (e) { handleError(e); } } } }, "Save key")),
+    data.key.set ? h("button", { class: "btn ghost danger-text", on: { click: async () => { try { await call("/api/shares/settings", { method: "PATCH", body: { key: "" } }); done("Key removed"); } catch (e) { handleError(e); } } } }, "Remove key") : null,
+  ]);
+}
+
 /** From a teammate's page: its links if it has some, otherwise straight to a new one. */
 async function shareTeammate(teammateId: string) {
   let data: any, team: any[];
   try { [data, team] = await Promise.all([call("/api/shares"), call("/api/teammates")]); } catch (e) { return handleError(e); }
-  if (!data.enabled) return toast("Sharing is off on this hub. Set HEARTH_BOX_RUNNER (see deploy/lightsail.md).", "err");
+  if (!data.enabled) return toast("Sharing needs Docker on this hub or an E2B key (Settings → Devices).", "err");
+  if (!data.key.set) { toast("First add a Claude key for shared links", "err"); return openShares(); }
   const t = team.find((x) => x.id === teammateId);
   const mine = data.shares.filter((s: any) => s.teammateId === teammateId);
   if (!mine.length) return openShareForm(team, teammateId);
@@ -2143,7 +2202,8 @@ async function shareTeammate(teammateId: string) {
 }
 
 async function openShareForm(team: any[], preselect?: string) {
-  let notebooks: any[] = [];
+  let notebooks: any[] = [], setup: any = null;
+  try { setup = await call("/api/shares"); } catch {}
   try {
     const m = await call("/api/memory");
     notebooks = m.notebooks || [];
@@ -2177,34 +2237,20 @@ async function openShareForm(team: any[], preselect?: string) {
     return row;
   }) : h("div", { class: "item muted" }, "No notebooks yet."));
   const notes = h("textarea", { class: "field", rows: 2, placeholder: "Anything else it should know, one per line" });
-  const folder = h("input", { class: "field", placeholder: "/full/path/to/the/folder", autocapitalize: "off", spellcheck: false });
-  const edit = h("textarea", { class: "field", rows: 2, placeholder: "e.g. recipes/**" });
-  const read = h("textarea", { class: "field", rows: 1, placeholder: "e.g. **" }, "**");
-  const hidden = h("textarea", { class: "field", rows: 1, placeholder: "e.g. deploy/**" });
-  st.folderOn = false; st.folderAccess = "read";
-  const advanced = h("details", { class: "advanced" }, h("summary", null, "Advanced: choose per file or folder"),
-    labeled("Can edit", edit), labeled("Can read", read), labeled("Hidden", hidden),
-    h("p", { class: "muted small" }, "Patterns like recipes/** or *.md. The most specific one wins; anything not listed is hidden."));
-  const access = seg([["read", "Read only"], ["edit", "Can edit"]], "folderAccess", () => { if (!edit.value.trim() || edit.value.trim() === "**") edit.value = st.folderAccess === "edit" ? "**" : ""; });
-  const folderBox = h("div", { hidden: true }, labeled("Folder", folder), access,
-    h("p", { class: "muted small" }, "They work on their own copy. Edits come back to you to apply, with Undo. Keys, .env files, .git and node_modules never leave your hub."),
-    advanced);
-  const folderRow = h("button", { class: "item", on: { click: () => { st.folderOn = !st.folderOn; folderRow.querySelector(".switch")!.classList.toggle("on", st.folderOn); folderBox.hidden = !st.folderOn; if (st.folderOn) folder.focus(); } } },
-    h("span", { class: "grow left" }, h("b", { class: "light" }, "Allow access to a folder"), h("small", { class: "sub" }, "A project or working folder it can read, and edit if you let it")),
+  // One switch: can it edit your primary workspace (set once in Settings → Shared links)? Off means no folder at all.
+  st.workspace = false;
+  const ws = setup?.settings?.workspace as string | undefined;
+  const wsRow = h("button", { class: "item", disabled: !ws, on: { click: () => { st.workspace = !st.workspace; wsRow.querySelector(".switch")!.classList.toggle("on", st.workspace); } } },
+    h("span", { class: "grow left" }, h("b", { class: "light" }, "Can edit your primary workspace"),
+      h("small", { class: "sub" }, ws ? `${ws.split("/").filter(Boolean).pop()} · they edit their own copy; changes come back to you to apply` : "Set your primary workspace in Settings → Shared links first")),
     h("span", { class: "switch" }, h("i")));
-  const brainNote = h("p", { class: "muted small" }, BRAIN_NOTE.api);
-  const cap = h("input", { class: "field", type: "number", min: "0.1", max: "50", step: "0.5", value: "2" });
-  const capRow = labeled("Daily spend cap (USD)", cap);
-  const brain = seg([["api", "API key"], ["hub", "My subscription"]], "brain", () => { brainNote.textContent = BRAIN_NOTE[st.brain as "api" | "hub"]; capRow.hidden = st.brain !== "api"; });
   const err = h("p", { class: "error", role: "alert" });
   openSheet(preselect && first ? `Share ${first.name}` : "Share a teammate", [
     h("h4", null, "Teammate"), teammate,
     h("h4", null, "Who"), kind, guestRow, labeled("How it refers to you", owner),
     h("h4", null, "What it does"), does, labeled("Example questions", examples), labeled("Won't do", not),
     h("h4", null, "What it knows"), h("p", { class: "muted small" }, "Only the notebooks you turn on are copied in. Nothing else from your memory, people, chats or location is."), nb, labeled("Notes", notes),
-    h("h4", null, "Folder"), h("div", { class: "list" }, folderRow), folderBox,
-    h("div", { class: "list" }, autoRow),
-    h("h4", null, "Runs on"), brain, brainNote, capRow,
+    h("h4", null, "Workspace"), h("div", { class: "list" }, wsRow, autoRow),
     err,
     h("button", { class: "btn primary big", on: { click: async () => {
       err.textContent = "";
@@ -2213,8 +2259,7 @@ async function openShareForm(team: any[], preselect?: string) {
           teammateId: st.teammateId, kind: st.kind, label: label.value, ownerName: owner.value,
           scope: { does: does.value, examples: lines(examples.value), not: lines(not.value) },
           notebooks: [...st.notebooks], notes: lines(notes.value), autoApply: st.autoApply,
-          models: { brain: st.brain }, limits: { costCapDayUsd: Number(cap.value) || 2 },
-          ...(st.folderOn && folder.value.trim() ? { folder: { path: folder.value.trim(), rules: { edit: lines(edit.value), read: lines(read.value), hidden: lines(hidden.value) } } } : {}),
+          workspace: st.workspace,
         } });
         toast("Link ready");
         openShare(s.id);
@@ -2285,28 +2330,39 @@ async function openShare(id: string) {
   };
   const needs = d.events.filter((e: any) => (e.kind === "edit" || e.kind === "ask") && (e.status === "pending" || e.status === "conflict"));
   const past = d.events.filter((e: any) => !needs.includes(e) && e.kind !== "chat").slice(0, 30);
-  openSheet(`${t?.emoji || ""} ${t?.name || "Shared link"}`, [
-    h("div", { class: "sharelink" }, h("code", null, shareUrl(s)),
-      h("div", { class: "row gap" },
-        h("button", { class: "btn small primary", on: { click: () => navigator.clipboard?.writeText(shareUrl(s)).then(() => toast("Link copied")) } }, "Copy link"),
+  const on = s.status !== "paused";
+  const short = shareUrl(s).replace(/^https?:\/\//, "").replace(/\/$/, "");
+  const fact = (ic: string, label: string, value: string) => h("div", { class: "item" }, h("span", { class: "facticon" }, ic), h("span", { class: "grow left" }, h("small", { class: "sub" }, label), h("span", null, value)));
+  openSheet(t?.name ? `Sharing ${t.name}` : "Shared link", [
+    h("div", { class: "linkcard" },
+      h("div", { class: "linkhead" },
+        t ? face(t, 40, "idle") : null,
+        h("span", { class: "grow left" }, h("b", null, s.kind === "guest" ? `For ${s.label}` : "Public link"),
+          h("small", { class: "sub" }, `${on ? (d.running ? "On" : "Starting…") : "Off"} · runs in ${s.sandbox === "e2b" ? "E2B" : "Docker"}${s.autoApply ? " · applies changes itself" : ""}`)),
+        h("button", { class: "switchbtn", "aria-label": on ? "Turn link off" : "Turn link on", on: { click: () => act("pause", { paused: on }, on ? "Link off" : "Link on") } }, h("span", { class: `switch ${on ? "on" : ""}` }, h("i")))),
+      h("div", { class: "linkurl" }, h("span", { class: "grow" }, short),
+        h("button", { class: "btn small primary", on: { click: () => navigator.clipboard?.writeText(shareUrl(s)).then(() => toast("Link copied")) } }, "Copy"),
         h("a", { class: "btn small ghost", href: shareUrl(s), target: "_blank", rel: "noopener" }, "Open"))),
-    h("div", { class: "chips" },
-      h("span", { class: "chip" }, s.kind === "guest" ? `Guest · ${s.label}` : "Public"),
-      h("span", { class: "chip" }, s.models.brain === "hub" ? "Your subscription" : "API key"),
-      s.status === "paused" ? h("span", { class: "chip" }, "Paused") : null,
-      s.autoApply ? h("span", { class: "chip" }, "Auto-applies changes") : null),
-    h("p", { class: "muted small" }, `${s.stats.chats} chats · ${s.stats.refused} blocked (${s.stats.offTopic} off-topic)${s.models.brain === "api" ? ` · $${s.stats.costUsd.toFixed(2)} spent` : ""}`),
-    h("h4", null, "What it knows"),
-    h("p", { class: "small" }, [s.scope.does, s.notebooks.length ? `Notebooks: ${s.notebooks.join(", ")}.` : "No notebooks.", s.notes.length ? `${s.notes.length} note${s.notes.length === 1 ? "" : "s"}.` : ""].filter(Boolean).join(" ")),
-    s.folder ? h("p", { class: "small" }, `Folder ${s.folder.path} · edit: ${(s.folder.rules.edit || []).join(", ") || "nothing"} · read: ${(s.folder.rules.read || []).join(", ") || "nothing"}${s.folder.excluded.length ? ` · ${s.folder.excluded.length} left out (${s.folder.excluded.slice(0, 2).map((x: any) => `${x.path}: ${x.why}`).join("; ")})` : ""}`) : null,
+    h("div", { class: "stattiles" },
+      h("div", null, h("b", null, String(s.stats.chats)), h("small", null, "chats")),
+      h("div", null, h("b", null, String(s.stats.refused)), h("small", null, "blocked")),
+      h("div", { class: needs.length ? "hot" : "" }, h("b", null, String(needs.length)), h("small", null, "need you"))),
     needs.length ? h("h4", null, "Needs you") : null,
     needs.map((e: any) => (e.kind === "edit" ? editCard(e) : askCard(e))),
+    h("h4", null, "What it can see"),
+    h("div", { class: "list" },
+      fact("💬", "Helps with", s.scope.does),
+      fact("📒", "Notebooks", s.notebooks.length ? s.notebooks.join(", ") : "None"),
+      s.notes.length ? fact("📝", "Your notes", s.notes.join(" · ")) : null,
+      fact("📁", "Workspace", s.folder ? `${s.folder.path.split("/").filter(Boolean).pop()} · ${(s.folder.rules.edit || []).length ? "can edit" : "read only"}${s.folder.excluded.length ? ` · ${s.folder.excluded.length} file${s.folder.excluded.length === 1 ? "" : "s"} kept back` : ""}` : "No access"),
+      s.scope.not.length ? fact("🚫", "Won't do", s.scope.not.join(" · ")) : null),
     past.length ? h("h4", null, "History") : null,
     past.length ? h("div", { class: "list" }, past.map(historyRow)) : null,
-    h("div", { class: "row gap wrap" },
-      h("button", { class: "btn small ghost", on: { click: () => act("publish", {}, "Copy updated") } }, "Update its copy"),
-      h("button", { class: "btn small ghost", on: { click: () => act("pause", { paused: s.status !== "paused" }, s.status === "paused" ? "Back on" : "Paused") } }, s.status === "paused" ? "Resume" : "Pause"),
-      h("button", { class: "btn small danger-ghost", on: { click: () => confirmSheet("Turn off this link?", "The link stops working and its box and visitor chats are deleted. Changes you already applied stay.", "Turn off", async () => { await call(`/api/shares/${id}`, { method: "DELETE" }); toast("Turned off"); openShares(); }) } }, "Turn off link")),
+    h("div", { class: "list" },
+      h("button", { class: "item", on: { click: () => act("publish", {}, "Copy updated") } },
+        h("span", { class: "grow left" }, h("b", { class: "light" }, "Update its copy"), h("small", { class: "sub" }, "After you change the notebooks or workspace")), icon("chevron", 16)),
+      h("button", { class: "item", on: { click: () => confirmSheet("Delete this link?", "The link stops working for good, and its sandbox and visitor chats are deleted. Changes you already applied stay.", "Delete link", async () => { await call(`/api/shares/${id}`, { method: "DELETE" }); toast("Link deleted"); openShares(); }) } },
+        h("span", { class: "grow left danger-text" }, h("b", { class: "light" }, "Delete link")))),
   ], { onClose: () => { S.panel = null; } });
 }
 

@@ -830,4 +830,18 @@ pre.diff .add { color: #2f8f4e; } pre.diff .del { color: var(--danger); } pre.di
 .item.clickable > .grow { min-width: 0; }
 details.advanced { margin: 6px 0 4px; }
 details.advanced summary { font-size: 14px; font-weight: 600; color: var(--ink-2); padding: 8px 2px; cursor: pointer; }
+.linkcard { background: var(--surface); border-radius: 16px; padding: 12px 14px; display: flex; flex-direction: column; gap: 12px; margin: 4px 0 10px; }
+.linkhead { display: flex; align-items: center; gap: 12px; }
+.linkhead .grow { min-width: 0; display: flex; flex-direction: column; }
+.linkurl { display: flex; align-items: center; gap: 8px; background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 6px 6px 6px 12px; }
+.linkurl .grow { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 13px; color: var(--ink-2); }
+.stattiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0 0 6px; }
+.stattiles > div { background: var(--surface); border-radius: 14px; padding: 10px 12px; display: flex; flex-direction: column; }
+.stattiles b { font-size: 22px; line-height: 1.1; }
+.stattiles small { color: var(--muted); font-size: 13px; }
+.stattiles .hot b { color: var(--danger); }
+.facticon { width: 24px; text-align: center; font-size: 17px; flex: none; }
+.danger-text b { color: var(--danger); }
+.mintstep { display: flex; align-items: center; gap: 12px; background: var(--surface); border-radius: 14px; padding: 12px 14px; margin: 8px 0; }
+.mintstep > b { width: 28px; height: 28px; border-radius: 50%; background: var(--primary); color: #fff; display: grid; place-items: center; flex: none; font-size: 14px; }
 

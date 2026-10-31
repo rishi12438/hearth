@@ -1,6 +1,6 @@
 # Sharing a teammate with other people
 
-Status: built (hub side, sealed box, phone screens, deploy, tests). Not built yet: free/busy-style summaries, captchas,
+Status: built (hub side, sandboxed box on Docker or E2B, phone screens, Hearth Client, deploy, tests). Not built yet: free/busy-style summaries, captchas,
 and device approval for guests (a guest link is a named link).
 
 Goal: send someone a link (or post it publicly) and they can chat with one teammate, say "Recipes" or "Book a call with
@@ -80,10 +80,10 @@ What makes it sealed:
   hub pulls it on a timer and shows it to you as untrusted text. It never goes into your memory.
 - **Own key with a provider-side cap.** Each box uses a separate model API key with a monthly limit set at the provider,
   so even a bug in our own limits can't run up your bill.
-- **Or your subscription, by choice.** Per link you can pick "My subscription" instead. The box writes model requests into
-  its own folder and the hub answers into the read-only bundle, running each as `claude -p` with no tools, capped at 400
-  calls a day per link. Your login stays on the hub; the trade-off (your plan's usage and terms) is shown where you pick it.
-- **Kill switch.** Revoking the link stops and deletes the container. The hub works the same with or without boxes.
+- **Your subscription, minted by Hearth.** The box's key can be a `claude setup-token` token (scope `user:inference`).
+  Hearth Client makes it when you link your Mac (approve in the browser), or the phone can start it from the hub.
+- **Your choice of sandbox.** Docker on the hub, or an E2B cloud sandbox, chosen in Settings → Shared links; boxes are
+  reached over HTTP with the link's secret, and the hub pulls their outbox. No unsandboxed mode.
 
 ### One container per link, not per visitor
 

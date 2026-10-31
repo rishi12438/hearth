@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { Database } from "bun:sqlite";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { BetaContentBlock, BetaMessageParam, BetaTool, BetaToolResultBlockParam } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import { AnthropicModel, type BoxModel } from "./model.ts";
@@ -139,6 +139,18 @@ export class Box {
   }
 
   // ---------- outbox (the hub pulls it; the box can't reach the hub) ----------
+
+  /** New outbox lines from a byte offset, whole lines only, for the hub to pull. */
+  readOutbox(from: number, max = 8_000_000) {
+    const file = join(this.dataDir, "outbox.jsonl");
+    if (!existsSync(file)) return { text: "", next: 0, size: 0 };
+    const size = statSync(file).size;
+    const start = from > size ? 0 : Math.max(0, from);
+    const buf = readFileSync(file).subarray(start, Math.min(size, start + max));
+    const end = buf.lastIndexOf(10);
+    if (end < 0) return { text: "", next: start, size };
+    return { text: buf.subarray(0, end + 1).toString("utf8"), next: start + end + 1, size };
+  }
 
   private out(e: OutboxEvent) { appendFileSync(join(this.dataDir, "outbox.jsonl"), JSON.stringify(e) + "\n", { mode: 0o640 }); }
 
@@ -383,10 +395,18 @@ export class Box {
 
   // ---------- HTTP (JSON only; the hub serves the page and forces safe headers) ----------
 
+  /** Set when the box listens on a port: every request must carry it (only the hub has it). */
+  secret: string | null = null;
+
   async handle(req: Request): Promise<Response> {
     const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
     try {
+      if (this.secret) {
+        const got = Buffer.from(req.headers.get("x-box-secret") || ""), want = Buffer.from(this.secret);
+        if (got.length !== want.length || !timingSafeEqual(got, want)) return json({ error: "Not found." }, 404);
+      }
       const url = new URL(req.url);
+      if (url.pathname === "/_hub/outbox" && req.method === "GET") return json(this.readOutbox(Number(url.searchParams.get("from") || 0)));
       const ip = (req.headers.get("x-visitor-ip") || "?").slice(0, 64);
       const m = this.manifest();
       if (url.pathname === "/api/info" && req.method === "GET") {
@@ -422,10 +442,19 @@ if (import.meta.main) {
   const key = process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_CODE_OAUTH_TOKEN;
   if (!key) { console.error("box: no ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN"); process.exit(1); }
   const box = new Box(bundle, data, new AnthropicModel(key, process.env.BOX_PROXY || undefined));
-  const sock = process.env.BOX_SOCKET || join(data, "run", "box.sock");
-  mkdirSync(dirname(sock), { recursive: true });
-  rmSync(sock, { force: true });
-  Bun.serve({ unix: sock, fetch: (req, server) => { server.timeout(req, 0); return box.handle(req); } }); // model calls can take minutes
-  chmodSync(sock, 0o660); // the hub's group can connect; nobody else
-  console.log(`box ready: ${box.manifest().teammate.name} on ${sock}`);
+  const port = Number(process.env.BOX_PORT || 0);
+  if (port) {
+    // Reachable only through the sandbox's front door (the Docker gateway or E2B), and only with this link's secret.
+    box.secret = process.env.BOX_SECRET || "";
+    if (box.secret.length < 32) { console.error("box: BOX_SECRET must be set (32+ characters) when listening on a port"); process.exit(1); }
+    Bun.serve({ port, hostname: "0.0.0.0", fetch: (req, server) => { server.timeout(req, 0); return box.handle(req); } });
+    console.log(`box ready: ${box.manifest().teammate.name} on :${port}`);
+  } else {
+    const sock = process.env.BOX_SOCKET || join(data, "run", "box.sock");
+    mkdirSync(dirname(sock), { recursive: true });
+    rmSync(sock, { force: true });
+    Bun.serve({ unix: sock, fetch: (req, server) => { server.timeout(req, 0); return box.handle(req); } }); // model calls can take minutes
+    chmodSync(sock, 0o660); // the hub's group can connect; nobody else
+    console.log(`box ready: ${box.manifest().teammate.name} on ${sock}`);
+  }
 }

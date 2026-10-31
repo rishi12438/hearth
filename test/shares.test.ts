@@ -7,36 +7,38 @@ import { Hub } from "../src/hub.ts";
 import { Brain } from "../src/brain.ts";
 import { Scripts } from "../src/scripts.ts";
 import { loadConfig } from "../src/config.ts";
-import { Shares, checkEvent, type BoxRunner } from "../src/shares.ts";
+import { Shares, checkEvent } from "../src/shares.ts";
+import type { BoxEnv, Sandbox } from "../src/sandboxes.ts";
 import { Box } from "../src/public/box.ts";
 import { newPairingCode, redeemPairingCode } from "../src/auth.ts";
 import type { Fact, Notebook, Person, Share, ShareEvent, Teammate } from "../src/types.ts";
 import { FakeModel, text, tool } from "./fake-model.ts";
 
-// The box runs in this process with a scripted model, on a real unix socket, behind the real hub server.
-class TestRunner implements BoxRunner {
-  readonly kind = "test";
-  readonly sealed = false;
+// The box runs in this process with a scripted model, on a real port with its link secret, behind the real hub server.
+class TestSandbox implements Sandbox {
+  readonly kind = "docker" as const;
   boxes = new Map<string, { box: Box; server: ReturnType<typeof Bun.serve> }>();
   constructor(private root: string, private model: FakeModel) {}
-  private dir(s: Share) { return join(this.root, s.id.slice(0, 8)); } // unix socket paths must stay short
-  async start(s: Share, bundleDir: string) {
-    if (this.boxes.has(s.id)) return;
-    mkdirSync(join(this.dir(s), "run"), { recursive: true });
-    const box = new Box(bundleDir, this.dir(s), this.model);
-    const server = Bun.serve({ unix: this.socket(s), fetch: (r, srv) => { srv.timeout(r, 0); return box.handle(r); } });
+  async start(s: Share, bundleDir: string, env: BoxEnv) {
+    if (this.boxes.has(s.id)) return {};
+    const box = new Box(bundleDir, join(this.root, s.id.slice(0, 8)), this.model);
+    box.secret = env.secret;
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (r, srv) => { srv.timeout(r, 0); return box.handle(r); } });
     this.boxes.set(s.id, { box, server });
+    return {};
   }
   async stop(s: Share) { const b = this.boxes.get(s.id); b?.server.stop(true); b?.box.close(); this.boxes.delete(s.id); }
-  async remove(s: Share) { await this.stop(s); rmSync(this.dir(s), { recursive: true, force: true }); }
-  socket(s: Share) { return join(this.dir(s), "run", "box.sock"); }
-  outbox(s: Share) { return join(this.dir(s), "outbox.jsonl"); }
-  alive(s: Share) { return this.boxes.has(s.id); }
+  async remove(s: Share) { await this.stop(s); rmSync(join(this.root, s.id.slice(0, 8)), { recursive: true, force: true }); }
+  url(s: Share) { const b = this.boxes.get(s.id); return b ? `http://127.0.0.1:${b.server.port}` : null; }
   shutdown() { for (const b of this.boxes.values()) { b.server.stop(true); b.box.close(); } this.boxes.clear(); }
 }
 
+/** The vault, in memory. */
+const keyStore = () => { const m = new Map<string, string>(); return { get: (k: string) => m.get(k) ?? null, set: (k: string, v: string) => void m.set(k, v), has: (k: string) => m.has(k), delete: (k: string) => void m.delete(k) }; };
+const API_KEY = "sk-ant-api03-" + "a".repeat(40);
+
 const PRIVATE = ["PRIVATE-HEALTH-MARKER", "PRIVATE-PERSON-MARKER", "PRIVATE-MESSAGE-MARKER", "PRIVATE-ABOUT-MARKER", "PRIVATE-PROMPT-MARKER", "PRIVATE-ENV-MARKER"];
-let dir: string, short: string, store: Store, hub: Hub, model: FakeModel, runner: TestRunner, shares: Shares, project: string, teammate: Teammate;
+let dir: string, short: string, store: Store, hub: Hub, model: FakeModel, runner: TestSandbox, shares: Shares, keys: ReturnType<typeof keyStore>, project: string, teammate: Teammate;
 
 beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), "hearth-shares-"));
@@ -68,8 +70,10 @@ beforeEach(async () => {
   w(".gitignore", "dist/\n");
   w("deploy/setup.sh", "#!/bin/sh\n");
   model = new FakeModel();
-  runner = new TestRunner(short, model);
-  shares = new Shares(hub, runner);
+  runner = new TestSandbox(short, model);
+  keys = keyStore();
+  keys.set("shareKey", API_KEY);
+  shares = new Shares(hub, { docker: runner }, keys);
 });
 
 afterEach(async () => {
@@ -277,5 +281,69 @@ test("the owner API needs a paired device", async () => {
   expect(made.link).toHaveLength(24);
   const list = await (await fetch(`http://127.0.0.1:${srv.port}/api/shares`, { headers: auth })).json();
   expect(list.shares.map((x: Share) => x.id)).toEqual([made.id]);
+  srv.stop(true);
+});
+
+test("each box answers only with its link's secret, and the app never sees the secret or the Claude key", async () => {
+  const s = await makeShare();
+  const url = runner.url(s)!;
+  expect((await fetch(`${url}/api/info`)).status).toBe(404);
+  expect((await fetch(`${url}/api/info`, { headers: { "X-Box-Secret": "x".repeat(43) } })).status).toBe(404);
+  expect((await fetch(`${url}/api/info`, { headers: { "X-Box-Secret": s.secret } })).status).toBe(200);
+  expect((await fetch(`${url}/_hub/outbox?from=0`)).status).toBe(404);
+  const srv = await server();
+  const { code } = await newPairingCode(store);
+  const { token } = (await redeemPairingCode(store, code, "phone"))!;
+  const auth = { Authorization: `Bearer ${token}` };
+  const everything = JSON.stringify(await (await fetch(`http://127.0.0.1:${srv.port}/api/shares`, { headers: auth })).json())
+    + JSON.stringify(await (await fetch(`http://127.0.0.1:${srv.port}/api/shares/${s.id}`, { headers: auth })).json());
+  expect(everything).not.toContain(s.secret);
+  expect(everything).not.toContain(API_KEY);
+  expect(everything).toContain('"kind":"api"');
+  srv.stop(true);
+});
+
+test("settings: the Claude key can be an API key or a setup-token, the sandbox must be available, the workspace a real folder", async () => {
+  expect((await shares.saveSettings({ key: "hunter2" })).error).toContain("doesn't look like");
+  expect((await shares.saveSettings({ key: "sk-ant-oat01-" + "b".repeat(40) })).value).toBeTruthy();
+  expect(shares.keyInfo()).toMatchObject({ set: true, kind: "subscription" });
+  expect((await shares.saveSettings({ sandbox: "e2b" })).error).toContain("E2B key");
+  expect((await shares.saveSettings({ workspace: "/" })).error).toContain("project folder");
+  expect((await shares.saveSettings({ workspace: project })).value!.workspace).toContain("recipes-app");
+  keys.delete("shareKey");
+  expect((await shares.create({ teammateId: teammate.id })).error).toContain("Claude key");
+});
+
+test("\"Can edit your primary workspace\" shares the workspace you set, editable; off means no folder", async () => {
+  expect((await shares.create({ teammateId: teammate.id, workspace: true })).error).toContain("primary workspace");
+  await shares.saveSettings({ workspace: project });
+  const on = (await shares.create({ teammateId: teammate.id, workspace: true })).value!;
+  expect(on.folder!.rules).toEqual({ edit: ["**"] });
+  expect(on.folder!.published["recipes/dal.md"].access).toBe("edit");
+  expect(on.folder!.published[".env"]).toBeUndefined(); // still never copied
+  const off = (await shares.create({ teammateId: teammate.id, workspace: false })).value!;
+  expect(off.folder).toBeUndefined();
+});
+
+test("joining your Mac can set the shared-links token: only your own computer's key, only a setup-token", async () => {
+  keys.delete("shareKey");
+  const { addDevice } = await import("../src/auth.ts");
+  const { sendShareKey } = await import("../src/computer.ts");
+  const srv = await server();
+  const hubUrl = `http://127.0.0.1:${srv.port}`;
+  const mac = await addDevice(store, "Rishi's MacBook", "computer");
+  const token = "sk-ant-oat01-" + "m".repeat(40);
+  const logs: string[] = [];
+  expect(await sendShareKey({ hub: hubUrl, token: mac.token, deviceId: mac.device.id, name: "Mac" } as any, (l) => logs.push(l), async () => token)).toBe(true);
+  expect(shares.keyInfo()).toMatchObject({ set: true, kind: "subscription", last4: "mmmm" });
+  expect(logs.at(-1)).toContain("Done");
+  const post = (auth: string, body: unknown) => fetch(`${hubUrl}/computer/share-key`, { method: "POST", headers: { Authorization: `Bearer ${auth}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  expect((await post(mac.token, { token: "sk-ant-api03-" + "x".repeat(40) })).status).toBe(400); // not a setup-token
+  const phone = await addDevice(store, "phone", "owner");
+  expect((await post(phone.token, { token })).status).toBe(401); // a phone key can't use the computer door
+  const cloud = await addDevice(store, "Cloud sandbox", "computer");
+  await store.put("devices", { ...cloud.device, machine: "m1" } as any);
+  expect((await post(cloud.token, { token })).status).toBe(403); // a cloud computer the hub set up can't set it
+  expect((await post("nope", { token })).status).toBe(401);
   srv.stop(true);
 });

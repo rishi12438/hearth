@@ -230,3 +230,19 @@ test("file tools: edit paths only, read-only and hidden paths refused, the bundl
   const other = await call("/api/chat", { token: await session(), body: { text: "show me the dal recipe" } });
   expect(other.body.reply ?? "").not.toContain("cumin");
 });
+
+test("gateway: forwards /b/<link id>/… to that box only, with only the headers a box needs", async () => {
+  const { forward } = await import("../src/public/gateway.ts");
+  let seen: { url: string; headers: Headers } | null = null;
+  const target = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (r) => { seen = { url: r.url, headers: r.headers }; return Response.json({ ok: true }); } });
+  const resolve = () => `http://127.0.0.1:${target.port}`;
+  const id = "a".repeat(24);
+  const ok = await forward(new Request(`http://gw/b/${id}/api/info?x=1`, { headers: { "X-Box-Secret": "s", Cookie: "c=1", Authorization: "Bearer t" } }), resolve);
+  expect(ok.status).toBe(200);
+  expect(seen!.url).toEndWith("/api/info?x=1");
+  expect(seen!.headers.get("x-box-secret")).toBe("s");
+  expect(seen!.headers.get("cookie")).toBeNull();
+  expect(seen!.headers.get("authorization")).toBeNull();
+  for (const bad of ["/b/../etc", `/b/${id}`, "/b/notanid/api/info", "/api/info", `/b/${id.toUpperCase()}/x`]) expect((await forward(new Request(`http://gw${bad}`), resolve)).status).toBe(404);
+  target.stop(true);
+});

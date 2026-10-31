@@ -80,7 +80,7 @@ Reminders and routines live on your hub, and it sends them as push notifications
 - **Memory you can see.** Facts live in notebooks, with history kept when they change. View, star, edit and delete anything.
 - **Skills, scripts and mini apps.** It saves what it solved so it doesn't work it out twice, writes scripts that only run after you approve the code, and builds small sandboxed apps (flashcards, checklists, countdowns) you can pin to Home.
 - **Approve before send.** Anything that sends, posts, pays, books or deletes outside the hub stops at an **Approve** card. The hub enforces this, not the model.
-- **Share a teammate by link.** Let someone chat with one teammate, publicly or as a named guest. It runs sealed in its own Docker container with only the notebooks, notes and folder files you pick, its own capped API key, and no route back to your hub. A guard model keeps it on its job, and folder edits come back to you to apply, with Undo. See [docs/design/public-teammates.md](docs/design/public-teammates.md).
+- **Share a teammate by link.** Let someone chat with one teammate, publicly or as a named guest. It runs in its own sandbox (Docker on your hub, or an E2B cloud sandbox: your choice) with only the notebooks, notes and workspace you pick, and no route back to your hub. Hearth sets up the Claude token for it with your subscription when you link your Mac. A guard model keeps it on its job, and folder edits come back to you to apply, with Undo. See [docs/design/public-teammates.md](docs/design/public-teammates.md).
 - **Router-style pairing.** Your first phone becomes the primary device. Every other device joins only when that phone approves it, optionally with Face ID.
 
 See **[docs/features.md](docs/features.md)** for the full tour.
@@ -156,6 +156,10 @@ bash deploy/setup.sh mac https://yournameassistant.com                      # th
 
 [deploy/lightsail.md](deploy/lightsail.md) walks through buying and locking down a domain, DNS and the server, step by step. It's written for AWS Lightsail, but any Linux VPS works the same way.
 
+## Hearth Client
+
+Your **Hearth Hub** is the server. A **Hearth Client** is a computer that works for it: install the app on a Mac (`.dmg`), Ubuntu desktop (`.deb`) or Windows PC (`.exe`), enter your hub's address, approve the 4-letter code on your phone, and jobs can run there with that computer's own Claude or Codex login. It starts at login and keeps the link up; it can also set up the Claude token your shared links use. Your phone is a window onto the hub and doesn't run work. Build the installers with `bash deploy/client/build.sh` (unsigned for now: on a Mac, right-click → Open the first time).
+
 ## Configuration
 
 All settings are environment variables. See [.env.example](.env.example) for the full list. The main ones:
@@ -170,7 +174,6 @@ All settings are environment variables. See [.env.example](.env.example) for the
 | `HEARTH_DB_URL` | SQLite in `./data` | `postgres://…`, `mysql://…`, `mongodb://…` (run `bun add mongodb`) |
 | `HEARTH_HOST` / `HEARTH_PORT` | `127.0.0.1:8790` | Keep it on localhost and put Caddy in front |
 | `HEARTH_ALLOWED_ORIGINS` | none | Other hubs' origins allowed to call this one from the same app |
-| `HEARTH_BOX_RUNNER` | off | Shared teammates: `docker` (sealed, for servers) or `local` (a plain subprocess for trying it out; set `HEARTH_BOX_API_KEY`) |
 | `HEARTH_REQUIRE_PASSKEY` | `0` | `1`: every device must unlock with Face ID or a passkey |
 
 ## Project layout
@@ -178,7 +181,8 @@ All settings are environment variables. See [.env.example](.env.example) for the
 ```
 src/          the hub: server, hooks engine, memory, brain runner, auth, scripts, storage backends (src/store),
               computer links (computers.ts on the hub, computer.ts on your Mac)
-src/public/   the sandboxed box a shared teammate runs in (no hub imports), its egress proxy and seal self-test
+src/public/   the sandboxed box a shared teammate runs in (no hub imports), its gateway, egress proxy and seal self-test
+src/client.ts Hearth Client: the desktop app (Mac .dmg, Ubuntu .deb, Windows .exe) that links a computer to your hub
 web/          the phone app: plain TypeScript bundled in memory by Bun, no framework, no build folder
 components/   starter components (itinerary, comparison, checklist, chart, …) teammates reuse with new data
 scripts/      trusted example scripts (weather, page-watch)

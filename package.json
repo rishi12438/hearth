@@ -15,6 +15,7 @@
     "doctor": "bun src/cli.ts doctor",
     "join": "bun src/cli.ts join",
     "computer": "bun src/cli.ts computer",
+    "share-key": "bun src/cli.ts share-key",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

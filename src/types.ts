@@ -384,6 +384,12 @@ export type Share = Doc & {
   autoApply: boolean;
   version: number;
   status: "running" | "paused" | "revoked";
+  /** Only the hub has it; the box refuses any request without it. */
+  secret: string;
+  /** Where its box runs (your choice in Settings → Shared links). */
+  sandbox: "docker" | "e2b";
+  sandboxId?: string;
+  sandboxUrl?: string;
   outboxOffset: number;
   stats: { chats: number; refused: number; offTopic: number; costUsd: number; lastAt?: string };
   answers: import("./public/types.ts").Answers;
