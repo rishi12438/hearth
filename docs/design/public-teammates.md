@@ -99,6 +99,53 @@ The hub only copies what you picked, worked out ahead of time:
 - **Ask me:** if a visitor wants something the box doesn't have ("what's his email?"), the box puts a request in its
   outbox and your phone asks *Share once / always / no*. Answering pushes just that one thing to the box.
 
+## Sharing a project folder
+
+Some teammates work on one folder: an app, a notes folder, a recipe collection. You can share those too, read-only or
+with editing. The visitor's teammate **never touches your real folder**: it works on a copy, and changes come back as
+proposals you approve.
+
+**Publishing a folder.** The hub copies the folder into the box. It works the same whether or not the folder is a git
+repo:
+
+- **Not git:** the hub copies the working tree as it is, and records the hash of every file (the *base*).
+- **Git:** same copy, plus the commit it came from. No remote, no push credentials, no history unless you tick it.
+
+Either way it skips `.env*`, keys, `node_modules`, anything in `.gitignore`, and warns you about anything that looks
+like a password or token. Assume visitors can read everything that's copied.
+
+**Editing inside the box.** For a folder teammate the box gets file tools (read, edit, optionally run with CPU, memory and
+time limits). Each visitor gets their own working copy. The box tracks changes itself (a hidden git repo inside the box,
+whatever the original was), so you don't need git and visitors never see it.
+
+**The edit log.** Every change is recorded, so you can see how it was edited, not just the end result:
+
+| When | Visitor | Asked | Files | Change |
+|---|---|---|---|---|
+| 14:02 | Sam | "add a vegan option to the dal recipe" | `dal.md` | +6 −1 |
+| 14:05 | Sam | "make the steps shorter" | `dal.md` | +3 −9 |
+
+Each entry has the message that caused it, the teammate's one-line note on what it did and why, and the diff. The guard
+flags entries that touch files outside the scope (deploy scripts, config, anything you marked "don't touch").
+
+**Bringing changes back.** The box sends the log and the diffs through the outbox. On your phone: "Sam changed 1 file in
+*Recipes*", with the log, and four choices:
+
+- **Apply:** write the changes into your folder. The hub checks each file against the base first: if you've changed the
+  same file since publishing, it merges where it can and shows you the conflicts where it can't. It keeps a backup, so
+  **Undo** puts things back.
+- **Apply some:** pick entries or files from the log.
+- **Save as a copy:** a new folder next to the original, e.g. `Recipes (Sam's changes)`, nothing overwritten.
+- **Reject.**
+
+For git folders there's a fifth: **open as a branch/PR**, with one commit per log entry.
+
+**Keeping the copy fresh.** *Update* (or automatic refresh) pushes your latest folder into the box. Visitors' open copies
+keep their base, so the merge on the way back still works.
+
+**What it won't do:** edit your real folder live. That would mean mounting your disk into the container, which breaks the
+seal.
+
 ## Staying on topic
 
 A "Recipes" link shouldn't write someone's essay or debug their code on your bill. Each shared teammate has a **scope**,
@@ -164,6 +211,7 @@ injection is actually dangerous, so it's the next place to put it after shared l
    setup steps in `deploy/lightsail.md`.
 4. **Outbox:** hub pulls activity and "ask me" requests and shows them as notifications.
 5. **Invited guests:** named links with more notebooks, same box.
+6. **Folder sharing:** copy-in, per-visitor working copies, edit log, apply/merge/undo on the hub.
 
 ## Tests that must pass
 
@@ -173,5 +221,7 @@ injection is actually dangerous, so it's the next place to put it after shared l
   messages) only ever returns things from the published copy.
 - Revoking a link makes it 404 within seconds and deletes its container and data.
 - Visitor A can't read visitor B's conversation.
+- Applying a visitor's changes after you edited the same file shows a conflict instead of overwriting, and Undo
+  restores the folder exactly. Copied folders never contain `.env*` or files that match `.gitignore`.
 - An off-topic suite (essays, code, homework, "pretend you're a general assistant") is mostly answered with the fixed
   reply, never calls the main model when the guard says `out`, and any reply that slips through stays under the length cap.
