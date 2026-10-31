@@ -13,6 +13,8 @@
     "recover": "bun src/cli.ts recover",
     "status": "bun src/cli.ts status",
     "doctor": "bun src/cli.ts doctor",
+    "join": "bun src/cli.ts join",
+    "computer": "bun src/cli.ts computer",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

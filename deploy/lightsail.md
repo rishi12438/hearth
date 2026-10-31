@@ -54,7 +54,7 @@ Any other Linux VPS works the same way.
 ```bash
 ssh ubuntu@<static IP>
 git clone https://github.com/<you>/hearth && cd hearth
-sudo bash deploy/setup.sh example.com you@example.com
+sudo bash deploy/setup.sh lightsail example.com you@example.com
 ```
 
 It checks that your domain points at this box, then installs and turns on everything below. You can run it again safely.
@@ -99,6 +99,21 @@ sudo -iu hearth bash -c 'cd /opt/hearth && ~/.bun/bin/bun run doctor'
 It checks HTTPS and HSTS, the redirect from http, that the hub isn't exposed directly, file permissions, and that your primary device has Face ID.
 
 For the strictest setup, add `HEARTH_REQUIRE_PASSKEY=1` to `/opt/hearth/.env` and restart. Every device then has to set up Face ID before it can see anything.
+
+## 7. Optional: link your Mac
+
+Want teammates to run on your Mac, with your own Claude or Codex login, whenever it's on? On the Mac, in a copy of the repo:
+
+```bash
+bash deploy/setup.sh mac https://example.com        # add --name "Studio" to choose what your phone calls it
+```
+
+It installs Bun if needed, asks your primary phone to approve the Mac (compare the 4-letter code), and starts it at login,
+kept awake while plugged in. The Mac connects out to your server and keeps the line open, so it needs no open ports.
+
+- Your phone shows it under **Settings → Devices → Computers**, with its signal and what it's running. Home says where work runs right now.
+- When the Mac is off, the server does the work. To let the server use Claude or Codex then, turn on **Copy to the cloud** for that login on the Mac's card.
+- Stop it: `launchctl bootout gui/$(id -u)/com.hearth.computer`. Unlink it from your phone to cut it off for good. Logs: `~/Library/Logs/hearth-computer.log`.
 
 ## What protects you, in plain words
 

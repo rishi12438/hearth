@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store, Collection } from "./store/index.ts";
 import type { Brain, BrainInput, BrainProfile, Brains, Meter } from "./brain.ts";
-import { QUIET, ESCALATE, REDO, HARNESSES, MODEL_RE, availableHarnesses } from "./brain.ts";
+import { QUIET, ESCALATE, REDO, HARNESSES, MODEL_RE, availableHarnesses, NeedsComputer } from "./brain.ts";
 import type { Scripts } from "./scripts.ts";
 import type { Push } from "./push.ts";
 import { parseReply } from "./reply.ts";
@@ -533,7 +533,7 @@ export class Hub {
       const status = patch.status === "failed" ? "failed" : blocked ? "blocked" : pending ? "waiting" : "done";
       await this.addSpend(job.messageId, meter.costUsd);
       cur = await this.saveJob({
-        ...cur, ...patch, blocked, status,
+        ...cur, ...patch, blocked, status, ranOn: meter.ranOn,
         durationMs: Date.now() - started, costUsd: meter.unknown ? null : +meter.costUsd.toFixed(4),
         finishedAt: status === "done" || status === "failed" ? this.clock().toISOString() : undefined,
       });
@@ -622,6 +622,11 @@ export class Hub {
       }
       await finish({ how: failedSkill ? "repaired" : "fresh", tier, escalated, voiced, result: r.text.slice(0, 4000), did: r.did, tiles: r.tiles, fileIds: r.fileIds });
     } catch (err: any) {
+      if (err instanceof NeedsComputer) {
+        // Parks instead of failing; resumeForComputer picks it up the moment a computer links in.
+        cur = await this.saveJob({ ...cur, blocked: { need: "Your Mac", why: err.message, unblock: "Open your Mac, or copy your login to the cloud in Settings → Devices", needs: "computer" } });
+        return await finish({ how: "fresh", tier });
+      }
       await finish({ status: "failed", how: "fresh", tier, escalated, result: err.message });
     }
   }
@@ -689,6 +694,13 @@ export class Hub {
     if (today >= caps.day) return `Today's spending cap ($${caps.day}) is reached`;
     if ((this.rambleSpend.get(messageId) || 0) >= caps.ramble) return `This ramble's spending cap ($${caps.ramble}) is reached`;
     return null;
+  }
+
+  /** A linked computer came online: run every job that was parked waiting for one. */
+  async resumeForComputer() {
+    const parked = (await this.store.all<Job>("jobs")).filter((j) => j.status === "blocked" && j.blocked?.needs === "computer");
+    for (const j of parked) await this.retryJob(j.id);
+    if (parked.length) await this.log("computer.resumed", `${parked.length} job(s) picked up by your computer`);
   }
 
   /** You unblocked it (opened the laptop, logged in, tapped Allow): run the job again from the top. */

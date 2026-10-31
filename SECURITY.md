@@ -41,6 +41,14 @@ Hearth holds personal data and can act on a schedule, so it is built to fail clo
 - The only ways out of an app are `postMessage`s the app screen accepts only from that app's own frame: `hearth.save(state)` (that app's state, 48 KB max) and `hearth.ask(text)` (a message to the teammate who made it, at most one every 3 seconds and 30 an hour, shown in your DM with them). A message from an app is still just a message: anything with external effects stops at Approve.
 - What remains: an app could *show* misleading text, such as a fake login form. Hearth never asks for passwords inside an app.
 
+## Linked computers
+- A computer (your Mac) joins the way a phone does: it asks, shows a 4-letter code, and only your primary device can approve it. It gets its own key, stored on the hub only as a hash.
+- That key opens the computer link and nothing else. Every API call made with it gets `403`, so a computer can't read chats, memory or settings, and it can't be made primary.
+- The computer dials out to the hub over the hub's HTTPS address and sends its key in a header. Wrong keys count toward the same lockout as the API.
+- The hub can only ask a computer for a brain call. The computer runs it with its own code and the same slim, web-only tool set as on the hub, and only for harnesses it has installed. The hub never gets a shell on it.
+- **Copy to the cloud** is off by default and set per login (Claude, Codex) by the primary device. Only a server hub (`HEARTH_TARGET=lightsail`) accepts copies, only for the logins you turned on, at most 64 KB, and only valid JSON. They're written `0600` to the hub user's home. Turning a copy off deletes it, but only if the file is still the one the hub wrote, so a login set up by hand is never removed.
+- Unlinking a computer closes its line at once (the computer stops retrying) and deletes the logins it copied.
+
 ## Your data
 - SQLite files and the data folder are created with mode `0700`. Use a Postgres or MySQL user with access only to the Hearth tables.
 - Web Push VAPID keys are generated on first run and kept with your data; nothing is hard-coded. Push payloads go from your hub to your browser's push service, encrypted end to end per the Web Push standard.

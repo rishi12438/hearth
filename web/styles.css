@@ -744,3 +744,39 @@ p.err { color: var(--danger); margin: 6px 2px 0; }
 .artfoot .linkbtn { margin-top: 0; font-size: 13.5px; color: var(--ink); }
 .mleg { position: absolute; transform: translate(-50%, -50%); padding: 3px 8px; border-radius: 999px; background: #fff; color: var(--ink); font-size: 11.5px; font-weight: 700; white-space: nowrap; box-shadow: 0 2px 6px rgba(0,0,0,.18); z-index: 1; }
 .mlegline { display: block; margin-top: 3px; font-size: 13px; color: var(--ink-2); font-weight: 600; }
+
+/* ---- Linked computers: where work runs ---- */
+.bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 14px; flex: none; }
+.bars i { width: 4px; border-radius: 1.5px; background: var(--line); }
+.bars i:nth-child(1) { height: 25%; } .bars i:nth-child(2) { height: 50%; } .bars i:nth-child(3) { height: 75%; } .bars i:nth-child(4) { height: 100%; }
+.bars.online i.on { background: var(--ok); }
+.bars.asleep i.on { background: var(--warn); }
+.linkstrip { display: flex; align-items: center; gap: 10px; width: calc(100% - 32px); margin: 4px 16px 2px; padding: 10px 14px; border: 0; border-radius: 16px; background: var(--card); box-shadow: var(--shadow); text-align: left; font-size: 14px; color: var(--ink-2); }
+.linkstrip b { color: var(--ink); font-weight: 650; }
+.linkstrip .lsicon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 10px; flex: none; }
+.linkstrip.online .lsicon { background: color-mix(in oklab, var(--ok) 14%, transparent); color: var(--ok); }
+.linkstrip.asleep .lsicon, .linkstrip.offline .lsicon { background: var(--surface); color: var(--muted); }
+.linkstrip > svg:last-child { color: var(--muted); flex: none; }
+.ccard { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 14px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 10px; }
+.cchead { display: flex; align-items: center; gap: 12px; }
+.cchead .grow { display: flex; flex-direction: column; gap: 1px; }
+.cchead b { font-size: 16px; }
+.ccicon { position: relative; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px; background: var(--surface); flex: none; }
+.cdot { position: absolute; right: -2px; bottom: -2px; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--card); background: var(--muted); }
+.cdot.online { background: var(--ok); }
+.cdot.asleep { background: var(--warn); }
+.cstate { font-size: 12px; font-weight: 650; color: var(--muted); }
+.cstate.online { color: var(--ok); }
+.cstate.asleep { color: var(--warn); }
+.ccsub { margin: 0; font-size: 13px; color: var(--ink-2); }
+.ccard.offline .ccsub { color: var(--muted); }
+.ccbrains { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ccbrains small, .cclabel { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.cccopy { display: flex; flex-direction: column; gap: 6px; }
+.cccopy .list { margin: 0; }
+.copyrow { width: 100%; text-align: left; }
+.copyrow:disabled { opacity: .6; }
+.ccard > .btn { align-self: flex-start; }
+.ccinfo { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.codeline { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 12px; border: 1px dashed var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); text-align: left; }
+.codeline code { flex: 1; font: 12.5px var(--mono); overflow-x: auto; white-space: nowrap; }

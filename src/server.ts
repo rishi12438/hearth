@@ -7,6 +7,8 @@ import type { Hub } from "./hub.ts";
 import { deepgramLive, type VoiceSettings } from "./voice.ts";
 import { randomBytes } from "node:crypto";
 import { availableHarnesses } from "./brain.ts";
+import { Computers, COPY_ITEMS, isCopyItem } from "./computers.ts";
+import { homedir } from "node:os";
 import { MAX_FILE_BYTES } from "./files.ts";
 import { appCsp } from "./apps.ts";
 import { isActive, search } from "./memory.ts";
@@ -71,6 +73,21 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
   const askGlobal = new RateLimiter(10, 10 * 60_000);
   const sessions = new Sessions(config.unlockHours * 3600_000);
   const access = new AccessRequests();
+  // Computers linked to this hub (your Mac): brain calls run there when one is online, here (the cloud) when none is.
+  const computers = new Computers({ dataDir: config.dataDir, homeDir: homedir(), acceptCopies: config.target === "lightsail" });
+  const linkedComputers = async () => (await store.all<Device>("devices")).filter((d) => d.role === "computer");
+  const recount = async () => { computers.known = (await linkedComputers()).length; };
+  await recount();
+  hub.brain.remote = computers;
+  computers.onChange = () => hub.emit("computers", {});
+  computers.onOnline = () => { hub.resumeForComputer().catch((e) => console.error(e)); };
+  computers.start();
+  const computerSummary = async () => {
+    const list = (await linkedComputers()).map((d) => computers.status(d.id, d.name, d.lastSeenAt));
+    const rank = { online: 0, asleep: 1, offline: 2 };
+    list.sort((x, y) => rank[x.state] - rank[y.state] || y.level - x.level);
+    return { linked: list.length, online: list.filter((c) => c.state === "online").map((c) => c.name), list, acceptCopies: config.target === "lightsail" };
+  };
   const streams = new Map<string, Set<ReadableStreamDefaultController>>();
   const enc = new TextEncoder();
 
@@ -143,9 +160,9 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
       if (!askLimiter.allow(ip) || !askGlobal.allow("all")) throw new HttpError(429, "Too many requests. Wait 10 minutes.");
       if ((await store.all<Device>("devices")).length === 0) throw new HttpError(409, "This hub isn't set up yet. Use the setup code from the server.");
       const b = await body(req);
-      const { poll, request } = access.create(b.deviceName, ip);
+      const { poll, request } = access.create(b.deviceName, ip, b.kind);
       hub.emit("access", { pending: access.pending().length });
-      await hub.push?.send({ title: "New device wants in", body: `${request.name} · code ${request.code}. Open Hearth to approve or deny.`, tag: "access", url: "/#access" }, (await owners(store)).map((d) => d.id));
+      await hub.push?.send({ title: request.kind === "computer" ? "A computer wants to link" : "New device wants in", body: `${request.name} · code ${request.code}. Open Hearth to approve or deny.`, tag: "access", url: "/#access" }, (await owners(store)).map((d) => d.id));
       return json({ poll, code: request.code, expiresInMin: 10 });
     }
     if (path === "/api/access/poll" && method === "POST") {
@@ -169,6 +186,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
     // ---- everything else needs a paired device ----
     const device = await deviceForToken(store, req.headers.get("authorization"));
     if (!device) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not paired."); }
+    // A linked computer's key opens its link and nothing else: it can't read chats or memory through the API.
+    if (device.role === "computer") throw new HttpError(403, "This key only links a computer to the hub.");
     // Face ID lock: a device with a passkey (or every device, with HEARTH_REQUIRE_PASSKEY=1) needs a recent unlock.
     // A copied device token alone then gets nothing but this lock screen.
     if ((device.passkey || config.requirePasskey) && !sessions.valid(req.headers.get("x-hearth-unlock"), device.id)) {
@@ -190,6 +209,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
           push: { available: !!hub.push, subscribed: hub.push ? await hub.push.hasDevice(device.id) : false },
           pendingScripts: (await hub.scripts.list()).filter((s) => s.status === "proposed").length,
           voice: voice?.current?.name ?? null,
+          computers: await computerSummary(),
           tileKey,
         });
       }
@@ -484,7 +504,24 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
       }
       case "devices": {
         const primaries = (await owners(store)).map((d) => d.id);
-        if (method === "GET") return json((await store.all<Device>("devices")).map(({ tokenHash, passkey, ...d }) => ({ ...d, primary: primaries.includes(d.id), passkey: !!passkey, current: d.id === device.id })));
+        if (method === "GET") return json((await store.all<Device>("devices")).map(({ tokenHash, passkey, ...d }) => ({
+          ...d, primary: primaries.includes(d.id), passkey: !!passkey, current: d.id === device.id,
+          ...(d.role === "computer" ? { link: computers.status(d.id, d.name, d.lastSeenAt), copy: d.copy || [],
+            copiedAt: Object.fromEntries(Object.entries(computers.copied()).filter(([, v]) => v.from === d.id).map(([k, v]) => [k, v.at])) } : {}),
+        })));
+        // What a computer keeps copied up here, so the cloud can work while it's off. Only a server hub takes copies.
+        if (method === "PUT" && id && seg[3] === "copy") {
+          ownerOnly();
+          const target = await store.get<Device>("devices", id);
+          if (!target || target.role !== "computer") throw new HttpError(404, "No such computer.");
+          if (config.target !== "lightsail") throw new HttpError(409, "Only a server hub (HEARTH_TARGET=lightsail) takes copies of logins.");
+          const b = await body(req);
+          const items = Object.keys(COPY_ITEMS).filter((k) => isCopyItem(k) && b[k] === true) as NonNullable<Device["copy"]>;
+          await store.put<Device>("devices", { ...target, copy: items });
+          computers.setWant(id, items);
+          await hub.log("computer.copy", `${target.name} copies: ${items.map((i) => COPY_ITEMS[i].label).join(", ") || "nothing"}`);
+          return json({ ok: true, copy: items, copied: computers.copied() });
+        }
         if (method === "POST" && id === "pair-code") {
           ownerOnly();
           const r = await newPairingCode(store);
@@ -496,6 +533,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
           ownerOnly();
           const target = await store.get<Device>("devices", id);
           if (!target) throw new HttpError(404, "No such device.");
+          if (target.role === "computer") throw new HttpError(409, "A linked computer can't be the primary device.");
           await store.put<Device>("devices", { ...target, role: "owner" });
           for (const d of await store.all<Device>("devices")) if (d.id !== id && (d.role === "owner" || primaries.includes(d.id))) await store.put<Device>("devices", { ...d, role: "member" });
           await hub.log("device.primary", `${target.name} is now the primary device`);
@@ -505,7 +543,10 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
           if (id !== device.id) ownerOnly();
           if (primaries.length === 1 && primaries[0] === id && (await store.all<Device>("devices")).length > 1) throw new HttpError(409, "Make another device primary first.");
           sessions.endDevice(id);
+          const gone = await store.get<Device>("devices", id);
+          if (gone?.role === "computer") { computers.drop(id, "signed out", 4001); for (const i of gone.copy || []) computers.removeCopy(i, id); }
           const ok = await store.remove("devices", id);
+          await recount();
           await hub.push?.unsubscribeDevice(id);
           for (const c of streams.get(id) || []) { try { c.close(); } catch {} }
           streams.delete(id);
@@ -557,8 +598,9 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
         if (seg[3] === "approve" && method === "POST") {
           const b = await body(req);
           if (device.passkey && !(pageOrigin && verifyPasskeyAssertion(b.passkey, device, pageOrigin))) throw new HttpError(401, "Confirm with Face ID to let a device in.");
-          const added = await addDevice(store, r.name, "member");
+          const added = await addDevice(store, r.name, r.kind === "computer" ? "computer" : "member");
           r.status = "approved"; r.token = added.token; r.deviceId = added.device.id;
+          await recount();
           await hub.log("device.paired", `${r.name} joined (approved from ${device.name})`);
           hub.emit("access", { pending: access.pending().length });
           return json({ ok: true });
@@ -586,23 +628,34 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
     throw new HttpError(404, "Not found.");
   }
 
-  type LiveData = { rate: number; relay?: ReturnType<typeof deepgramLive> };
-  const server = Bun.serve<LiveData, never>({
+  type LiveData = { kind: "voice"; rate: number; relay?: ReturnType<typeof deepgramLive> };
+  type ComputerData = { kind: "computer"; deviceId: string; name: string; want: NonNullable<Device["copy"]> };
+  const server = Bun.serve<LiveData | ComputerData, never>({
     hostname: config.host,
     port: config.port,
     idleTimeout: 60,
     websocket: {
       maxPayloadLength: 1024 * 1024,
       open(ws) {
+        if (ws.data.kind === "computer") { computers.attach(ws.data.deviceId, ws.data.name, ws, ws.data.want); return; }
         const key = voice?.deepgramKey();
         if (!key) { ws.close(1011, "voice off"); return; }
         ws.data.relay = deepgramLive(key, ws.data.rate, { send: (d) => ws.send(d), close: () => ws.close() });
       },
       message(ws, msg) {
+        if (ws.data.kind === "computer") { computers.message(ws.data.deviceId, String(msg)); return; }
         if (typeof msg === "string") { if (msg === "stop") ws.data.relay?.stop(); return; }
         ws.data.relay?.audio(msg);
       },
-      close(ws) { ws.data.relay?.abort(); },
+      close(ws) {
+        if (ws.data.kind === "computer") {
+          const { deviceId } = ws.data;
+          computers.detach(deviceId, ws);
+          // Remember when it left, so "last seen" survives a hub restart.
+          store.get<Device>("devices", deviceId).then((d) => d && store.put<Device>("devices", { ...d, lastSeenAt: new Date().toISOString() })).catch(() => {});
+        }
+        else ws.data.relay?.abort();
+      },
     },
     async fetch(req, server) {
       const url = new URL(req.url);
@@ -618,8 +671,18 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
         if (!exp || exp < Date.now()) return new Response("Ticket expired", { status: 401 });
         if (origin && !sameOrigin && !config.allowedOrigins.includes(origin)) return new Response("Origin not allowed", { status: 403 });
         if (!(rate >= 8000 && rate <= 96000)) return new Response("Bad sample rate", { status: 400 });
-        if (server.upgrade(req, { data: { rate: Math.round(rate) } })) return undefined as unknown as Response;
+        if (server.upgrade(req, { data: { kind: "voice", rate: Math.round(rate) } })) return undefined as unknown as Response;
         return new Response("Expected a WebSocket", { status: 426 });
+      }
+      // A linked computer dials in here and keeps the line open; work comes down it. Its key goes in a header.
+      if (url.pathname === "/computer") {
+        const ip = clientIp(req, server);
+        if (badToken.blocked(ip)) return new Response("Too many wrong keys. Wait 10 minutes.", { status: 429 });
+        const d = await deviceForToken(store, req.headers.get("authorization"));
+        if (!d || d.role !== "computer") { badToken.allow(ip); return new Response("Not linked.", { status: 401 }); }
+        await store.put<Device>("devices", { ...d, lastSeenAt: new Date().toISOString() });
+        if (server.upgrade(req, { data: { kind: "computer", deviceId: d.id, name: d.name, want: d.copy || [] } })) return undefined as unknown as Response;
+        return new Response("This is the computer link; connect with a WebSocket.", { status: 426 });
       }
       const headers = security(origin, sameOrigin);
       // A response that brings its own CSP or frame rules (sandboxed downloads, mini apps) keeps them.
@@ -702,7 +765,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
       return finish(new Response(asset.body as BodyInit, { headers: { "Content-Type": asset.type, "Cache-Control": cache } }));
     },
   });
-  return { server, build: web.build };
+  return { server, build: web.build, computers };
 }
 
 const EMOJI_DIR = (() => { try { return join(resolve(import.meta.dir, ".."), "node_modules/@lobehub/fluent-emoji-3d/assets"); } catch { return ""; } })();

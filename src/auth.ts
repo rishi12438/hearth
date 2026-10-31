@@ -39,7 +39,7 @@ export async function redeemPairingCode(store: Store, rawCode: unknown, deviceNa
   return addDevice(store, deviceName, first ? "owner" : entry.role || "member");
 }
 
-export async function addDevice(store: Store, deviceName: unknown, role: "owner" | "member") {
+export async function addDevice(store: Store, deviceName: unknown, role: "owner" | "member" | "computer") {
   const token = randomBytes(32).toString("base64url");
   const now = new Date().toISOString();
   const device = await store.put<Device>("devices", {
@@ -53,7 +53,7 @@ export async function addDevice(store: Store, deviceName: unknown, role: "owner"
 export async function owners(store: Store) {
   const all = (await store.all<Device>("devices")).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const marked = all.filter((d) => d.role === "owner");
-  return marked.length ? marked : all.slice(0, 1);
+  return marked.length ? marked : all.filter((d) => d.role !== "computer").slice(0, 1);
 }
 
 export const isOwner = async (store: Store, d: Device) => (await owners(store)).some((o) => o.id === d.id);
@@ -151,17 +151,17 @@ export class Sessions {
 }
 
 // ---- Access requests: a new device asks, the primary approves (like WPS on a router, but you check a code) ----
-export type AccessRequest = { id: string; name: string; code: string; ip: string; createdAt: string; exp: number; status: "pending" | "approved" | "denied"; token?: string; deviceId?: string };
+export type AccessRequest = { id: string; name: string; kind: "device" | "computer"; code: string; ip: string; createdAt: string; exp: number; status: "pending" | "approved" | "denied"; token?: string; deviceId?: string };
 const REQUEST_TTL_MS = 10 * 60_000;
 
 export class AccessRequests {
   private byPoll = new Map<string, AccessRequest>();
-  create(name: unknown, ip: string) {
+  create(name: unknown, ip: string, kind: unknown = "device") {
     this.sweep();
     let code = "";
     for (const b of randomBytes(4)) code += CODE_ALPHABET[b % CODE_ALPHABET.length];
     const poll = randomBytes(32).toString("base64url");
-    const r: AccessRequest = { id: randomUUID(), name: String(name || "New device").slice(0, 60), code, ip, createdAt: new Date().toISOString(), exp: Date.now() + REQUEST_TTL_MS, status: "pending" };
+    const r: AccessRequest = { id: randomUUID(), name: String(name || "New device").slice(0, 60), kind: kind === "computer" ? "computer" : "device", code, ip, createdAt: new Date().toISOString(), exp: Date.now() + REQUEST_TTL_MS, status: "pending" };
     this.byPoll.set(sha256(poll), r);
     return { poll, request: r };
   }

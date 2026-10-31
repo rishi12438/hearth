@@ -153,6 +153,7 @@ function onEvent(e: { type: string; data?: any }) {
     case "unpaired": toast("This device was signed out of the hub.", "err"); removeHub(activeHub()!.id); location.reload(); return;
     case "locked": location.reload(); return;
     case "access": if (S.state?.device.primary && e.data?.pending) { toast("A new device wants in. Settings → Devices"); refreshState(); } return;
+    case "computers": computersChanged(); return;
     case "thinking":
       if (e.data?.on === false) { if (S.planning === e.data.threadId) S.planning = null; }
       else S.planning = e.data?.threadId || null;
@@ -663,6 +664,7 @@ function drawHome() {
     h("span", { class: "hicon" }, "#"), h("span", { class: "grow" }, channelName(t)),
     t.needsYou ? h("em", { class: "badge" }, String(t.needsYou)) : t.working ? h("i", { class: "spin" }) : fresh(t) ? h("i", { class: "udot", "aria-label": "New" }) : null);
   clear(top,
+    linkStrip(),
     S.ideas.length ? h("section", { class: "ideas" }, h("h2", { class: "bigtitle" }, "Ideas"), S.ideas.map(ideaRow)) : null,
     h("div", { class: "tiles" }, tiles.map(([ic, title, sub, fn, hot]) =>
       h("button", { class: `tilebtn ${hot ? "hot" : ""}`, on: { click: fn } }, h("span", { class: "ti" }, icon(ic, 22), hot ? h("i", { class: "dot" }) : null), h("b", null, title), h("small", null, sub)))));
@@ -1028,7 +1030,7 @@ function metaLine(j: any) {
     return `${n ? `used ${n} · ` : ""}${secs(j.durationMs)} · ${money(j.costUsd)}`;
   }
   const model = j.voiced ? `${j.tier === "quick" ? "quick" : "workhorse"} + heavy` : j.tier === "quick" ? "quick" : j.tier === "heavy" ? "heavy" : null;
-  return [j.escalated ? "moved up" : null, model, secs(j.durationMs), money(j.costUsd)].filter(Boolean).join(" · ");
+  return [j.escalated ? "moved up" : null, model, j.ranOn ? `on ${j.ranOn === "cloud" ? "the cloud" : j.ranOn}` : null, secs(j.durationMs), money(j.costUsd)].filter(Boolean).join(" · ");
 }
 
 function chatMenu() {
@@ -2262,16 +2264,18 @@ async function openDevices() {
         : "New devices join through your primary device. Each device has its own key; sign one out and it loses access at once."),
       waiting.length ? h("h4", null, "Waiting to join") : null,
       waiting.length ? h("div", { class: "list" }, waiting.map((r: any) => h("div", { class: "item" },
-        h("div", { class: "hicon" }, icon("phone", 16)),
-        h("div", { class: "grow" }, h("div", { class: "title" }, r.name, h("span", { class: "tag soft" }, `code ${r.code}`)), h("div", { class: "sub" }, `Asked ${relTime(r.createdAt)} · only approve if the same code is on its screen`)),
+        h("div", { class: "hicon" }, icon(r.kind === "computer" ? "laptop" : "phone", 16)),
+        h("div", { class: "grow" }, h("div", { class: "title" }, r.name, h("span", { class: "tag soft" }, `code ${r.code}`)), h("div", { class: "sub" }, `${r.kind === "computer" ? "Wants to link as a computer · " : ""}Asked ${relTime(r.createdAt)} · only approve if the same code is on its screen`)),
         h("button", { class: "btn small primary", on: { click: () => decide(r, "approve") } }, "Approve"),
         h("button", { class: "btn small danger-ghost", on: { click: () => decide(r, "deny") } }, "Deny")))) : null,
-      h("div", { class: "list" }, devices.map((d: any) => h("div", { class: "item" },
+      h("h4", null, "Phones and browsers"),
+      h("div", { class: "list" }, devices.filter((d: any) => d.role !== "computer").map((d: any) => h("div", { class: "item" },
         h("div", { class: "hicon" }, icon(d.passkey ? "lock" : "phone", 16)),
         h("div", { class: "grow" }, h("div", { class: "title" }, d.name, d.primary ? h("span", { class: "tag soft" }, "Primary") : null, d.current ? h("span", { class: "tag soft" }, "This device") : null), h("div", { class: "sub" }, `Paired ${dayLabel(d.createdAt)} · seen ${relTime(d.lastSeenAt)}${d.passkey ? " · Face ID" : ""}`)),
         primary && !d.primary ? h("button", { class: "btn small ghost", on: { click: () => confirmSheet(`Make ${d.name} primary?`, "It will be the one that lets new devices in. This device stays paired.", "Make primary", async () => { await call(`/api/devices/${d.id}/primary`, { body: {} }); toast(`${d.name} is primary`); refreshState(); }) } }, "Make primary") : null,
         primary || d.current ? h("button", { class: "btn small danger-ghost", on: { click: () => confirmSheet(`Sign out ${d.name}?`, "It will need to be let in again to come back.", "Sign out", async () => { await call(`/api/devices/${d.id}`, { method: "DELETE" }); if (d.current) { removeHub(activeHub()!.id); location.reload(); } toast("Signed out"); }) } }, "Sign out") : null))),
       codeBox,
+      computersSection(devices.filter((d: any) => d.role === "computer"), primary),
       primary ? h("button", { class: "btn ghost", on: { click: async () => {
         try {
           const { code, expiresInMin, qr } = await call("/api/devices/pair-code", { body: {} });
@@ -2283,6 +2287,85 @@ async function openDevices() {
       } } }, icon("plus", 16), "Add a device") : null,
     ]);
   } catch (e) { handleError(e); }
+}
+
+// ---- Linked computers: where work runs ----
+
+/** Four bars, like a phone's signal. */
+function bars(level: number, state: string) {
+  return h("span", { class: `bars ${state}`, "aria-label": `Signal ${level} of 4` }, [1, 2, 3, 4].map((n) => h("i", { class: n <= level ? "on" : "" })));
+}
+const STATE_LABEL: Record<string, string> = { online: "Online", asleep: "Not answering", offline: "Offline" };
+const shortName = (n: string) => n.replace(/ \((Mac)\)$/, "");
+
+/** Home: one line saying where work runs right now. Only shows once a computer is linked. */
+function linkStrip() {
+  const c = S.state?.computers;
+  if (!c?.linked) return null;
+  const best = c.list[0];
+  const on = best?.state === "online";
+  const text = on
+    ? [h("b", null, shortName(best.name)), ` is online · work runs there${best.running ? ` · ${best.running} running` : ""}`]
+    : [h("b", null, c.linked === 1 ? shortName(best.name) : "Your computers"), ` ${best?.state === "asleep" ? "isn't answering" : "is offline"} · the cloud is doing the work`];
+  return h("button", { class: `linkstrip ${best?.state || "offline"}`, on: { click: openDevices } },
+    h("span", { class: "lsicon" }, icon(on ? "laptop" : "cloud", 18)),
+    h("span", { class: "grow" }, text),
+    on ? bars(best.level, best.state) : null, icon("chevron", 14));
+}
+
+function computersSection(list: any[], primary: boolean) {
+  const accept = !!S.state?.computers?.acceptCopies;
+  const hub = activeHub()?.url || "https://yournameassistant.com";
+  const cmd = `bash deploy/setup.sh mac ${hub}`;
+  const card = (d: any) => {
+    const l = d.link;
+    const detail = l.state === "online"
+      ? [`Connected ${relTime(l.connectedAt).replace(/ ago$/, "")}`, l.rttMs != null ? `${l.rttMs} ms` : null, l.running ? `running ${l.running} job${l.running > 1 ? "s" : ""}` : "idle"].filter(Boolean).join(" · ")
+      : l.lastAliveAt ? `Last seen ${relTime(l.lastAliveAt)} · the cloud is doing the work` : "Hasn't connected yet · run the setup on it";
+    const copyRow = (item: "claude" | "codex", label: string) => {
+      const on = d.copy.includes(item);
+      const at = d.copiedAt?.[item];
+      return h("button", { class: "item copyrow", disabled: !primary, on: { click: async () => {
+        try {
+          await call(`/api/devices/${d.id}/copy`, { method: "PUT", body: { ...Object.fromEntries(d.copy.map((i: string) => [i, true])), [item]: !on } });
+          toast(on ? `Stopped copying ${label}` : `Copying ${label} to the cloud`); openDevices();
+        } catch (e) { handleError(e); }
+      } } },
+        h("span", { class: "grow" }, h("b", { class: "light" }, label),
+          h("small", { class: "sub" }, on ? (at ? `Copied ${relTime(at)} · kept up to date` : l.state === "online" ? "Copying…" : "Copies next time it's online") : `So the cloud can use ${item === "claude" ? "Claude" : "Codex"} while this computer is off`)),
+        h("span", { class: `switch ${on ? "on" : ""}` }, h("i")));
+    };
+    return h("div", { class: `ccard ${l.state}` },
+      h("div", { class: "cchead" },
+        h("span", { class: "ccicon" }, icon("laptop", 20), h("i", { class: `cdot ${l.state}` })),
+        h("span", { class: "grow" }, h("b", null, d.name), h("small", { class: `cstate ${l.state}` }, STATE_LABEL[l.state])),
+        bars(l.level, l.state)),
+      h("p", { class: "ccsub" }, detail),
+      l.harnesses.filter((x: string) => x !== "echo").length ? h("div", { class: "ccbrains" }, h("small", null, "Brains here"), l.harnesses.filter((x: string) => x !== "echo").map((x: string) => h("span", { class: "tag soft" }, x))) : null,
+      accept ? h("div", { class: "cccopy" }, h("small", { class: "cclabel" }, "Copy to the cloud"),
+        h("div", { class: "list" }, copyRow("claude", "Claude login"), copyRow("codex", "Codex login"))) : null,
+      primary ? h("button", { class: "btn small danger-ghost", on: { click: () => confirmSheet(`Unlink ${d.name}?`, "It stops running work for this hub, and logins it copied to the cloud are removed.", "Unlink", async () => { await call(`/api/devices/${d.id}`, { method: "DELETE" }); toast("Unlinked"); refreshState(); }) } }, "Unlink") : null);
+  };
+  return h("div", null,
+    h("h4", null, "Computers"),
+    list.length ? list.map(card) : null,
+    h("div", { class: "ccinfo" },
+      h("p", { class: "muted small" }, list.length
+        ? "Work runs on a linked computer when it's online, with its own logins. When none is, this hub (the cloud) does it."
+        : "Link your Mac and teammates run on it, with your own Claude or Codex login. When it's off, the cloud does the work."),
+      primary ? h("button", { class: "codeline", title: "Copy", on: { click: () => { navigator.clipboard?.writeText(cmd); toast("Copied. Run it in the hearth folder on your Mac"); } } }, h("code", null, cmd), icon("clip", 14)) : null));
+}
+
+let computersTimer: ReturnType<typeof setTimeout> | null = null;
+/** A computer came or went: refresh Home's strip, and the Devices sheet if it's open. */
+function computersChanged() {
+  if (computersTimer) return;
+  computersTimer = setTimeout(async () => {
+    computersTimer = null;
+    await refreshState();
+    if (route().view === "home") drawHome();
+    if (document.querySelector('.sheet[aria-label="Devices"]')) openDevices();
+  }, 400);
 }
 
 async function toggleFaceId() {

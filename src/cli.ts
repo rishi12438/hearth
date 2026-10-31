@@ -3,8 +3,9 @@ import { loadConfig } from "./config.ts";
 import { createStore, redactUrl } from "./store/index.ts";
 import { newPairingCode, owners } from "./auth.ts";
 import QRCode from "qrcode";
-import { statSync } from "node:fs";
-import { Brain } from "./brain.ts";
+import { mkdirSync, statSync } from "node:fs";
+import { Brain, availableHarnesses } from "./brain.ts";
+import { connect, joinHub, readLink } from "./computer.ts";
 import { Scripts } from "./scripts.ts";
 import { Push } from "./push.ts";
 import { Hub } from "./hub.ts";
@@ -15,6 +16,29 @@ import type { Device, Hook } from "./types.ts";
 
 const cmd = process.argv[2] || "start";
 const config = loadConfig();
+mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
+
+// The computer side (your Mac): it links to a hub and runs work for it, so it needs no database of its own.
+if (cmd === "join") {
+  const args = process.argv.slice(3);
+  const named = args.indexOf("--name");
+  const name = named >= 0 ? args[named + 1] : undefined;
+  const rest = named >= 0 ? args.filter((_, i) => i !== named && i !== named + 1) : args;
+  const url = rest[0] || process.env.HEARTH_HUB_URL;
+  if (!url) { console.log('usage: bun run join https://yournameassistant.com [--name "Studio"]'); process.exit(1); }
+  try { await joinHub(url, config.dataDir, name || undefined); process.exit(0); } catch (e: any) { console.error(`  ${e.message}`); process.exit(1); }
+}
+if (cmd === "computer") {
+  const link = readLink(config.dataDir);
+  if (!link) { console.log("This computer isn't linked yet. Run: bun run join https://yournameassistant.com"); process.exit(1); }
+  console.log(`hearth · ${link.name} · linking to ${link.hub}  brains here: ${availableHarnesses(config).join(", ")}`);
+  const stop = connect({ config, link });
+  const quit = () => { stop(); process.exit(0); };
+  process.on("SIGINT", quit);
+  process.on("SIGTERM", quit);
+  await new Promise(() => {});
+}
+
 const store = await createStore(config.dbUrl, config.dataDir);
 const publicUrl = process.env.HEARTH_PUBLIC_URL || `http://${config.host === "0.0.0.0" ? "localhost" : config.host}:${config.port}`;
 
@@ -48,7 +72,7 @@ if (cmd === "setup" || cmd === "pair") {
 } else if (cmd === "status") {
   const devices = await store.all<Device>("devices");
   const hooks = (await store.all<Hook>("hooks")).filter((h) => h.status === "active");
-  console.log(`hub: ${config.name}\nstorage: ${store.kind} (${redactUrl(config.dbUrl)})\nbrain: ${config.agent}`);
+  console.log(`hub: ${config.name} (${config.target})\nstorage: ${store.kind} (${redactUrl(config.dbUrl)})\nbrain: ${config.agent}`);
   console.log(`devices: ${devices.length}\nactive hooks: ${hooks.length}`);
   for (const h of hooks) console.log(`  - ${h.title}  next: ${h.nextAt ?? "on event"}`);
   await store.close();
@@ -62,7 +86,7 @@ if (cmd === "setup" || cmd === "pair") {
   const stt = new VoiceSettings(config.dataDir);
   const { server, build } = await startServer(hub, stt);
   await hub.start();
-  console.log(`hearth · ${config.name} · build ${build}`);
+  console.log(`hearth · ${config.name} · ${config.target} · build ${build}`);
   console.log(`listening on http://${server.hostname}:${server.port}  storage: ${store.kind}  brain: ${hub.brain.label}  voice: ${stt.current?.name ?? "off"}  library search: ${library.mode}`);
   if ((await store.all("devices")).length === 0) {
     const { code, expiresInMin } = await newPairingCode(store, "owner");
@@ -72,8 +96,22 @@ if (cmd === "setup" || cmd === "pair") {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 } else {
-  console.log("usage: hearth [start|setup|recover|status|doctor]");
+  console.log("usage: hearth [start|setup|recover|status|doctor]   on a computer: hearth [join <hub-url>|computer]");
   process.exit(1);
+}
+
+/** On a linked computer: is it linked, can it reach the hub, and is a brain logged in here? */
+async function doctorComputer(check: (ok: boolean, good: string, fix: string) => void, bad: () => number) {
+  const link = readLink(config.dataDir);
+  check(!!link, `Linked to ${link?.hub}`, "Not linked: run `bun run join https://yournameassistant.com`");
+  if (link) {
+    const r = await fetch(link.hub + "/computer", { headers: { Authorization: `Bearer ${link.token}` }, signal: AbortSignal.timeout(8000) }).catch(() => null);
+    check(r?.status === 426, "The hub knows this computer", r ? (r.status === 401 ? "The hub signed this computer out: run join again" : `The hub answered ${r.status}`) : `Can't reach ${link.hub}`);
+  }
+  const brains = availableHarnesses(config).filter((h) => h !== "echo");
+  check(brains.length > 0, `Brains here: ${brains.join(", ")}`, "Install and log in to Claude Code (`claude`) or Codex on this computer");
+  console.log(bad() ? `\n  ${bad()} thing(s) to fix.\n` : "\n  All good.\n");
+  if (bad()) process.exitCode = 1;
 }
 
 /** A security self-check for a hub on the internet. Exits non-zero if anything needs fixing. */
@@ -82,7 +120,8 @@ async function doctor() {
   const check = (ok: boolean, good: string, fix: string) => { console.log(ok ? `  ✓ ${good}` : `  ✗ ${fix}`); if (!ok) bad++; };
   const mode = (p: string) => { try { return statSync(p).mode & 0o777; } catch { return -1; } };
   const local = ["127.0.0.1", "localhost", "::1"].includes(config.host);
-  console.log("\nhearth doctor\n");
+  console.log(`\nhearth doctor · ${config.target}\n`);
+  if (config.target === "mac") return doctorComputer(check, () => bad);
   check(local, "Hub listens only on this machine; Caddy is the way in", `HEARTH_HOST=${config.host} exposes the hub without HTTPS. Set HEARTH_HOST=127.0.0.1`);
   check(/^https:\/\//.test(process.env.HEARTH_PUBLIC_URL || ""), `Public address is HTTPS (${process.env.HEARTH_PUBLIC_URL})`, "Set HEARTH_PUBLIC_URL=https://your-domain in .env");
   check(config.behindProxy, "Behind a proxy (HSTS on, real client IPs for rate limits)", "Set HEARTH_BEHIND_PROXY=1 when Caddy is in front");

@@ -3,7 +3,10 @@ import type { Repeat } from "./time.ts";
 
 /** The primary device (role "owner") lets other devices in, like the admin of a router. */
 export type Passkey = { credId: string; spki: string; alg: number };
-export type Device = Doc & { name: string; tokenHash: string; lastSeenAt: string; role?: "owner" | "member"; passkey?: Passkey };
+/** "computer": a Mac (or any machine) linked to this hub to run work with its own logins. Its key opens only the link. */
+export type Device = Doc & { name: string; tokenHash: string; lastSeenAt: string; role?: "owner" | "member" | "computer"; passkey?: Passkey;
+  /** For a computer: which of its logins it keeps copied up to this hub, so the cloud can work while it's off. */
+  copy?: ("claude" | "codex")[] };
 export type PairingCode = Doc & { codeHash: string; expiresAt: number; role?: "owner" | "member" };
 
 export type Done = { kind: string; label: string; id?: string };
@@ -83,7 +86,10 @@ export type Job = Doc & {
   teammateId: string;
   status: "queued" | "working" | "waiting" | "blocked" | "done" | "failed";
   /** Set when the job can't go on without you (a login, your laptop, a permission). It parks until you unblock it. */
-  blocked?: { need: string; why: string; unblock: string };
+  /** needs "computer": parked until a linked computer is online, then it resumes on its own. */
+  blocked?: { need: string; why: string; unblock: string; needs?: "computer" };
+  /** Where the model ran: a linked computer's name, or "cloud" for this hub. */
+  ranOn?: string;
   effort: "quick" | "light" | "heavy";
   /** How it was done: reused a skill/workflow, or worked out fresh by a model. */
   how?: "skill" | "workflow" | "fresh" | "repaired";
