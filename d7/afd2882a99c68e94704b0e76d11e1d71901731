@@ -1,0 +1,88 @@
+src/sandboxes.ts
+  s_d994421d2b64f1::t_e262d8b63815ee 1-223
+deploy/lightsail.md
+  s_d994421d2b64f1::t_c279962fead2f6 189-192,204-205,214
+src/cli.ts
+  s_d994421d2b64f1::t_487febefd371cd 17-18,56-61,103,137
+  s_d994421d2b64f1::t_398822133b7c2d 9,35-40
+web/src/app.ts
+  s_d994421d2b64f1::t_a830a915e0e083 2137,2146-2171,2173,2176-2182
+  s_d994421d2b64f1::t_c0fefcf01d4682 2333-2344,2346-2349,2352-2358,2361-2365
+  s_d994421d2b64f1::t_fb50da62d4f38a 2172,2174-2175
+  s_d994421d2b64f1::t_c111595b4dcbce 2102-2104,2116,2123-2136,2138-2145,2183-2184,2189-2190,2205-2206,2240-2245,2253,2262
+docs/design/public-teammates.md
+  s_d994421d2b64f1::t_c279962fead2f6 3,83-86
+test/shares.test.ts
+  s_d994421d2b64f1::t_e3ac4b9f1dcb0b 321
+  s_d994421d2b64f1::t_a878b9ff007ac4 10-11,17-19,22-26,28,31-32,36-39,41,73-76
+  s_d994421d2b64f1::t_5a61b9fb11ee11 327-349
+  s_d994421d2b64f1::t_81e8ef9a7b6658 286-320,322-326
+package.json
+  s_d994421d2b64f1::t_398822133b7c2d 18
+web/styles.css
+  s_d994421d2b64f1::t_a830a915e0e083 845-846
+  s_d994421d2b64f1::t_c0fefcf01d4682 833-844
+src/computer.ts
+  s_d994421d2b64f1::t_398822133b7c2d 1-2,8,40,42,49-93
+  s_d994421d2b64f1::t_2d6e2be285debc 23,28,41
+src/public/box.ts
+  s_d994421d2b64f1::t_8e48e489dd74bb 4,143-154,398-400,404-407,409,445-459
+src/client.ts
+  s_d994421d2b64f1::t_c0221c6d3ebf95 192
+  s_d994421d2b64f1::t_89f94b27d45a61 225,230-231,233-234
+  s_d994421d2b64f1::t_062ad9cb09125c 1-191,193-224,226-229,232,235-258
+.gitignore
+  s_d994421d2b64f1::t_f3abb9d87b8514 8
+src/types.ts
+  s_d994421d2b64f1::t_487febefd371cd 387-392
+deploy/client/build.sh
+  s_d994421d2b64f1::t_f3abb9d87b8514 1-46,48-62,64-72
+  s_d994421d2b64f1::t_50fca2add94c9e 47,63
+SECURITY.md
+  s_d994421d2b64f1::t_c279962fead2f6 66-73
+deploy/hearth-boxctl
+  s_d994421d2b64f1::t_356e4b8b2ef201 4-5,33-40,48-55,63,65,69
+src/shares.ts
+  s_d994421d2b64f1::t_0af26a9c98314f 12,14-17,115,134,139-157,160-165,167-179,192-204,206,216-217,219,222,227-229,231-240,243-245,249-250,265,271
+  s_d994421d2b64f1::t_49f64bf276ecb7 158-159,166,180-191
+  s_d994421d2b64f1::t_1b51953a5c7348 303-306,308,310-312,319-331,427,436-437,448,452-464
+  s_d994421d2b64f1::t_e3ac4b9f1dcb0b 307
+  s_d994421d2b64f1::t_56e6c61d71c185 377,554
+  s_d994421d2b64f1::t_37f20a19a37dd3 13,112-114,117-133
+src/tokenmint.ts
+  s_d994421d2b64f1::t_2d6e2be285debc 10-11,39-40,50,71-80
+  s_d994421d2b64f1::t_3386c21b1c7bfc 1-9,12-38,41-49,51-70,81-108
+src/server.ts
+  s_d994421d2b64f1::t_398822133b7c2d 853,858-862,866-868
+  s_d994421d2b64f1::t_5a61b9fb11ee11 863-865
+  s_d994421d2b64f1::t_56e6c61d71c185 476,481,487-488
+  s_d994421d2b64f1::t_37f20a19a37dd3 469-474
+  s_d994421d2b64f1::t_49f64bf276ecb7 179,181,188,198-201,468,475,480
+src/public/gateway.ts
+  s_d994421d2b64f1::t_8e48e489dd74bb 1-29
+test/public.test.ts
+  s_d994421d2b64f1::t_81e8ef9a7b6658 233-248
+.env.example
+  s_d994421d2b64f1::t_c279962fead2f6 91-94
+README.md
+  s_d994421d2b64f1::t_c279962fead2f6 83,159-162,184-185
+test/sandboxes.test.ts
+  s_d994421d2b64f1::t_81e8ef9a7b6658 1-36
+  s_d994421d2b64f1::t_502ad397c2ee0f 37-51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "d7afd2882a99c68e94704b0e76d11e1d71901731",
+  "prompts": {},
+  "sessions": {
+    "s_d994421d2b64f1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "86403106-4ceb-4bb5-ad21-404643c5be6c",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
