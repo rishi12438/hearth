@@ -38,7 +38,7 @@ export function createEmbeddings(env: Record<string, string | undefined> = proce
   throw new Error(`Unknown HEARTH_EMBEDDINGS provider: ${provider}`);
 }
 
-export type LibraryItem = { kind: "skill" | "workflow" | "script" | "component"; name: string; description: string; inputs?: string[]; how?: string; score: number };
+export type LibraryItem = { kind: "skill" | "workflow" | "script" | "component" | "trigger" | "trigger-recipe"; name: string; description: string; inputs?: string[]; how?: string; id?: string; score: number };
 
 const cosine = (a: number[], b: number[]) => {
   let dot = 0, na = 0, nb = 0;
@@ -65,8 +65,8 @@ export class Library {
   }
 
   /** Top matches for a request. Falls back to keywords if the embedding provider fails. */
-  async search(query: string, skills: Skill[], workflows: Workflow[], scripts: Script[], k = 6, components: Component[] = []): Promise<LibraryItem[]> {
-    const items = this.items(skills, workflows, scripts, components);
+  async search(query: string, skills: Skill[], workflows: Workflow[], scripts: Script[], k = 6, components: Component[] = [], extra: Omit<LibraryItem, "score">[] = []): Promise<LibraryItem[]> {
+    const items = [...this.items(skills, workflows, scripts, components), ...extra];
     if (!items.length || !query.trim()) return [];
     const texts = items.map((i) => `${i.name}: ${i.description}`);
     if (this.embeddings) {
@@ -132,6 +132,28 @@ export function validateWorkflow(a: any) {
   })).filter((s: any) => (s.skill && NAME_RE.test(s.skill)) || s.task);
   if (steps.length < 2) return { error: "A workflow has at least two steps." };
   return { value: { name, description, steps, inputs: cleanInputs(a.inputs) } };
+}
+
+/** A trigger recipe from the brain: a name, inputs and a hook whose strings may hold $input.x blanks. */
+export function validateTriggerRecipe(a: any) {
+  const name = String(a?.name || "").toLowerCase();
+  const description = str(a?.description, 240);
+  if (!NAME_RE.test(name) || !description) return { error: "A trigger recipe needs a lowercase-dash name and a description." };
+  const h = a?.hook;
+  if (!h || typeof h !== "object" || !h.trigger || !h.action || !str(h.title, 80)) return { error: "A trigger recipe needs a hook with title, trigger and action." };
+  const hook = { title: str(h.title, 80)!, trigger: h.trigger, action: h.action, why: str(h.why, 300) || "From a saved setup.",
+    ...(typeof h.teammate === "string" && h.teammate.trim() ? { teammate: h.teammate.trim().slice(0, 24) } : {}),
+    ...(h.cooldownMin ? { cooldownMin: Number(h.cooldownMin) || undefined } : {}) };
+  if (JSON.stringify(hook).length > 6000) return { error: "That trigger recipe is too big." };
+  return { value: { name, description, inputs: cleanInputs(a.inputs), hook } };
+}
+
+/** Fills $input.x blanks in every string inside a value (a recipe's hook). */
+export function fillDeep<T>(v: T, inputs: Record<string, string>): T {
+  if (typeof v === "string") return fill(v, inputs, "") as T;
+  if (Array.isArray(v)) return v.map((x) => fillDeep(x, inputs)) as T;
+  if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, fillDeep(x, inputs)])) as T;
+  return v;
 }
 
 /** Fills "$input.x" and "$prev" placeholders. */

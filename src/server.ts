@@ -480,6 +480,11 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (method === "DELETE" && !id) { ownerOnly(); const st = await hub.google.disconnect(); await hub.log("google.disconnected", "Google disconnected"); hub.emit("connections"); return json({ ...st, redirectUri }); }
         break;
       }
+      case "trigger-recipes": {
+        if (method === "GET" && !id) return json(await hub.listTriggerRecipes());
+        if (method === "DELETE" && id) return json({ ok: await hub.removeTriggerRecipe(id) });
+        break;
+      }
       case "hooks": {
         if (method === "GET" && !id) return json(await hub.listHooks());
         if (method === "POST" && !id) { const r = await hub.addHook(await body(req), "you"); if (r.error) throw new HttpError(400, r.error); return json(r.value); }

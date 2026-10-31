@@ -74,7 +74,16 @@ ${SOURCE_DOCS}
       {"type":"script","script":"<name>","args":[],"then":"notify|think"}
     "why" is shown to the user when it fires: say who asked and when, in a few words.
     requestedByUser = true only if the user explicitly asked for this reminder.
+- hook.update {id, title?, trigger?, action?, why?, teammate?}   change a plan instead of adding a near-copy
 - hook.remove {id} | hook.pause {id}
+    BEFORE hook.add, look for one that already covers it: CONTEXT.hooks (your plans; CONTEXT.hooksTotal says if only
+    some are shown) and CONTEXT.library entries of kind "trigger" (a live plan, id in "id") or "trigger-recipe".
+    Already covered: say so, or widen it with hook.update. A trigger-recipe fits: trigger.use it.
+- trigger.save {name, description, inputs:[{name,description}], hook:{title, trigger, action, why, teammate?}}
+    save a trigger setup worth reusing ("school-deadline-alerts", "linkedin-digest"). Put $input.<name> where the
+    details change (a sender, a URL, a time). Save one when the setup took thought and could come up again.
+- trigger.use {name, inputs:{…}}   make a plan from a saved setup with new details
+- trigger.forget {name}
 - memory.add {fact, notebook, importance, evidence, expiresAt?}
     One fact per entry, written as a standalone sentence. notebook: a short topic (people, health, work, food, home, travel, money, preferences…).
     importance: 3 = core identity or something they'd be upset you forgot (always loaded), 2 = useful, 1 = minor.
