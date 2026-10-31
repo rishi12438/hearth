@@ -15,21 +15,57 @@
 </p>
 
 <p align="center">
+  <a href="#what-you-need">What you need</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#features">Features</a> ·
-  <a href="#deploy-to-your-own-domain">Deploy</a> ·
   <a href="#configuration">Configuration</a> ·
   <a href="docs/features.md">Docs</a> ·
   <a href="SECURITY.md">Security</a>
 </p>
 
+<table align="center">
+  <tr>
+    <td><img src="docs/screenshots/home.png" width="180" alt="Home: needs you, board, plans, active rambles and teammates"></td>
+    <td><img src="docs/screenshots/ramble.png" width="180" alt="New ramble: type or talk, however it comes out"></td>
+    <td><img src="docs/screenshots/channel.png" width="180" alt="A ramble split into jobs, each handled by a teammate"></td>
+    <td><img src="docs/screenshots/plans.png" width="180" alt="Plans: when your teammates will speak up, and why"></td>
+    <td><img src="docs/screenshots/menu.png" width="180" alt="Menu: memory, people, teammates, skills, brains, scripts"></td>
+  </tr>
+  <tr align="center">
+    <td>Home</td><td>Ramble</td><td>Teammates at work</td><td>Plans</td><td>Everything else</td>
+  </tr>
+</table>
+
 ---
 
 ## Why Hearth?
 
-Most assistants keep your life on someone else's servers and only answer when you ask. Hearth runs on a box you own (a $5 VPS, a home server or your laptop), uses `claude -p`, `codex exec` or any CLI you choose to do the thinking, and speaks first when you've told it what matters: reminders, check-ins, a page that changed, a bill that's due.
+**Think of it as Muse, but open source, and you own the data and the memory.**
 
-There's no relay, no account and no middleman. Your phone talks straight to your hub over HTTPS.
+Most assistants keep your life on someone else's servers and only answer when you ask. Hearth runs on a box you own and lives at an address you own, like `https://yournameassistant.com`. It uses `claude -p`, `codex exec` or any CLI you choose to do the thinking, and it speaks first when you've told it what matters: reminders, check-ins, a page that changed, a bill that's due.
+
+Everything it learns about you sits in a database on your server. You can read it, edit it, export it as one file or wipe it. There's no relay, no account and no middleman: your phone talks straight to your hub over HTTPS.
+
+## What you need
+
+| | What | Cost |
+|---|---|---|
+| **A server** | Anything always on that runs Linux or macOS: a small VPS (AWS Lightsail, Hetzner, DigitalOcean), a home server or a spare Mac. Your laptop works for trying it out, but reminders only fire while it's awake. | about $5/month |
+| **A domain** | So you can open it from anywhere at something like `https://yournameassistant.com`. Any registrar works; HTTPS certificates are automatic and free. | about $10/year |
+| **A brain** | [Claude Code](https://claude.com/claude-code) or [Codex](https://github.com/openai/codex), logged in on the server. Your existing subscription covers it, and the hub never stores model keys. | your plan |
+| **A phone** | Open your domain and tap **Add to Home Screen**. It runs like an app, with push notifications (iPhone needs iOS 16.4 or newer). | free |
+| **Voice** *(optional)* | A [Deepgram](https://console.deepgram.com) key for hold-to-talk. | pay as you go |
+
+Then:
+
+1. Buy the domain and point it at your server ([step-by-step guide](deploy/lightsail.md)).
+2. On the server, run `sudo bash deploy/setup.sh yournameassistant.com you@example.com`. That one command sets up HTTPS, a firewall, the service and push notifications.
+3. Scan the QR code it prints with your phone. That phone becomes your primary device, and any other device (laptop, tablet) joins only when it approves.
+4. Start rambling: *"remind me at 6 to call mom, find a cheap dinner spot, and every weekday at 8 brief me on the weather."*
+
+### How reminders reach you
+
+Reminders and routines live on your hub, and it sends them as push notifications to your phone on time, even when the app is closed. Quiet hours and a daily cap keep it from getting noisy. Reminders you asked for yourself always come through. For anything that belongs in your calendar, a teammate can make a calendar invite (`.ics`) that you tap once to add to Apple Calendar, Google Calendar or Outlook.
 
 ## Features
 
@@ -82,7 +118,7 @@ bun start
 To get HTTPS, a firewall and phone notifications in one command on a fresh Linux server:
 
 ```bash
-sudo bash deploy/setup.sh example.com you@example.com
+sudo bash deploy/setup.sh yournameassistant.com you@example.com
 ```
 
 [deploy/lightsail.md](deploy/lightsail.md) walks through buying and locking down a domain, DNS and the server, step by step. It's written for AWS Lightsail, but any Linux VPS works the same way.
