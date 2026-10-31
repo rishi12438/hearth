@@ -13,6 +13,9 @@ export type Config = {
   allowedOrigins: string[];
   contact: string;
   behindProxy: boolean;
+  /** Every device must unlock with a passkey (Face ID…) before it can read anything. */
+  requirePasskey: boolean;
+  unlockHours: number;
   /** How many brain processes may run at once, overall and per harness. The orchestrator never waits. */
   maxParallel: number;
   maxParallelPerHarness: Record<string, number>;
@@ -43,6 +46,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     allowedOrigins: list(env.HEARTH_ALLOWED_ORIGINS),
     contact: env.HEARTH_CONTACT || "mailto:hearth@example.com",
     behindProxy: env.HEARTH_BEHIND_PROXY === "1",
+    requirePasskey: env.HEARTH_REQUIRE_PASSKEY === "1",
+    unlockHours: Math.max(1, Number(env.HEARTH_UNLOCK_HOURS || 12)),
     maxParallel: Math.max(1, Number(env.HEARTH_MAX_PARALLEL || 4)),
     maxParallelPerHarness: Object.fromEntries(Object.entries(env)
       .filter(([k, v]) => /^HEARTH_MAX_PARALLEL_[A-Z]+$/.test(k) && v)

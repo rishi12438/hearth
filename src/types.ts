@@ -1,8 +1,10 @@
 import type { Doc } from "./store/types.ts";
 import type { Repeat } from "./time.ts";
 
-export type Device = Doc & { name: string; tokenHash: string; lastSeenAt: string };
-export type PairingCode = Doc & { codeHash: string; expiresAt: number };
+/** The primary device (role "owner") lets other devices in, like the admin of a router. */
+export type Passkey = { credId: string; spki: string; alg: number };
+export type Device = Doc & { name: string; tokenHash: string; lastSeenAt: string; role?: "owner" | "member"; passkey?: Passkey };
+export type PairingCode = Doc & { codeHash: string; expiresAt: number; role?: "owner" | "member" };
 
 export type Done = { kind: string; label: string; id?: string };
 

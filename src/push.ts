@@ -44,8 +44,8 @@ export class Push {
     return (await this.store.all<PushSub>("pushSubs")).some((s) => s.deviceId === deviceId);
   }
 
-  async send(payload: { title: string; body: string; tag?: string; url?: string }) {
-    const subs = await this.store.all<PushSub>("pushSubs");
+  async send(payload: { title: string; body: string; tag?: string; url?: string }, onlyDevices?: string[]) {
+    const subs = (await this.store.all<PushSub>("pushSubs")).filter((s) => !onlyDevices || onlyDevices.includes(s.deviceId));
     await Promise.all(subs.map(async (s) => {
       try {
         await webpush.sendNotification({ endpoint: s.endpoint, keys: s.keys }, JSON.stringify(payload), { TTL: 3600, urgency: "high" });

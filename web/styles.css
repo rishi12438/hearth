@@ -356,6 +356,7 @@ button.item:active, .item > button.grow:active { background: var(--surface-2); }
 .paircode { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 18px; margin: 14px 0; border-radius: 14px; background: var(--surface); text-align: center; }
 .paircode b { font-family: var(--mono); font-size: 30px; letter-spacing: .08em; }
 .paircode small { color: var(--muted); }
+.paircode .qr { background: #fff; padding: 8px; border-radius: 10px; margin-bottom: 8px; }
 .notice { display: flex; gap: 10px; align-items: flex-start; padding: 12px; border-radius: 10px; background: color-mix(in srgb, var(--warn) 14%, transparent); font-size: 14px; margin: 10px 0; }
 .notice .icon { color: var(--warn); margin-top: 2px; }
 pre.code, pre.output { font-family: var(--mono); font-size: 12.5px; line-height: 1.5; background: var(--surface); padding: 12px; border-radius: 10px; overflow: auto; max-height: 46vh; white-space: pre; }

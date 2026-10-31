@@ -1,9 +1,15 @@
-# Caddy gets and renews a real HTTPS certificate for your domain automatically.
-# Point an A record (e.g. hub.example.com) at your box's static IP, then:
+# Caddy gets and renews a real HTTPS certificate for your domain automatically, and redirects http:// to https://.
+# deploy/setup.sh fills in your domain and email. By hand: point an A record at your box, edit both lines, then
 #   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
+
+{
+	email you@example.com
+}
 
 hub.example.com {
 	encode gzip
+	# Don't advertise what's running.
+	header -Server
 	reverse_proxy 127.0.0.1:8790 {
 		flush_interval -1
 	}

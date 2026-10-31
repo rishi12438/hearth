@@ -8,17 +8,22 @@
   "scripts": {
     "start": "bun src/cli.ts start",
     "dev": "HEARTH_AGENT=echo bun --watch src/cli.ts start",
+    "setup": "bun src/cli.ts setup",
     "pair": "bun src/cli.ts pair",
+    "recover": "bun src/cli.ts recover",
     "status": "bun src/cli.ts status",
+    "doctor": "bun src/cli.ts doctor",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@lobehub/fluent-emoji-3d": "1.1.0",
+    "qrcode": "1.5.4",
     "web-push": "^3.6.7"
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@types/qrcode": "^1.5.6",
     "@types/web-push": "^3.6.4",
     "typescript": "^5.6.0"
   }

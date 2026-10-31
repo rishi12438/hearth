@@ -1,5 +1,5 @@
 import { h, clear, icon, richText, relTime, shortAgo, clockTime, dayLabel, greeting, toast } from "./dom.ts";
-import { activeHub, call, hubs, pair, removeHub, setActive, stream, normalizeUrl, ApiError, type HubRef } from "./api.ts";
+import { activeHub, call, hubs, pair, removeHub, setActive, stream, normalizeUrl, ApiError, authHeaders, passkeysWork, registerPasskey, passkeyProof, unlock, requestAccess, waitForApproval, type HubRef } from "./api.ts";
 
 declare const __BUILD__: string;
 
@@ -61,6 +61,10 @@ async function boot() {
   const pairCode = new URLSearchParams(location.hash.slice(1)).get("pair");
   if (!activeHub() || pairCode) return renderPairing(pairCode || "");
   if (/^#(chat\/|hearth)/.test(location.hash)) history.replaceState(null, "", "#"); // old links
+  // Face ID lock: nothing loads until this device unlocks (or sets up Face ID, if the hub requires it).
+  try { await call("/api/state"); } catch (e) { if (e instanceof ApiError && e.status === 423) return renderLock(!!e.data?.hasPasskey); }
+  const wantsAccess = location.hash === "#access";
+  if (wantsAccess) history.replaceState(null, "", "#");
   await Promise.all([refreshState(), loadTeammates(), loadSkills(), loadFiles(), loadApps(), loadIdeas()]);
   show();
   connect();
@@ -70,6 +74,32 @@ async function boot() {
   document.addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openJump(); } });
   setInterval(checkForUpdate, 5 * 60_000);
   setInterval(() => { if (route().view === "home") drawHome(); }, 30_000);
+  if (wantsAccess || S.state?.pendingAccess) openDevices();
+  else if (S.state?.device.primary && !S.state.device.passkey && passkeysWork() && !localStorage.getItem("hearth.faceIdAsked")) {
+    localStorage.setItem("hearth.faceIdAsked", "1");
+    openSheet("Lock with Face ID?", [
+      h("p", { class: "muted" }, "This is your primary device. With Face ID on, a copied key alone can't open your hub, and letting a new device in needs your face."),
+      h("div", { class: "row gap" },
+        h("button", { class: "btn ghost grow", on: { click: closeSheet } }, "Not now"),
+        h("button", { class: "btn primary grow", on: { click: toggleFaceId } }, "Turn on")),
+    ]);
+  }
+}
+
+function renderLock(hasPasskey: boolean) {
+  const err = h("p", { class: "error", role: "alert" });
+  const btn = h("button", { class: "btn primary big", on: { click: async () => {
+    btn.disabled = true; err.textContent = "";
+    try { await (hasPasskey ? unlock() : registerPasskey()); location.reload(); }
+    catch (ex: any) { err.textContent = ex.message || "That didn't work. Try again."; btn.disabled = false; }
+  } } }, icon("lock", 18), hasPasskey ? "Unlock with Face ID" : "Set up Face ID");
+  clear(app, h("div", { class: "pairing" },
+    h("div", { class: "mark" }, h("img", { src: "/icon.svg", alt: "", width: 72, height: 72 })),
+    h("h1", null, "Locked"),
+    h("p", { class: "lede" }, hasPasskey ? "Your hub asks for Face ID (or your device's PIN) before it shows anything." : "This hub requires Face ID on every device. Set it up once; it stays on this device."),
+    err, btn,
+    h("p", { class: "hint" }, passkeysWork() ? "" : "Open this from the hub's own address to use Face ID."),
+  ));
 }
 
 let lastLayout = "";
@@ -121,6 +151,8 @@ function onEvent(e: { type: string; data?: any }) {
   switch (e.type) {
     case "hello": if (e.data?.build && e.data.build !== __BUILD__) markUpdate(); return;
     case "unpaired": toast("This device was signed out of the hub.", "err"); removeHub(activeHub()!.id); location.reload(); return;
+    case "locked": location.reload(); return;
+    case "access": if (S.state?.device.primary && e.data?.pending) { toast("A new device wants in. Settings → Devices"); refreshState(); } return;
     case "thinking":
       if (e.data?.on === false) { if (S.planning === e.data.threadId) S.planning = null; }
       else S.planning = e.data?.threadId || null;
@@ -193,6 +225,7 @@ async function loadTeammates() {
 }
 
 function handleError(err: unknown) {
+  if (err instanceof ApiError && err.status === 423) { renderLock(!!err.data?.hasPasskey); return; }
   if (err instanceof ApiError && err.status === 401) {
     toast("This device isn't paired with the hub any more.", "err");
     removeHub(activeHub()!.id);
@@ -253,7 +286,7 @@ const viewable = (m: string) => /^(image\/(png|jpeg|gif|webp|heic|avif)|applicat
 
 async function fileBlob(f: any, inline: boolean) {
   const hub = activeHub()!;
-  const res = await fetch(`${hub.url}/api/files/${f.id}${inline ? "?inline=1" : ""}`, { headers: { Authorization: `Bearer ${hub.token}` } });
+  const res = await fetch(`${hub.url}/api/files/${f.id}${inline ? "?inline=1" : ""}`, { headers: authHeaders(hub) });
   if (!res.ok) throw new Error("Couldn't fetch the file");
   return new Blob([await res.arrayBuffer()], { type: inline ? f.mime : "application/octet-stream" });
 }
@@ -1106,7 +1139,7 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
     for (const file of Array.from(picker.files || []).slice(0, 5)) {
       try {
         const hub = activeHub()!;
-        const res = await fetch(`${hub.url}/api/files`, { method: "POST", headers: { Authorization: `Bearer ${hub.token}`, "X-File-Name": encodeURIComponent(file.name), "Content-Type": file.type || "application/octet-stream" }, body: file });
+        const res = await fetch(`${hub.url}/api/files`, { method: "POST", headers: { ...authHeaders(hub), "X-File-Name": encodeURIComponent(file.name), "Content-Type": file.type || "application/octet-stream" }, body: file });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Upload failed");
         S.files.set(data.id, data); pending.push(data); drawChips(); swap();
@@ -1494,7 +1527,7 @@ async function finishDictation(keep: boolean) {
       if (d.chunks.length) {
         const hub = activeHub()!;
         const blob = new Blob(d.chunks, { type: (d.rec?.mimeType || "audio/webm").split(";")[0] });
-        const res = await fetch(hub.url + "/api/transcribe", { method: "POST", headers: { Authorization: `Bearer ${hub.token}`, "Content-Type": blob.type }, body: blob });
+        const res = await fetch(hub.url + "/api/transcribe", { method: "POST", headers: { ...authHeaders(hub), "Content-Type": blob.type }, body: blob });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Transcription failed");
         said = String(data.text || "").trim();
@@ -1882,7 +1915,8 @@ function openSettings() {
       row("Places", "Home, office…", openPlaces)),
     h("h4", null, "Security and data"),
     h("div", { class: "list" },
-      row("Devices", "Who can talk to this hub", openDevices),
+      row("Devices", st.device.primary ? (st.pendingAccess ? `${st.pendingAccess} waiting to join` : "This is your primary device") : "Who can talk to this hub", openDevices),
+      passkeysWork() ? row("Face ID lock", st.device.passkey ? "On · asked each time you open the app" : "Off · a copied key alone could open this hub", toggleFaceId, sw(st.device.passkey)) : null,
       row("Activity log", "Everything the hub did", openActivity),
       row("Export everything", "One JSON file", exportData),
       row("Delete my data", "Chats, memory, plans, places", openWipe)),
@@ -1947,7 +1981,8 @@ function renderPairing(code: string) {
     h("label", null, h("span", null, "Pairing code"), codeIn),
     h("label", null, h("span", null, "Name this device"), name),
     err, btn,
-    h("p", { class: "hint" }, "No code? On your hub, run ", h("code", null, "bun run pair"), ". Codes work once and expire after 10 minutes."),
+    h("button", { class: "btn ghost", type: "button", on: { click: () => askToJoin(url.value, name.value, err) } }, "No code? Ask your primary device"),
+    h("p", { class: "hint" }, "Setting up for the first time? On your server, run ", h("code", null, "bun run setup"), " and scan the code. That phone becomes your primary device."),
   );
   clear(app, h("div", { class: "pairing" },
     h("div", { class: "mark" }, h("img", { src: "/icon.svg", alt: "", width: 72, height: 72 })),
@@ -2210,21 +2245,74 @@ function openScript(s: any) {
 
 async function openDevices() {
   try {
-    const devices = await call("/api/devices");
+    const primary = !!S.state?.device.primary;
+    const [devices, waiting] = await Promise.all([call("/api/devices"), primary ? call("/api/access") : Promise.resolve([])]);
     const codeBox = h("div");
+    const decide = async (r: any, verb: "approve" | "deny") => {
+      try {
+        // Letting a device in takes a fresh Face ID check, so someone holding your unlocked phone for a moment can't.
+        const body = verb === "approve" && S.state?.device.passkey ? { passkey: await passkeyProof() } : {};
+        await call(`/api/access/${r.id}/${verb}`, { body });
+        toast(verb === "approve" ? `${r.name} is in` : "Denied"); refreshState(); openDevices();
+      } catch (e) { handleError(e); }
+    };
     openSheet("Devices", [
-      h("p", { class: "muted" }, "Each device has its own key. Sign one out and it loses access at once."),
-      h("div", { class: "list" }, devices.map((d: any) => h("div", { class: "item" },
+      h("p", { class: "muted" }, primary
+        ? "This is your primary device: it lets other devices in. Each device has its own key; sign one out and it loses access at once."
+        : "New devices join through your primary device. Each device has its own key; sign one out and it loses access at once."),
+      waiting.length ? h("h4", null, "Waiting to join") : null,
+      waiting.length ? h("div", { class: "list" }, waiting.map((r: any) => h("div", { class: "item" },
         h("div", { class: "hicon" }, icon("phone", 16)),
-        h("div", { class: "grow" }, h("div", { class: "title" }, d.name, d.current ? h("span", { class: "tag soft" }, "This device") : null), h("div", { class: "sub" }, `Paired ${dayLabel(d.createdAt)} · seen ${relTime(d.lastSeenAt)}`)),
-        h("button", { class: "btn small danger-ghost", on: { click: () => confirmSheet(`Sign out ${d.name}?`, "It will need a new pairing code to come back.", "Sign out", async () => { await call(`/api/devices/${d.id}`, { method: "DELETE" }); if (d.current) { removeHub(activeHub()!.id); location.reload(); } toast("Signed out"); }) } }, "Sign out")))),
+        h("div", { class: "grow" }, h("div", { class: "title" }, r.name, h("span", { class: "tag soft" }, `code ${r.code}`)), h("div", { class: "sub" }, `Asked ${relTime(r.createdAt)} · only approve if the same code is on its screen`)),
+        h("button", { class: "btn small primary", on: { click: () => decide(r, "approve") } }, "Approve"),
+        h("button", { class: "btn small danger-ghost", on: { click: () => decide(r, "deny") } }, "Deny")))) : null,
+      h("div", { class: "list" }, devices.map((d: any) => h("div", { class: "item" },
+        h("div", { class: "hicon" }, icon(d.passkey ? "lock" : "phone", 16)),
+        h("div", { class: "grow" }, h("div", { class: "title" }, d.name, d.primary ? h("span", { class: "tag soft" }, "Primary") : null, d.current ? h("span", { class: "tag soft" }, "This device") : null), h("div", { class: "sub" }, `Paired ${dayLabel(d.createdAt)} · seen ${relTime(d.lastSeenAt)}${d.passkey ? " · Face ID" : ""}`)),
+        primary && !d.primary ? h("button", { class: "btn small ghost", on: { click: () => confirmSheet(`Make ${d.name} primary?`, "It will be the one that lets new devices in. This device stays paired.", "Make primary", async () => { await call(`/api/devices/${d.id}/primary`, { body: {} }); toast(`${d.name} is primary`); refreshState(); }) } }, "Make primary") : null,
+        primary || d.current ? h("button", { class: "btn small danger-ghost", on: { click: () => confirmSheet(`Sign out ${d.name}?`, "It will need to be let in again to come back.", "Sign out", async () => { await call(`/api/devices/${d.id}`, { method: "DELETE" }); if (d.current) { removeHub(activeHub()!.id); location.reload(); } toast("Signed out"); }) } }, "Sign out") : null))),
       codeBox,
-      h("button", { class: "btn ghost", on: { click: async () => {
-        const { code, expiresInMin } = await call("/api/devices/pair-code", { body: {} });
-        clear(codeBox, h("div", { class: "paircode" }, h("small", null, "Pairing code"), h("b", null, code), h("small", null, `Single use · expires in ${expiresInMin} min · open ${activeHub()!.url}`)));
-      } } }, icon("plus", 16), "Pair another device"),
+      primary ? h("button", { class: "btn ghost", on: { click: async () => {
+        try {
+          const { code, expiresInMin, qr } = await call("/api/devices/pair-code", { body: {} });
+          clear(codeBox, h("div", { class: "paircode" },
+            h("img", { src: `data:image/svg+xml;utf8,${encodeURIComponent(qr)}`, alt: "Pairing QR code", width: 200, height: 200, class: "qr" }),
+            h("small", null, "Scan with the new device's camera, or enter"), h("b", null, code),
+            h("small", null, `Single use · expires in ${expiresInMin} min · ${activeHub()!.url}`)));
+        } catch (e) { handleError(e); }
+      } } }, icon("plus", 16), "Add a device") : null,
     ]);
   } catch (e) { handleError(e); }
+}
+
+async function toggleFaceId() {
+  try {
+    if (S.state?.device.passkey) await call("/api/passkey", { method: "DELETE" });
+    else await registerPasskey();
+    toast(S.state?.device.passkey ? "Face ID lock off" : "Face ID lock on");
+    await refreshState(); closeSheet(); openSettings();
+  } catch (e) { e instanceof ApiError ? handleError(e) : toast((e as Error).message || "Face ID didn't work", "err"); }
+}
+
+/** A new device with no code: ask the hub, show a short code, and wait for the primary phone to approve. */
+async function askToJoin(url: string, name: string, err: HTMLElement) {
+  err.textContent = "";
+  try {
+    const { origin, poll, code } = await requestAccess(url, name);
+    const stop = new AbortController();
+    clear(app, h("div", { class: "pairing" },
+      h("div", { class: "mark" }, h("img", { src: "/icon.svg", alt: "", width: 72, height: 72 })),
+      h("h1", null, "Asked to join"),
+      h("p", { class: "lede" }, "Your primary device got a notification. Approve it there if it shows this same code:"),
+      h("div", { class: "paircode" }, h("b", null, code), h("small", null, "Waiting… the request lasts 10 minutes")),
+      h("button", { class: "btn ghost", on: { click: () => { stop.abort(); location.reload(); } } }, "Cancel")));
+    await waitForApproval(origin, poll, stop.signal);
+    history.replaceState(null, "", "#today");
+    location.reload();
+  } catch (ex: any) {
+    if (ex?.name === "AbortError") return;
+    if (err.isConnected) err.textContent = ex.message; else { toast(ex.message, "err"); setTimeout(() => location.reload(), 1500); }
+  }
 }
 
 async function openActivity() {
@@ -2238,7 +2326,7 @@ async function openActivity() {
 async function exportData() {
   try {
     const hub = activeHub()!;
-    const res = await fetch(hub.url + "/api/export", { headers: { Authorization: `Bearer ${hub.token}` } });
+    const res = await fetch(hub.url + "/api/export", { headers: authHeaders(hub) });
     if (!res.ok) throw new Error("Export failed");
     const blob = await res.blob();
     const a = h("a", { href: URL.createObjectURL(blob), download: `hearth-export-${new Date().toISOString().slice(0, 10)}.json` });

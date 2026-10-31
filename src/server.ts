@@ -1,7 +1,8 @@
 import { readFileSync, readdirSync, existsSync, mkdirSync } from "node:fs";
 import { join, resolve, extname, dirname } from "node:path";
 type Server = Bun.Server<unknown>;
-import { sha256, deviceForToken, newPairingCode, redeemPairingCode, RateLimiter } from "./auth.ts";
+import { sha256, deviceForToken, newPairingCode, redeemPairingCode, RateLimiter, addDevice, owners, isOwner, newChallenge, verifyPasskeyRegistration, verifyPasskeyAssertion, Sessions, AccessRequests } from "./auth.ts";
+import QRCode from "qrcode";
 import type { Hub } from "./hub.ts";
 import { deepgramLive, type VoiceSettings } from "./voice.ts";
 import { randomBytes } from "node:crypto";
@@ -63,6 +64,13 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
   const pairLimiter = new RateLimiter(5, 10 * 60_000);
   const pairGlobal = new RateLimiter(30, 10 * 60_000);
   const ideaLimiter = new RateLimiter(2, 10 * 60_000);
+  // Wrong device tokens: 20 in 10 minutes and that address is shut out of the API for the rest of the window.
+  const badToken = new RateLimiter(20, 10 * 60_000);
+  // Access requests notify your primary phone, so strangers can't spam it.
+  const askLimiter = new RateLimiter(3, 10 * 60_000);
+  const askGlobal = new RateLimiter(10, 10 * 60_000);
+  const sessions = new Sessions(config.unlockHours * 3600_000);
+  const access = new AccessRequests();
   const streams = new Map<string, Set<ReadableStreamDefaultController>>();
   const enc = new TextEncoder();
 
@@ -88,7 +96,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
     // Other hubs you own can call this one from the same app, but only if you list them.
     if (origin && !sameOrigin && config.allowedOrigins.includes(origin)) {
       h["Access-Control-Allow-Origin"] = origin;
-      h["Access-Control-Allow-Headers"] = "Authorization, Content-Type";
+      h["Access-Control-Allow-Headers"] = "Authorization, Content-Type, X-Hearth-Unlock";
       h["Access-Control-Allow-Methods"] = "GET, POST, PATCH, DELETE";
       h["Access-Control-Max-Age"] = "600";
       h["Vary"] = "Origin";
@@ -108,7 +116,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
   }
 
   const clientIp = (req: Request, server: Server) =>
-    (config.behindProxy && req.headers.get("x-forwarded-for")?.split(",")[0].trim()) || server.requestIP(req)?.address || "?";
+    (config.behindProxy && req.headers.get("x-forwarded-for")?.split(",").pop()!.trim()) || server.requestIP(req)?.address || "?";
 
   const publicPrefs = (p: Prefs) => ({ userName: p.userName, tz: p.tz, quietStart: p.quietStart, quietEnd: p.quietEnd, maxProactivePerDay: p.maxProactivePerDay, proactiveToday: p.proactiveToday });
 
@@ -117,10 +125,36 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
     const method = req.method;
     const seg = path.split("/").filter(Boolean); // ["api", resource, id?, verb?]
 
+    const ip = clientIp(req, server);
+    // An address that keeps sending wrong keys loses pairing and access requests too. Paired devices are never shut out.
+    const banned = () => new HttpError(429, "Too many wrong keys from this address. Wait 10 minutes.");
+    const isPublic = path === "/api/pair" || path.startsWith("/api/access/request") || path.startsWith("/api/access/poll");
+    if (isPublic && badToken.blocked(ip)) throw banned();
+    // Passkeys are bound to the page's own origin; a call from another hub's page can't use them.
+    const pageOrigin = (() => {
+      const o = req.headers.get("origin"), host = req.headers.get("x-forwarded-host") || req.headers.get("host");
+      try { return o && new URL(o).host === host ? o : null; } catch { return null; }
+    })();
+
     // ---- public ----
-    if (path === "/api/health") return json({ name: config.name, version: pkg.version, build: web.build });
+    if (path === "/api/health") return json({ name: config.name, version: pkg.version, build: web.build, setup: (await store.all<Device>("devices")).length === 0 });
+    // A new device asks to join. Your primary phone gets a notification with the same short code to compare.
+    if (path === "/api/access/request" && method === "POST") {
+      if (!askLimiter.allow(ip) || !askGlobal.allow("all")) throw new HttpError(429, "Too many requests. Wait 10 minutes.");
+      if ((await store.all<Device>("devices")).length === 0) throw new HttpError(409, "This hub isn't set up yet. Use the setup code from the server.");
+      const b = await body(req);
+      const { poll, request } = access.create(b.deviceName, ip);
+      hub.emit("access", { pending: access.pending().length });
+      await hub.push?.send({ title: "New device wants in", body: `${request.name} · code ${request.code}. Open Hearth to approve or deny.`, tag: "access", url: "/#access" }, (await owners(store)).map((d) => d.id));
+      return json({ poll, code: request.code, expiresInMin: 10 });
+    }
+    if (path === "/api/access/poll" && method === "POST") {
+      const r = access.poll((await body(req)).poll);
+      if (!r) throw new HttpError(404, "That request expired. Ask again.");
+      return json({ status: r.status, token: r.token, deviceId: r.deviceId, hub: { name: config.name, build: web.build } });
+    }
     if (path === "/api/pair" && method === "POST") {
-      if (!pairLimiter.allow(clientIp(req, server)) || !pairGlobal.allow("all")) throw new HttpError(429, "Too many attempts. Wait 10 minutes.");
+      if (!pairLimiter.allow(ip) || !pairGlobal.allow("all")) throw new HttpError(429, "Too many attempts. Wait 10 minutes.");
       const b = await body(req);
       const r = await redeemPairingCode(store, b.code, b.deviceName);
       if (!r) throw new HttpError(401, "That code didn't work. Codes are single-use and last 10 minutes.");
@@ -134,7 +168,15 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
 
     // ---- everything else needs a paired device ----
     const device = await deviceForToken(store, req.headers.get("authorization"));
-    if (!device) throw new HttpError(401, "Not paired.");
+    if (!device) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not paired."); }
+    // Face ID lock: a device with a passkey (or every device, with HEARTH_REQUIRE_PASSKEY=1) needs a recent unlock.
+    // A copied device token alone then gets nothing but this lock screen.
+    if ((device.passkey || config.requirePasskey) && !sessions.valid(req.headers.get("x-hearth-unlock"), device.id)) {
+      const lockOk = seg[1] === "unlock" || (seg[1] === "passkey" && !device.passkey);
+      if (!lockOk) return json({ error: "Locked.", locked: true, hasPasskey: !!device.passkey }, 423);
+    }
+    const owner = await isOwner(store, device);
+    const ownerOnly = () => { if (!owner) throw new HttpError(403, "Only your primary device can do that."); };
     if (Date.now() - new Date(device.lastSeenAt).getTime() > 5 * 60_000) await store.put<Device>("devices", { ...device, lastSeenAt: new Date().toISOString() });
     const id = seg[2];
 
@@ -143,7 +185,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
         const prefs = await hub.prefs();
         return json({
           hub: { name: config.name, version: pkg.version, build: web.build, brain: hub.brain.label, storage: store.kind },
-          device: { id: device.id, name: device.name }, prefs: publicPrefs(prefs), thinking: hub.thinking,
+          device: { id: device.id, name: device.name, primary: owner, passkey: !!device.passkey }, requirePasskey: config.requirePasskey,
+          pendingAccess: owner ? access.pending().length : 0, prefs: publicPrefs(prefs), thinking: hub.thinking,
           push: { available: !!hub.push, subscribed: hub.push ? await hub.push.hasDevice(device.id) : false },
           pendingScripts: (await hub.scripts.list()).filter((s) => s.status === "proposed").length,
           voice: voice?.current?.name ?? null,
@@ -440,15 +483,85 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null) 
         return json(publicPrefs(await hub.setPrefs(patch)));
       }
       case "devices": {
-        if (method === "GET") return json((await store.all<Device>("devices")).map(({ tokenHash, ...d }) => ({ ...d, current: d.id === device.id })));
-        if (method === "POST" && id === "pair-code") return json(await newPairingCode(store));
+        const primaries = (await owners(store)).map((d) => d.id);
+        if (method === "GET") return json((await store.all<Device>("devices")).map(({ tokenHash, passkey, ...d }) => ({ ...d, primary: primaries.includes(d.id), passkey: !!passkey, current: d.id === device.id })));
+        if (method === "POST" && id === "pair-code") {
+          ownerOnly();
+          const r = await newPairingCode(store);
+          const link = `${pageOrigin || process.env.HEARTH_PUBLIC_URL || ""}/#pair=${r.code}`;
+          return json({ ...r, link, qr: await QRCode.toString(link, { type: "svg", margin: 1, errorCorrectionLevel: "M" }) });
+        }
+        // Hand the primary role to another device (you're moving to a new phone).
+        if (method === "POST" && id && seg[3] === "primary") {
+          ownerOnly();
+          const target = await store.get<Device>("devices", id);
+          if (!target) throw new HttpError(404, "No such device.");
+          await store.put<Device>("devices", { ...target, role: "owner" });
+          for (const d of await store.all<Device>("devices")) if (d.id !== id && (d.role === "owner" || primaries.includes(d.id))) await store.put<Device>("devices", { ...d, role: "member" });
+          await hub.log("device.primary", `${target.name} is now the primary device`);
+          return json({ ok: true });
+        }
         if (method === "DELETE" && id) {
+          if (id !== device.id) ownerOnly();
+          if (primaries.length === 1 && primaries[0] === id && (await store.all<Device>("devices")).length > 1) throw new HttpError(409, "Make another device primary first.");
+          sessions.endDevice(id);
           const ok = await store.remove("devices", id);
           await hub.push?.unsubscribeDevice(id);
           for (const c of streams.get(id) || []) { try { c.close(); } catch {} }
           streams.delete(id);
           await hub.log("device.revoked", `A device was signed out`);
           return json({ ok });
+        }
+        break;
+      }
+      // Face ID lock for this device.
+      case "passkey": {
+        if (!pageOrigin) throw new HttpError(400, "Open the hub's own address to use Face ID.");
+        if (id === "options" && method === "POST") {
+          return json({ challenge: newChallenge(device.id), rp: { name: config.name, id: new URL(pageOrigin).hostname }, user: { id: Buffer.from(device.id).toString("base64url"), name: device.name } });
+        }
+        if (id === "register" && method === "POST") {
+          if (device.passkey && !sessions.valid(req.headers.get("x-hearth-unlock"), device.id)) throw new HttpError(423, "Unlock first.");
+          const pk = verifyPasskeyRegistration(await body(req), device.id, pageOrigin);
+          if (!pk) throw new HttpError(400, "That passkey didn't check out. Try again.");
+          await store.put<Device>("devices", { ...device, passkey: pk });
+          await hub.log("device.passkey", `${device.name} turned on Face ID lock`);
+          return json({ ok: true, unlock: sessions.create(device.id) });
+        }
+        if (method === "DELETE") {
+          if (config.requirePasskey) throw new HttpError(409, "This hub requires Face ID on every device.");
+          const { passkey, ...rest } = device;
+          await store.put<Device>("devices", rest as Device);
+          await hub.log("device.passkey", `${device.name} turned off Face ID lock`);
+          return json({ ok: true });
+        }
+        break;
+      }
+      case "unlock": {
+        if (!pageOrigin) throw new HttpError(400, "Open the hub's own address to use Face ID.");
+        if (!device.passkey) throw new HttpError(409, "No passkey on this device yet.");
+        if (id === "options" && method === "POST") return json({ challenge: newChallenge(device.id), rpId: new URL(pageOrigin).hostname, credId: device.passkey.credId });
+        if (id === "verify" && method === "POST") {
+          if (!verifyPasskeyAssertion(await body(req), device, pageOrigin)) { badToken.allow(ip); throw new HttpError(401, "Face ID didn't match."); }
+          return json({ unlock: sessions.create(device.id) });
+        }
+        break;
+      }
+      // New devices asking to join. Approving takes a fresh Face ID check when the primary has one.
+      case "access": {
+        ownerOnly();
+        if (method === "GET") return json(access.pending().map(({ token, ...r }) => r));
+        const r = id ? access.find(id) : null;
+        if (!r || r.status !== "pending") throw new HttpError(404, "That request expired.");
+        if (seg[3] === "deny" && method === "POST") { r.status = "denied"; hub.emit("access", { pending: access.pending().length }); return json({ ok: true }); }
+        if (seg[3] === "approve" && method === "POST") {
+          const b = await body(req);
+          if (device.passkey && !(pageOrigin && verifyPasskeyAssertion(b.passkey, device, pageOrigin))) throw new HttpError(401, "Confirm with Face ID to let a device in.");
+          const added = await addDevice(store, r.name, "member");
+          r.status = "approved"; r.token = added.token; r.deviceId = added.device.id;
+          await hub.log("device.paired", `${r.name} joined (approved from ${device.name})`);
+          hub.emit("access", { pending: access.pending().length });
+          return json({ ok: true });
         }
         break;
       }
