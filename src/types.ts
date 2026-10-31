@@ -78,7 +78,7 @@ export type Job = Doc & {
   status: "queued" | "working" | "waiting" | "blocked" | "done" | "failed";
   /** Set when the job can't go on without you (a login, your laptop, a permission). It parks until you unblock it. */
   blocked?: { need: string; why: string; unblock: string };
-  effort: "light" | "heavy";
+  effort: "quick" | "light" | "heavy";
   /** How it was done: reused a skill/workflow, or worked out fresh by a model. */
   how?: "skill" | "workflow" | "fresh" | "repaired";
   skillId?: string;
@@ -100,7 +100,7 @@ export type Job = Doc & {
   parentId?: string;
   depth?: number;
   startedAt?: string;
-  tier?: "workhorse" | "heavy";
+  tier?: "quick" | "workhorse" | "heavy";
   escalated?: boolean;
   result?: string;
   did?: Done[];
@@ -185,6 +185,18 @@ export type Idea = Doc & {
   status: "open" | "accepted" | "dismissed";
   decidedAt?: string;
   threadId?: string;
+};
+
+/** Someone in the user's life, for the relationship map. Teammates add and update them as people come up. */
+export type Person = Doc & {
+  name: string;
+  /** How they relate to the user: "sister", "landlord", "Priya's partner". */
+  relation: string;
+  emoji?: string;
+  notes: string[];
+  /** How they relate to other people on the map. */
+  links: { to: string; relation: string }[];
+  lastMentionedAt?: string;
 };
 
 /** One line per day of what happened, so "what did I say last week" works without loading every chat. id = YYYY-MM-DD. */

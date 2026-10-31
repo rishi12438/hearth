@@ -25,7 +25,7 @@ Run one hub on an always-on box so routines fire while your laptop sleeps. Run a
 
 ### Rambles, teammates and escalation
 
-1. You ramble into a chat. The **orchestrator** (default `claude-fable-5-1`) returns a title, a short reply, facts to remember, and jobs. Each job has a teammate and an effort, `light` or `heavy`.
+1. You ramble into a chat. The **orchestrator** (default `claude-sonnet-5-5`, fast because you wait on it) returns a title, a short reply, facts to remember, and jobs. Each job has a teammate and an effort, `light` or `heavy`.
 2. Light jobs run on the **workhorse** (default `claude-sonnet-5-5`), heavy ones on **heavy** (default `claude-opus-5-5`). If the workhorse fails or answers `[[escalate]]`, the job reruns on heavy and its card says "escalated".
 3. Teammates are a name plus a role prompt. If no teammate fits, the orchestrator creates one, which you can see and delete in the app.
 4. Voice: the app records audio and the hub transcribes it with Deepgram (`HEARTH_DEEPGRAM_API_KEY`), so the key never reaches the phone. Speech-to-text is an interface in [src/voice.ts](src/voice.ts), so other providers can be added.
@@ -122,7 +122,7 @@ All settings are environment variables; see [.env.example](.env.example). The ma
 | Variable | Default | |
 |---|---|---|
 | `HEARTH_AGENT` | `claude` | Default harness: `claude`, `codex`, `echo` (demo), or `custom` with `HEARTH_AGENT_CMD='["ollama","run","llama3.1"]'` |
-| `HEARTH_ORCHESTRATOR_MODEL` / `_WORKHORSE_` / `_HEAVY_` | Fable / Sonnet / Opus | Default models per role; `HEARTH_*_AGENT` sets the harness. Changeable in the app under Brains |
+| `HEARTH_ORCHESTRATOR_MODEL` / `_WORKHORSE_` / `_HEAVY_` | Sonnet / Sonnet / Opus | Default models per role; `HEARTH_*_AGENT` sets the harness. Changeable in the app under Brains |
 | `HEARTH_DEEPGRAM_API_KEY` | none | Turns on hold-to-talk |
 | `HEARTH_DB_URL` | SQLite in `./data` | `postgres://…`, `mysql://…`, `mongodb://…` (run `bun add mongodb`) |
 | `HEARTH_HOST` / `HEARTH_PORT` | `127.0.0.1:8790` | Keep it on localhost and put Caddy in front |

@@ -21,6 +21,7 @@ const S = {
   files: new Map<string, any>(),
   apps: [] as any[],
   ideas: [] as any[],
+  progress: new Map<string, string>(), // jobId -> what it's doing right now
   skills: [] as any[],
   workflows: [] as any[],
   hooks: [] as any[],
@@ -32,7 +33,7 @@ const S = {
   planning: null as null | string, // chat id the orchestrator is reading
   updateReady: false,
   sheetOpen: false,
-  panel: null as null | "plans" | "memory" | "skills",
+  panel: null as null | "plans" | "memory" | "skills" | "people",
 };
 
 let live: ReturnType<typeof stream> | null = null;
@@ -147,6 +148,12 @@ function onEvent(e: { type: string; data?: any }) {
     case "threads": if (open) markSeen(open); soon(); if (open && S.chat) call("/api/threads").then((l: any[]) => { const t = l.find((x) => x.id === open); if (t && S.chat) { S.chat.thread.title = t.title; drawHeader(); } }).catch(() => {}); return;
     case "teammates": loadTeammates().then(soon); return;
     case "skills": loadSkills(); return;
+    case "progress": {
+      S.progress.set(e.data.jobId, e.data.text);
+      for (const el of document.querySelectorAll<HTMLElement>(`[data-progress="${e.data.jobId}"]`)) el.textContent = e.data.text;
+      return;
+    }
+    case "people": if (S.panel === "people") openPeople(); return;
     case "ideas": loadIdeas().then(() => { if (route().view === "home") drawHome(); }); return;
     case "about": if (S.panel === "memory") loadAbout(); return;
     case "apps": loadApps().then(() => { const r2 = route(); if (r2.view === "app") { toast("Updated"); renderApp(r2.id); } else if (r2.view === "home") { drawPins(); drawHome(); } else if (r2.view === "chat") drawChat(false); else if (r2.view === "dm") drawDm(false); }); return;
@@ -719,7 +726,7 @@ function drawChannel(el: HTMLElement, stick: boolean) {
     nodes.push(m.taskJobId ? taskMessage(m) : plainMessage(m, grouped));
     lastWho = m.taskJobId ? "task" : who; lastAt = t;
   }
-  if (S.planning === S.chat.thread.id) nodes.push(row(mateWho("hearth", "thinking"), new Date().toISOString(), [h("div", { class: "typing" }, h("i"), h("i"), h("i"), h("span", null, "turning that into tasks…"))], lastWho === "hearth"));
+  if (S.planning === S.chat.thread.id) nodes.push(row(mateWho("hearth", "thinking"), new Date().toISOString(), [h("div", { class: "typing" }, h("i"), h("i"), h("i"), h("span", null, "Reading that and splitting it up…"))], lastWho === "hearth"));
   const atBottom = el.parentElement!.scrollHeight - el.parentElement!.scrollTop - el.parentElement!.clientHeight < 120;
   clear(el, nodes);
   if (stick || atBottom) requestAnimationFrame(() => { const s = document.getElementById("scroll")!; s.scrollTop = s.scrollHeight; });
@@ -776,9 +783,11 @@ function taskMessage(m: any) {
   const open = () => { location.hash = `#c/${S.chat.thread.id}/${j.id}`; };
   const aps = (S.chat.approvals || []).filter((a: any) => (a.jobId === j.id || follow.some((f: any) => f.id === a.jobId)) && a.status === "pending");
   const st = latest.status;
-  const body: (Node | Node[] | null)[] = [h("button", { class: "ttitle", on: { click: open } }, jobLabel(j))];
+  const body: (Node | Node[] | null)[] = [h("button", { class: "ttitle", on: { click: open } }, h("span", null, jobLabel(j)), icon("chevron", 16))];
   if (st === "working" || st === "queued") {
-    body.push(h("div", { class: "typing" }, h("i"), h("i"), h("i"), h("span", null, st === "working" ? "working on it" : latest.dependsOn?.length ? "waiting on another task" : "up next")));
+    body.push(h("button", { class: "typing live", on: { click: open } }, h("i"), h("i"), h("i"),
+      h("span", { "data-progress": latest.id }, st === "working" ? S.progress.get(latest.id) || (latest.tier === "heavy" ? "Thinking it through" : "On it") : latest.dependsOn?.length ? "Waiting on another task" : "Up next"),
+      st === "working" && latest.startedAt ? h("time", { "data-since": latest.startedAt }, elapsed(latest.startedAt)) : null));
   } else if (st === "waiting") {
     body.push(h("div", { class: "block" }, h("div", { class: "blockhead" }, icon("lock", 15), h("b", null, aps[0]?.summary || "Needs your OK")),
       aps.length ? h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => decide(aps[0].id, true) } }, "Approve"), h("button", { class: "sbtn", on: { click: () => decide(aps[0].id, false) } }, "No")) : null));
@@ -806,6 +815,13 @@ function taskMessage(m: any) {
   }
   return row(mateWho(j.teammateId, jobState(latest)), m.createdAt, body, false, st === "failed" ? "err" : "");
 }
+
+/** "0:42" since a task started; kept ticking by the clock below. */
+function elapsed(since: string) {
+  const s = Math.max(0, Math.round((Date.now() - new Date(since).getTime()) / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+setInterval(() => { for (const el of document.querySelectorAll<HTMLElement>("[data-since]")) el.textContent = elapsed(el.dataset.since!); }, 1000);
 
 async function decide(id: string, yes: boolean) { try { await call(`/api/approvals/${id}/${yes ? "approve" : "reject"}`, { body: {} }); } catch (e) { handleError(e); } }
 async function retry(id: string) { try { await call(`/api/jobs/${id}/retry`, { body: {} }); } catch (e) { handleError(e); } }
@@ -842,7 +858,9 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
 function answer(j: any) {
   const who = mateWho(j.teammateId, jobState(j));
   const at = j.finishedAt || j.startedAt || j.createdAt;
-  if (j.status === "queued" || j.status === "working") return row(who, at, [h("div", { class: "typing" }, h("i"), h("i"), h("i"), h("span", null, j.status === "working" ? "working on it" : "up next"))]);
+  if (j.status === "queued" || j.status === "working") return row(who, at, [h("div", { class: "typing live" }, h("i"), h("i"), h("i"),
+    h("span", { "data-progress": j.id }, j.status === "working" ? S.progress.get(j.id) || (j.tier === "heavy" ? "Thinking it through" : "On it") : "Up next"),
+    j.status === "working" && j.startedAt ? h("time", { "data-since": j.startedAt }, elapsed(j.startedAt)) : null)]);
   if (j.status === "waiting") {
     const aps = (S.chat.approvals || []).filter((a: any) => a.jobId === j.id);
     return row(who, at, [j.result ? richText(j.result) : null, aps.map((a: any) => h("div", { class: "block" },
@@ -877,7 +895,8 @@ function metaLine(j: any) {
     const n = (j.skillId ? S.skills.find((x) => x.id === j.skillId) : S.workflows.find((x) => x.id === j.workflowId))?.name;
     return `${n ? `used ${n} · ` : ""}${secs(j.durationMs)} · ${money(j.costUsd)}`;
   }
-  return [j.escalated ? "escalated" : null, secs(j.durationMs), money(j.costUsd)].filter(Boolean).join(" · ");
+  const model = j.tier === "quick" ? "quick" : j.tier === "heavy" ? "heavy" : null;
+  return [j.escalated ? "moved up" : null, model, secs(j.durationMs), money(j.costUsd)].filter(Boolean).join(" · ");
 }
 
 function chatMenu() {
@@ -1201,6 +1220,7 @@ function openMenu() {
       item("search", "Jump to…", "Find a teammate, chat or task (⌘K)", openJump),
       item("bell", "Plans", "Reminders, routines, watches", openPlans),
       item("brain", "Memory", "What I know about you", openMemory),
+      item("dms", "People", "Your relationship map", openPeople),
       item("users", "Teammates", "Who the orchestrator can hand work to", openTeammates),
       item("sparkle", "Skills", "What the team already knows how to do", openSkills),
       item("brain", "Brains", "Which harness and model does what", openBrains),
@@ -1268,9 +1288,10 @@ async function openBrains() {
   let data: any;
   try { data = await call("/api/brains"); } catch (e) { return handleError(e); }
   const roles: [string, string, string][] = [
-    ["orchestrator", "Orchestrator", "Reads every ramble, splits it into jobs, picks the teammate and how hard each job is. Use your smartest model."],
-    ["workhorse", "Workhorse", "Does the light jobs. Fast and cheap."],
-    ["heavy", "Heavy", "Does the hard jobs, and anything the workhorse can't finish (auto-escalation)."],
+    ["orchestrator", "Orchestrator", "Reads every ramble, splits it into jobs, and picks who does each and which model. You wait on it, so fast matters."],
+    ["quick", "Quick", "Simple jobs: reminders, notes, pinning, small app changes. Use your cheapest model."],
+    ["workhorse", "Workhorse", "Most jobs: lookups, options, advice, building apps."],
+    ["heavy", "Heavy", "Long research and careful writing, and anything the others can't finish (they move up on their own)."],
   ];
   const state: any = JSON.parse(JSON.stringify(data.current));
   const block = ([key, title, blurb]: [string, string, string]) => {
@@ -1396,6 +1417,93 @@ function openMemory() {
   drawMemory();
   loadMemory();
   loadAbout();
+}
+
+// ---------------- people: the relationship map ----------------
+
+const CIRCLES: [RegExp, string, string][] = [
+  [/partner|wife|husband|girlfriend|boyfriend|fianc|spouse/i, "Partner", "#e0849a"],
+  [/mom|mother|dad|father|sister|brother|son|daughter|aunt|uncle|cousin|grand|niece|nephew|parent|sibling|family|in-law/i, "Family", "#e2a560"],
+  [/friend|roommate|neighbo|buddy/i, "Friends", "#72b083"],
+  [/boss|manager|cowork|colleague|team|client|work|report|mentor|investor|founder|recruiter/i, "Work", "#7093d8"],
+];
+// "Priya's partner" is someone else's partner, not yours: they go with everyone else.
+const circleOf = (p: any) => (/\w['’]s\s/.test(p.relation || "") ? null : CIRCLES.find(([re]) => re.test(p.relation || ""))) || [null, "Others", "#a99d90"] as const;
+
+function personDot(p: any, size: number) {
+  const [, , color] = circleOf(p);
+  return h("span", { class: "pdot", style: `--c:${color};--s:${size}px` }, p.emoji ? emoji3d(p.emoji) : h("b", null, (p.name || "?")[0].toUpperCase()));
+}
+
+/** You in the middle; partner and family close, everyone else on the outer ring; lines for how people know each other. */
+async function openPeople() {
+  let people: any[] = [];
+  try { people = await call("/api/people"); } catch (e) { return handleError(e); }
+  S.panel = "people";
+  const order = ["Partner", "Family", "Friends", "Work", "Others"];
+  people.sort((a, b) => order.indexOf(circleOf(a)[1]) - order.indexOf(circleOf(b)[1]) || a.name.localeCompare(b.name));
+  const inner = people.length > 8 ? people.filter((p) => ["Partner", "Family"].includes(circleOf(p)[1])) : people;
+  const outer = people.length > 8 ? people.filter((p) => !inner.includes(p)) : [];
+  const pos = new Map<string, { x: number; y: number }>();
+  // Oval rings: the sheet is narrower than it is tall, and names need room at the sides.
+  const ring = (list: any[], r: number, turn: number) => list.forEach((p, i) => {
+    const a = -Math.PI / 2 + turn + (i / list.length) * Math.PI * 2;
+    pos.set(p.name.toLowerCase(), { x: 50 + r * 0.8 * Math.cos(a), y: 50 + r * Math.sin(a) });
+  });
+  ring(inner, outer.length ? 25 : 36, inner.length % 2 ? 0 : Math.PI / Math.max(2, inner.length));
+  ring(outer, 45, Math.PI / Math.max(2, outer.length) + (inner.length % 2 ? Math.PI / Math.max(2, inner.length) : 0));
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 100 100");
+  svg.setAttribute("class", "plines");
+  const line = (a: { x: number; y: number }, b: { x: number; y: number }, color: string, dashed: boolean) => {
+    const l = document.createElementNS(ns, "line");
+    for (const [k, v] of Object.entries({ x1: a.x, y1: a.y, x2: b.x, y2: b.y })) l.setAttribute(k, String(v));
+    l.setAttribute("stroke", color);
+    l.setAttribute("class", dashed ? "plink" : "pspoke");
+    svg.appendChild(l);
+  };
+  for (const p of people) line({ x: 50, y: 50 }, pos.get(p.name.toLowerCase())!, circleOf(p)[2], false);
+  for (const p of people) for (const l of p.links || []) {
+    const to = pos.get(String(l.to).toLowerCase());
+    if (to) line(pos.get(p.name.toLowerCase())!, to, "#b9aea2", true);
+  }
+  const map = h("div", { class: "pmap" }, svg,
+    h("div", { class: "pnode you", style: "left:50%;top:50%" }, userAvatar(52), h("small", null, "You")),
+    people.map((p) => { const at = pos.get(p.name.toLowerCase())!; return h("button", { class: "pnode", style: `left:${at.x}%;top:${at.y}%`, on: { click: () => openPerson(p, people) } },
+      personDot(p, 40), h("b", null, p.name), h("small", null, p.relation || "")); }));
+  const used = order.filter((g) => people.some((p) => circleOf(p)[1] === g));
+  openSheet("People", [
+    people.length ? map : h("div", { class: "pempty" }, emoji3d("🫂", "ideaicon"), h("p", null, "As you mention people (your sister, your manager, your landlord), the team adds them here and keeps notes on each.")),
+    used.length ? h("div", { class: "plegend" }, used.map((g) => h("span", null, h("i", { style: `--c:${CIRCLES.find((c) => c[1] === g)?.[2] || "#a99d90"}` }), g))) : null,
+    people.length ? h("div", { class: "list" }, people.map((p) => h("button", { class: "item", on: { click: () => openPerson(p, people) } },
+      personDot(p, 34), h("span", { class: "grow left" }, h("b", null, p.name), h("small", { class: "sub" }, [p.relation, p.notes?.at(-1)].filter(Boolean).join(" · "))), icon("chevron", 16)))) : null,
+    h("button", { class: "btn ghost", on: { click: addPerson } }, icon("plus", 16), "Add someone"),
+  ], { onClose: () => { S.panel = null; } });
+}
+
+function openPerson(p: any, all: any[]) {
+  const rel = h("input", { class: "field", value: p.relation || "", maxLength: 60, placeholder: "sister, manager, landlord…" });
+  const knows = [...(p.links || []), ...all.filter((o) => o !== p).flatMap((o) => (o.links || []).filter((l: any) => String(l.to).toLowerCase() === p.name.toLowerCase()).map((l: any) => ({ to: o.name, relation: `${l.relation} (of ${p.name})` })))];
+  openSheet(p.name, [
+    h("div", { class: "phero" }, personDot(p, 72), h("b", null, p.name), h("small", null, p.relation || "")),
+    p.notes?.length ? [h("h4", null, "What I know"), h("ul", { class: "pnotes" }, p.notes.slice().reverse().map((n: string) => h("li", null, n)))] : null,
+    knows.length ? [h("h4", null, "Connected to"), h("div", { class: "list" }, knows.map((l: any) => { const o = all.find((x) => x.name.toLowerCase() === String(l.to).toLowerCase()); return h("button", { class: "item", on: { click: () => o && openPerson(o, all) } }, o ? personDot(o, 28) : null, h("span", { class: "grow left" }, h("b", null, l.to), h("small", { class: "sub" }, l.relation))); }))] : null,
+    h("label", null, h("span", null, "How you know them"), rel),
+    h("button", { class: "btn primary big", on: { click: async () => { try { await call(`/api/people/${p.id}`, { method: "PATCH", body: { relation: rel.value } }); toast("Saved"); openPeople(); } catch (e) { handleError(e); } } } }, "Save"),
+    h("button", { class: "btn ghost", on: { click: async () => { closeSheet(); const r = await call("/api/threads", { body: { text: `What do you know about ${p.name}? Anything coming up I should remember?` } }); location.hash = `#c/${r.thread.id}`; } } }, `Ask about ${p.name}`),
+    h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet(`Forget ${p.name}?`, "They come off your map. Memory facts stay.", "Forget", async () => { await call(`/api/people/${p.id}`, { method: "DELETE" }); openPeople(); }) } }, `Forget ${p.name}`),
+  ]);
+}
+
+function addPerson() {
+  const name = h("input", { class: "field", maxLength: 40, placeholder: "Priya" });
+  const rel = h("input", { class: "field", maxLength: 60, placeholder: "sister" });
+  openSheet("Add someone", [
+    h("label", null, h("span", null, "Name"), name), h("label", null, h("span", null, "How you know them"), rel),
+    h("button", { class: "btn primary big", on: { click: async () => { if (!name.value.trim()) return name.focus(); try { await call("/api/people", { body: { name: name.value, relation: rel.value } }); openPeople(); } catch (e) { handleError(e); } } } }, "Add"),
+  ]);
+  setTimeout(() => name.focus(), 60);
 }
 
 /** "About you": the short profile the team keeps of you, always in mind. You can rewrite it. */

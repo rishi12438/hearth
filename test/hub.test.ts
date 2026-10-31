@@ -350,3 +350,16 @@ test("about you is always in context; past conversations are searchable by the b
   expect(found).toContain("landlord");
   expect(await hub.searchHistory("zebra unicorn")).toBe("(no matches)");
 });
+
+test("people: the relationship map grows as people come up, merging by name", async () => {
+  await hub.applyActions([{ type: "person.upsert", name: "Priya", relation: "sister", note: "Turns 30 on Dec 12", emoji: "🎂" }], "");
+  await hub.applyActions([{ type: "person.upsert", name: "Sam", relation: "Priya's partner", links: [{ to: "Priya", relation: "partner" }] }], "");
+  await hub.applyActions([{ type: "person.upsert", name: "priya", note: "Loves pottery" }], "");
+  const people = await store.all<any>("people");
+  expect(people.length).toBe(2);
+  const priya = people.find((p) => p.name === "Priya");
+  expect([priya.relation, priya.notes, priya.emoji]).toEqual(["sister", ["Turns 30 on Dec 12", "Loves pottery"], "🎂"]);
+  expect(people.find((p) => p.name === "Sam").links).toEqual([{ to: "Priya", relation: "partner" }]);
+  expect((await hub.upsertPerson({ name: "me" })).error).toBeTruthy();
+  expect(((await hub.context("hi", "chat")) as any).people.length).toBe(2);
+});

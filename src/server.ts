@@ -9,7 +9,7 @@ import { MAX_FILE_BYTES } from "./files.ts";
 import { appCsp } from "./apps.ts";
 import { isActive, search } from "./memory.ts";
 import { isValidTimeZone } from "./time.ts";
-import type { StoredFile, Approval, Device, Fact, Hook, LocationFix, MiniApp, Message, Notebook, Place, Prefs, Skill, Teammate, Workflow } from "./types.ts";
+import type { Person, StoredFile, Approval, Device, Fact, Hook, LocationFix, MiniApp, Message, Notebook, Place, Prefs, Skill, Teammate, Workflow } from "./types.ts";
 import pkg from "../package.json" with { type: "json" };
 
 const WEB = resolve(import.meta.dir, "../web");
@@ -323,6 +323,18 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
         }
         if (method === "POST" && id && seg[3] === "accept") { const r = await hub.acceptIdea(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "POST" && id && seg[3] === "dismiss") return json({ ok: await hub.dismissIdea(id) });
+        break;
+      }
+      case "people": {
+        if (method === "GET" && !id) return json(await store.all<Person>("people"));
+        if (method === "POST" && !id) { const r = await hub.upsertPerson(await body(req)); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "PATCH" && id) {
+          const p = await store.get<Person>("people", id);
+          if (!p) break;
+          const r = await hub.upsertPerson({ ...(await body(req)), name: p.name });
+          return json(r.value);
+        }
+        if (method === "DELETE" && id) { const ok = await store.remove("people", id); hub.emit("people"); return json({ ok }); }
         break;
       }
       case "about": {

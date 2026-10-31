@@ -260,3 +260,16 @@ test("saying more about a task that's still running restarts it with the whole b
   expect(all[0].label).toBe("Knee, volleyball and lower body");
   expect(readFileSync(log, "utf8").split("\n").filter((l) => l.startsWith("end")).length).toBe(1); // the first run was stopped
 });
+
+test("the model deck: quick jobs run on the quick model and move up step by step when it can't do them", async () => {
+  await setup();
+  process.env.FAKE_MS = "20";
+  plan([{ task: "set a reminder", teammate: "Hearth", effort: "quick" }, { task: "FAIL this one", teammate: "Hearth", effort: "quick" }]);
+  await hub.ramble("two small things");
+  await until(() => allDone(2));
+  const all = await jobs();
+  const ok = all.find((j) => j.task === "set a reminder")!;
+  const bad = all.find((j) => j.task.startsWith("FAIL"))!;
+  expect([ok.effort, ok.tier, ok.escalated]).toEqual(["quick", "quick", false]);
+  expect([bad.tier, bad.escalated, bad.status]).toEqual(["heavy", true, "failed"]); // quick -> workhorse -> heavy
+});

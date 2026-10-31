@@ -59,6 +59,11 @@ ACTIONS
 - script.run {name, args}   run an approved script now; you'll be called again with its output
 - history.search {query}   search past conversations, answers and the daily log (exact wording, "what did I say about X");
     you'll be called again with what matched. Use it when memory doesn't have what you need.
+- person.upsert {name, relation?, note?, emoji?, links?: [{to, relation}]}   whenever someone in the user's life comes up
+    (family, friends, partner, coworkers, landlord, doctor, kids' teachers…): add or update them with how they relate to the user
+    ("sister", "manager at work"), one new thing worth remembering as note, and links to other people they relate to
+    (Sam {to:"Priya", relation:"partner"}). Use names as the user says them. This builds the user's relationship map.
+- person.forget {name}   when the user asks to forget someone
 - about.update {text}   rewrite CONTEXT.aboutYou, the short profile of the user (people, routines, likes, goals, constraints),
     when you learn something durable that belongs there. Keep it under ~250 words, plain lines, most important first.
 - script.propose {name, description, code}   write a new Bun/TypeScript script (stdout = result; use fetch, no secrets,
@@ -158,7 +163,7 @@ NAMING a new teammate: the user should know what it does from the name alone, li
 
 Reply with ONLY a JSON object, no prose, no code fence:
 {"title":"3-6 word chat title","reply":"...","facts":[{"fact":"...","notebook":"...","importance":1|2|3}],
- "jobs":[{"id":"j1","label":"2-6 words the user sees","task":"...","teammate":"<existing name>","effort":"light|heavy","dependsOn":["<earlier job id>"]?,"use":{"skill|workflow":"<library name>","inputs":{...}}?}
+ "jobs":[{"id":"j1","label":"2-6 words the user sees","task":"...","teammate":"<existing name>","effort":"quick|light|heavy","dependsOn":["<earlier job id>"]?,"use":{"skill|workflow":"<library name>","inputs":{...}}?}
        | {"label":"...","task":"...","teammate":"<new name>","effort":"light|heavy","newTeammate":{"name":"...","description":"...","emoji":"🏋️"}}],
  "newWorkflows":[{"name","description","inputs","steps":[{"skill","inputs"}]}]?}
 TILES: results like weather, places, checklists and numbers show as tiles; teammates and skills handle that, so write each
@@ -180,8 +185,12 @@ The task is the full brief for the teammate and stays hidden until they open the
 SEARCH BEFORE CREATE: CONTEXT.library lists skills and workflows the team already has. If one does a job, set "use" with its name and
 the inputs filled from the ramble; it then runs without anyone working it out again. If the ramble needs several existing skills
 in a row that will recur, you may propose a new workflow in newWorkflows (the user switches it on).
-effort: "light" for quick, well-defined jobs (set a reminder, save a note, a simple lookup). "heavy" for jobs that need judgment,
-research across sources, planning, or careful writing. When unsure, choose light; it escalates on its own if needed.
+effort picks the model (cheapest that can do it; a job that's too much moves up on its own):
+"quick" (cheapest): set or change a reminder, save a note or fact, pin/unpin/delete an app, a change to an app's data, a simple
+yes/no or one-line answer, anything with no research and no writing to speak of.
+"light" by default for the rest: lookups, a few options, advice, a short plan, building or redesigning a mini app.
+"heavy" only for long research across many sources, multi-week plans, or careful writing the user will send. The user waits on
+every job, and light jobs escalate on their own if they can't do it, so heavy is the exception (at most one per ramble, usually none).
 `.trim();
 
 export function buildPrompt(b: BrainInput) {
@@ -203,6 +212,7 @@ export function buildPrompt(b: BrainInput) {
       "- day.log {date, summary} for each day in CONTEXT.recentDays that has no log yet: 1-3 plain sentences of what the user",
       "  asked for, decided and got done (names, places, numbers). This is how past days are found later.",
       "- about.update {text} if CONTEXT.aboutYou is missing or out of date given memory and these days.",
+      "- person.upsert for anyone in memory or these days who's missing from CONTEXT.people, or whose relation/links are out of date.",
       "Reply with one short line describing what changed, or " + QUIET + " if nothing.");
   } else if (b.mode === "ideas") {
     parts.push("", "IDEAS: look at memory, aboutYou, recent days, hooks and recent messages, and suggest up to 2 things the team",
@@ -231,9 +241,20 @@ function agentEnv() {
 export type BrainProfile = { harness: string; model: string };
 /** Collects model spend across calls. `unknown` flips when a harness can't report cost. */
 /** Spend for one job; signal stops its model process when the user changes the job mid-run. */
-export type Meter = { costUsd: number; unknown: boolean; signal?: AbortSignal };
-/** The orchestrator plans; the workhorse does light jobs; heavy does hard ones and anything the workhorse escalates. */
-export type Brains = { orchestrator: BrainProfile; workhorse: BrainProfile; heavy: BrainProfile };
+export type Meter = { costUsd: number; unknown: boolean; signal?: AbortSignal; onProgress?: (what: string) => void };
+
+/** One line on what the model is doing right now, from a streamed tool call ("Searching: pottery gifts"). */
+export function describeStep(name: string, input: any): string | null {
+  const q = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 70);
+  if (name === "WebSearch") return `Searching: ${q(input?.query)}`;
+  if (name === "WebFetch") { try { return `Reading ${new URL(String(input?.url)).hostname.replace(/^www\./, "")}`; } catch { return "Reading a page"; } }
+  return null;
+}
+/**
+ * The model deck. The orchestrator plans; quick does simple jobs on the cheapest model; the workhorse does normal ones; heavy
+ * does hard ones. A job that's too much for its model moves up (quick -> workhorse -> heavy), so starting cheap is safe.
+ */
+export type Brains = { orchestrator: BrainProfile; quick: BrainProfile; workhorse: BrainProfile; heavy: BrainProfile };
 export const HARNESSES = ["claude", "codex", "echo", "custom"] as const;
 export const MODEL_RE = /^[A-Za-z0-9._:\/-]{0,64}$/;
 
@@ -281,7 +302,8 @@ export class Brain {
       return { harness, model: env[modelVar] ?? (harness === "claude" ? claudeDefault : "") };
     };
     return {
-      orchestrator: pick("HEARTH_ORCHESTRATOR_AGENT", "HEARTH_ORCHESTRATOR_MODEL", "claude-fable-5-1"),
+      orchestrator: pick("HEARTH_ORCHESTRATOR_AGENT", "HEARTH_ORCHESTRATOR_MODEL", "claude-sonnet-5-5"),
+      quick: pick("HEARTH_QUICK_AGENT", "HEARTH_QUICK_MODEL", "claude-haiku-5-5"),
       workhorse: pick("HEARTH_WORKHORSE_AGENT", "HEARTH_WORKHORSE_MODEL", "claude-sonnet-5-5"),
       heavy: pick("HEARTH_HEAVY_AGENT", "HEARTH_HEAVY_MODEL", "claude-opus-5-5"),
     };
@@ -321,7 +343,7 @@ export class Brain {
     let cmd: string[];
     switch (harness) {
       case "claude":
-        cmd = ["claude", "-p", "--output-format", "json", "--no-session-persistence", ...(model ? ["--model", model] : []),
+        cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence", ...(model ? ["--model", model] : []),
           ...(planning ? [] : ["--allowedTools", "WebSearch", "WebFetch"]),
           "--disallowedTools", "Bash", "Edit", "Write", "Read", "Glob", "Grep", "NotebookEdit", "Task", ...(planning ? ["WebSearch", "WebFetch"] : [])];
         break;
@@ -344,7 +366,29 @@ export class Brain {
     const timer = setTimeout(() => { timedOut = true; proc.kill(); }, this.config.agentTimeoutMs);
     const stop = () => proc.kill();
     meter?.signal?.addEventListener("abort", stop);
-    const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+    // Read stdout as it comes so a streaming harness (claude stream-json) can report progress along the way.
+    const readOut = async () => {
+      if (harness !== "claude") return new Response(proc.stdout).text();
+      let all = "", buf = "";
+      const dec = new TextDecoder();
+      for await (const chunk of proc.stdout as unknown as AsyncIterable<Uint8Array>) {
+        const text = dec.decode(chunk, { stream: true });
+        all += text; buf += text;
+        let i: number;
+        while ((i = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, i); buf = buf.slice(i + 1);
+          if (!meter?.onProgress || !line.includes('"tool_use"')) continue;
+          try {
+            for (const c of JSON.parse(line)?.message?.content || []) {
+              const step = c?.type === "tool_use" ? describeStep(c.name, c.input) : null;
+              if (step) meter.onProgress(step);
+            }
+          } catch {}
+        }
+      }
+      return all;
+    };
+    const [out, err] = await Promise.all([readOut(), new Response(proc.stderr).text()]);
     const code = await proc.exited;
     clearTimeout(timer);
     meter?.signal?.removeEventListener("abort", stop);
@@ -353,7 +397,8 @@ export class Brain {
     let reply = out;
     if (harness === "claude") {
       try {
-        const j = JSON.parse(out);
+        // stream-json: the last "result" event has the answer and the cost.
+        const j = JSON.parse(out.trim().split("\n").reverse().find((l) => l.includes('"type":"result"')) || out);
         reply = String(j.result ?? "");
         if (meter && typeof j.total_cost_usd === "number") meter.costUsd += j.total_cost_usd;
         else if (meter) meter.unknown = true;

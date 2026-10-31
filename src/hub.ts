@@ -9,7 +9,7 @@ import { parseReply } from "./reply.ts";
 import { validateHook, computeNextAt, describeTrigger, isUserReminder } from "./hooks.ts";
 import { recall, isActive, validateFact } from "./memory.ts";
 import { describeLocal, inQuietHours, quietEndsAt, localDate, distanceMeters } from "./time.ts";
-import type { DayLog, Idea, MiniApp, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
+import type { DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
 import { Library, validateSkill, validateWorkflow, fill } from "./library.ts";
 import { cleanTile, cleanOptions, extractTiles, type Tile } from "./tiles.ts";
 import { Files, extractFiles } from "./files.ts";
@@ -158,6 +158,7 @@ export class Hub {
       tz: prefs.tz,
       userName: prefs.userName || undefined,
       aboutYou: prefs.about || "(not written yet)",
+      people: (await this.store.all<Person>("people")).slice(0, 80).map((p) => ({ name: p.name, relation: p.relation, notes: p.notes.slice(-4), links: p.links })),
       quietHours: `${prefs.quietStart}-${prefs.quietEnd}`,
       proactiveMessagesLeftToday: Math.max(0, prefs.maxProactivePerDay - used),
       location,
@@ -234,7 +235,7 @@ export class Hub {
     const allowed = availableHarnesses(this.config);
     const cur = await this.brains();
     const next: Brains = { ...cur };
-    for (const role of ["orchestrator", "workhorse", "heavy"] as const) {
+    for (const role of ["orchestrator", "quick", "workhorse", "heavy"] as const) {
       const p = patch?.[role];
       if (!p) continue;
       const harness = String(p.harness || "");
@@ -377,7 +378,7 @@ export class Hub {
       const inputs = use?.inputs && typeof use.inputs === "object" ? Object.fromEntries(Object.entries(use.inputs).slice(0, 8).map(([k, v]) => [k, String(v).slice(0, 400)])) : undefined;
       jobs.push(await this.store.put<Job>("jobs", {
         ...this.doc({}), threadId: thread.id, messageId: m.id, task: j.task.trim().slice(0, 1000), label: shortLabel(j.label, j.task), teammateId: mate.id,
-        status: "queued", effort: j.effort === "heavy" ? "heavy" : "light",
+        status: "queued", effort: j.effort === "heavy" ? "heavy" : j.effort === "quick" ? "quick" : "light",
         skillId: skill?.status === "active" ? skill.id : undefined, workflowId: workflow?.id, inputs,
       } as Job));
       const made = jobs[jobs.length - 1];
@@ -462,7 +463,8 @@ export class Hub {
     const started = Date.now();
     const stop = new AbortController();
     this.stops.set(job.id, stop);
-    const meter: Meter = { costUsd: 0, unknown: false, signal: stop.signal };
+    // Live progress for the app ("Searching: pottery gifts"): an event only, not stored, so it can't race the job's own saves.
+    const meter: Meter = { costUsd: 0, unknown: false, signal: stop.signal, onProgress: (what) => this.emit("progress", { jobId: job.id, threadId: job.threadId, text: what }) };
     const mate = await this.teammate(job.teammateId);
     let cur: Job = await this.saveJob({ ...job, status: "working", startedAt: this.clock().toISOString() });
     const finish = async (patch: Partial<Job>) => {
@@ -522,20 +524,24 @@ export class Hub {
     const ask = await this.store.get<Message>("messages", job.messageId);
     const attached = await this.attachmentNote(ask?.fileIds);
     const input = `${job.task}${depNote}${repairNote}${splitNote}${attached}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")`;
-    const attempt = async (tier: "workhorse" | "heavy") => {
+    type Tier = "quick" | "workhorse" | "heavy";
+    const attempt = async (tier: Tier) => {
       cur = await this.saveJob({ ...cur, status: "working", tier });
       return this.turn("job", input, job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains[tier], meter });
     };
-    let tier: "workhorse" | "heavy" = job.effort === "heavy" ? "heavy" : "workhorse";
+    // Start on the cheapest model the plan allows; move up a step when a model can't do it.
+    const ladder: Tier[] = job.effort === "heavy" ? ["heavy"] : job.effort === "quick" ? ["quick", "workhorse", "heavy"] : ["workhorse", "heavy"];
+    let tier: Tier = ladder[0];
     let escalated = false;
     if (await overCap()) return finish({ how: "fresh" });
     try {
-      let r = await attempt(tier).catch((err) => (tier === "workhorse" ? null : Promise.reject(err)));
+      let r = await attempt(tier).catch((err) => (tier !== "heavy" ? null : Promise.reject(err)));
       if (stop.signal.aborted) throw new Error("Restarted with your new message.");
-      if (tier === "workhorse" && (!r || r.text.includes(ESCALATE) || !r.text.trim())) {
-        escalated = true; tier = "heavy";
-        await this.log("job.escalated", `${job.task.slice(0, 80)} → ${label(brains.heavy)}`);
-        r = await attempt("heavy");
+      while (tier !== "heavy" && (!r || r.text.includes(ESCALATE) || !r.text.trim())) {
+        escalated = true; tier = ladder[ladder.indexOf(tier) + 1];
+        await this.log("job.escalated", `${job.task.slice(0, 80)} → ${label(brains[tier])}`);
+        r = await attempt(tier).catch((err) => (tier !== "heavy" ? null : Promise.reject(err)));
+        if (stop.signal.aborted) throw new Error("Restarted with your new message.");
       }
       if (!r || r.text.includes(ESCALATE)) throw new Error("Nobody could do this one.");
       if (r.split && job.effort === "heavy" && !job.depth) {
@@ -1062,6 +1068,17 @@ export class Hub {
           case "history.search":
             if (typeof a.query === "string" && a.query.trim()) runs.push({ name: "@history", args: [a.query.trim().slice(0, 200)] });
             break;
+          case "person.upsert": {
+            if (where.recipe) break;
+            const r = await this.upsertPerson(a);
+            if (r.value && r.created) done.push({ kind: "memory", label: `Added ${r.value.name} to your people` });
+            break;
+          }
+          case "person.forget": {
+            const p = await this.personByName(String(a.name || ""));
+            if (p) { await this.store.remove("people", p.id); this.emit("people"); done.push({ kind: "memory", label: `Forgot ${p.name}` }); }
+            break;
+          }
           case "about.update": {
             if (where.recipe || typeof a.text !== "string" || !a.text.trim()) break;
             await this.setAbout(a.text, false);
@@ -1469,6 +1486,36 @@ export class Hub {
     return true;
   }
 
+  // ---------- people: the relationship map ----------
+
+  async personByName(name: string) {
+    const n = name.trim().toLowerCase();
+    return n ? (await this.store.all<Person>("people")).find((p) => p.name.toLowerCase() === n) || null : null;
+  }
+
+  async upsertPerson(a: any) {
+    const name = typeof a?.name === "string" ? a.name.trim().replace(/\s+/g, " ").slice(0, 40) : "";
+    if (!name || /^(me|myself|i|the user|user)$/i.test(name)) return { error: "Who?" };
+    const prev = await this.personByName(name);
+    const str = (v: unknown, n: number) => (typeof v === "string" && v.trim() ? v.trim().slice(0, n) : "");
+    const notes = [...(prev?.notes || [])];
+    const note = str(a.note, 200);
+    if (note && !notes.some((x) => x.toLowerCase() === note.toLowerCase())) notes.push(note);
+    const links = [...(prev?.links || [])];
+    for (const l of Array.isArray(a.links) ? a.links.slice(0, 8) : []) {
+      const to = str(l?.to, 40), relation = str(l?.relation, 40);
+      if (!to || !relation || to.toLowerCase() === name.toLowerCase()) continue;
+      const i = links.findIndex((x) => x.to.toLowerCase() === to.toLowerCase());
+      if (i >= 0) links[i] = { to, relation }; else links.push({ to, relation });
+    }
+    const person = await this.store.put<Person>("people", {
+      ...(prev || this.doc({})), name: prev?.name || name, relation: str(a.relation, 60) || prev?.relation || "",
+      emoji: cleanEmoji(a.emoji) || prev?.emoji, notes: notes.slice(-20), links: links.slice(0, 12), lastMentionedAt: this.clock().toISOString(),
+    } as Person);
+    this.emit("people");
+    return { value: person, created: !prev };
+  }
+
   // ---------- about you, the daily log, and searching what was said ----------
 
   async setAbout(text: string, byUser: boolean) {
@@ -1745,7 +1792,7 @@ export class Hub {
 
   async exportAll() {
     const out: Record<string, unknown> = { exportedAt: this.clock().toISOString(), hub: this.config.name, storage: this.store.kind };
-    for (const col of ["threads", "messages", "jobs", "teammates", "skills", "workflows", "approvals", "hooks", "memory", "notebooks", "places", "locations", "activity", "scripts", "apps", "appState", "ideas", "days"] as const) out[col] = await this.store.all(col);
+    for (const col of ["threads", "messages", "jobs", "teammates", "skills", "workflows", "approvals", "hooks", "memory", "notebooks", "places", "locations", "activity", "scripts", "apps", "appState", "ideas", "days", "people"] as const) out[col] = await this.store.all(col);
     out.devices = (await this.store.all<any>("devices")).map(({ tokenHash, ...d }) => d);
     out.prefs = await this.prefs();
     return out;
@@ -1753,7 +1800,7 @@ export class Hub {
 
   async wipePersonal() {
     for (const f of await this.store.all<StoredFile>("files")) await this.files.remove(f.id);
-    for (const col of ["threads", "messages", "jobs", "approvals", "hooks", "memory", "notebooks", "places", "locations", "activity", "apps", "appState", "ideas", "days"] as const) await this.store.clear(col);
+    for (const col of ["threads", "messages", "jobs", "approvals", "hooks", "memory", "notebooks", "places", "locations", "activity", "apps", "appState", "ideas", "days", "people"] as const) await this.store.clear(col);
     await this.setPrefs({ about: undefined, aboutUpdatedAt: undefined });
     await this.ensureSystemHooks();
     await this.ensureTeammates();

@@ -87,3 +87,10 @@ test("teammates can pin apps to Home and take them off; apps can message their t
   expect(job.teammateId).toBe("scout");
   expect(job.task).toContain('mini app "Cards"');
 });
+
+test("streamed tool calls become one-line progress the app can show", async () => {
+  const { describeStep } = await import("../src/brain.ts");
+  expect(describeStep("WebSearch", { query: "pottery gifts under $80" })).toBe("Searching: pottery gifts under $80");
+  expect(describeStep("WebFetch", { url: "https://www.etsy.com/x" })).toBe("Reading etsy.com");
+  expect(describeStep("ToolSearch", {})).toBeNull();
+});
