@@ -1,17 +1,14 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, hostname, platform } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { sha256 } from "./auth.ts";
-import { Brain, availableHarnesses, type BrainProfile } from "./brain.ts";
 import { ALIVE_EVERY_MS, COPY_ITEMS, isCopyItem, type CopyItem } from "./computers.ts";
-import type { Config } from "./config.ts";
 
-// The computer side of a link (run on your Mac): join a hub once, then keep a line open to it and run the work it sends,
-// with this computer's own Claude/Codex login. The hub never gets a shell here: it can only ask for a brain call, which
-// runs with the same slim, web-only tool set as on the hub, and for the login files you chose to copy.
+// The computer side of a link (run on your Mac): join a hub once, then keep a line open to it so the app shows it, and
+// copy up the logins you chose so the hub can think with them. Nothing runs here: all thinking happens on the hub, and the
+// hub can't ask this computer for anything but those login files.
 
-/** cloud: the hub set this machine up (a sandbox or your VM) and may hand it logins. Your Mac's link never has it. */
-export type Link = { hub: string; token: string; deviceId: string; name: string; cloud?: boolean };
+export type Link = { hub: string; token: string; deviceId: string; name: string };
 const linkFile = (dataDir: string) => join(dataDir, "computer.json");
 
 export function readLink(dataDir: string): Link | null {
@@ -69,40 +66,15 @@ export function hasLogin(item: CopyItem): boolean {
   return existsSync(join(homedir(), COPY_ITEMS[item].path));
 }
 
-type Opts = { config: Config; link: Link; brain?: Brain; readCopy?: (item: CopyItem) => string | null; log?: (s: string) => void; copyEveryMs?: number; home?: string;
+type Opts = { link: Link; readCopy?: (item: CopyItem) => string | null; log?: (s: string) => void; copyEveryMs?: number;
   /** The hub signed this computer out for good. */
   onSignedOut?: () => void };
 
-/** A cloud computer got logins from its hub: put them where Claude Code and Codex look, and skip Claude's first-run questions. */
-export function writeLogins(home: string, items: Record<string, unknown>) {
-  const wrote: string[] = [];
-  for (const [item, data] of Object.entries(items)) {
-    if (!isCopyItem(item) || typeof data !== "string" || data.length > 64 * 1024) continue;
-    try { JSON.parse(data); } catch { continue; }
-    const path = join(home, COPY_ITEMS[item].path);
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    writeFileSync(path, data, { mode: 0o600 });
-    chmodSync(path, 0o600);
-    wrote.push(item);
-  }
-  if (wrote.includes("claude")) {
-    const state = join(home, ".claude.json");
-    let cur: any = {};
-    try { cur = JSON.parse(readFileSync(state, "utf8")); } catch {}
-    writeFileSync(state, JSON.stringify({ hasCompletedOnboarding: true, theme: "dark", ...cur }), { mode: 0o600 });
-  }
-  return wrote;
-}
-
 /** Keep a line open to the hub for as long as this runs, reconnecting with backoff. Returns a stop function. */
 export function connect(opts: Opts) {
-  const { config, link } = opts;
+  const { link } = opts;
   const log = opts.log || ((s: string) => console.log(s));
-  const brain = opts.brain || new Brain(config);
-  // When this computer thinks, the job's workbench tools call the hub at its public address.
-  brain.toolUrl ??= link.hub;
   const readCopy = opts.readCopy || readLogin;
-  const runs = new Map<string, AbortController>();
   let ws: WebSocket | null = null;
   let stopped = false, backoff = 1000, alive: ReturnType<typeof setInterval> | null = null, copyTimer: ReturnType<typeof setInterval> | null = null;
   let want: { items: CopyItem[]; have: Record<string, string> } = { items: [], have: {} };
@@ -122,20 +94,6 @@ export function connect(opts: Opts) {
     }
   };
 
-  const run = async (m: any) => {
-    const ctl = new AbortController();
-    runs.set(m.id, ctl);
-    try {
-      const profile: BrainProfile = { harness: String(m.profile?.harness || ""), model: String(m.profile?.model || "") };
-      if (!availableHarnesses(config).includes(profile.harness)) throw new Error(`${profile.harness} isn't installed on ${link.name}.`);
-      const meter = { costUsd: 0, unknown: false, signal: ctl.signal, onProgress: (text: string) => send({ t: "step", id: m.id, text }) };
-      const reply = await brain.think(m.input, profile, meter);
-      send({ t: "done", id: m.id, reply, costUsd: meter.unknown ? undefined : meter.costUsd });
-    } catch (e: any) {
-      send({ t: "error", id: m.id, message: e?.message || String(e) });
-    } finally { runs.delete(m.id); }
-  };
-
   let opened = false;
   const signedOut = () => { log(`  ${link.name} was signed out of the hub. Run join again to link it.`); stopped = true; opts.onSignedOut?.(); };
   const retry = (why: string) => {
@@ -152,7 +110,7 @@ export function connect(opts: Opts) {
       opened = true;
       backoff = 1000;
       log(`  connected to ${link.hub}`);
-      send({ t: "hello", harnesses: availableHarnesses(config), platform: platform() });
+      send({ t: "hello", platform: platform() });
       alive = setInterval(() => send({ t: "alive" }), ALIVE_EVERY_MS);
       copyTimer = setInterval(copyUp, opts.copyEveryMs ?? 5 * 60_000);
     };
@@ -160,18 +118,11 @@ export function connect(opts: Opts) {
       let m: any;
       try { m = JSON.parse(String(ev.data)); } catch { return; }
       if (m.t === "ping") send({ t: "pong", ts: m.ts });
-      else if (m.t === "run" && typeof m.id === "string") run(m);
-      else if (m.t === "stop") runs.get(m.id)?.abort();
       else if (m.t === "want") { want = { items: (m.items || []).filter(isCopyItem), have: m.have || {} }; copyUp(); }
-      else if (m.t === "logins" && link.cloud && m.items && typeof m.items === "object") {
-        const wrote = writeLogins(opts.home || homedir(), m.items);
-        if (wrote.length) log(`  got ${wrote.map((i) => COPY_ITEMS[i as CopyItem].label).join(" and ")} from the hub`);
-      }
     };
     ws.onclose = (ev) => {
       if (alive) clearInterval(alive);
       if (copyTimer) clearInterval(copyTimer);
-      for (const c of runs.values()) c.abort();
       if (stopped) return;
       if (ev.code === 4001) return signedOut();
       if (opened) return retry(String(ev.code));

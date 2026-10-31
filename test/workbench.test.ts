@@ -134,11 +134,11 @@ test("end to end: a job's agent uses the tools through the MCP server and the hu
   for (const c of COLLECTIONS) await store.clear(c);
   const config = { ...loadConfig({ HEARTH_PORT: "0", HEARTH_AGENT: "echo" }), dataDir: dir };
   const hub = new Hub(config, store, new Brain(config), new Scripts(store, dir, join(import.meta.dir, "../scripts")), null);
-  await hub.setPrefs({ tz: "UTC", work: { agent: "hub", workbench: "plain" } });
+  await hub.setPrefs({ tz: "UTC", work: { workbench: "plain" } });
   await hub.ensureTeammates();
   const phone = await redeemPairingCode(store, (await newPairingCode(store, "owner")).code, "Phone");
-  const { server, computers, machines, workbench } = await startServer(hub, null, { docker: () => false });
-  cleanups.push(async () => { workbench.stopTimer(); machines.stopTimer(); computers.stop(); server.stop(true); await store.close(); });
+  const { server, computers, workbench } = await startServer(hub, null, { docker: () => false, checkE2b: async (k) => (k.startsWith("e2b_good") ? null : "E2B didn't accept that key.") });
+  cleanups.push(async () => { workbench.stopTimer(); computers.stop(); server.stop(true); await store.close(); });
   const url = `http://127.0.0.1:${server.port}`;
   expect(hub.brain.toolUrl).toBe(url);
   const api = (p: string, init: RequestInit = {}) => fetch(url + p, { ...init, headers: { Authorization: `Bearer ${phone!.token}`, "Content-Type": "application/json" } });
@@ -190,9 +190,15 @@ test("end to end: a job's agent uses the tools through the MCP server and the hu
   expect(((await dead.json()) as any).ok).toBe(false);
 
   // Only the primary device changes where work runs, and "plain" must be asked for by name.
-  const put = await api("/api/work", { method: "PUT", body: JSON.stringify({ agent: "mac-first", workbench: "auto" }) });
-  expect(((await put.json()) as any).settings).toEqual({ agent: "mac-first", workbench: "auto" });
-  expect(hub.brain.agentOn).toBe("mac-first");
+  const put = await api("/api/work", { method: "PUT", body: JSON.stringify({ workbench: "auto" }) });
+  expect(((await put.json()) as any).settings).toEqual({ workbench: "auto" });
+
+  // Connecting E2B: a bad key is turned away, a good one makes "auto" pick E2B.
+  expect((await api("/api/work/e2b-key", { method: "POST", body: JSON.stringify({ key: "e2b_bad_0123456789" }) })).status).toBe(400);
+  const on = (await (await api("/api/work/e2b-key", { method: "POST", body: JSON.stringify({ key: "e2b_good_0123456789" }) })).json()) as any;
+  expect([on.e2b, on.workbench.kind]).toEqual([true, "e2b"]);
+  const off = (await (await api("/api/work/e2b-key", { method: "DELETE" })).json()) as any;
+  expect([off.e2b, off.workbench]).toEqual([false, null]);
 }, 60_000);
 
 test("tool calls made at the same time are all logged; none overwrite another", async () => {

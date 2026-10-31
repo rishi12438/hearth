@@ -6,15 +6,15 @@ import type { Files } from "./files.ts";
 import type { Vault } from "./vault.ts";
 import type { StoredFile, WorkSession, WorkSettings } from "./types.ts";
 
-// The workbench: the one place the team's code runs. Teammates think on your Mac or this hub; when they need to run
+// The workbench: the one place the team's code runs. Teammates think on this hub; when they need to run
 // something they use a few tools (run, write_file, read_file, copy_in, copy_out) and the hub carries that out here.
-// It's E2B if you connected it, else a locked-down Docker container on this hub (Settings → Where work runs).
+// It's E2B if you connected it, else a locked-down Docker container on this hub (Settings → Your hub & devices).
 //
 // Folders: /work/<teammate> is each teammate's own and stays between jobs; /work/shared is for everyone. Nothing secret
 // ever goes onto the workbench, and every job's time on it is written down (sessions), so anyone can see what happened
 // and carry on.
 
-export const DEFAULT_WORK: WorkSettings = { agent: "mac-first", workbench: "auto" };
+export const DEFAULT_WORK: WorkSettings = { workbench: "auto" };
 
 export type RunResult = { code: number; stdout: string; stderr: string };
 /** One kind of workbench. Paths are absolute inside it. */
@@ -222,11 +222,23 @@ export class E2bBench implements Bench {
 
 // ---------------------------------------------------------------- the manager: which bench, tools, sessions
 
+const E2B_API = "https://api.e2b.dev";
+
+/** Is this E2B key real? null when it is, else a short reason (never the key). */
+export async function checkE2bKey(key: string, api = E2B_API): Promise<string | null> {
+  try {
+    const r = await fetch(`${api}/sandboxes`, { headers: { "X-API-Key": key }, signal: AbortSignal.timeout(10_000) });
+    if (r.status === 401 || r.status === 403) return "E2B didn't accept that key.";
+    return r.ok ? null : `E2B answered ${r.status}.`;
+  } catch { return "Couldn't reach E2B."; }
+}
+
 type Grant = { sessionId: string; folder: string; threadId?: string; jobId?: string; teammateId?: string; exp: number };
 type Opts = {
   store: Store; files: Files; dataDir: string; vault: Vault;
   settings: () => Promise<WorkSettings>;
   docker?: () => boolean; dockerBench?: Bench; e2bSdk?: E2bSdk; now?: () => number;
+  checkE2b?: (key: string) => Promise<string | null>;
 };
 
 export const TOOLS = [
@@ -266,6 +278,16 @@ export class Workbench {
     return null;
   }
   private e2bKey() { return process.env.HEARTH_E2B_API_KEY || this.o.vault.get("e2b") || ""; }
+  /** Connect E2B: the key is checked with E2B, then kept in the vault. Returns a reason when it's no good. */
+  async setE2bKey(key: string) {
+    const k = key.trim();
+    if (!/^[A-Za-z0-9_-]{10,200}$/.test(k)) return "That doesn't look like an E2B API key.";
+    const bad = await (this.o.checkE2b ?? checkE2bKey)(k);
+    if (bad) return bad;
+    this.o.vault.set("e2b", k);
+    return null;
+  }
+  forgetE2bKey() { this.o.vault.delete("e2b"); this.e2b = null; }
 
   async status() {
     const s = await this.o.settings();
@@ -306,7 +328,7 @@ export class Workbench {
     if (!g || g.exp < this.now()) return { ok: false, text: "This job's workbench access has ended." };
     g.exp = this.now() + TOKEN_TTL_MS;
     const bench = await this.pick();
-    if (!bench) return { ok: false, text: "No workbench right now (Settings → Where work runs)." };
+    if (!bench) return { ok: false, text: "No workbench right now (Settings → Your hub & devices)." };
     const started = this.now();
     this.lastUse = started;
     let r: { ok: boolean; text: string; what: string; fileId?: string };

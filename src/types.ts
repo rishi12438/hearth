@@ -3,12 +3,10 @@ import type { Repeat } from "./time.ts";
 
 /** The primary device (role "owner") lets other devices in, like the admin of a router. */
 export type Passkey = { credId: string; spki: string; alg: number };
-/** "computer": a Mac (or any machine) linked to this hub to run work with its own logins. Its key opens only the link. */
+/** "computer": a Mac (or any machine) linked to this hub, to copy its logins up. Its key opens only the link. */
 export type Device = Doc & { name: string; tokenHash: string; lastSeenAt: string; role?: "owner" | "member" | "computer"; passkey?: Passkey;
-  /** For a computer: which of its logins it keeps copied up to this hub, so the cloud can work while it's off. */
-  copy?: ("claude" | "codex")[];
-  /** For a computer the hub set up itself (an E2B sandbox or your VM): its machine id. The hub hands it its logins. */
-  machine?: string };
+  /** For a computer: which of its logins it keeps copied up to this hub, so the hub can think with them. */
+  copy?: ("claude" | "codex")[] };
 export type PairingCode = Doc & { codeHash: string; expiresAt: number; role?: "owner" | "member" };
 
 export type Done = { kind: string; label: string; id?: string };
@@ -88,10 +86,7 @@ export type Job = Doc & {
   teammateId: string;
   status: "queued" | "working" | "waiting" | "blocked" | "done" | "failed";
   /** Set when the job can't go on without you (a login, your laptop, a permission). It parks until you unblock it. */
-  /** needs "computer": parked until a linked computer is online, then it resumes on its own. */
-  blocked?: { need: string; why: string; unblock: string; needs?: "computer" };
-  /** Where the model ran: a linked computer's name, or "cloud" for this hub. */
-  ranOn?: string;
+  blocked?: { need: string; why: string; unblock: string };
   effort: "quick" | "light" | "heavy";
   /** How it was done: reused a skill/workflow, or worked out fresh by a model. */
   how?: "skill" | "workflow" | "fresh" | "repaired";
@@ -190,17 +185,16 @@ export type Prefs = {
   aboutUpdatedAt?: string;
   /** Hybrid: cheaper models do a job's legwork, the heavy model writes what the user reads. On unless turned off. */
   hybrid?: boolean;
-  /** Where work runs (Settings → Where work runs). */
+  /** Where teammates' code runs (Settings → Your hub & devices). */
   work?: WorkSettings;
 };
 
 /**
- * agent: where teammates think. "mac-first" = a linked computer when one is online, else this hub; "hub" = always here;
- * "mac" = only on a linked computer (jobs wait for it). workbench: where code runs. "auto" = E2B if connected, else Docker
+ * Teammates always think on the hub. workbench: where their code runs. "auto" = E2B if connected, else Docker
  * on this hub; or pin one. "plain" = straight on this machine, no container: the code runs as the hub's own user and
  * could read its data and keys, so it's never picked automatically. "off" = no code at all.
  */
-export type WorkSettings = { agent: "mac-first" | "hub" | "mac"; workbench: "auto" | "e2b" | "docker" | "plain" | "off" };
+export type WorkSettings = { workbench: "auto" | "e2b" | "docker" | "plain" | "off" };
 
 /** One job's time on the workbench: what went in, what ran, what came out. Kept so anyone can see what happened and continue. */
 export type WorkSession = Doc & {

@@ -49,15 +49,6 @@ export async function addDevice(store: Store, deviceName: unknown, role: "owner"
   return { token, device };
 }
 
-/** A new key for a device; the old one stops working at once. Used each time the hub sets up a cloud computer. */
-export async function rotateToken(store: Store, deviceId: string) {
-  const d = await store.get<Device>("devices", deviceId);
-  if (!d) throw new Error("No such device.");
-  const token = randomBytes(32).toString("base64url");
-  await store.put<Device>("devices", { ...d, tokenHash: sha256(token) });
-  return token;
-}
-
 /** The primary devices. Hubs paired before roles existed treat their oldest device as primary. */
 export async function owners(store: Store) {
   const all = (await store.all<Device>("devices")).sort((a, b) => a.createdAt.localeCompare(b.createdAt));

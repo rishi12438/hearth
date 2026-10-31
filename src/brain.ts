@@ -310,16 +310,7 @@ function agentEnv() {
 export type BrainProfile = { harness: string; model: string };
 /** Collects model spend across calls. `unknown` flips when a harness can't report cost. */
 /** Spend for one job; signal stops its model process when the user changes the job mid-run. */
-/** ranOn: set by Brain to the linked computer that ran the call, or "cloud" when this hub ran it while computers are linked. */
-export type Meter = { costUsd: number; unknown: boolean; signal?: AbortSignal; onProgress?: (what: string) => void; ranOn?: string };
-
-/** Somewhere else that can run a brain call: a computer linked to this hub (see computers.ts). */
-export type RemoteRunner = { name: string; run(b: BrainInput, p: BrainProfile, meter?: Meter): Promise<string> };
-export type Remote = { pick(p: BrainProfile): RemoteRunner | null; linked(): boolean };
-/** No linked computer is online for this harness, and this hub can't run it itself. The job parks until one is. */
-export class NeedsComputer extends Error {}
-/** The computer running a call dropped off mid-way. */
-export class ComputerGone extends Error {}
+export type Meter = { costUsd: number; unknown: boolean; signal?: AbortSignal; onProgress?: (what: string) => void };
 
 /** One line on what the model is doing right now, from a streamed tool call ("Searching: pottery gifts"). */
 export function describeStep(name: string, input: any): string | null {
@@ -367,11 +358,7 @@ export class Brain {
   /** Brain processes running right now (for the UI and tests). */
   running = 0;
   private workDir: string;
-  /** Linked computers. When one is online with the harness, calls run there, on its own logins. */
-  remote: Remote | null = null;
-  /** Where teammates think (Settings → Where work runs). */
-  agentOn: "mac-first" | "hub" | "mac" = "mac-first";
-  /** The hub address the workbench tools call back to (the hub itself, or a linked computer's hub). */
+  /** The hub address the workbench tools call back to. */
   toolUrl: string | null = null;
 
   constructor(private config: Config) {
@@ -404,7 +391,7 @@ export class Brain {
    */
   async think(b: BrainInput, profile?: BrainProfile, meter?: Meter): Promise<string> {
     const p = profile || this.defaults().workhorse;
-    if (b.mode === "orchestrate") return this.dispatch(b, p, meter);
+    if (b.mode === "orchestrate") return this.run(b, p, meter);
     const cap = this.config.maxParallelPerHarness[p.harness];
     if (cap && !this.perHarness.has(p.harness)) this.perHarness.set(p.harness, new Semaphore(cap));
     const own = this.perHarness.get(p.harness);
@@ -413,26 +400,9 @@ export class Brain {
     this.running++;
     try {
       if (meter?.signal?.aborted) throw new Error("Restarted with your new message.");
-      return await this.dispatch(b, p, meter);
+      return await this.run(b, p, meter);
     }
     finally { this.running--; own?.release(); this.global.release(); }
-  }
-
-  /** A linked computer if one is online with this harness, else this hub (the cloud). */
-  private async dispatch(b: BrainInput, p: BrainProfile, meter?: Meter): Promise<string> {
-    const r = this.agentOn === "hub" ? null : this.remote?.pick(p);
-    if (!r && this.agentOn === "mac" && this.remote) throw new NeedsComputer("This hub is set to think only on your Mac, and it isn't online.");
-    if (r) {
-      if (meter) meter.ranOn = r.name;
-      try { return await r.run(b, p, meter); }
-      catch (e) { if (!(e instanceof ComputerGone)) throw e; }
-    }
-    const here = availableHarnesses(this.config).includes(p.harness);
-    if (!here && this.remote?.linked()) {
-      throw new NeedsComputer(`No linked computer is online to run ${p.harness}, and this hub can't run it. Open your Mac, or copy your ${p.harness} login to the cloud.`);
-    }
-    if (meter) meter.ranOn = this.remote?.linked() ? "cloud" : undefined;
-    return this.run(b, p, meter);
   }
 
   private async run(b: BrainInput, profile: BrainProfile, meter?: Meter): Promise<string> {

@@ -102,27 +102,25 @@ For the strictest setup, add `HEARTH_REQUIRE_PASSKEY=1` to `/opt/hearth/.env` an
 
 ## 7. Optional: link your Mac
 
-Want teammates to run on your Mac, with your own Claude or Codex login, whenever it's on? On the Mac, in a copy of the repo:
+The hub does all the thinking. Link your Mac so it can copy your Claude or Codex login up, and the hub thinks with your own
+account. On the Mac, in a copy of the repo:
 
 ```bash
 bash deploy/setup.sh mac https://example.com        # add --name "Studio" to choose what your phone calls it
 ```
 
-It installs Bun if needed, asks your primary phone to approve the Mac (compare the 4-letter code), and starts it at login,
-kept awake while plugged in. The Mac connects out to your server and keeps the line open, so it needs no open ports.
+It installs Bun if needed, asks your primary phone to approve the Mac (compare the 4-letter code), and starts it at login.
+The Mac connects out to your server and keeps the line open, so it needs no open ports.
 
-- Your phone shows it under **Settings → Devices → Computers**, with its signal and what it's running. Home says where work runs right now.
-- When the Mac is off, the server does the work. To let the server use Claude or Codex then, turn on **Copy to the cloud** for that login on the Mac's card.
+- Your phone shows it under **Settings → Your hub & devices**, with its signal and when it was last seen.
+- Turn on **Copy Claude login to the hub** on the Mac's card. The copy stays current; turning it off deletes it from the server.
 - Stop it: `launchctl bootout gui/$(id -u)/com.hearth.computer`. Unlink it from your phone to cut it off for good. Logs: `~/Library/Logs/hearth-computer.log`.
 
-## 8. Optional: cloud computers
+## 8. Optional: run code in E2B
 
-No Mac, or want a computer that's always there? On your phone: **Settings → Devices → Add a cloud computer**.
-
-- **E2B sandbox:** paste your [E2B](https://e2b.dev) API key once. Hearth makes a sandbox, installs itself and Claude Code there and links it. It pauses after the idle time you pick (no compute cost, everything stays installed) and wakes in seconds, on its own when a job is waiting for a computer. Remove deletes it from E2B.
-- **Your own VM:** any Linux machine you can SSH into (another Lightsail box, Hetzner, DigitalOcean). Enter its address, user and private key; Hearth checks it can log in, pins the machine's identity, and sets it up the same way.
-
-Both dial back to `HEARTH_PUBLIC_URL` (step 3 sets it). They use the logins this hub holds, so turn on **Copy to the cloud** for your Mac's Claude login first, or log in on the server.
+Teammates' code runs in Docker on the server by default. To run it in a cloud sandbox instead: **Settings → Your hub &
+devices → Run code in the cloud**, and paste your [E2B](https://e2b.dev) API key. The team shares one sandbox; it pauses
+when idle and holds no logins or keys. The thinking stays on the hub.
 
 ## What protects you, in plain words
 

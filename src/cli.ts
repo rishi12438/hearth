@@ -5,8 +5,9 @@ import { newPairingCode, owners } from "./auth.ts";
 import QRCode from "qrcode";
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { Brain, availableHarnesses } from "./brain.ts";
-import { connect, joinHub, readLink } from "./computer.ts";
+import { Brain } from "./brain.ts";
+import { connect, hasLogin, joinHub, readLink } from "./computer.ts";
+import { COPY_ITEMS, type CopyItem } from "./computers.ts";
 import { Scripts } from "./scripts.ts";
 import { Push } from "./push.ts";
 import { Hub } from "./hub.ts";
@@ -20,7 +21,7 @@ const cmd = process.argv[2] || "start";
 const config = loadConfig();
 mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
 
-// The computer side (your Mac): it links to a hub and runs work for it, so it needs no database of its own.
+// The computer side (your Mac): it links to a hub and can copy its logins up. Nothing runs here, so it needs no database.
 if (cmd === "join") {
   const args = process.argv.slice(3);
   const named = args.indexOf("--name");
@@ -33,9 +34,9 @@ if (cmd === "join") {
 if (cmd === "computer") {
   const link = readLink(config.dataDir);
   if (!link) { console.log("This computer isn't linked yet. Run: bun run join https://yournameassistant.com"); process.exit(1); }
-  console.log(`hearth · ${link.name} · linking to ${link.hub}  brains here: ${availableHarnesses(config).join(", ")}`);
+  console.log(`hearth · ${link.name} · linking to ${link.hub}`);
   // Exits 0 when unlinked, so launchd and cron don't keep restarting a computer the hub no longer knows.
-  const stop = connect({ config, link, onSignedOut: () => process.exit(0) });
+  const stop = connect({ link, onSignedOut: () => process.exit(0) });
   const quit = () => { stop(); process.exit(0); };
   process.on("SIGINT", quit);
   process.on("SIGTERM", quit);
@@ -105,7 +106,7 @@ if (cmd === "setup" || cmd === "pair") {
   process.exit(1);
 }
 
-/** On a linked computer: is it linked, can it reach the hub, and is a brain logged in here? */
+/** On a linked computer: is it linked, and can it reach the hub? */
 async function doctorComputer(check: (ok: boolean, good: string, fix: string) => void, bad: () => number) {
   const link = readLink(config.dataDir);
   check(!!link, `Linked to ${link?.hub}`, "Not linked: run `bun run join https://yournameassistant.com`");
@@ -113,8 +114,8 @@ async function doctorComputer(check: (ok: boolean, good: string, fix: string) =>
     const r = await fetch(link.hub + "/computer", { headers: { Authorization: `Bearer ${link.token}` }, signal: AbortSignal.timeout(8000) }).catch(() => null);
     check(r?.status === 426, "The hub knows this computer", r ? (r.status === 401 ? "The hub signed this computer out: run join again" : `The hub answered ${r.status}`) : `Can't reach ${link.hub}`);
   }
-  const brains = availableHarnesses(config).filter((h) => h !== "echo");
-  check(brains.length > 0, `Brains here: ${brains.join(", ")}`, "Install and log in to Claude Code (`claude`) or Codex on this computer");
+  const logins = (Object.keys(COPY_ITEMS) as CopyItem[]).filter(hasLogin);
+  console.log(`  · Logins here you can copy to the hub: ${logins.length ? logins.map((i) => COPY_ITEMS[i].label).join(", ") : "none"}`);
   console.log(bad() ? `\n  ${bad()} thing(s) to fix.\n` : "\n  All good.\n");
   if (bad()) process.exitCode = 1;
 }

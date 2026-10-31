@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // The workbench tools, as a tiny MCP server Claude Code starts for one job (stdio, JSON-RPC, one message per line).
 // It holds nothing but the hub's address and that job's short-lived key, and forwards each tool call to the hub, which
-// runs it on the workbench. Works the same when the agent thinks on your Mac: the key is only good for that job.
+// runs it on the workbench. The key is only good for that job.
 import { TOOLS } from "./workbench.ts";
 
 const url = process.env.HEARTH_TOOL_URL || "";

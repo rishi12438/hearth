@@ -1030,7 +1030,7 @@ function metaLine(j: any) {
     return `${n ? `used ${n} · ` : ""}${secs(j.durationMs)} · ${money(j.costUsd)}`;
   }
   const model = j.voiced ? `${j.tier === "quick" ? "quick" : "workhorse"} + heavy` : j.tier === "quick" ? "quick" : j.tier === "heavy" ? "heavy" : null;
-  return [j.escalated ? "moved up" : null, model, j.ranOn ? `on ${j.ranOn === "cloud" ? "the cloud" : j.ranOn}` : null, secs(j.durationMs), money(j.costUsd)].filter(Boolean).join(" · ");
+  return [j.escalated ? "moved up" : null, model, secs(j.durationMs), money(j.costUsd)].filter(Boolean).join(" · ");
 }
 
 function chatMenu() {
@@ -2247,16 +2247,15 @@ function openScript(s: any) {
 
 /**
  * Settings → Your hub & devices: everything you own, and under each, in plain words, what it does. Switches sit right on
- * the thing they change: whether your Mac thinks, which machine runs your teammates' code, which logins get copied.
+ * the thing they change: which machine runs your teammates' code, which logins get copied. All thinking happens on the hub.
  */
 async function openDevices() {
   try {
     const primary = !!S.state?.device.primary;
-    const [devices, waiting, cloud, work] = await Promise.all([
-      call("/api/devices"), primary ? call("/api/access") : Promise.resolve([]),
-      primary ? call("/api/machines").catch(() => null) : Promise.resolve(null), call("/api/work").catch(() => null)]);
+    const [devices, waiting, work] = await Promise.all([
+      call("/api/devices"), primary ? call("/api/access") : Promise.resolve([]), call("/api/work").catch(() => null)]);
     const hub = S.state?.hub || {};
-    const settings = work?.settings || { agent: "mac-first", workbench: "auto" };
+    const settings = work?.settings || { workbench: "auto" };
     const runsOn = work?.workbench?.kind || null; // where code runs right now: "docker" | "e2b" | "plain" | null
     const saveWork = async (patch: any, msg: string) => { try { await call("/api/work", { method: "PUT", body: { ...settings, ...patch } }); toast(msg); await refreshState(); openDevices(); } catch (e) { handleError(e); } };
     const codeHere = (kind: "docker" | "e2b" | "plain") => {
@@ -2264,10 +2263,8 @@ async function openDevices() {
       saveWork({ workbench: kind }, kind === "e2b" ? "Code now runs in your E2B sandbox" : "Code now runs in Docker on the hub");
     };
     const codeDown = () => saveWork({ workbench: "off" }, "Teammates won't run code");
-    const macs = devices.filter((d: any) => d.role === "computer" && !d.machine);
-    const machineDevs = devices.filter((d: any) => d.role === "computer" && d.machine);
+    const macs = devices.filter((d: any) => d.role === "computer");
     const phones = devices.filter((d: any) => d.role !== "computer");
-    const anyMacOnline = macs.some((d: any) => d.link?.state === "online");
     const decide = async (r: any, verb: "approve" | "deny") => {
       try {
         // Letting a device in takes a fresh Face ID check, so someone holding your unlocked phone for a moment can't.
@@ -2278,7 +2275,8 @@ async function openDevices() {
     };
     const codeBox = h("div");
     const where = hub.target === "lightsail" ? "on your server" : hub.target === "mac" ? "on a Mac" : "on this computer";
-    const thinksLine = settings.agent === "mac" ? "Doesn't think: set to your Mac only" : settings.agent === "hub" || !macs.length ? "Does the thinking" : anyMacOnline ? "Thinks when your Mac is off (it's on now)" : "Thinks now, while your Mac is off";
+    const logins: string[] = S.state?.computers?.logins || [];
+    const thinksWith = logins.length ? `with your ${logins.map((i) => (i === "claude" ? "Claude" : "Codex")).join(" and ")} login${logins.length > 1 ? "s" : ""}` : null;
 
     openSheet("Your hub & devices", [
       waiting.length ? h("h4", null, "Waiting to join") : null,
@@ -2291,7 +2289,7 @@ async function openDevices() {
       h("h4", null, "Your hub"),
       thing({ icon: "server", name: hub.name || "Hearth", sub: `${(activeHub()?.url || "").replace(/^https?:\/\//, "")} · ${where}`, state: "online", stateLabel: "Online" }, [
         cap("Keeps your memory, chats and reminders", true),
-        cap(thinksLine, settings.agent !== "mac"),
+        cap(thinksWith ? `Does all the thinking, ${thinksWith}` : "Does all the thinking", true),
         runsOn === "docker" || runsOn === "plain" || work?.docker
           ? choice(runsOn === "plain" ? "Runs your teammates' code, without a container" : "Runs your teammates' code (Docker)", runsOn === "docker" || runsOn === "plain", primary && work?.docker && runsOn !== "docker" ? () => codeHere("docker") : null)
           : cap("Can't run code: Docker isn't installed", false),
@@ -2315,15 +2313,13 @@ async function openDevices() {
           const on = d.copy.includes(item), at = d.copiedAt?.[item];
           return toggle(`Copy ${label} to the hub`, on, primary ? async () => {
             try { await call(`/api/devices/${d.id}/copy`, { method: "PUT", body: { ...Object.fromEntries(d.copy.map((i: string) => [i, true])), [item]: !on } }); toast(on ? `Stopped copying ${label}` : `Copying ${label} to the hub`); openDevices(); } catch (e) { handleError(e); }
-          } : null, on ? (at ? `Copied ${relTime(at)}, kept up to date` : "Copies next time it's online") : "So the hub can think while this Mac is off");
+          } : null, on ? (at ? `Copied ${relTime(at)}, kept up to date` : "Copies next time it's online") : "So the hub thinks with your own login");
         };
-        return thing({ icon: "laptop", name: d.name, sub: l.state === "online" ? [l.rttMs != null ? `${l.rttMs} ms` : null, l.running ? `running ${l.running}` : "idle", l.harnesses.filter((x: string) => x !== "echo").join(", ")].filter(Boolean).join(" · ") : l.lastAliveAt ? `Last seen ${relTime(l.lastAliveAt)}` : "Hasn't connected yet", state: l.state, stateLabel: STATE_LABEL[l.state], level: l.level }, [
-          toggle("Thinks with your Claude login when it's on", settings.agent !== "hub", primary ? () => saveWork({ agent: settings.agent === "hub" ? "mac-first" : "hub" }, settings.agent === "hub" ? "Your Mac thinks when it's on" : "The hub does all the thinking") : null),
-          cap("Doesn't run your teammates' code", false),
-          accept ? copy("claude", "Claude login") : null,
+        return thing({ icon: "laptop", name: d.name, sub: l.state === "online" ? [l.rttMs != null ? `${l.rttMs} ms` : null, "linked"].filter(Boolean).join(" · ") : l.lastAliveAt ? `Last seen ${relTime(l.lastAliveAt)}` : "Hasn't connected yet", state: l.state, stateLabel: STATE_LABEL[l.state], level: l.level }, [
+          accept ? copy("claude", "Claude login") : cap("Linked to your hub", true),
           accept ? copy("codex", "Codex login") : null,
         ], [
-          primary ? h("button", { class: "btn small danger-ghost", on: { click: () => confirmSheet(`Unlink ${d.name}?`, "It stops thinking for this hub, and logins it copied to the hub are removed.", "Unlink", async () => { await call(`/api/devices/${d.id}`, { method: "DELETE" }); toast("Unlinked"); refreshState(); openDevices(); }) } }, "Unlink") : null,
+          primary ? h("button", { class: "btn small danger-ghost", on: { click: () => confirmSheet(`Unlink ${d.name}?`, "Logins it copied to the hub are removed.", "Unlink", async () => { await call(`/api/devices/${d.id}`, { method: "DELETE" }); toast("Unlinked"); refreshState(); openDevices(); }) } }, "Unlink") : null,
         ]);
       }),
       codeBox,
@@ -2340,24 +2336,14 @@ async function openDevices() {
         h("button", { class: "btn ghost", on: { click: () => linkMacSheet() } }, icon("laptop", 16), "Link a Mac")) : null,
 
       h("h4", null, "Cloud"),
-      cloud?.e2bKey
+      work?.e2b
         ? thing({ icon: "cloud", name: "E2B sandbox", sub: runsOn === "e2b" ? work.workbench.label : "Connected", state: runsOn === "e2b" ? "online" : "offline", stateLabel: runsOn === "e2b" ? "In use" : "Ready" }, [
             choice("Runs your teammates' code", runsOn === "e2b", primary && runsOn !== "e2b" ? () => codeHere("e2b") : null),
             cap("Paused when idle, so it costs little", true),
             cap("Holds no logins or keys", true),
-          ], [primary ? h("button", { class: "linkbtn subtle", on: { click: () => confirmSheet("Disconnect E2B?", "The key is removed from the hub. Code runs in Docker on the hub instead, if it has Docker.", "Disconnect", async () => { await call("/api/machines/e2b-key", { method: "DELETE" }); toast("E2B disconnected"); openDevices(); }) } }, "Disconnect E2B") : null])
-        : primary && cloud ? h("button", { class: "item", on: { click: () => openAddMachine(cloud, "e2b") } }, h("div", { class: "hicon" }, icon("cloud", 16)),
+          ], [primary ? h("button", { class: "linkbtn subtle", on: { click: () => confirmSheet("Disconnect E2B?", "The key is removed from the hub. Code runs in Docker on the hub instead, if it has Docker.", "Disconnect", async () => { await call("/api/work/e2b-key", { method: "DELETE" }); toast("E2B disconnected"); openDevices(); }) } }, "Disconnect E2B") : null])
+        : primary ? h("button", { class: "item", on: { click: connectE2bSheet } }, h("div", { class: "hicon" }, icon("cloud", 16)),
             h("span", { class: "grow" }, h("b", { class: "light" }, "Run code in the cloud"), h("small", { class: "sub" }, "Connect E2B: a sandbox that runs your teammates' code, paused when idle")), icon("chevron", 16)) : null,
-      machineDevs.map((d: any) => {
-        const mc = cloud?.machines?.find((m: any) => m.id === d.machine), l = d.link;
-        if (!mc) return null;
-        const busy = mc.state === "setting-up";
-        return thing({ icon: "cloud", name: d.name, sub: mc.kind === "e2b" ? "Cloud computer (E2B)" : `Your VM · ${mc.host}`, state: busy ? "asleep" : l.state, stateLabel: busy ? "Setting up" : mc.state === "error" && l.state !== "online" ? "Needs attention" : mc.state === "paused" && l.state !== "online" ? "Paused" : STATE_LABEL[l.state], level: l.level }, [
-          cap(l.state === "online" ? "Thinks for your teammates" : machineDetail(mc), l.state === "online"),
-          cap(cloud.logins.length ? `Uses the ${cloud.logins.map((i: string) => (i === "claude" ? "Claude" : "Codex")).join(" and ")} login the hub holds` : "No login to use yet: copy one from your Mac first", !!cloud.logins.length),
-        ], [primary ? machineButtons(mc) : null]);
-      }),
-      primary && cloud ? h("button", { class: "linkbtn", on: { click: () => openAddMachine(cloud, "ssh") } }, "Add your own VM") : null,
       primary && runsOn ? h("button", { class: "linkbtn subtle", on: { click: codeDown } }, "Don't let teammates run code") : null,
       primary && !runsOn && settings.workbench === "off" ? h("button", { class: "linkbtn", on: { click: () => saveWork({ workbench: "auto" }, "Teammates can run code again") } }, "Let teammates run code again") : null,
     ]);
@@ -2391,13 +2377,13 @@ function choice(text: string, on: boolean, fn: (() => void) | null) {
 function linkMacSheet() {
   const cmd = `bash deploy/setup.sh mac ${activeHub()?.url || "https://yournameassistant.com"}`;
   openSheet("Link a Mac", [
-    h("p", null, "Your Mac thinks for your teammates with your own Claude login whenever it's on. It never runs their code."),
+    h("p", null, "Linking your Mac lets it copy your Claude login up to the hub, so the hub thinks with your own account. Nothing runs on the Mac."),
     h("ol", { class: "steps" }, h("li", null, "On the Mac, open Terminal in the hearth folder."), h("li", null, "Run this, then approve the Mac here when its code shows up.")),
     h("button", { class: "codeline", title: "Copy", on: { click: () => { navigator.clipboard?.writeText(cmd); toast("Copied"); } } }, h("code", null, cmd), icon("clip", 14)),
   ]);
 }
 
-// ---- Linked computers: where work runs ----
+// ---- Linked computers ----
 
 /** Four bars, like a phone's signal. */
 function bars(level: number, state: string) {
@@ -2406,103 +2392,38 @@ function bars(level: number, state: string) {
 const STATE_LABEL: Record<string, string> = { online: "Online", asleep: "Not answering", offline: "Offline" };
 const shortName = (n: string) => n.replace(/ \((Mac)\)$/, "");
 
-/** Home: one line saying where work runs right now. Only shows once a computer is linked. */
+/** Home: one line saying whether your linked computer is there. Only shows once one is linked. */
 function linkStrip() {
   const c = S.state?.computers;
   if (!c?.linked) return null;
   const best = c.list[0];
   const on = best?.state === "online";
-  const text = on
-    ? [h("b", null, shortName(best.name)), ` is online · work runs there${best.running ? ` · ${best.running} running` : ""}`]
-    : [h("b", null, c.linked === 1 ? shortName(best.name) : "Your computers"), ` ${best?.state === "asleep" ? "isn't answering" : "is offline"} · the cloud is doing the work`];
+  const text = [h("b", null, c.linked === 1 || on ? shortName(best.name) : "Your computers"), on ? " is online" : best?.state === "asleep" ? " isn't answering" : " is offline"];
   return h("button", { class: `linkstrip ${best?.state || "offline"}`, on: { click: openDevices } },
-    h("span", { class: "lsicon" }, icon(on ? "laptop" : "cloud", 18)),
+    h("span", { class: "lsicon" }, icon("laptop", 18)),
     h("span", { class: "grow" }, text),
     on ? bars(best.level, best.state) : null, icon("chevron", 14));
 }
 
-/** What a cloud computer is doing when it isn't online. */
-function machineDetail(m: any) {
-  if (m.state === "setting-up") return `${m.step || "Starting"}…`;
-  if (m.state === "error") return `Couldn't set it up: ${m.error}`;
-  if (m.state === "paused") return `Paused · everything stays installed, wakes in seconds${m.autoStart ? " when a job needs it" : ""}`;
-  if (m.state === "stopped") return m.kind === "e2b" ? (m.autoStart ? "Stopped · starts on its own when a job needs it" : "Stopped · not costing anything") : "Stopped";
-  return "Starting the link…";
-}
-
-function machineButtons(m: any) {
-  const act = (verb: string, label: string) => async (e: Event) => {
-    (e.currentTarget as HTMLButtonElement).disabled = true;
-    try { await call(`/api/machines/${m.id}/${verb}`, { body: {} }); toast(label); } catch (err) { handleError(err); }
-    openDevices();
-  };
-  const running = m.state === "running" || m.state === "setting-up";
-  return h("div", { class: "ccbtns" },
-    m.kind === "e2b" && !running ? h("button", { class: "btn small primary", on: { click: act("start", m.state === "paused" ? "Waking the sandbox" : "Starting the sandbox") } }, m.state === "paused" ? "Wake" : "Start") : null,
-    m.kind === "e2b" && running ? h("button", { class: "btn small ghost", on: { click: act("stop", "Paused. Everything stays installed.") } }, "Pause") : null,
-    m.kind === "ssh" && m.state !== "setting-up" ? h("button", { class: "btn small ghost", on: { click: act("start", "Setting it up again") } }, "Set up again") : null,
-    h("button", { class: "btn small danger-ghost", on: { click: () => confirmSheet(`Remove ${m.name}?`, m.kind === "e2b" ? "The sandbox and its disk are deleted from E2B, and its key stops working." : "The link on the VM is stopped, its key stops working, and the SSH key is deleted from this hub. The VM itself keeps running.", "Remove", async () => { await call(`/api/machines/${m.id}`, { method: "DELETE" }); toast("Removed"); refreshState(); }) } }, "Remove"));
-}
-
-/** Add a computer the hub sets up itself: an E2B sandbox (your API key) or your own VM (its address and an SSH key). */
-function openAddMachine(cloud: any, kind: "e2b" | "ssh" = "e2b") {
+/** Connect E2B so teammates' code runs in a cloud sandbox instead of Docker on the hub. */
+function connectE2bSheet() {
   const err = h("p", { class: "err small", hidden: true });
-  const fail = (b: HTMLButtonElement, label: string) => (e: any) => { err.textContent = e.message; err.hidden = false; b.disabled = false; b.textContent = label; };
-  const tabs = h("div", { class: "segmented" },
-    h("button", { class: kind === "e2b" ? "on" : "", on: { click: () => openAddMachine(cloud, "e2b") } }, "E2B sandbox"),
-    h("button", { class: kind === "ssh" ? "on" : "", on: { click: () => openAddMachine(cloud, "ssh") } }, "Your own VM"));
-  const warnings = [
-    !cloud.hubUrl ? h("p", { class: "err small" }, "This hub doesn't know its public address yet. Set HEARTH_PUBLIC_URL (deploy/setup.sh lightsail does) so a cloud computer can dial back to it.") : null,
-    !cloud.logins.length ? h("p", { class: "muted small" }, "Tip: turn on Copy to the cloud for your Mac's Claude login first. The hub hands that login to the computers it sets up.") : null,
-  ];
-  const name = h("input", { class: "field", placeholder: kind === "e2b" ? "Name (e.g. Sandbox)" : "Name (e.g. Hetzner)", maxLength: 40 });
-  let body: any[];
-  if (kind === "e2b" && !cloud.e2bKey) {
-    const key = h("input", { class: "field", type: "password", placeholder: "E2B API key", autocomplete: "off", autocapitalize: "off", spellcheck: false });
-    const save = h("button", { class: "btn primary big", on: { click: async () => {
-      if (!key.value.trim()) return key.focus();
-      save.disabled = true; save.textContent = "Checking with E2B…"; err.hidden = true;
-      try { const v = await call("/api/machines/e2b-key", { body: { key: key.value } }); toast("E2B connected"); openAddMachine(v, "e2b"); }
-      catch (e) { fail(save, "Connect E2B")(e); }
-    } } }, "Connect E2B");
-    body = [
-      h("ol", { class: "steps" },
-        h("li", null, "Make an account at ", h("a", { href: "https://e2b.dev/dashboard", target: "_blank", rel: "noopener noreferrer" }, "e2b.dev"), "."),
-        h("li", null, "Copy your API key from the dashboard."),
-        h("li", null, "Paste it here.")),
-      key, err, save,
-      h("p", { class: "muted small" }, "The key is checked with E2B, then stays on your hub in a private file. It's never stored in your data or exports and never sent back to this app."),
-    ];
-    setTimeout(() => key.focus(), 80);
-  } else if (kind === "e2b") {
-    let auto = true, idle = 30;
-    const sw = h("button", { class: "item", on: { click: () => { auto = !auto; sw.querySelector(".switch")!.classList.toggle("on", auto); } } },
-      h("span", { class: "grow" }, h("b", { class: "light" }, "Wake on its own when needed"), h("small", { class: "sub" }, "When a job needs a computer and none is online")), h("span", { class: "switch on" }, h("i")));
-    const idleSel = h("select", { class: "field", on: { change: (e: Event) => { idle = Number((e.target as HTMLSelectElement).value); } } },
-      [15, 30, 60, 120].map((n) => h("option", { value: String(n), selected: n === 30 }, `Pause after ${n < 60 ? `${n} minutes` : `${n / 60} hour${n > 60 ? "s" : ""}`} idle`)));
-    const add = h("button", { class: "btn primary big", on: { click: async () => {
-      add.disabled = true; add.textContent = "Starting…"; err.hidden = true;
-      try { await call("/api/machines", { body: { kind: "e2b", name: name.value, autoStart: auto, idleStopMin: idle } }); toast("Setting up your sandbox. It takes a minute or two."); openDevices(); }
-      catch (e) { fail(add, "Add sandbox")(e); }
-    } } }, "Add sandbox");
-    body = [name, h("div", { class: "list" }, sw), idleSel, err, add,
-      h("p", { class: "muted small" }, "Hearth makes a sandbox in your E2B account, installs itself and Claude Code there, and links it. When idle it's paused: it stops costing compute but keeps everything installed, so it wakes in seconds. Your memory and chats never live on it; they stay on your hub."),
-      h("button", { class: "linkbtn", on: { click: () => confirmSheet("Disconnect E2B?", "The key is removed from the hub. Sandboxes it made are left alone.", "Disconnect", async () => { await call("/api/machines/e2b-key", { method: "DELETE" }); toast("E2B disconnected"); }) } }, "Disconnect E2B")];
-  } else {
-    const host = h("input", { class: "field", placeholder: "IP address or host name", autocapitalize: "off", spellcheck: false });
-    const user = h("input", { class: "field", value: "ubuntu", placeholder: "User", autocapitalize: "off", spellcheck: false });
-    const port = h("input", { class: "field", value: "22", inputmode: "numeric", placeholder: "Port" });
-    const key = h("textarea", { class: "field mono", rows: 5, placeholder: "-----BEGIN OPENSSH PRIVATE KEY-----\n…\n-----END OPENSSH PRIVATE KEY-----", autocapitalize: "off", spellcheck: false });
-    const add = h("button", { class: "btn primary big", on: { click: async () => {
-      if (!host.value.trim()) return host.focus();
-      add.disabled = true; add.textContent = "Reaching it…"; err.hidden = true;
-      try { await call("/api/machines", { body: { kind: "ssh", name: name.value, host: host.value, user: user.value, port: Number(port.value), privateKey: key.value } }); toast("Setting up your VM. It takes a minute or two."); openDevices(); }
-      catch (e) { fail(add, "Connect and set up")(e); }
-    } } }, "Connect and set up");
-    body = [name, host, h("div", { class: "row2" }, user, port), key, err, add,
-      h("p", { class: "muted small" }, "Any Linux VM you can reach over SSH: Lightsail, Hetzner, DigitalOcean, a box at home. Hearth checks it can log in, remembers the machine's identity, installs itself and Claude Code, and links it. The key stays on your hub in a private file and is never shown again.")];
-  }
-  openSheet("Add a cloud computer", [tabs, ...warnings, ...body]);
+  const key = h("input", { class: "field", type: "password", placeholder: "E2B API key", autocomplete: "off", autocapitalize: "off", spellcheck: false });
+  const save = h("button", { class: "btn primary big", on: { click: async () => {
+    if (!key.value.trim()) return key.focus();
+    save.disabled = true; save.textContent = "Checking with E2B…"; err.hidden = true;
+    try { await call("/api/work/e2b-key", { body: { key: key.value } }); toast("E2B connected"); openDevices(); }
+    catch (e: any) { err.textContent = e.message; err.hidden = false; save.disabled = false; save.textContent = "Connect E2B"; }
+  } } }, "Connect E2B");
+  openSheet("Run code in the cloud", [
+    h("ol", { class: "steps" },
+      h("li", null, "Make an account at ", h("a", { href: "https://e2b.dev/dashboard", target: "_blank", rel: "noopener noreferrer" }, "e2b.dev"), "."),
+      h("li", null, "Copy your API key from the dashboard."),
+      h("li", null, "Paste it here.")),
+    key, err, save,
+    h("p", { class: "muted small" }, "Your teammates still think on the hub; only the code they run goes to one shared E2B sandbox, paused when idle. The key is checked with E2B, then kept encrypted on your hub and never sent back to this app."),
+  ]);
+  setTimeout(() => key.focus(), 80);
 }
 
 let computersTimer: ReturnType<typeof setTimeout> | null = null;

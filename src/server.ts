@@ -1,17 +1,16 @@
 import { readFileSync, readdirSync, existsSync, mkdirSync } from "node:fs";
 import { join, resolve, extname, dirname } from "node:path";
 type Server = Bun.Server<unknown>;
-import { rotateToken, sha256, deviceForToken, newPairingCode, redeemPairingCode, RateLimiter, addDevice, owners, isOwner, newChallenge, verifyPasskeyRegistration, verifyPasskeyAssertion, Sessions, AccessRequests } from "./auth.ts";
+import { sha256, deviceForToken, newPairingCode, redeemPairingCode, RateLimiter, addDevice, owners, isOwner, newChallenge, verifyPasskeyRegistration, verifyPasskeyAssertion, Sessions, AccessRequests } from "./auth.ts";
 import QRCode from "qrcode";
 import type { Hub } from "./hub.ts";
 import { deepgramLive, type VoiceSettings } from "./voice.ts";
 import { randomBytes } from "node:crypto";
 import { availableHarnesses } from "./brain.ts";
 import { Computers, COPY_ITEMS, isCopyItem } from "./computers.ts";
-import { Machines, realE2b, realSsh, type E2b, type Ssh } from "./machines.ts";
 import { Vault } from "./vault.ts";
 import { DEFAULT_WORK, Workbench, type Bench, type E2bSdk } from "./workbench.ts";
-import { hasLogin, readLogin } from "./computer.ts";
+import { hasLogin } from "./computer.ts";
 import { homedir } from "node:os";
 import { MAX_FILE_BYTES } from "./files.ts";
 import { appCsp } from "./apps.ts";
@@ -59,9 +58,9 @@ export async function buildWeb() {
 
 class HttpError extends Error { constructor(public status: number, msg: string) { super(msg); } }
 
-/** drivers: stand-ins for E2B and ssh in tests. */
+/** drivers: stand-ins for E2B, Docker and the login check in tests. */
 export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
-  drivers: { e2b?: E2b; ssh?: Ssh; readLogin?: typeof readLogin; allowLocalHub?: boolean; vault?: Vault; dockerBench?: Bench; e2bSdk?: E2bSdk; docker?: () => boolean } = {}) {
+  drivers: { hasLogin?: typeof hasLogin; vault?: Vault; dockerBench?: Bench; e2bSdk?: E2bSdk; docker?: () => boolean; checkE2b?: (key: string) => Promise<string | null> } = {}) {
   const voiceLimiter = new RateLimiter(5, 10 * 60_000);
   const liveTickets = new Map<string, number>();
   const tileKey = randomBytes(12).toString("base64url");
@@ -79,50 +78,23 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   const askGlobal = new RateLimiter(10, 10 * 60_000);
   const sessions = new Sessions(config.unlockHours * 3600_000);
   const access = new AccessRequests();
-  // Computers linked to this hub (your Mac): brain calls run there when one is online, here (the cloud) when none is.
-  const computers = new Computers({ dataDir: config.dataDir, homeDir: homedir(), acceptCopies: config.target === "lightsail", readLogin: drivers.readLogin ?? readLogin,
-    hasLogin: drivers.readLogin ? (i) => !!drivers.readLogin!(i) : hasLogin });
+  // Your computers linked to this hub (your Mac). All thinking happens here on the hub; a computer can copy its logins up.
+  const computers = new Computers({ dataDir: config.dataDir, homeDir: homedir(), acceptCopies: config.target === "lightsail", hasLogin: drivers.hasLogin ?? hasLogin });
   const linkedComputers = async () => (await store.all<Device>("devices")).filter((d) => d.role === "computer");
-  const recount = async () => { computers.known = (await linkedComputers()).length; };
-  await recount();
-  hub.brain.remote = computers;
   computers.onChange = () => hub.emit("computers", {});
-  computers.onOnline = () => { hub.resumeForComputer().catch((e) => console.error(e)); };
   computers.start();
-  // Cloud computers the hub sets up itself: an E2B sandbox or your VM. Each becomes a linked computer.
   const vault = drivers.vault ?? new Vault(config.dataDir);
   vault.migrate(config.dataDir);
-  const machines = new Machines({
-    dataDir: config.dataDir, vault,
-    hubUrl: () => process.env.HEARTH_PUBLIC_URL || null,
-    addComputer: async (name, machineId) => {
-      const { token, device } = await addDevice(store, name, "computer");
-      await store.put<Device>("devices", { ...device, machine: machineId });
-      await recount();
-      return { token, deviceId: device.id };
-    },
-    removeComputer: async (deviceId) => { computers.drop(deviceId, "removed", 4001); await store.remove("devices", deviceId); await recount(); },
-    rekey: async (deviceId) => { const t = await rotateToken(store, deviceId); computers.drop(deviceId, "new key"); return t; },
-    isOnline: (id) => computers.isOnline(id),
-    isBusy: (id) => computers.status(id, "").running > 0,
-    e2b: drivers.e2b ?? realE2b, ssh: drivers.ssh ?? realSsh, allowLocalHub: drivers.allowLocalHub,
-  });
-  machines.onChange = () => hub.emit("computers", {});
-  machines.startTimer();
-  hub.onNeedsComputer = () => { machines.wake().catch((e) => console.error(e)); };
-  // Where code runs (E2B, Docker on this hub, or plain) and where teammates think: Settings → Where work runs.
+  // Where teammates' code runs: E2B, Docker on this hub, or plain (Settings → Your hub & devices).
   const workSettings = async () => ({ ...DEFAULT_WORK, ...((await hub.prefs()).work || {}) });
-  const workbench = new Workbench({ store, files: hub.files, dataDir: config.dataDir, vault, settings: workSettings, dockerBench: drivers.dockerBench, e2bSdk: drivers.e2bSdk, docker: drivers.docker });
+  const workbench = new Workbench({ store, files: hub.files, dataDir: config.dataDir, vault, settings: workSettings, dockerBench: drivers.dockerBench, e2bSdk: drivers.e2bSdk, docker: drivers.docker, checkE2b: drivers.checkE2b });
   hub.workbench = workbench;
   workbench.startTimer();
-  const applyWork = async () => { hub.brain.agentOn = (await workSettings()).agent; };
-  await applyWork();
-  hub.on((e) => { if (e.type === "prefs") applyWork().catch(() => {}); });
   const computerSummary = async () => {
     const list = (await linkedComputers()).map((d) => computers.status(d.id, d.name, d.lastSeenAt));
     const rank = { online: 0, asleep: 1, offline: 2 };
     list.sort((x, y) => rank[x.state] - rank[y.state] || y.level - x.level);
-    return { linked: list.length, online: list.filter((c) => c.state === "online").map((c) => c.name), list, acceptCopies: config.target === "lightsail" };
+    return { linked: list.length, online: list.filter((c) => c.state === "online").map((c) => c.name), list, acceptCopies: config.target === "lightsail", logins: computers.loginsHeld() };
   };
   const streams = new Map<string, Set<ReadableStreamDefaultController>>();
   const enc = new TextEncoder();
@@ -554,7 +526,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           ...(d.role === "computer" ? { link: computers.status(d.id, d.name, d.lastSeenAt), copy: d.copy || [],
             copiedAt: Object.fromEntries(Object.entries(computers.copied()).filter(([, v]) => v.from === d.id).map(([k, v]) => [k, v.at])) } : {}),
         })));
-        // What a computer keeps copied up here, so the cloud can work while it's off. Only a server hub takes copies.
+        // What a computer keeps copied up here, so the hub thinks with it. Only a server hub takes copies.
         if (method === "PUT" && id && seg[3] === "copy") {
           ownerOnly();
           const target = await store.get<Device>("devices", id);
@@ -590,9 +562,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           sessions.endDevice(id);
           const gone = await store.get<Device>("devices", id);
           if (gone?.role === "computer") { computers.drop(id, "signed out", 4001); for (const i of gone.copy || []) computers.removeCopy(i, id); }
-          if (gone?.machine) await machines.deviceRemoved(id);
           const ok = await store.remove("devices", id);
-          await recount();
           await hub.push?.unsubscribeDevice(id);
           for (const c of streams.get(id) || []) { try { c.close(); } catch {} }
           streams.delete(id);
@@ -646,46 +616,24 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           if (device.passkey && !(pageOrigin && verifyPasskeyAssertion(b.passkey, device, pageOrigin))) throw new HttpError(401, "Confirm with Face ID to let a device in.");
           const added = await addDevice(store, r.name, r.kind === "computer" ? "computer" : "member");
           r.status = "approved"; r.token = added.token; r.deviceId = added.device.id;
-          await recount();
           await hub.log("device.paired", `${r.name} joined (approved from ${device.name})`);
           hub.emit("access", { pending: access.pending().length });
           return json({ ok: true });
         }
         break;
       }
-      // Cloud computers: an E2B sandbox (your API key) or your own VM (address + SSH key). Primary device only.
-      case "machines": {
-        ownerOnly();
-        const view = () => ({ e2bKey: machines.hasE2bKey(), logins: computers.loginsHeld(), hubUrl: process.env.HEARTH_PUBLIC_URL || null, machines: machines.list().map((m) => machines.view(m)) });
-        if (method === "GET" && !id) return json(view());
-        if (id === "e2b-key" && method === "POST") { const bad = await machines.setE2bKey(String((await body(req)).key || "")); if (bad) throw new HttpError(400, bad); await hub.log("machines.e2b", "E2B key connected"); return json(view()); }
-        if (id === "e2b-key" && method === "DELETE") { machines.forgetE2bKey(); return json(view()); }
-        if (!id && method === "POST") {
-          const b = await body(req);
-          const r = b.kind === "e2b" ? await machines.addE2b(b) : b.kind === "ssh" ? await machines.addSsh(b) : { error: "Pick E2B or your own VM." };
-          if ("error" in r && r.error) throw new HttpError(400, r.error);
-          await hub.log("machines.add", `${b.kind === "e2b" ? "E2B sandbox" : "VM"} ${(r as any).value?.name} added`);
-          return json(view());
-        }
-        const m = id ? machines.get(id) : null;
-        if (!m) throw new HttpError(404, "No such cloud computer.");
-        if (seg[3] === "start" && method === "POST") { void machines.start(m.id); return json({ ok: true }); }
-        if (seg[3] === "stop" && method === "POST") { await machines.stop(m.id); return json(view()); }
-        if (method === "DELETE") { await machines.remove(m.id); await hub.log("machines.remove", `${m.name} removed`); return json(view()); }
-        break;
-      }
-      // Where work runs: where teammates think, and the workbench where code runs.
+      // The workbench where teammates' code runs, and the E2B key it can use.
       case "work": {
+        if (id === "e2b-key" && method === "POST") { ownerOnly(); const bad = await workbench.setE2bKey(String((await body(req)).key || "")); if (bad) throw new HttpError(400, bad); await hub.log("work.e2b", "E2B connected"); return json(await workbench.status()); }
+        if (id === "e2b-key" && method === "DELETE") { ownerOnly(); workbench.forgetE2bKey(); await hub.log("work.e2b", "E2B disconnected"); return json(await workbench.status()); }
         if (method === "GET") return json(await workbench.status());
         if (method === "PUT") {
           ownerOnly();
           const b = await body(req);
           const cur = await workSettings();
-          const agent = ["mac-first", "hub", "mac"].includes(b.agent) ? b.agent : cur.agent;
           const bench = ["auto", "e2b", "docker", "plain", "off"].includes(b.workbench) ? b.workbench : cur.workbench;
-          await hub.setPrefs({ work: { agent, workbench: bench } });
-          await applyWork();
-          await hub.log("work.settings", `Teammates think: ${agent}; code runs: ${bench}`);
+          await hub.setPrefs({ work: { workbench: bench } });
+          await hub.log("work.settings", `Code runs: ${bench}`);
           return json(await workbench.status());
         }
         break;
@@ -718,7 +666,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   }
 
   type LiveData = { kind: "voice"; rate: number; relay?: ReturnType<typeof deepgramLive> };
-  type ComputerData = { kind: "computer"; deviceId: string; name: string; want: NonNullable<Device["copy"]>; cloud: boolean };
+  type ComputerData = { kind: "computer"; deviceId: string; name: string; want: NonNullable<Device["copy"]> };
   const server = Bun.serve<LiveData | ComputerData, never>({
     hostname: config.host,
     port: config.port,
@@ -726,7 +674,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
     websocket: {
       maxPayloadLength: 1024 * 1024,
       open(ws) {
-        if (ws.data.kind === "computer") { computers.attach(ws.data.deviceId, ws.data.name, ws, ws.data.want, ws.data.cloud); return; }
+        if (ws.data.kind === "computer") { computers.attach(ws.data.deviceId, ws.data.name, ws, ws.data.want); return; }
         const key = voice?.deepgramKey();
         if (!key) { ws.close(1011, "voice off"); return; }
         ws.data.relay = deepgramLive(key, ws.data.rate, { send: (d) => ws.send(d), close: () => ws.close() });
@@ -763,20 +711,14 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (server.upgrade(req, { data: { kind: "voice", rate: Math.round(rate) } })) return undefined as unknown as Response;
         return new Response("Expected a WebSocket", { status: 426 });
       }
-      // A linked computer dials in here and keeps the line open; work comes down it. Its key goes in a header.
-      if (url.pathname === "/computer" || url.pathname === "/computer/bundle") {
+      // A linked computer dials in here and keeps the line open. Its key goes in a header.
+      if (url.pathname === "/computer") {
         const ip = clientIp(req, server);
         if (badToken.blocked(ip)) return new Response("Too many wrong keys. Wait 10 minutes.", { status: 429 });
         const d = await deviceForToken(store, req.headers.get("authorization"));
         if (!d || d.role !== "computer") { badToken.allow(ip); return new Response("Not linked.", { status: 401 }); }
-        // A cloud computer being set up downloads Hearth from its own hub, so the two always run the same code.
-        if (url.pathname === "/computer/bundle") {
-          const root = resolve(import.meta.dir, "..");
-          const tar = Bun.spawn(["tar", "-czf", "-", "-C", root, "src", "scripts", "package.json", "bun.lock", "tsconfig.json"], { stdout: "pipe", stderr: "ignore" });
-          return new Response(tar.stdout, { headers: { "Content-Type": "application/gzip", "Cache-Control": "no-store" } });
-        }
         await store.put<Device>("devices", { ...d, lastSeenAt: new Date().toISOString() });
-        if (server.upgrade(req, { data: { kind: "computer", deviceId: d.id, name: d.name, want: d.copy || [], cloud: !!d.machine } })) return undefined as unknown as Response;
+        if (server.upgrade(req, { data: { kind: "computer", deviceId: d.id, name: d.name, want: d.copy || [] } })) return undefined as unknown as Response;
         return new Response("This is the computer link; connect with a WebSocket.", { status: 426 });
       }
       const headers = security(origin, sameOrigin);
@@ -862,7 +804,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   });
   // The workbench tools call back to this hub on its own port (a linked computer uses the hub's public address instead).
   hub.brain.toolUrl = `http://127.0.0.1:${server.port}`;
-  return { server, build: web.build, computers, machines, workbench };
+  return { server, build: web.build, computers, workbench };
 }
 
 const EMOJI_DIR = (() => { try { return join(resolve(import.meta.dir, ".."), "node_modules/@lobehub/fluent-emoji-3d/assets"); } catch { return ""; } })();

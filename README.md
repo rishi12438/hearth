@@ -43,7 +43,7 @@
 **Think of it as Muse, but open source, and you own the data and the memory.**
 
 - **Use your own laptop and your own credentials.** Hearth runs on your machine and uses the Claude Code or Codex login you already have. No new account, no API keys handed to anyone.
-- **Don't want to keep your laptop open?** Put the hub on a small always-on server and link your Mac to it. Work runs on your Mac, with your logins, whenever it's on; when it's closed, the server does it. See [Your Mac and the cloud](#your-mac-and-the-cloud).
+- **Don't want to keep your laptop open?** Put the hub on a small always-on server. It does all the thinking; link your Mac and it copies your Claude login up, so the hub thinks with your own account. See [Your hub and your devices](#your-hub-and-your-devices).
 
 Most assistants keep your life on someone else's servers and only answer when you ask. Hearth runs on a box you own and lives at an address you own, like `https://yournameassistant.com`. It uses `claude -p`, `codex exec` or any CLI you choose to do the thinking, and it speaks first when you've told it what matters: reminders, check-ins, a page that changed, a bill that's due.
 
@@ -64,7 +64,7 @@ Then:
 1. Buy the domain and point it at your server ([step-by-step guide](deploy/lightsail.md)).
 2. On the server, run `sudo bash deploy/setup.sh lightsail yournameassistant.com you@example.com`. That one command sets up HTTPS, a firewall, the service and push notifications.
 3. Scan the QR code it prints with your phone. That phone becomes your primary device, and any other device (laptop, tablet) joins only when it approves.
-4. *(Optional)* On your Mac, run `bash deploy/setup.sh mac https://yournameassistant.com` and approve it on your phone. Work now runs on your Mac when it's on.
+4. *(Optional)* On your Mac, run `bash deploy/setup.sh mac https://yournameassistant.com` and approve it on your phone. Then turn on **Copy Claude login to the hub** on its card, so the hub thinks with your own login.
 5. Start rambling: *"remind me at 6 to call mom, find a cheap dinner spot, and every weekday at 8 brief me on the weather."*
 
 ### How reminders reach you
@@ -94,107 +94,46 @@ phone (home-screen web app) ──HTTPS──►  your hub (e.g. a $5 VPS)
                                          ├─ brain          claude -p / codex exec / custom CLI, run per event
                                          └─ storage        SQLite | Postgres | MySQL | MongoDB
                                                 ▲
-                            your Mac ───────────┘ connects out and keeps the line open; runs work with your logins
+                            your Mac ───────────┘ connects out and keeps the line open; copies your logins up
 ```
 
-### Where work runs
+### Where code runs
 
-Everything is on one screen, **Settings → Your hub & devices**: your hub, your phones, your Mac and the cloud, each with what it does underneath and the switches right there. Two things matter:
+Everything is on one screen, **Settings → Your hub & devices**: your hub, your phones, your Mac and the cloud, each with what it does underneath and the switches right there.
 
-| | Default | Options |
-|---|---|---|
-| **Where teammates think** (`claude -p`) | Your Mac when it's on, else the hub | Always the hub · only your Mac |
-| **Where code runs** (the workbench) | E2B if connected, else Docker on the hub | E2B · Docker · plain (no container, less safe) · off |
+- **Teammates always think on the hub** (`claude -p`). Nothing to choose.
+- **Their code runs on the workbench:** E2B if you connected it, else Docker on the hub. You can pin one, pick plain (no container, less safe) or turn code off.
 
 - **The workbench** is one place the whole team's code runs. Teammates get a few tools (`run`, `write_file`, `read_file`, `copy_in`, `copy_out`); the agent decides *what* to run, the hub decides *where*.
 - **Folders:** `/work/<teammate>` keeps each teammate's files between jobs; `/work/shared` is for the whole team.
-- **Nothing secret goes there.** Your logins and API keys stay on the hub (or Mac). Docker containers can't see the hub's data; plain mode can, which is why it's never picked automatically.
+- **Nothing secret goes there.** Your logins and API keys stay on the hub. Docker containers can't see the hub's data; plain mode can, which is why it's never picked automatically.
 - **Every job's time on it is written down:** what came in, what ran, what it installed and what came back. It shows under *Recent work*, and the next job gets it so it carries on instead of starting over.
 
 <p align="center">
-  <img src="docs/screenshots/hub-and-devices.png" width="220" alt="Your hub: keeps your memory, thinks when your Mac is off, runs your teammates' code in Docker">
-  <img src="docs/screenshots/hub-and-devices-mac.png" width="220" alt="Your Mac: thinks with your Claude login when it's on, doesn't run code; Cloud: connect E2B">
+  <img src="docs/screenshots/hub-and-devices.png" width="220" alt="Your hub: keeps your memory, does all the thinking, runs your teammates' code in Docker">
+  <img src="docs/screenshots/hub-and-devices-mac.png" width="220" alt="Your Mac: linked, with switches to copy its Claude and Codex logins to the hub; Cloud: connect E2B">
 </p>
 
-### Your Mac and the cloud
+### Your hub and your devices
 
 Set up each machine for its role with one setting, the **target**:
 
 | Target | Command | What it does |
 |---|---|---|
-| `lightsail` | `sudo bash deploy/setup.sh lightsail <domain> <email>` | The always-on hub at your domain. Holds memory and reminders, and does the work when no computer is online. Any Ubuntu VPS works. |
-| `mac` | `bash deploy/setup.sh mac https://<domain>` | Links your Mac to that hub. Your primary phone approves it, like a new device. It starts at login and stays awake while plugged in. |
+| `lightsail` | `sudo bash deploy/setup.sh lightsail <domain> <email>` | The always-on hub at your domain. Holds memory and reminders, and does all the thinking. Any Ubuntu VPS works. |
+| `mac` | `bash deploy/setup.sh mac https://<domain>` | Links your Mac to that hub as one of your devices. Your primary phone approves it, like a new phone. |
 
-- **Mac on:** teammates run on your Mac, on your own Claude or Codex login and subscription.
-- **Mac off:** the hub does the work itself. A job that only your Mac can do waits as *Needs your Mac* and finishes by itself when the Mac comes back.
-- **Nothing to sync:** your hub holds the only copy of your memory, chats and reminders. It sends each job to a computer with the memory that job needs; the computer runs it and sends back the answer and any changes ("remember this", "remind me at 6"), which the hub applies. Computers keep nothing, so there's no second copy to merge, and a computer that disappears mid-job loses nothing.
+- **One brain, on the hub.** Every teammate thinks there, whether your Mac is on or not. Nothing waits for a device.
+- **Your devices just link.** Phones use the app; a linked Mac shows its connection (signal bars, round-trip time, last seen) and can copy your logins up.
+- **Copy your login to the hub:** on the Mac's card, choose which logins (Claude, Codex) it keeps copied to the hub, so the hub thinks with your own account and subscription. Copies stay current, and turning one off deletes it from the hub.
+- **Nothing to sync:** your hub holds the only copy of your memory, chats and reminders.
 - **No middleman:** your Mac dials out to your own server and keeps the line open, so it needs no domain, open ports or tunnel, and nothing passes through anyone else's service.
-- **Cloud computers:** no Mac, or want more? In **Settings → Devices → Add a cloud computer**, paste an [E2B](https://e2b.dev) API key (like the Deepgram key) or give the address and SSH key of any Linux VM. The hub sets the machine up itself: it installs Hearth (downloaded from your own hub, so versions always match) and Claude Code, hands over the logins it holds, and links the machine. E2B sandboxes pause when idle: they stop costing compute but keep everything installed, so they wake in seconds, on their own when a job is waiting for a computer.
-- **Copy to the cloud:** in **Settings → Devices**, choose which logins (Claude, Codex) your Mac keeps copied to the server, so the server can use them while the Mac is off. Copies stay current, and turning one off deletes it from the server.
-- **See it at a glance:** Home shows where work runs right now, and each computer shows its connection (signal bars, round-trip time, jobs running, last seen). Every answer says where it ran.
-
-<table align="center">
-  <tr>
-    <td><img src="docs/screenshots/computer-home-online.png" width="180" alt="Home: Studio is online, work runs there"></td>
-    <td><img src="docs/screenshots/computer-devices-online.png" width="180" alt="Devices: Studio online with signal bars, brains and copy-to-cloud switches"></td>
-    <td><img src="docs/screenshots/computer-home-offline.png" width="180" alt="Home: Studio is offline, the cloud is doing the work"></td>
-    <td><img src="docs/screenshots/computer-ran-on.png" width="180" alt="An answer that says it ran on the cloud"></td>
-  </tr>
-  <tr align="center"><td>Mac online</td><td>Connection</td><td>Mac off: the cloud works</td><td>Where it ran</td></tr>
-</table>
-
-## Quick start
-
-**Requirements:** [Bun](https://bun.sh) 1.1 or newer. For a real brain, add [Claude Code](https://claude.com/claude-code) or [Codex](https://github.com/openai/codex), logged in on the same machine.
-
-```bash
-git clone https://github.com/rishi12438/hearth.git
-cd hearth
-bun install
-bun run dev            # demo brain, no keys needed: try "remind me in 2 minutes to stretch"
-```
-
-Scan the QR code it prints. That phone becomes your primary device.
-
-To use a real brain:
-
-```bash
-cp .env.example .env   # then set HEARTH_AGENT=claude (or codex)
-bun start
-```
-
-### Deploy to your own domain
-
-To get HTTPS, a firewall and phone notifications in one command on a fresh Linux server:
-
-```bash
-sudo bash deploy/setup.sh lightsail yournameassistant.com you@example.com   # the server
-bash deploy/setup.sh mac https://yournameassistant.com                      # then, optionally, your Mac
-```
-
-[deploy/lightsail.md](deploy/lightsail.md) walks through buying and locking down a domain, DNS and the server, step by step. It's written for AWS Lightsail, but any Linux VPS works the same way.
-
-## Configuration
-
-All settings are environment variables. See [.env.example](.env.example) for the full list. The main ones:
-
-| Variable | Default | Description |
-|---|---|---|
-| `HEARTH_TARGET` | `local` | Where this runs: `lightsail` (the server hub), `mac` (a computer linked to it) or `local`. `deploy/setup.sh` sets it |
-| `HEARTH_AGENT` | `claude` | Default harness: `claude`, `codex`, `echo` (demo), or `custom` with `HEARTH_AGENT_CMD='["ollama","run","llama3.1"]'` |
-| `HEARTH_ORCHESTRATOR_MODEL` / `_WORKHORSE_` / `_HEAVY_` | Opus / Sonnet / Opus | Default model per role; `HEARTH_*_AGENT` sets the harness. Also changeable in the app under Brains |
-| `HEARTH_DEEPGRAM_API_KEY` | none | Turns on hold-to-talk (or paste a key in Settings → Voice) |
-| `HEARTH_FIREWORKS_API_KEY` | none | Embeddings for skill search; keyword matching otherwise |
-| `HEARTH_DB_URL` | SQLite in `./data` | `postgres://…`, `mysql://…`, `mongodb://…` (run `bun add mongodb`) |
-| `HEARTH_HOST` / `HEARTH_PORT` | `127.0.0.1:8790` | Keep it on localhost and put Caddy in front |
-| `HEARTH_ALLOWED_ORIGINS` | none | Other hubs' origins allowed to call this one from the same app |
-| `HEARTH_REQUIRE_PASSKEY` | `0` | `1`: every device must unlock with Face ID or a passkey |
 
 ## Project layout
 
 ```
 src/          the hub: server, hooks engine, memory, brain runner, auth, scripts, storage backends (src/store),
-              computer links (computers.ts on the hub, computer.ts on your Mac)
+              device links (computers.ts on the hub, computer.ts on your Mac), workbench.ts (where code runs)
 web/          the phone app: plain TypeScript bundled in memory by Bun, no framework, no build folder
 components/   starter components (itinerary, comparison, checklist, chart, …) teammates reuse with new data
 scripts/      trusted example scripts (weather, page-watch)
