@@ -1476,9 +1476,23 @@ const COOKIE_HELP: Record<string, { site: string; need: string }> = {
   x: { site: "https://x.com", need: "auth_token and ct0" },
 };
 async function openCookieSetup(c: Connector) {
-  const conns: any[] = await call("/api/connections").catch(() => []);
-  const st = conns.find((x) => x.id === c.via);
+  const [conns, browsers] = await Promise.all([call("/api/connections").catch(() => []), call(`/api/connections/${c.via}/browsers`).catch(() => [])]);
+  const st = (conns as any[]).find((x) => x.id === c.via);
   const help = COOKIE_HELP[c.via!];
+  const out0 = h("div", { class: "ctest" });
+  const showResult = (t: any) => clear(out0, t.ok
+    ? h("p", { class: "okline" }, icon("check", 16), ` Works: read ${t.count} ${t.count === 1 ? "item" : "items"}${t.sample?.length ? `, like “${t.sample[0].replace(/^● /, "")}”` : ""}.`)
+    : h("p", { class: "err small" }, t.error));
+  // One tap: read the login straight from your browser on this Mac (macOS asks once; choose Always Allow).
+  const importRow = (browsers as any[]).length ? h("div", { class: "stack" },
+    h("p", { class: "muted small" }, `Found ${c.name} logged in on this Mac. Import it — no copy-paste:`),
+    ...(browsers as any[]).map((b) => h("button", { class: "btn primary big", on: { click: async (e: Event) => {
+      const btn = e.currentTarget as HTMLButtonElement; btn.disabled = true; btn.textContent = "Reading from your browser…"; clear(out0);
+      try { const r = await call(`/api/connections/${c.via}/import`, { body: { profile: b.id } }); showResult(r.test); setTimeout(() => openCookieSetup(c), 1400); }
+      catch (err: any) { showResult({ ok: false, error: err.message }); btn.disabled = false; btn.textContent = `Import from ${b.label}`; }
+    } } }, `Import from ${b.label}`)),
+    out0,
+    h("p", { class: "muted small" }, "The first time, macOS asks to let Hearth use the browser's Safe Storage key — choose Always Allow. Cookies only, kept encrypted in the hub, never shown.")) : null;
   const box = h("textarea", { class: "field mono", rows: 4, placeholder: `Paste cookies: the Cookie-Editor export, or ${help.need.replace(/ \(.*\)/, "")} as name=value; name=value`, autocapitalize: "off", spellcheck: false }) as HTMLTextAreaElement;
   const out = h("div", { class: "ctest" });
   const show = (t: any) => clear(out, t.ok
@@ -1498,6 +1512,8 @@ async function openCookieSetup(c: Connector) {
     st?.connected ? h("div", { class: "stack" },
       h("button", { class: "btn ghost", on: { click: async (e: Event) => { const b = e.currentTarget as HTMLButtonElement; b.disabled = true; show(await call(`/api/connections/${c.via}/test`, { body: {} }).catch((x: any) => ({ ok: false, error: x.message }))); b.disabled = false; } } }, icon("play", 16), "Test now")) : null,
     out,
+    importRow,
+    importRow ? h("p", { class: "muted small", style: "text-align:center" }, "— or paste cookies —") : null,
     h("ol", { class: "steps" },
       h("li", null, "On your computer, open ", h("a", { href: help.site, target: "_blank", rel: "noopener noreferrer" }, help.site.replace("https://", "")), " in Chrome, logged in."),
       h("li", null, "Easiest: install the ", h("a", { href: "https://chromewebstore.google.com/search/cookie-editor", target: "_blank", rel: "noopener noreferrer" }, "Cookie-Editor"), " extension, open it on that tab, Export → JSON, and paste it below."),

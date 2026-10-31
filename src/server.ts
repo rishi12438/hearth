@@ -485,6 +485,14 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       case "connections": {
         if (method === "GET" && !id) return json(hub.connections.status());
         if (!isCookieSite(id)) break;
+        if (method === "GET" && seg[3] === "browsers") { ownerOnly(); return json(hub.connections.browserOptions(id)); }
+        if (method === "POST" && seg[3] === "import") {
+          ownerOnly();
+          const r = hub.importFromBrowser(id, String((await body(req)).profile || ""));
+          if (r.error) throw new HttpError(400, r.error);
+          await hub.log("connection.saved", `${COOKIE_SITES[id].label} imported from browser`);
+          return json({ status: r.value, test: await hub.testConnection(id) });
+        }
         if (method === "PUT" && !seg[3]) {
           ownerOnly();
           const r = hub.connections.saveCookies(id, String((await body(req)).cookies || ""));

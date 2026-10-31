@@ -1,4 +1,5 @@
 import { parseCookies, type Cookie } from "./browser.ts";
+import { browserProfiles, profileHasSite, readSiteCookies, canReadBrowser, type BrowserProfile } from "./chrome.ts";
 import type { Google } from "./google.ts";
 import type { Vault } from "./vault.ts";
 
@@ -40,6 +41,31 @@ export class Connections {
     const cookies = parseCookies(raw, s.domain).filter((c) => c.domain.replace(/^\./, "").endsWith(bare) || bare.endsWith(c.domain.replace(/^\./, "")));
     const missing = s.required.filter((n) => !cookies.some((c) => c.name === n && c.value));
     if (missing.length) return { error: `Those cookies are missing ${missing.join(" and ")}. Copy them while you're logged in to ${s.label}.` };
+    this.vault.set(`cookies:${site}`, JSON.stringify({ cookies, savedAt: new Date().toISOString() } satisfies Saved));
+    this.problems.delete(site);
+    return { value: this.status() };
+  }
+
+  /** Profiles on this Mac logged into a site, so the user can import its cookies in one tap instead of pasting. */
+  browserOptions(site: CookieSite): { id: string; label: string }[] {
+    if (!canReadBrowser()) return [];
+    const s = COOKIE_SITES[site];
+    return browserProfiles().filter((p) => profileHasSite(p.cookiesDb, s.domain.replace(/^\./, ""), [...s.required]))
+      .map((p) => ({ id: `${p.browser}/${p.profile}`, label: p.label }));
+  }
+
+  /** Import a site's cookies straight from a local browser profile (no pasting). Returns the same as saveCookies. */
+  importFromBrowser(site: CookieSite, profileId: string) {
+    if (!this.vault) return { error: "This hub has no key vault." };
+    const prof = browserProfiles().find((p) => `${p.browser}/${p.profile}` === profileId);
+    if (!prof) return { error: "That browser profile isn't here anymore." };
+    const s = COOKIE_SITES[site];
+    let cookies: Cookie[];
+    try { cookies = readSiteCookies(prof, s.domain.replace(/^\./, "")); }
+    catch { return { error: `Couldn't read ${prof.label}'s cookies.` }; }
+    if (!cookies.length) return { error: `No ${s.label} cookies in ${prof.label}${canReadBrowser() ? ". If macOS asked and you clicked Deny, try again and Allow." : ""}.` };
+    const missing = s.required.filter((n) => !cookies.some((c) => c.name === n && c.value));
+    if (missing.length) return { error: `${prof.label} is missing ${missing.join(" and ")} for ${s.label}. Open ${s.label} in it and sign in.` };
     this.vault.set(`cookies:${site}`, JSON.stringify({ cookies, savedAt: new Date().toISOString() } satisfies Saved));
     this.problems.delete(site);
     return { value: this.status() };

@@ -2130,6 +2130,12 @@ export class Hub {
   }
 
   /** Connectors' "Save and test": read one list now and say what came back. */
+  importFromBrowser(site: "linkedin" | "x", profileId: string) {
+    const r = this.connections.importFromBrowser(site, profileId);
+    if (r.value) this.emit("connections");
+    return r;
+  }
+
   async testConnection(id: "linkedin" | "x") {
     const src = sourceById(id)!;
     try {

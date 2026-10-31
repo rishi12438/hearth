@@ -12,7 +12,7 @@ const PAGES: Record<What, Page> = {
   messages: { url: "https://www.linkedin.com/messaging/", signedOut: SIGNED_OUT,
     selectors: ["li.msg-conversation-listitem", "[class*='msg-conversation-listitem']", ".msg-conversations-container__conversations-list li"] },
   notifications: { url: "https://www.linkedin.com/notifications/", signedOut: SIGNED_OUT,
-    selectors: ["article.nt-card", "[class*='nt-card']", "[data-finite-scroll-hotkey-item]"] },
+    selectors: ["[componentkey^='notification-card']", "article.nt-card", "[class*='nt-card']", "[data-finite-scroll-hotkey-item]"] },
   invitations: { url: "https://www.linkedin.com/mynetwork/invitation-manager/", signedOut: SIGNED_OUT,
     selectors: ["li.invitation-card", "[class*='invitation-card']", "[data-view-name*='invitation']", "main section ul > li"] },
 };
