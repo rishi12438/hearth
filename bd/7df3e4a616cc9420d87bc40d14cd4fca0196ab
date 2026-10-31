@@ -1,0 +1,59 @@
+src/public/relay.ts
+  s_d994421d2b64f1::t_e1951e54cc153d 1-98
+docs/screenshots/sharing/seal-selftest.txt
+  s_d994421d2b64f1::t_fd1c55338237fc 1-14
+SECURITY.md
+  s_d994421d2b64f1::t_c66987bb32dc57 66-70
+deploy/lightsail.md
+  s_d994421d2b64f1::t_c66987bb32dc57 167-168,181
+web/styles.css
+  s_d994421d2b64f1::t_aa11db644d3cf6 758-759
+  s_d994421d2b64f1::t_a45015529a924e 762-763
+  s_d994421d2b64f1::t_02f06bbffc32b3 747-757,760-761,764
+src/public/types.ts
+  s_d994421d2b64f1::t_e1951e54cc153d 30-34
+src/public/box.ts
+  s_d994421d2b64f1::t_e1951e54cc153d 8,413,423-425
+  s_d994421d2b64f1::t_686ef6da42ab38 46-48,222,249
+test/shares.test.ts
+  s_d994421d2b64f1::t_769be7bcd7126d 12,27-30,286-316
+  s_d994421d2b64f1::t_a1af7c88b181a2 56
+  s_d994421d2b64f1::t_68b621613a37ea 110
+src/cli.ts
+  s_d994421d2b64f1::t_1e54b5220a1492 77,84
+docs/design/public-teammates.md
+  s_d994421d2b64f1::t_c66987bb32dc57 3-4,83-85
+test/public.test.ts
+  s_d994421d2b64f1::t_686ef6da42ab38 130-134
+  s_d994421d2b64f1::t_68b621613a37ea 28
+src/brain.ts
+  s_d994421d2b64f1::t_e1951e54cc153d 393-414
+src/shares.ts
+  s_d994421d2b64f1::t_a1af7c88b181a2 299-300
+  s_d994421d2b64f1::t_68b621613a37ea 26-28,178-187,199,212-254,282,316
+  s_d994421d2b64f1::t_c7901664b40781 82,87
+web/src/app.ts
+  s_d994421d2b64f1::t_02f06bbffc32b3 205-208,1924,1933-1941,1943-1958,1960-1967,1974-1977,1979-1995,1997-2005,2007-2010,2015-2055,2057-2121
+  s_d994421d2b64f1::t_a1af7c88b181a2 1968-1973,1996
+  s_d994421d2b64f1::t_74478410039ad1 37,1959
+  s_d994421d2b64f1::t_a45015529a924e 1942,1978,2006,2011-2014
+  s_d994421d2b64f1::t_aa11db644d3cf6 2056
+deploy/hearth-boxctl
+  s_d994421d2b64f1::t_769be7bcd7126d 18,41-42,50
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "bd7df3e4a616cc9420d87bc40d14cd4fca0196ab",
+  "prompts": {},
+  "sessions": {
+    "s_d994421d2b64f1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "86403106-4ceb-4bb5-ad21-404643c5be6c",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
