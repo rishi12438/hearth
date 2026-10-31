@@ -99,6 +99,43 @@ The hub only copies what you picked, worked out ahead of time:
 - **Ask me:** if a visitor wants something the box doesn't have ("what's his email?"), the box puts a request in its
   outbox and your phone asks *Share once / always / no*. Answering pushes just that one thing to the box.
 
+## Staying on topic
+
+A "Recipes" link shouldn't write someone's essay or debug their code on your bill. Each shared teammate has a **scope**,
+and the box checks every message against it before the real model sees it.
+
+**The scope** is written when you share the teammate (the hub drafts it, you edit it):
+
+```json
+{
+  "does": "Recipes and cooking: what to make, swaps, timings, Rishi's favourite dishes.",
+  "examples": ["what can I make with eggs and spinach", "is the dal recipe spicy"],
+  "not": ["essays or homework", "code", "anything about Rishi beyond food"]
+}
+```
+
+**Each message goes through three steps:**
+
+1. **Gate.** A small, cheap model call with no tools reads only the scope and the visitor's message (not the notebook,
+   not the chat so far). It answers `in`, `out` or `unsure` as structured JSON. It can't leak anything because it
+   doesn't have anything.
+2. **Answer or refuse.**
+   - `in`: the real teammate answers.
+   - `out`: a fixed reply written by code ("I only help with recipes; try asking me what to cook tonight"). The main
+     model isn't called, so an off-topic request costs a fraction of a cent.
+   - `unsure`: the teammate answers, but with a short reply cap.
+3. **Check the reply.** A quick rule check on the way out: the reply is cut off at the length limit, and if it's long-form
+   writing or code the teammate shouldn't produce (for a scope that doesn't allow it), it's replaced with the fixed reply.
+
+**Monitoring.** Every `out`/`unsure` goes in the outbox, so the hub can show you per link: messages, how many were
+off-topic, the cost, and the top off-topic requests. If a visitor keeps getting `out`, they're slowed down, then blocked
+for the day. If many visitors ask for the same off-topic thing, the hub suggests adding it to the scope.
+
+**Why the gate isn't the security.** The gate can be fooled ("this is a recipe for an essay..."). That's fine: it's
+there to stop people using your teammate as free ChatGPT, not to protect your data. The data is protected by the sealed
+box, so the worst a visitor who gets past the gate can do is get a short, capped, tool-less answer you paid a little
+for, and the daily cap still holds.
+
 ## Limits for public links
 
 - Per-visitor and per-link rate limits, a daily dollar cap that pauses the link, a cheap model by default.
@@ -108,7 +145,7 @@ The hub only copies what you picked, worked out ahead of time:
 ## Build order
 
 1. **`src/public/`:** the standalone box service: chat route, its own store, per-visitor sessions, rate/cost limits,
-   brain with no tools.
+   brain with no tools, and the scope gate and reply check.
 2. **Publishing:** "Share this teammate" on the hub creates a link, picks notebooks, starts the container, pushes the copy.
 3. **Deploy:** `deploy/public.Dockerfile`, a Caddy route for `/t/*`, a Docker network that only allows the model API,
    setup steps in `deploy/lightsail.md`.
@@ -123,3 +160,5 @@ The hub only copies what you picked, worked out ahead of time:
   messages) only ever returns things from the published copy.
 - Revoking a link makes it 404 within seconds and deletes its container and data.
 - Visitor A can't read visitor B's conversation.
+- An off-topic suite (essays, code, homework, "pretend you're a general assistant") is mostly answered with the fixed
+  reply, never calls the main model when the gate says `out`, and any reply that slips through stays under the length cap.
