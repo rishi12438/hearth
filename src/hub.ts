@@ -11,6 +11,10 @@ import { parseReply } from "./reply.ts";
 import { validateHook, computeNextAt, describeTrigger, isUserReminder } from "./hooks.ts";
 import { look, lineDiff } from "./watch.ts";
 import { Google } from "./google.ts";
+import { Connections } from "./connections.ts";
+import { readPage } from "./browser.ts";
+import { SignedOut } from "./sources/pages.ts";
+import type { Vault } from "./vault.ts";
 import { SOURCES, sourceById, formatItems } from "./sources/index.ts";
 import { recall, isActive, validateFact } from "./memory.ts";
 import { describeLocal, inQuietHours, quietEndsAt, localDate, distanceMeters } from "./time.ts";
@@ -72,8 +76,25 @@ export class Hub {
   private listeners = new Set<(e: HubEvent) => void>();
   private firing = new Set<string>();
   private _google: Google | null = null;
+  /** The encrypted key vault (vault.ts), set by the server. Connections keep their sign-ins in it. */
+  vault: Vault | null = null;
   /** Your Google account (Gmail, Calendar), if you've connected one. */
-  get google() { return (this._google ??= new Google(this.config.dataDir)); }
+  get google() {
+    // Made again once the vault arrives, so an early look (before the server set it) doesn't stick.
+    if (!this._google || this._googleVault !== this.vault) { this._google = new Google(this.vault); this._googleVault = this.vault; }
+    return this._google;
+  }
+  private _googleVault: Vault | null = null;
+  private _connections: Connections | null = null;
+  /** Every account teammates can read (Google, LinkedIn, X), all kept in the vault. */
+  get connections() {
+    const g = this.google;
+    if (!this._connections || (this._connections as any).google !== g) this._connections = new Connections(this.vault, g);
+    return this._connections;
+  }
+  /** Headless Chrome for logged-in sites. Swapped in tests. */
+  readPage = readPage;
+  private sourceCtx = async () => ({ google: this.google, cookies: (s: "linkedin" | "x") => this.connections.cookies(s), readPage: this.readPage, now: this.clock(), tz: (await this.prefs()).tz });
   /** Webhook calls that arrived while their hook was still busy with the last one; handled together right after. */
   private webhookQueue = new Map<string, string[]>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -186,7 +207,7 @@ export class Hub {
       proactiveMessagesLeftToday: Math.max(0, prefs.maxProactivePerDay - used),
       location,
       places: places.map((p) => ({ name: p.name, radiusM: p.radiusM })),
-      sources: SOURCES.map((s) => ({ id: s.id, label: s.label, connected: s.needs === "google" ? this.google.connected : false })),
+      sources: SOURCES.map((s) => ({ id: s.id, label: s.label, connected: this.connections.connected(s.needs) })),
       memory: memory.map((f) => ({ id: f.id, fact: f.fact, notebook: f.notebook, importance: f.importance, ...(f.expiresAt ? { expiresAt: f.expiresAt } : {}) })),
       notebooks: (await this.store.all<Notebook>("notebooks")).map((n) => ({ name: n.name, summary: n.summary })),
       // Every plan while there are few; with many, the ones that match this request plus the newest (search finds the rest).
@@ -2065,21 +2086,29 @@ export class Hub {
     if (!src) return `## ${req.source}\nNo such source. Sources: ${SOURCES.map((s) => s.id).join(", ")}.`;
     const config = src.validate(req.config);
     if (typeof config === "string") return `## ${src.label}\n${config}`;
-    if (src.needs === "google" && !this.google.connected) return `## ${src.label}\nGoogle isn't connected. Tell the user to connect it in Menu → Connections.`;
+    if (!this.connections.connected(src.needs)) return `## ${src.label}\n${src.label} isn't connected. Tell the user to connect it in Menu → Connectors.`;
     try {
-      const items = await src.items(config, { google: this.google, now: this.clock(), tz: (await this.prefs()).tz });
+      const items = await src.items(config, await this.sourceCtx());
+      this.connections.problem(src.needs, null);
       return `## ${src.label}: ${src.describe(config)}\n<untrusted>\n${formatItems(items)}\n</untrusted>`;
-    } catch (e: any) { return `## ${src.label}\nCouldn't read it: ${e.message}`; }
+    } catch (e: any) {
+      if (e instanceof SignedOut) this.connections.problem(src.needs, e.message);
+      return `## ${src.label}\nCouldn't read it: ${e.message}`;
+    }
   }
 
   /** A source hook's check: items it hasn't seen before, or null. The first check only remembers what's there. */
   private async pollSource(h: Hook & { trigger: { type: "source" } }) {
     const t = h.trigger, src = sourceById(t.source);
     if (!src) { await this.log("hook.source", `${h.title}: unknown source ${t.source}`); return null; }
-    if (src.needs === "google" && !this.google.connected) { await this.log("hook.source", `${h.title}: Google isn't connected`); return null; }
+    if (!this.connections.connected(src.needs)) { await this.log("hook.source", `${h.title}: ${src.label} isn't connected`); return null; }
     let items;
-    try { items = await src.items(t.config as never, { google: this.google, now: this.clock(), tz: (await this.prefs()).tz }); }
-    catch (e: any) { await this.log("hook.source", `${h.title}: ${String(e.message).slice(0, 200)}`); return null; }
+    try { items = await src.items(t.config as never, await this.sourceCtx()); this.connections.problem(src.needs, null); }
+    catch (e: any) {
+      await this.log("hook.source", `${h.title}: ${String(e.message).slice(0, 200)}`);
+      if (e instanceof SignedOut) await this.signedOut(src.needs, e.message);
+      return null;
+    }
     const cur = (await this.store.get<Hook>("hooks", h.id)) || h;
     const known = new Set((cur.seen?.text || "").split("\n").filter(Boolean));
     const fresh = cur.seen ? items.filter((i) => !known.has(i.id)) : [];
@@ -2088,6 +2117,30 @@ export class Hub {
     await this.store.put<Hook>("hooks", { ...cur, seen: { hash: sha256(ids.join("\n")), text: ids.join("\n"), at: this.clock().toISOString() } });
     if (!cur.seen) { await this.log("hook.source", `${h.title}: first look saved (${items.length} already there)`); return null; }
     return fresh.length ? { count: fresh.length, text: `## ${fresh.length} new from ${src.label}\n<untrusted>\n${formatItems(fresh)}\n</untrusted>`, items: fresh } : null;
+  }
+
+  /** A site signed Hearth out: say so once (not on every check), until it's connected again. */
+  private async signedOut(id: "google" | "linkedin" | "x", message: string) {
+    const was = this.connections.status().find((c) => c.id === id)?.problem;
+    this.connections.problem(id, message);
+    this.emit("connections");
+    if (was) return;
+    const msg = await this.addMessage({ role: "assistant", threadId: await this.updatesThread(), text: message });
+    await this.push?.send({ title: "Reconnect needed", body: message.slice(0, 180), tag: `signedout-${id}`, url: threadLink(msg.threadId!) });
+  }
+
+  /** Connectors' "Save and test": read one list now and say what came back. */
+  async testConnection(id: "linkedin" | "x") {
+    const src = sourceById(id)!;
+    try {
+      const items = await src.items(src.validate({}), await this.sourceCtx());
+      this.connections.problem(id, null);
+      this.emit("connections");
+      return { ok: true, count: items.length, sample: items.slice(0, 3).map((i) => i.title) };
+    } catch (e: any) {
+      if (e instanceof SignedOut) this.connections.problem(id, e.message);
+      return { ok: false, error: String(e.message) };
+    }
   }
 
   async fire(h: Hook, reason: string, late = false, extra?: string) {

@@ -1391,7 +1391,7 @@ function tile(t: any) {
 
 type Shape = [string, Record<string, string | number>];
 /** A connector's tile: a brand color and a simple mark drawn as SVG (no images, no innerHTML). */
-type Connector = { id: string; name: string; blurb: string; group: "Featured" | "Social" | "Productivity"; via?: "google"; bg: string; shapes: Shape[] };
+type Connector = { id: string; name: string; blurb: string; group: "Featured" | "Social" | "Productivity"; via?: "google" | "linkedin" | "x"; bg: string; shapes: Shape[] };
 const CONNECTORS: Connector[] = [
   { id: "gmail", name: "Gmail", blurb: "New mail you care about, read-only", group: "Featured", via: "google", bg: "#fff", shapes: [
     ["path", { d: "M5 18V8.5l7 5 7-5V18", fill: "none", stroke: "#EA4335", "stroke-width": 2.4, "stroke-linejoin": "round" }],
@@ -1400,9 +1400,9 @@ const CONNECTORS: Connector[] = [
   { id: "calendar", name: "Google Calendar", blurb: "New invites and heads-ups before events", group: "Featured", via: "google", bg: "#fff", shapes: [
     ["rect", { x: 4, y: 5, width: 16, height: 15, rx: 3, fill: "#4285F4" }], ["rect", { x: 4, y: 5, width: 16, height: 4, rx: 2, fill: "#1A73E8" }],
     ["text", { x: 12, y: 18, "text-anchor": "middle", "font-size": 8.5, "font-weight": 800, fill: "#fff", "font-family": "-apple-system, sans-serif" }]] },
-  { id: "linkedin", name: "LinkedIn", blurb: "Messages and invites", group: "Social", bg: "#0A66C2", shapes: [
+  { id: "linkedin", name: "LinkedIn", blurb: "Messages, notifications and invites", group: "Social", via: "linkedin", bg: "#0A66C2", shapes: [
     ["text", { x: 12, y: 16.5, "text-anchor": "middle", "font-size": 12, "font-weight": 800, fill: "#fff", "font-family": "-apple-system, sans-serif" }]] },
-  { id: "x", name: "X", blurb: "Mentions and DMs", group: "Social", bg: "#000", shapes: [
+  { id: "x", name: "X", blurb: "Notifications, mentions and DMs", group: "Social", via: "x", bg: "#000", shapes: [
     ["path", { d: "M6 6l12 12M18 6L6 18", stroke: "#fff", "stroke-width": 2.2, "stroke-linecap": "round" }]] },
   { id: "instagram", name: "Instagram Messages", blurb: "DMs", group: "Social", bg: "#E1306C", shapes: [
     ["rect", { x: 6, y: 6, width: 12, height: 12, rx: 3.5, fill: "none", stroke: "#fff", "stroke-width": 1.8 }], ["circle", { cx: 12, cy: 12, r: 2.8, fill: "none", stroke: "#fff", "stroke-width": 1.8 }]] },
@@ -1430,17 +1430,20 @@ function connectorTile(c: Connector, size = 40) {
 
 /** Connectors, laid out like an app store: search, Available / Connected, Featured, then groups. */
 async function openConnections(tab: "available" | "connected" = "available") {
-  let g: any;
-  try { g = await call("/api/google"); } catch (e) { return handleError(e); }
-  const isOn = (c: Connector) => c.via === "google" && g.connected;
+  let g: any, conns: any[];
+  try { [g, conns] = await Promise.all([call("/api/google"), call("/api/connections")]); } catch (e) { return handleError(e); }
+  const conn = (c: Connector) => conns.find((x) => x.id === c.via);
+  const isOn = (c: Connector) => !!conn(c)?.connected;
+  const open = (c: Connector) => (c.via === "google" ? openGoogleSetup() : openCookieSetup(c));
+  const sub = (c: Connector) => conn(c)?.problem ? `Needs reconnecting` : isOn(c) ? `Connected · ${c.via === "google" ? g.email || "Google" : conn(c).detail}` : c.blurb;
   const body = h("div", { class: "connectors" });
   let q = "";
   const action = (c: Connector) => !c.via ? h("span", { class: "csoon" }, "Soon")
-    : h("button", { class: "clink", on: { click: () => openGoogleSetup() } }, isOn(c) ? "Manage" : "Connect");
+    : h("button", { class: "clink", on: { click: () => open(c) } }, isOn(c) ? "Manage" : "Connect");
   const draw = () => {
     const match = (c: Connector) => !q || `${c.name} ${c.blurb}`.toLowerCase().includes(q);
     const shown = CONNECTORS.filter((c) => match(c) && (tab === "available" || isOn(c)));
-    const row = (c: Connector) => h("div", { class: "crow" }, connectorTile(c), h("span", { class: "grow" }, h("b", null, c.name), h("small", null, isOn(c) ? `Connected · ${g.email || "Google"}` : c.blurb)), action(c));
+    const row = (c: Connector) => h("div", { class: "crow" }, connectorTile(c), h("span", { class: "grow" }, h("b", null, c.name), h("small", { class: conn(c)?.problem ? "err" : "" }, sub(c))), action(c));
     const featured = tab === "available" && !q ? shown.filter((c) => c.group === "Featured") : [];
     const groups = tab === "connected" || q ? [["", shown]] as [string, Connector[]][]
       : (["Social", "Productivity"] as const).map((n) => [n, shown.filter((c) => c.group === n)] as [string, Connector[]]);
@@ -1451,7 +1454,7 @@ async function openConnections(tab: "available" | "connected" = "available") {
         h("button", { class: tab === "available" ? "on" : "", on: { click: () => { tab = "available"; draw(); } } }, "Available"),
         h("button", { class: tab === "connected" ? "on" : "", on: { click: () => { tab = "connected"; draw(); } } }, "Connected")),
       featured.length ? [h("h4", null, "Featured"), h("div", { class: "cfeatured" }, featured.map((c) =>
-        h("button", { class: "cfeat", on: { click: () => openGoogleSetup() } }, h("span", { class: "grow" }, h("b", null, c.name), h("small", null, isOn(c) ? `Connected · ${g.email || "Google"}` : c.blurb)), connectorTile(c, 56))))] : null,
+        h("button", { class: "cfeat", on: { click: () => open(c) } }, h("span", { class: "grow" }, h("b", null, c.name), h("small", null, sub(c))), connectorTile(c, 56))))] : null,
       groups.filter(([, list]) => list.length || tab === "connected").map(([name, list]) => [
         name ? h("h4", null, name) : null,
         list.length ? h("div", { class: "list" }, list.map(row))
@@ -1467,6 +1470,44 @@ async function openConnections(tab: "available" | "connected" = "available") {
  * Connect your Google account with your own OAuth client: make one in Google Cloud, paste its ID and secret,
  * tap Connect. The hub keeps the sign-in in a private file; teammates read Gmail and Calendar, never change them.
  */
+/** LinkedIn and X: paste the cookies from your logged-in browser; the hub keeps them encrypted and tests them at once. */
+const COOKIE_HELP: Record<string, { site: string; need: string }> = {
+  linkedin: { site: "https://www.linkedin.com", need: "li_at (and JSESSIONID)" },
+  x: { site: "https://x.com", need: "auth_token and ct0" },
+};
+async function openCookieSetup(c: Connector) {
+  const conns: any[] = await call("/api/connections").catch(() => []);
+  const st = conns.find((x) => x.id === c.via);
+  const help = COOKIE_HELP[c.via!];
+  const box = h("textarea", { class: "field mono", rows: 4, placeholder: `Paste cookies: the Cookie-Editor export, or ${help.need.replace(/ \(.*\)/, "")} as name=value; name=value`, autocapitalize: "off", spellcheck: false }) as HTMLTextAreaElement;
+  const out = h("div", { class: "ctest" });
+  const show = (t: any) => clear(out, t.ok
+    ? h("p", { class: "okline" }, icon("check", 16), ` Works: read ${t.count} ${t.count === 1 ? "item" : "items"}${t.sample?.length ? `, like “${t.sample[0].replace(/^● /, "")}”` : ""}.`)
+    : h("p", { class: "err small" }, t.error));
+  const save = h("button", { class: "btn primary big", on: { click: async () => {
+    if (!box.value.trim()) return box.focus();
+    save.disabled = true; save.textContent = "Saving and testing…"; clear(out);
+    try { const r = await call(`/api/connections/${c.via}`, { method: "PUT", body: { cookies: box.value } }); box.value = ""; show(r.test); }
+    catch (e: any) { show({ ok: false, error: e.message }); }
+    save.disabled = false; save.textContent = "Save and test";
+  } } }, "Save and test");
+  openSheet(c.name, [
+    h("button", { class: "btn ghost", on: { click: () => openConnections() } }, icon("back", 16), "All connectors"),
+    h("div", { class: "phero" }, connectorTile(c, 52), h("b", null, st?.connected ? (st.problem ? `${c.name} needs reconnecting` : `${c.name} is connected`) : `Connect ${c.name}`),
+      h("small", null, st?.problem || (st?.connected ? `${st.detail} · read-only, checked at most every 15 min` : `Teammates read your ${c.blurb.toLowerCase()} through your own login. Read-only.`))),
+    st?.connected ? h("div", { class: "stack" },
+      h("button", { class: "btn ghost", on: { click: async (e: Event) => { const b = e.currentTarget as HTMLButtonElement; b.disabled = true; show(await call(`/api/connections/${c.via}/test`, { body: {} }).catch((x: any) => ({ ok: false, error: x.message }))); b.disabled = false; } } }, icon("play", 16), "Test now")) : null,
+    out,
+    h("ol", { class: "steps" },
+      h("li", null, "On your computer, open ", h("a", { href: help.site, target: "_blank", rel: "noopener noreferrer" }, help.site.replace("https://", "")), " in Chrome, logged in."),
+      h("li", null, "Easiest: install the ", h("a", { href: "https://chromewebstore.google.com/search/cookie-editor", target: "_blank", rel: "noopener noreferrer" }, "Cookie-Editor"), " extension, open it on that tab, Export → JSON, and paste it below."),
+      h("li", null, `Or: DevTools → Application → Cookies, and copy ${help.need} as name=value; name=value.`)),
+    box, save,
+    st?.connected ? h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet(`Disconnect ${c.name}?`, "The cookies are deleted from the hub. Triggers on it stop until you connect again.", "Disconnect", async () => { await call(`/api/connections/${c.via}`, { method: "DELETE" }); toast(`${c.name} disconnected`); openConnections(); }) } }, `Disconnect ${c.name}`) : null,
+    h("p", { class: "muted small" }, "Cookies are your login: they're kept encrypted in the hub's vault and only used to open these pages. Logging out of " + c.name + " in your browser ends them, and then Hearth tells you to reconnect."),
+  ]);
+}
+
 async function openGoogleSetup() {
   let g: any;
   try { g = await call("/api/google"); } catch (e) { return handleError(e); }

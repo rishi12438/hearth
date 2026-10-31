@@ -807,3 +807,5 @@ p.err { color: var(--danger); margin: 6px 2px 0; }
 .cfeat:last-child { border-bottom: 0; }
 .cfeat b { display: block; font-size: 18px; font-weight: 700; }
 .cfeat small { display: block; color: var(--muted); font-size: 14px; margin-top: 2px; }
+.okline { display: flex; align-items: center; gap: 6px; color: var(--ok); font-weight: 600; margin: 6px 0; }
+.crow small.err { color: var(--danger); }

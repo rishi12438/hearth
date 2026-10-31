@@ -142,7 +142,7 @@ async function doctor() {
   }
   try { if (process.env.HEARTH_MASTER_KEY || existsSync(keyPath)) { const v = new Vault(config.dataDir); check(true, `API keys are encrypted at rest (${v.names().length} in the vault)`, ""); v.close(); } }
   catch (e: any) { check(false, "", e.message); }
-  const plain = ["voice.json", "keys/secrets.json"].filter((f) => existsSync(join(config.dataDir, f)));
+  const plain = ["voice.json", "keys/secrets.json", "google.json"].filter((f) => existsSync(join(config.dataDir, f)));
   check(plain.length === 0, "No API keys in plain files", `Plain key files left: ${plain.join(", ")}. Start the hub once to move them into the vault`);
 
   const devices = await store.all<Device>("devices");

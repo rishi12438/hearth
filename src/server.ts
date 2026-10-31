@@ -14,6 +14,7 @@ import { hasLogin, readLogin } from "./computer.ts";
 import { homedir } from "node:os";
 import { MAX_FILE_BYTES } from "./files.ts";
 import { fetchPublic } from "./watch.ts";
+import { COOKIE_SITES, isCookieSite } from "./connections.ts";
 import { appCsp } from "./apps.ts";
 import { isActive, search } from "./memory.ts";
 import { isValidTimeZone } from "./time.ts";
@@ -94,6 +95,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   // Cloud computers the hub sets up itself: an E2B sandbox or your VM. Each becomes a linked computer.
   const vault = drivers.vault ?? new Vault(config.dataDir);
   vault.migrate(config.dataDir);
+  hub.vault = vault;
   const machines = new Machines({
     dataDir: config.dataDir, vault,
     hubUrl: () => process.env.HEARTH_PUBLIC_URL || null,
@@ -478,6 +480,21 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           return json({ url: r.value });
         }
         if (method === "DELETE" && !id) { ownerOnly(); const st = await hub.google.disconnect(); await hub.log("google.disconnected", "Google disconnected"); hub.emit("connections"); return json({ ...st, redirectUri }); }
+        break;
+      }
+      case "connections": {
+        if (method === "GET" && !id) return json(hub.connections.status());
+        if (!isCookieSite(id)) break;
+        if (method === "PUT" && !seg[3]) {
+          ownerOnly();
+          const r = hub.connections.saveCookies(id, String((await body(req)).cookies || ""));
+          if (r.error) throw new HttpError(400, r.error);
+          await hub.log("connection.saved", `${COOKIE_SITES[id].label} cookies saved`);
+          hub.emit("connections");
+          return json({ status: r.value, test: await hub.testConnection(id) });
+        }
+        if (method === "POST" && seg[3] === "test") { ownerOnly(); return json(await hub.testConnection(id)); }
+        if (method === "DELETE" && !seg[3]) { ownerOnly(); const st = hub.connections.remove(id); await hub.log("connection.removed", `${COOKIE_SITES[id].label} disconnected`); hub.emit("connections"); return json(st); }
         break;
       }
       case "trigger-recipes": {
