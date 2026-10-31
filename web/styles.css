@@ -761,4 +761,10 @@ pre.diff .add { color: #2f8f4e; } pre.diff .del { color: var(--danger); } pre.di
 .row.wrap { flex-wrap: wrap; }
 .flabel { display: block; margin: 8px 0; }
 .flabel > span { display: block; font-size: 13px; font-weight: 600; color: var(--muted); margin: 0 0 4px 2px; }
+.dmhero .sharebtn { width: auto; margin: 10px auto 0; display: inline-flex; gap: 6px; align-items: center; }
+.item.clickable { cursor: pointer; }
+.switchbtn { padding: 4px; flex: none; display: flex; }
+.item.clickable > .grow { min-width: 0; }
+details.advanced { margin: 6px 0 4px; }
+details.advanced summary { font-size: 14px; font-weight: 600; color: var(--ink-2); padding: 8px 2px; cursor: pointer; }
 

@@ -1106,6 +1106,7 @@ function drawDm(stick = true) {
   const elsewhere = d.jobs.filter((j: any) => !direct.has(j.messageId) && !j.followsUp).slice(-6).reverse();
   clear(el,
     h("div", { class: "dmhero" }, face(t, 72, t.state), h("h2", null, t.name), h("p", null, t.description || role(t)),
+      S.state?.device.primary ? h("button", { class: "btn small ghost sharebtn", on: { click: () => shareTeammate(t.id) } }, icon("share", 15), "Share") : null,
       d.routines.length ? h("div", { class: "routines" }, h("small", null, "Routines"), d.routines.map((r: any) =>
         h("button", { class: `routine ${r.status}`, on: { click: () => openHook(r) } }, icon(r.trigger.type === "at" ? "clock" : "repeat", 14), h("span", null, r.title), h("small", null, r.status === "paused" ? "paused" : r.when)))) : null,
       elsewhere.length ? h("div", { class: "routines" }, h("small", null, "In rambles"), elsewhere.map((j: any) =>
@@ -1595,6 +1596,7 @@ function openTeammates() {
     h("div", { class: "list" }, S.teammates.map((t) => h("div", { class: "item" },
       h("button", { class: "facebtn", "aria-label": `Change ${t.name}'s badge`, on: { click: () => openBadge(t) } }, face(t, 34, "idle")),
       h("span", { class: "grow" }, h("b", null, t.name), h("small", { class: "sub" }, t.description)),
+      S.state?.device.primary ? h("button", { class: "iconbtn", "aria-label": `Share ${t.name}`, on: { click: () => shareTeammate(t.id) } }, icon("share", 17)) : null,
       !t.builtIn ? h("button", { class: "iconbtn", "aria-label": `Remove ${t.name}`, on: { click: () => confirmSheet(`Remove ${t.name}?`, "Past work stays.", "Remove", async () => { await call(`/api/teammates/${t.id}`, { method: "DELETE" }); toast("Removed"); }) } }, icon("trash", 16)) : null))),
     h("h4", null, "Add one yourself"),
     h("label", null, h("span", null, "Name"), name),
@@ -1947,23 +1949,46 @@ async function openShares() {
   S.panel = "shares";
   const who = (id: string) => team.find((t) => t.id === id);
   openSheet("Shared links", [
-    h("p", { class: "muted" }, "Let someone chat with one teammate. It only gets what you pick here, and can't reach anything else on your hub."),
+    h("p", { class: "muted" }, "Every teammate you've shared. Turn a link off here; to share one, open the teammate and tap Share."),
     !data.enabled ? h("p", { class: "notice" }, "Sharing is off on this hub. Set HEARTH_BOX_RUNNER (see deploy/lightsail.md).")
       : !data.sealed ? h("p", { class: "notice" }, "Test mode: links run as plain processes on this computer, not sealed in a container. Use HEARTH_BOX_RUNNER=docker on a server.") : null,
     data.shares.length ? h("div", { class: "list" }, data.shares.map((s: any) => {
       const t = who(s.teammateId);
-      return h("button", { class: "item", on: { click: () => openShare(s.id) } },
+      const on = s.status !== "paused";
+      const toggle = h("button", { class: "switchbtn", "aria-label": on ? `Turn off ${t?.name || "link"}` : `Turn on ${t?.name || "link"}`, on: { click: async (e: Event) => {
+        e.stopPropagation();
+        try { await call(`/api/shares/${s.id}/pause`, { body: { paused: on } }); toast(on ? "Link off. Visitors see it's turned off." : "Link on"); openShares(); } catch (err) { handleError(err); }
+      } } }, h("span", { class: `switch ${on ? "on" : ""}` }, h("i")));
+      return h("div", { class: "item clickable", on: { click: () => openShare(s.id) } },
         h("div", { class: "hicon emoji" }, t?.emoji || "🔗"),
         h("span", { class: "grow left" },
           h("b", { class: "light" }, t?.name || "Teammate", h("span", { class: "tag soft" }, s.kind === "guest" ? `Guest · ${s.label}` : "Public"), s.status === "paused" ? h("span", { class: "tag warn" }, "Paused") : null),
           h("small", { class: "sub" }, `${s.stats.chats} chats · ${s.stats.refused} blocked${s.models.brain === "hub" ? " · your subscription" : ` · $${s.stats.costUsd.toFixed(2)}`}${s.stats.lastAt ? ` · ${relTime(s.stats.lastAt)}` : ""}`)),
-        icon("chevron", 16));
+        toggle);
     })) : h("p", { class: "empty" }, "No shared links yet."),
-    data.enabled ? h("button", { class: "btn primary big", on: { click: () => openShareForm(team) } }, icon("plus", 16), "Share a teammate") : null,
+    data.enabled ? h("button", { class: "btn ghost", on: { click: () => openShareForm(team) } }, icon("plus", 16), "Share a teammate") : null,
   ], { onClose: () => { S.panel = null; } });
 }
 
-async function openShareForm(team: any[]) {
+/** From a teammate's page: its links if it has some, otherwise straight to a new one. */
+async function shareTeammate(teammateId: string) {
+  let data: any, team: any[];
+  try { [data, team] = await Promise.all([call("/api/shares"), call("/api/teammates")]); } catch (e) { return handleError(e); }
+  if (!data.enabled) return toast("Sharing is off on this hub. Set HEARTH_BOX_RUNNER (see deploy/lightsail.md).", "err");
+  const t = team.find((x) => x.id === teammateId);
+  const mine = data.shares.filter((s: any) => s.teammateId === teammateId);
+  if (!mine.length) return openShareForm(team, teammateId);
+  openSheet(`Share ${t?.name || "teammate"}`, [
+    h("div", { class: "list" }, mine.map((s: any) => h("button", { class: "item", on: { click: () => openShare(s.id) } },
+      h("span", { class: "grow left" },
+        h("b", { class: "light" }, s.kind === "guest" ? `Guest · ${s.label}` : "Public link", s.status === "paused" ? h("span", { class: "tag warn" }, "Paused") : null),
+        h("small", { class: "sub" }, `${s.stats.chats} chats · ${s.stats.refused} blocked${s.stats.lastAt ? ` · ${relTime(s.stats.lastAt)}` : ""}`)),
+      icon("chevron", 16)))),
+    h("button", { class: "btn primary big", on: { click: () => openShareForm(team, teammateId) } }, icon("plus", 16), "New link"),
+  ]);
+}
+
+async function openShareForm(team: any[], preselect?: string) {
   let notebooks: any[] = [];
   try {
     const m = await call("/api/memory");
@@ -1971,9 +1996,10 @@ async function openShareForm(team: any[]) {
     for (const f of m.facts || []) if (!notebooks.some((n) => n.name === f.notebook)) notebooks.push({ name: f.notebook, summary: "" });
     for (const n of notebooks) n.count = (m.facts || []).filter((f: any) => f.notebook === n.name).length;
   } catch {}
-  const st: any = { teammateId: team[0]?.id, kind: "public", brain: "api", notebooks: new Set<string>(), autoApply: false };
+  const first = team.find((t) => t.id === preselect) || team[0];
+  const st: any = { teammateId: first?.id, kind: "public", brain: "api", notebooks: new Set<string>(), autoApply: false };
   const teammate = h("select", { class: "field", on: { change: () => { st.teammateId = teammate.value; does.value = team.find((t) => t.id === st.teammateId)?.description || ""; } } },
-    team.map((t) => h("option", { value: t.id }, `${t.emoji || ""} ${t.name}`)));
+    team.map((t) => h("option", { value: t.id, selected: t.id === first?.id }, `${t.emoji || ""} ${t.name}`)));
   const label = h("input", { class: "field", placeholder: "Who is it for? (e.g. Sam)", maxLength: 40 });
   const guestRow = h("div", { hidden: true }, labeled("Their name", label));
   const seg = (opts: [string, string][], key: string, after: () => void) => {
@@ -1988,7 +2014,7 @@ async function openShareForm(team: any[]) {
     h("span", { class: "switch" }, h("i")));
   const kind = seg([["public", "Public link"], ["guest", "Someone I trust"]], "kind", () => { guestRow.hidden = st.kind !== "guest"; autoRow.hidden = st.kind !== "guest"; });
   const owner = h("input", { class: "field", placeholder: "How it refers to you (e.g. Rishi)", value: S.state?.prefs?.userName || "", maxLength: 40 });
-  const does = h("textarea", { class: "field", rows: 2, placeholder: "What it helps with" }, team[0]?.description || "");
+  const does = h("textarea", { class: "field", rows: 2, placeholder: "What it helps with" }, first?.description || "");
   const examples = h("textarea", { class: "field", rows: 2, placeholder: "Example questions, one per line" });
   const not = h("textarea", { class: "field", rows: 2, placeholder: "Won't do, one per line" }, "essays or homework\nanything about me beyond this");
   const nb = h("div", { class: "list" }, notebooks.length ? notebooks.map((n: any) => {
@@ -1997,21 +2023,32 @@ async function openShareForm(team: any[]) {
     return row;
   }) : h("div", { class: "item muted" }, "No notebooks yet."));
   const notes = h("textarea", { class: "field", rows: 2, placeholder: "Anything else it should know, one per line" });
-  const folder = h("input", { class: "field", placeholder: "/full/path/to/project (optional)", autocapitalize: "off", spellcheck: false });
-  const edit = h("textarea", { class: "field", rows: 2, placeholder: "Can edit, e.g. recipes/**" });
-  const read = h("textarea", { class: "field", rows: 1, placeholder: "Can read" }, "**");
-  const hidden = h("textarea", { class: "field", rows: 1, placeholder: "Hidden, e.g. deploy/**" });
+  const folder = h("input", { class: "field", placeholder: "/full/path/to/the/folder", autocapitalize: "off", spellcheck: false });
+  const edit = h("textarea", { class: "field", rows: 2, placeholder: "e.g. recipes/**" });
+  const read = h("textarea", { class: "field", rows: 1, placeholder: "e.g. **" }, "**");
+  const hidden = h("textarea", { class: "field", rows: 1, placeholder: "e.g. deploy/**" });
+  st.folderOn = false; st.folderAccess = "read";
+  const advanced = h("details", { class: "advanced" }, h("summary", null, "Advanced: choose per file or folder"),
+    labeled("Can edit", edit), labeled("Can read", read), labeled("Hidden", hidden),
+    h("p", { class: "muted small" }, "Patterns like recipes/** or *.md. The most specific one wins; anything not listed is hidden."));
+  const access = seg([["read", "Read only"], ["edit", "Can edit"]], "folderAccess", () => { if (!edit.value.trim() || edit.value.trim() === "**") edit.value = st.folderAccess === "edit" ? "**" : ""; });
+  const folderBox = h("div", { hidden: true }, labeled("Folder", folder), access,
+    h("p", { class: "muted small" }, "They work on their own copy. Edits come back to you to apply, with Undo. Keys, .env files, .git and node_modules never leave your hub."),
+    advanced);
+  const folderRow = h("button", { class: "item", on: { click: () => { st.folderOn = !st.folderOn; folderRow.querySelector(".switch")!.classList.toggle("on", st.folderOn); folderBox.hidden = !st.folderOn; if (st.folderOn) folder.focus(); } } },
+    h("span", { class: "grow left" }, h("b", { class: "light" }, "Allow access to a folder"), h("small", { class: "sub" }, "A project or working folder it can read, and edit if you let it")),
+    h("span", { class: "switch" }, h("i")));
   const brainNote = h("p", { class: "muted small" }, BRAIN_NOTE.api);
   const cap = h("input", { class: "field", type: "number", min: "0.1", max: "50", step: "0.5", value: "2" });
   const capRow = labeled("Daily spend cap (USD)", cap);
   const brain = seg([["api", "API key"], ["hub", "My subscription"]], "brain", () => { brainNote.textContent = BRAIN_NOTE[st.brain as "api" | "hub"]; capRow.hidden = st.brain !== "api"; });
   const err = h("p", { class: "error", role: "alert" });
-  openSheet("Share a teammate", [
+  openSheet(preselect && first ? `Share ${first.name}` : "Share a teammate", [
     h("h4", null, "Teammate"), teammate,
     h("h4", null, "Who"), kind, guestRow, labeled("How it refers to you", owner),
     h("h4", null, "What it does"), does, labeled("Example questions", examples), labeled("Won't do", not),
     h("h4", null, "What it knows"), h("p", { class: "muted small" }, "Only the notebooks you turn on are copied in. Nothing else from your memory, people, chats or location is."), nb, labeled("Notes", notes),
-    h("h4", null, "A folder (optional)"), folder, labeled("Can edit", edit), labeled("Can read", read), labeled("Hidden", hidden), h("p", { class: "muted small" }, "Anything not listed is hidden. Keys, .env files, .git and node_modules never leave your hub. They edit their own copy; changes come back to you."),
+    h("h4", null, "Folder"), h("div", { class: "list" }, folderRow), folderBox,
     h("div", { class: "list" }, autoRow),
     h("h4", null, "Runs on"), brain, brainNote, capRow,
     err,
@@ -2023,7 +2060,7 @@ async function openShareForm(team: any[]) {
           scope: { does: does.value, examples: lines(examples.value), not: lines(not.value) },
           notebooks: [...st.notebooks], notes: lines(notes.value), autoApply: st.autoApply,
           models: { brain: st.brain }, limits: { costCapDayUsd: Number(cap.value) || 2 },
-          ...(folder.value.trim() ? { folder: { path: folder.value.trim(), rules: { edit: lines(edit.value), read: lines(read.value), hidden: lines(hidden.value) } } } : {}),
+          ...(st.folderOn && folder.value.trim() ? { folder: { path: folder.value.trim(), rules: { edit: lines(edit.value), read: lines(read.value), hidden: lines(hidden.value) } } } : {}),
         } });
         toast("Link ready");
         openShare(s.id);
