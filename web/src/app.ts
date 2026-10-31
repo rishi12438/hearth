@@ -20,6 +20,7 @@ const S = {
   teammates: [] as any[],
   files: new Map<string, any>(),
   apps: [] as any[],
+  ideas: [] as any[],
   skills: [] as any[],
   workflows: [] as any[],
   hooks: [] as any[],
@@ -56,7 +57,7 @@ async function boot() {
   const pairCode = new URLSearchParams(location.hash.slice(1)).get("pair");
   if (!activeHub() || pairCode) return renderPairing(pairCode || "");
   if (/^#(chat\/|hearth)/.test(location.hash)) history.replaceState(null, "", "#"); // old links
-  await Promise.all([refreshState(), loadTeammates(), loadSkills(), loadFiles(), loadApps()]);
+  await Promise.all([refreshState(), loadTeammates(), loadSkills(), loadFiles(), loadApps(), loadIdeas()]);
   show();
   connect();
   if (localStorage.getItem("hearth.autoLocation") === "1") shareLocation(true);
@@ -146,6 +147,8 @@ function onEvent(e: { type: string; data?: any }) {
     case "threads": if (open) markSeen(open); soon(); if (open && S.chat) call("/api/threads").then((l: any[]) => { const t = l.find((x) => x.id === open); if (t && S.chat) { S.chat.thread.title = t.title; drawHeader(); } }).catch(() => {}); return;
     case "teammates": loadTeammates().then(soon); return;
     case "skills": loadSkills(); return;
+    case "ideas": loadIdeas().then(() => { if (route().view === "home") drawHome(); }); return;
+    case "about": if (S.panel === "memory") loadAbout(); return;
     case "apps": loadApps().then(() => { const r2 = route(); if (r2.view === "app") { toast("Updated"); renderApp(r2.id); } else if (r2.view === "home") { drawPins(); drawHome(); } else if (r2.view === "chat") drawChat(false); else if (r2.view === "dm") drawDm(false); }); return;
     case "files": loadFiles().then(() => { const r2 = route(); if (r2.view === "chat") drawChat(false); else if (r2.view === "dm") drawDm(false); }); return;
     case "hooks": if (S.panel === "plans") loadHooks(); if (r.view === "dm") loadDm(r.id); return;
@@ -205,6 +208,20 @@ const jobState = (j: any) => j.status === "working" ? "working" : j.status === "
 
 async function loadApps() {
   try { S.apps = await call("/api/apps"); } catch {}
+}
+
+async function loadIdeas() {
+  try { S.ideas = await call("/api/ideas"); } catch {}
+}
+
+/** A 3D emoji (Fluent Emoji 3D, served by the hub); falls back to the plain emoji if there's no picture for it. */
+const emojiUrl = (e: string) => `${activeHub()?.url || ""}/emoji/${Array.from(e).map((c) => c.codePointAt(0)!.toString(16)).join("-")}.webp`;
+function emoji3d(e: string, cls = "e3d") {
+  const span = h("span", { class: cls, role: "img", "aria-label": e });
+  const img = h("img", { src: emojiUrl(e), alt: "", decoding: "async" });
+  img.addEventListener("error", () => clear(span, e));
+  span.appendChild(img);
+  return span;
 }
 
 async function loadFiles() {
@@ -359,40 +376,75 @@ function drawHeader() {
   const top = document.getElementById("top");
   if (!top) return;
   if (r.view === "home" || r.view === "dms" || r.view === "activity") {
-    const title = r.view === "home" ? (S.state?.hub?.name || "Hearth") : r.view === "dms" ? "DMs" : "Activity";
-    clear(top, h("div", { class: "toprow big" },
-      r.view === "home" ? h("button", { class: "logo", on: { click: openHubs }, "aria-label": "Your hubs" }, h("img", { src: "/icon.svg", alt: "" })) : null,
-      h("h1", null, title, h("i", { class: `status ${S.conn}`, title: S.conn })),
-      h("div", { class: "pillgroup glass" },
-        S.updateReady ? h("button", { class: "pillbtn", on: { click: () => location.reload() } }, "Update") : null,
-        h("button", { class: "pillbtn", "aria-label": "Menu", on: { click: openMenu } }, icon("filter", 22), (S.state?.pendingScripts || 0) ? h("i", { class: "dot" }) : null),
-        h("button", { class: "pillbtn", "aria-label": "You", on: { click: openSettings } }, userAvatar(36)))));
+    const left = h("button", { class: "circle glass", "aria-label": "Menu", on: { click: openMenu } }, icon("filter", 22), (S.state?.pendingScripts || 0) ? h("i", { class: "dot" }) : null);
+    const right = h("div", { class: "pillgroup glass" },
+      S.updateReady ? h("button", { class: "pillbtn", on: { click: () => location.reload() } }, "Update") : null,
+      h("button", { class: "pillbtn", "aria-label": "You", on: { click: openSettings } }, userAvatar(36)));
+    if (r.view === "home") {
+      const hearth = rosterEntry("hearth");
+      clear(top, h("div", { class: "toprow stagerow" }, left,
+        stage("home", hearth, S.planning ? "thinking" : hearth.state || "idle", S.state?.hub?.name || "Hearth", null, openHubs, true), right));
+      return;
+    }
+    clear(top, h("div", { class: "toprow big" }, left, h("h1", null, r.view === "dms" ? "DMs" : "Activity"), right));
     return;
   }
   const back = h("button", { class: "circle glass", "aria-label": "Back", on: { click: () => { history.length > 1 ? history.back() : (location.hash = ""); } } }, icon("back", 24));
+  const search = h("button", { class: "circle glass", "aria-label": "Search", on: { click: openJump } }, icon("search", 21));
   if (r.view === "dm") {
     const t = rosterEntry(r.id);
-    clear(top, h("div", { class: "toprow" }, back,
-      h("div", { class: "titlepill glass" }, face(t, 28, t.state), h("span", { class: "grow" }, h("b", null, t.name), h("small", null, t.status || role(t)))),
-      h("button", { class: "circle glass", "aria-label": "Search", on: { click: openJump } }, icon("search", 21))));
+    clear(top, h("div", { class: "toprow stagerow" }, back, stage("dm", t, t.state || "idle", t.name, t.status || role(t), null), search));
     return;
   }
   const chat = S.chat;
   const name = chat?.thread ? channelName(chat.thread) : "new-ramble";
-  const members = [...new Set((chat?.jobs || []).filter((j: any) => !j.parentId).map((j: any) => j.teammateId))] as string[];
   if (r.view === "chat" && r.job) {
-    clear(top, h("div", { class: "toprow" }, back,
-      h("div", { class: "titlepill glass" }, h("span", { class: "grow" }, h("b", null, "Thread"), h("small", null, `# ${name}`))),
-      h("button", { class: "circle glass", "aria-label": "Search", on: { click: openJump } }, icon("search", 21))));
+    const j = chat?.jobs?.find((x: any) => x.id === r.job);
+    const t = mate(j?.teammateId);
+    clear(top, h("div", { class: "toprow stagerow" }, back, stage("chat", t, j ? jobState(j) : "idle", t.name, `Thread in #${name}`, null), search));
     return;
   }
-  const open = (chat?.jobs || []).filter((j: any) => !j.parentId && !["done", "failed"].includes(j.status)).length;
-  clear(top, h("div", { class: "toprow" }, back,
-    h("button", { class: "titlepill glass", on: { click: chatMenu } }, h("span", { class: "hash" }, "#"),
-      h("span", { class: "grow" }, h("b", null, name), h("small", null, [`${members.length + 1} members`, chat?.thread?.title && chat.thread.id !== "new" ? chat.thread.title : null, open ? `${open} working` : null].filter(Boolean).join(" • ")))),
-    h("div", { class: "pillgroup glass" },
-      h("button", { class: "pillbtn", "aria-label": "Files", on: { click: openFiles } }, icon("clip", 21)),
-      h("button", { class: "pillbtn", "aria-label": "Search", on: { click: openJump } }, icon("search", 21)))));
+  // A ramble: Hearth while it's sorting things out, then whoever is doing the work takes the stage.
+  const who = speaker(chat);
+  const jobs = (chat?.jobs || []).filter((j: any) => !j.parentId);
+  const open = jobs.filter((j: any) => !["done", "failed"].includes(j.status)).length;
+  const others = [...new Set(jobs.map((j: any) => j.teammateId))].filter((id) => id !== who.t.id).slice(0, 3).map((id) => mate(id as string));
+  clear(top, h("div", { class: "toprow stagerow" }, back,
+    stage("chat", who.t, who.state, who.t.name, [`#${name}`, open ? `${open} working` : null].filter(Boolean).join(" · "), chatMenu, false, others),
+    h("button", { class: "circle glass", "aria-label": "Files", on: { click: openFiles } }, icon("clip", 21))));
+}
+
+/** Who's "on stage" in a ramble right now. */
+function speaker(chat: any): { t: any; state: string } {
+  if (chat?.thread && S.planning === chat.thread.id) return { t: mate("hearth"), state: "thinking" };
+  const jobs = (chat?.jobs || []).filter((j: any) => !j.parentId);
+  const by = (st: string[]) => jobs.filter((j: any) => st.includes(j.status)).sort((a: any, b: any) => (b.updatedAt || b.createdAt).localeCompare(a.updatedAt || a.createdAt))[0];
+  const now = by(["working"]) || by(["waiting", "blocked"]) || by(["queued"]);
+  if (now) return { t: mate(now.teammateId), state: jobState(now) };
+  const last = by(["done", "failed"]);
+  if (last) return { t: mate(last.teammateId), state: Date.now() - new Date(last.finishedAt || last.updatedAt).getTime() < 120_000 ? "done" : "idle" };
+  return { t: mate("hearth"), state: "idle" };
+}
+
+// The stage keeps one face per place and morphs it (color, badge, a little squash) when someone else takes over.
+const stages = new Map<string, { id: string; face: HTMLElement }>();
+function stage(place: string, t: any, state: string, title: string, sub: string | null, onTap: (() => void) | null, live = false, others: any[] = []) {
+  const prev = stages.get(place);
+  let f: HTMLElement;
+  if (prev && prev.id === t.id) {
+    f = prev.face;
+    const fresh = face(t, 58, state);
+    f.className = fresh.className;
+    clear(f, ...Array.from(fresh.childNodes));
+  } else {
+    f = face(prev ? { ...t, color: prev.face.style.getPropertyValue("--c") || t.color } : t, 58, state);
+    if (prev) { requestAnimationFrame(() => requestAnimationFrame(() => f.style.setProperty("--c", t.color))); f.classList.add("morph"); setTimeout(() => f.classList.remove("morph"), 700); }
+    stages.set(place, { id: t.id, face: f });
+  }
+  const pill = h("span", { class: "stagepill" },
+    others.length ? h("span", { class: "minis" }, others.map((o) => face(o, 18, "idle"))) : null,
+    h("b", null, title, live ? h("i", { class: `status ${S.conn}`, title: S.conn }) : null));
+  return h(onTap ? "button" : "div", { class: "stage", ...(onTap ? { on: { click: onTap } } : {}) }, f, pill, sub ? h("small", null, sub) : null);
 }
 
 function channelName(t: any) {
@@ -420,6 +472,28 @@ function renderHome() {
   drawHome();
 }
 
+/** "I can follow up on your airline refund": yes runs it as a ramble, no makes it go away for good. */
+function ideaRow(i: any) {
+  const busy = (b: HTMLButtonElement) => { b.disabled = true; };
+  return h("div", { class: "idea" }, emoji3d(i.emoji || "💡", "ideaicon"),
+    h("div", { class: "grow" }, h("b", null, i.title), i.body ? h("p", null, i.body) : null,
+      h("div", { class: "ideabtns" },
+        h("button", { class: "btn small primary", on: { click: async (e: Event) => {
+          busy(e.currentTarget as HTMLButtonElement);
+          try { const r = await call(`/api/ideas/${i.id}/accept`, { body: {} }); S.ideas = S.ideas.filter((x) => x.id !== i.id); location.hash = `#c/${r.thread.id}`; } catch (err) { handleError(err); }
+        } } }, "Do it"),
+        h("button", { class: "btn small ghost", on: { click: async () => {
+          S.ideas = S.ideas.filter((x) => x.id !== i.id); drawHome();
+          try { await call(`/api/ideas/${i.id}/dismiss`, { body: {} }); toast("Got it. I won't suggest that again."); } catch (err) { handleError(err); }
+        } } }, "Not now"))));
+}
+
+async function lookForIdeas() {
+  toast("Looking for things I can do for you…");
+  try { S.ideas = await call("/api/ideas", { body: {} }); drawHome(); if (!S.ideas.length) toast("Nothing worth suggesting right now."); }
+  catch (err) { handleError(err); }
+}
+
 function drawHome() {
   const el = document.getElementById("home"), top = document.getElementById("htiles");
   if (!el || !top) return;
@@ -433,6 +507,7 @@ function drawHome() {
     ["sparkle", "Working", `${working} live`, () => { location.hash = "#activity"; }, working > 0],
     ["bell", "Plans", plans ? `${plans} coming up` : "Reminders", openPlans, false],
     ["clip", "Files", `${S.files.size} files`, openFiles, false],
+    ["sparkle", "Ideas", S.ideas.length ? `${S.ideas.length} for you` : "Look now", lookForIdeas, false],
   ];
   const section = (id: string, title: string, rows: Node[], extra?: Node | null) => h("section", { class: "hsec" },
     h("div", { class: "hsec-head" },
@@ -444,8 +519,10 @@ function drawHome() {
   const channelRow = (t: any) => h("button", { class: `hrow ${t.working || t.needsYou || fresh(t) ? "unread" : ""}`, on: { click: () => { location.hash = `#c/${t.id}`; } } },
     h("span", { class: "hicon" }, "#"), h("span", { class: "grow" }, channelName(t)),
     t.needsYou ? h("em", { class: "badge" }, String(t.needsYou)) : t.working ? h("i", { class: "spin" }) : fresh(t) ? h("i", { class: "udot", "aria-label": "New" }) : null);
-  clear(top, h("div", { class: "tiles" }, tiles.map(([ic, title, sub, fn, hot]) =>
-    h("button", { class: `tilebtn ${hot ? "hot" : ""}`, on: { click: fn } }, h("span", { class: "ti" }, icon(ic, 22), hot ? h("i", { class: "dot" }) : null), h("b", null, title), h("small", null, sub)))));
+  clear(top,
+    S.ideas.length ? h("section", { class: "ideas" }, h("h2", { class: "bigtitle" }, "Ideas"), S.ideas.map(ideaRow)) : null,
+    h("div", { class: "tiles" }, tiles.map(([ic, title, sub, fn, hot]) =>
+      h("button", { class: `tilebtn ${hot ? "hot" : ""}`, on: { click: fn } }, h("span", { class: "ti" }, icon(ic, 22), hot ? h("i", { class: "dot" }) : null), h("b", null, title), h("small", null, sub)))));
   clear(el,
     section("rambles", "Active rambles", active.length ? active.map(channelRow)
       : [h("p", { class: "hempty" }, "Tap + and ramble. Each ramble becomes a channel; it archives itself an hour after everything's done.")],
@@ -935,7 +1012,7 @@ function shapeOf(id: string) {
 const LANE_EMOJI: [RegExp, string][] = [
   [/fit|gym|workout|exercise|training|sport|run|yoga/i, "🏋️"], [/health|doctor|medic|wellness|sleep/i, "❤️"],
   [/research|search|find|scout|news/i, "🔍"], [/travel|trip|flight|vacation/i, "✈️"], [/bill|money|financ|budget|tax|invest|expense|pay/i, "💸"],
-  [/remind|plan|calendar|schedul|errand/i, "🔔"], [/language|learn|study|school|flashcard|tutor/i, "🗣️"], [/read|book/i, "📚"],
+  [/remind|plan|calendar|schedul|errand/i, "🔔"], [/language|learn|study|school|flashcard|tutor/i, "💬"], [/read|book/i, "📚"],
   [/meal|food|cook|recipe|diet|grocer|nutrition/i, "🍳"], [/gift|shop|buy/i, "🎁"], [/repair|fix|maintenance|car|diy/i, "🔧"],
   [/home|house|apartment|rent|landlord/i, "🏠"], [/music|song|playlist|concert|ticket/i, "🎵"], [/job|career|work|interview|resume/i, "💼"],
   [/pet|dog|cat|vet/i, "🐾"],
@@ -953,7 +1030,7 @@ function face(t: any, size = 44, state = "idle") {
   const badge = size >= 26 ? badgeOf(t) : null;
   return h("span", { class: `face ${shapeOf(t.id)} ${state}`, style: `--c:${t.color};--s:${size}px`, role: "img", "aria-label": `${t.name}, ${state}` },
     h("span", { class: "eyes" }, h("i", { class: "eye" }), h("i", { class: "eye" })),
-    badge ? h("span", { class: `prop m-${moveOf(badge)}`, "aria-hidden": "true" }, h("span", { class: "em" }, badge)) : null);
+    badge ? h("span", { class: `prop m-${moveOf(badge)}`, "aria-hidden": "true" }, h("span", { class: "em" }, emoji3d(badge))) : null);
 }
 
 const jobStatus = new Map<string, string>();
@@ -1146,7 +1223,7 @@ function openBadge(t: any) {
   const ideas = ["🏋️", "🏐", "🧘", "✈️", "🧭", "🔍", "💸", "📈", "🔔", "📅", "🗣️", "📚", "🍳", "🎁", "🔧", "🏠", "🎵", "💼", "🐾", "❤️", "🌱", "🎨", "📸", "🧠"];
   openSheet(`${t.name}'s badge`, [
     h("div", { class: "badgepreview" }, face({ ...t, emoji: input.value || t.emoji }, 72, "idle")),
-    h("div", { class: "emojigrid" }, ideas.map((e) => h("button", { class: "emojibtn", on: { click: () => save(e) } }, e))),
+    h("div", { class: "emojigrid" }, ideas.map((e) => h("button", { class: "emojibtn", "aria-label": e, on: { click: () => save(e) } }, emoji3d(e)))),
     h("label", null, h("span", null, "Or any emoji"), input),
     h("button", { class: "btn primary big", on: { click: () => save(input.value.trim()) } }, "Save"),
   ]);
@@ -1283,10 +1360,33 @@ function openMemory() {
   openSheet("Memory", [
     h("div", { class: "search" }, icon("search", 18), h("input", { placeholder: "Search", type: "search", value: S.memoryQuery,
       on: { input: debounce((e: Event) => { S.memoryQuery = (e.target as HTMLInputElement).value; loadMemory(); }, 250) } })),
+    h("div", { id: "about" }),
     h("div", { id: "memory" }),
   ], { onClose: () => { S.panel = null; } });
   drawMemory();
   loadMemory();
+  loadAbout();
+}
+
+/** "About you": the short profile the team keeps of you, always in mind. You can rewrite it. */
+async function loadAbout() {
+  const el = document.getElementById("about");
+  if (!el) return;
+  let a: any;
+  try { a = await call("/api/about"); } catch (e) { return handleError(e); }
+  clear(el, h("div", { class: "aboutcard" },
+    h("div", { class: "row" }, emoji3d("🪪", "ideaicon small"), h("b", { class: "grow" }, "About you"),
+      h("button", { class: "btn small ghost", on: { click: () => editAbout(a.text) } }, a.text ? "Edit" : "Write it")),
+    a.text ? h("div", { class: "abouttext" }, richText(a.text)) : h("p", { class: "muted small" }, "The team writes this from what you tell it (people, routines, goals), and keeps it current every night."),
+    a.updatedAt ? h("small", { class: "muted" }, `Updated ${relTime(a.updatedAt)}`) : null));
+}
+
+function editAbout(text: string) {
+  const area = h("textarea", { class: "field", rows: 12, maxLength: 2500, value: text, placeholder: "Sister Priya, turns 30 on Dec 12.\nTraining for a half marathon in March.\nVegetarian. Hates early meetings." });
+  openSheet("About you", [
+    h("p", { class: "muted" }, "Everyone on the team reads this before they help. Keep it short; most important first."), area,
+    h("button", { class: "btn primary big", on: { click: async () => { try { await call("/api/about", { method: "PUT", body: { text: area.value } }); closeSheet(); toast("Saved"); openMemory(); } catch (e) { handleError(e); } } } }, "Save"),
+  ]);
 }
 
 function drawMemory() {

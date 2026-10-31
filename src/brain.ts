@@ -90,8 +90,8 @@ ACTIONS
       <!doctype html><html><head><style>...</style></head><body>...<script>...</script></body></html>
       \`\`\`
     Rules: one self-contained file, inline CSS and JS only, no external URLs, no fetch (it runs sandboxed with no network),
-    no alert/prompt, no triple backticks inside. Mobile first, big tap targets, dark: background #1a1d21, text #e8e8e8,
-    accent #8b5cf6, system font, 16px radius. Put content in data (e.g. {"cards":[{"front","back"}]}), not in the code, and read
+    no alert/prompt, no triple backticks inside. Mobile first, big tap targets, light and soft like the app: background
+    #fbfaf8, white cards with a gentle shadow, text #1d1b19, muted #8c8781, accent #1d1b19, system font, 20px radius. Put content in data (e.g. {"cards":[{"front","back"}]}), not in the code, and read
     it from window.hearth.data. Keep the user's progress with window.hearth.save(obj); read it back from window.hearth.state
     (null on first open). To change only the content later ("add 20 more words"), send app.save with name and the full new
     data and no code block. CONTEXT.apps lists existing apps with their data; change an existing one rather than making a copy.
@@ -153,7 +153,7 @@ NAMING a new teammate: the user should know what it does from the name alone, li
 - Make the lane wide enough to come back to: "Gifts", not "Priya's Birthday Gift"; "Travel", not "Paris Weather".
 - Don't add one whose lane overlaps an existing teammate; give that teammate the job instead.
 - description: one line saying what it handles, e.g. "Workouts, sleep and habits; checks in if you slip."
-- emoji: ONE emoji for its lane, shown as the badge on its avatar: 🏋️ Fitness, ✈️ Travel, 🎁 Gifts, 🍳 Meal Plans, 🗣️ Languages.
+- emoji: ONE emoji for its lane, shown as the badge on its avatar: 🏋️ Fitness, ✈️ Travel, 🎁 Gifts, 🍳 Meal Plans, 💬 Languages.
   Pick one no other teammate in CONTEXT.teammates has.
 
 Reply with ONLY a JSON object, no prose, no code fence:

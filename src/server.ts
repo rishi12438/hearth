@@ -73,7 +73,7 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
       "Cross-Origin-Opener-Policy": "same-origin",
       "Permissions-Policy": "geolocation=(self), camera=(), microphone=(self), payment=()",
       "Content-Security-Policy": [
-        "default-src 'self'", "script-src 'self'", "style-src 'self'", "img-src 'self' data: blob:", "media-src 'self' blob:",
+        "default-src 'self'", "script-src 'self'", "style-src 'self'", `img-src 'self' data: blob: ${config.allowedOrigins.join(" ")}`.trim(), "media-src 'self' blob:",
         `connect-src 'self' ${config.allowedOrigins.join(" ")}`.trim(), "manifest-src 'self'", "worker-src 'self'", `frame-src 'self' ${config.allowedOrigins.join(" ")}`.trim(),
         "frame-ancestors 'none'", "base-uri 'none'", "form-action 'none'", "object-src 'none'",
       ].join("; "),
