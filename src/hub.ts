@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store, Collection } from "./store/index.ts";
 import type { Brain, BrainInput, BrainProfile, Brains, Meter } from "./brain.ts";
-import { QUIET, ESCALATE, HARNESSES, MODEL_RE, availableHarnesses } from "./brain.ts";
+import { QUIET, ESCALATE, REDO, HARNESSES, MODEL_RE, availableHarnesses } from "./brain.ts";
 import type { Scripts } from "./scripts.ts";
 import type { Push } from "./push.ts";
 import { parseReply } from "./reply.ts";
@@ -135,6 +135,14 @@ export class Hub {
   async context(query: string, mode: BrainInput["mode"], teammate?: Teammate | null) {
     const now = this.clock();
     const prefs = await this.prefs();
+    // The voice pass only writes the answer from the legwork notes: who it is, who the user is, the time. Nothing else.
+    if (mode === "voice") {
+      return {
+        you: teammate ? { name: teammate.name, role: teammate.prompt } : { name: "Hearth", role: "The user's main assistant." },
+        now: describeLocal(now, prefs.tz), tz: prefs.tz, userName: prefs.userName || undefined, aboutYou: prefs.about || undefined,
+        memory: recall(await this.store.all<Fact>("memory"), query, 8, now).map((f) => f.fact),
+      };
+    }
     const facts = await this.store.all<Fact>("memory");
     const memory = mode === "review" ? facts.filter((f) => isActive(f, now)) : recall(facts, query, 40, now);
     const hooks = (await this.store.all<Hook>("hooks")).filter((h) => h.status !== "done" && h.source !== "system");
@@ -244,7 +252,7 @@ export class Hub {
       if (!MODEL_RE.test(model)) return { error: "Model names are letters, digits, dots, dashes and slashes." };
       next[role] = { harness, model };
     }
-    await this.setPrefs({ brains: next });
+    await this.setPrefs({ brains: next, ...(typeof patch?.hybrid === "boolean" ? { hybrid: patch.hybrid } : {}) });
     await this.log("brains", `Orchestrator ${label(next.orchestrator)}, workhorse ${label(next.workhorse)}, heavy ${label(next.heavy)}`);
     return { value: next };
   }
@@ -525,9 +533,11 @@ export class Hub {
     const attached = await this.attachmentNote(ask?.fileIds);
     const input = `${job.task}${depNote}${repairNote}${splitNote}${attached}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")`;
     type Tier = "quick" | "workhorse" | "heavy";
+    // Hybrid (on by default): a cheaper model does the legwork and the heavy model writes what you read.
+    const hybrid = (await this.prefs()).hybrid !== false && label(brains.heavy) !== label(brains.workhorse);
     const attempt = async (tier: Tier) => {
       cur = await this.saveJob({ ...cur, status: "working", tier });
-      return this.turn("job", input, job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains[tier], meter });
+      return this.turn(hybrid && tier !== "heavy" ? "legwork" : "job", input, job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains[tier], meter });
     };
     // Start on the cheapest model the plan allows; move up a step when a model can't do it.
     const ladder: Tier[] = job.effort === "heavy" ? ["heavy"] : job.effort === "quick" ? ["quick", "workhorse", "heavy"] : ["workhorse", "heavy"];
@@ -535,7 +545,7 @@ export class Hub {
     let escalated = false;
     if (await overCap()) return finish({ how: "fresh" });
     try {
-      let r = await attempt(tier).catch((err) => (tier !== "heavy" ? null : Promise.reject(err)));
+      let r: Awaited<ReturnType<typeof attempt>> | null = await attempt(tier).catch((err) => (tier !== "heavy" ? null : Promise.reject(err)));
       if (stop.signal.aborted) throw new Error("Restarted with your new message.");
       while (tier !== "heavy" && (!r || r.text.includes(ESCALATE) || !r.text.trim())) {
         escalated = true; tier = ladder[ladder.indexOf(tier) + 1];
@@ -544,11 +554,31 @@ export class Hub {
         if (stop.signal.aborted) throw new Error("Restarted with your new message.");
       }
       if (!r || r.text.includes(ESCALATE)) throw new Error("Nobody could do this one.");
+      let voiced = false;
+      const legwork = r;
+      if (hybrid && tier !== "heavy" && !legwork.split) {
+        const r0 = legwork;
+        meter.onProgress?.("Writing it up");
+        const v = await this.turn("voice", `${job.task}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")\n\nNOTES FROM THE LEGWORK:\n<untrusted>\n${r0.text.slice(0, 8000)}\n</untrusted>`,
+          job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains.heavy, meter });
+        if (stop.signal.aborted) throw new Error("Restarted with your new message.");
+        if (v.text.includes(REDO) || !v.text.trim()) {
+          // The lead wasn't happy with the legwork: it does the job itself.
+          await this.log("job.redo", `${job.task.slice(0, 80)}: ${v.text.replace(REDO, "").trim().slice(0, 120)}`);
+          escalated = true; tier = "heavy";
+          const again = await attempt("heavy");
+          r = { ...again, split: again.split ?? null, did: [...r0.did, ...again.did], tiles: [...(r0.tiles || []), ...(again.tiles || [])].slice(0, 4), fileIds: [...(r0.fileIds || []), ...(again.fileIds || [])] };
+        } else {
+          r = { ...r0, split: r0.split ?? null, text: v.text, did: [...r0.did, ...v.did], tiles: [...(r0.tiles || []), ...(v.tiles || [])].slice(0, 4), fileIds: [...(r0.fileIds || []), ...(v.fileIds || [])] };
+          voiced = true;
+        }
+      }
+      if (!r) throw new Error("Nobody could do this one.");
       if (r.split && job.effort === "heavy" && !job.depth) {
         const merged = await this.runSplit(cur, r.split, ramble, meter);
         return await finish({ how: "fresh", tier, escalated, result: merged.text.slice(0, 4000), did: [...r.did, ...merged.did], tiles: merged.tiles });
       }
-      await finish({ how: failedSkill ? "repaired" : "fresh", tier, escalated, result: r.text.slice(0, 4000), did: r.did, tiles: r.tiles, fileIds: r.fileIds });
+      await finish({ how: failedSkill ? "repaired" : "fresh", tier, escalated, voiced, result: r.text.slice(0, 4000), did: r.did, tiles: r.tiles, fileIds: r.fileIds });
     } catch (err: any) {
       await finish({ status: "failed", how: "fresh", tier, escalated, result: err.message });
     }

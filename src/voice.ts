@@ -6,7 +6,10 @@ export interface SpeechToText {
   transcribe(audio: Uint8Array, mimeType: string): Promise<string>;
 }
 
-class Deepgram implements SpeechToText {
+import { readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { join } from "node:path";
+
+export class Deepgram implements SpeechToText {
   readonly name = "deepgram";
   constructor(private key: string, private model = "nova-3") {}
 
@@ -20,6 +23,53 @@ class Deepgram implements SpeechToText {
     if (!res.ok) throw new Error(`Deepgram replied ${res.status}`);
     const data: any = await res.json();
     return String(data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || "").trim();
+  }
+}
+
+/** Is this a working Deepgram key? Asks Deepgram (lists your projects) without spending anything. */
+export async function checkDeepgramKey(key: string): Promise<string | null> {
+  if (!/^[A-Za-z0-9_\-.]{20,100}$/.test(key)) return "That doesn't look like a Deepgram API key.";
+  try {
+    const res = await fetch("https://api.deepgram.com/v1/projects", { headers: { Authorization: `Token ${key}` }, signal: AbortSignal.timeout(10_000) });
+    if (res.status === 401 || res.status === 403) return "Deepgram didn't accept that key.";
+    if (!res.ok) return `Deepgram replied ${res.status}. Try again in a minute.`;
+    return null;
+  } catch { return "Couldn't reach Deepgram from the hub."; }
+}
+
+/**
+ * Voice settings the app can change: the Deepgram key lives in <data>/voice.json (mode 0600), never in the database,
+ * exports or API responses. A key in the environment wins and can't be changed from the app.
+ */
+export class VoiceSettings {
+  private file: string;
+  current: SpeechToText | null;
+  constructor(dataDir: string, private env: Record<string, string | undefined> = process.env) {
+    this.file = join(dataDir, "voice.json");
+    this.current = createSpeechToText(env) || this.fromFile();
+  }
+  get fromEnv() { return !!this.env.HEARTH_DEEPGRAM_API_KEY; }
+  private saved(): { deepgramKey?: string } { try { return existsSync(this.file) ? JSON.parse(readFileSync(this.file, "utf8")) : {}; } catch { return {}; } }
+  private fromFile() { const k = this.saved().deepgramKey; return k ? new Deepgram(k, this.env.HEARTH_DEEPGRAM_MODEL || "nova-3") : null; }
+  /** What the app may see: provider, where the key came from, and its last 4 characters. */
+  status() {
+    const key = this.env.HEARTH_DEEPGRAM_API_KEY || this.saved().deepgramKey;
+    return { provider: this.current?.name || null, source: this.fromEnv ? "env" : key ? "app" : null, hint: key ? `••••${key.slice(-4)}` : null };
+  }
+  async connect(key: string) {
+    if (this.fromEnv) return { error: "This hub's voice key is set in its .env, so it can't be changed from the app." };
+    const clean = key.trim();
+    const bad = await checkDeepgramKey(clean);
+    if (bad) return { error: bad };
+    writeFileSync(this.file, JSON.stringify({ deepgramKey: clean }), { mode: 0o600 });
+    this.current = this.fromFile();
+    return { value: this.status() };
+  }
+  disconnect() {
+    if (this.fromEnv) return { error: "This hub's voice key is set in its .env." };
+    rmSync(this.file, { force: true });
+    this.current = null;
+    return { value: this.status() };
   }
 }
 

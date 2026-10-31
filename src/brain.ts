@@ -10,7 +10,7 @@ import { wallParts, zonedToUtc } from "./time.ts";
 // and the agent runs in an empty folder with no file or shell tools and none of the hub's secrets.
 
 export type BrainInput = {
-  mode: "chat" | "hook" | "review" | "job" | "orchestrate" | "ideas";
+  mode: "chat" | "hook" | "review" | "job" | "orchestrate" | "ideas" | "legwork" | "voice";
   context: Record<string, unknown>;
   input: string;
   toolResults?: string;
@@ -18,6 +18,10 @@ export type BrainInput = {
 
 export const QUIET = "[[quiet]]";
 export const ESCALATE = "[[escalate]]";
+export const REDO = "[[redo]]";
+/** Calls that only read and write text: no web tools. */
+const NO_TOOLS = new Set<BrainInput["mode"]>(["orchestrate", "voice", "review", "ideas"]);
+const SYSTEM_PROMPT = "You are part of Hearth, the user's personal assistant hub. The message holds your instructions, context and task. Follow its format exactly: when it asks for JSON reply with only the JSON, and put any actions in the ```hearth block it describes.";
 
 const PROTOCOL = `
 You are a personal assistant that lives on the user's own server ("hub"). You talk to one person.
@@ -206,6 +210,23 @@ export function buildPrompt(b: BrainInput) {
       "routines, watches and memory; search the web if you need to. Then reply with the result in 1-5 short lines, written to the user.",
       `If the job is clearly beyond you or you can't do it well, reply exactly ${ESCALATE} and a stronger model will take it.`,
       "JOB:", b.input);
+  } else if (b.mode === "legwork") {
+    parts.push("", "You were handed ONE job from the user's ramble. You do the LEGWORK; a stronger model on the team (the lead) will read",
+      "your notes and write the reply the user sees. Do the job fully now: search the web, read pages, and take the actions it needs",
+      "(reminders, memory, people, files, apps, tiles). Then reply with NOTES FOR THE LEAD, not a message to the user:",
+      "- what you found: concrete facts, names, prices, dates, addresses, with source links",
+      "- what you did: actions taken and their results",
+      "- anything uncertain or missing, and what you'd ask the user",
+      `Be complete and factual; the lead can't search again cheaply. If the job is beyond you, reply exactly ${ESCALATE}.`,
+      "JOB:", b.input);
+  } else if (b.mode === "voice") {
+    parts.push("", "You are the lead on ONE job. A teammate on a cheaper model already did the legwork (searches, actions); their notes are",
+      "below. Write the reply the user sees, in your teammate voice: 1-5 short lines, the answer first, warm and specific, no filler.",
+      "Use only what the notes support; don't invent facts. Actions in the notes are already done; don't repeat them. You may add a",
+      "tile or file.create if it presents the answer better.",
+      `If the notes don't answer the job well enough (wrong, thin, or missed what the user asked), reply exactly ${REDO} and one line on`,
+      "what's missing; you'll then do the job yourself.",
+      "JOB:", b.input);
   } else if (b.mode === "review") {
     parts.push("", "MEMORY REVIEW (nightly): tidy memory. Merge duplicates, update stale facts, set expiresAt on temporary ones,",
       "forget trivia, and refresh notebook summaries. Then:",
@@ -342,11 +363,15 @@ export class Brain {
     let outFile: string | null = null;
     let cmd: string[];
     switch (harness) {
-      case "claude":
+      case "claude": {
+        // Slim: our own short system prompt instead of Claude Code's, only the tools this call needs, none of the machine's
+        // MCP servers, settings or hooks. Cuts ~22k tokens of overhead from every call (~$0.06 on Sonnet, ~5x that on Opus).
+        const web = !NO_TOOLS.has(b.mode);
         cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence", ...(model ? ["--model", model] : []),
-          ...(planning ? [] : ["--allowedTools", "WebSearch", "WebFetch"]),
-          "--disallowedTools", "Bash", "Edit", "Write", "Read", "Glob", "Grep", "NotebookEdit", "Task", ...(planning ? ["WebSearch", "WebFetch"] : [])];
+          "--system-prompt", SYSTEM_PROMPT, "--strict-mcp-config", "--setting-sources", "project",
+          "--tools", web ? "WebSearch,WebFetch" : "", ...(web ? ["--allowedTools", "WebSearch", "WebFetch"] : [])];
         break;
+      }
       case "codex":
         outFile = join(this.workDir, `${randomUUID()}.txt`);
         cmd = ["codex", "exec", ...(model ? ["-m", model] : []), "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "--color", "never", "-o", outFile, "-"];
@@ -437,6 +462,7 @@ function echoOrchestrator(b: BrainInput): string {
 function echoBrain(b: BrainInput): string {
   const ctx = b.context as { tz: string; nowIso: string };
   if (b.mode === "review") return QUIET;
+  if (b.mode === "voice") return (b.input.split("NOTES FROM THE LEGWORK:")[1] || b.input).replace(/<\/?untrusted>/g, "").trim();
   if (b.mode === "ideas") {
     const facts = ((b.context as any).memory || []) as { fact: string }[];
     const open = (((b.context as any).ideas?.open || []) as string[]).length + (((b.context as any).ideas?.dismissed || []) as string[]).length;

@@ -895,7 +895,7 @@ function metaLine(j: any) {
     const n = (j.skillId ? S.skills.find((x) => x.id === j.skillId) : S.workflows.find((x) => x.id === j.workflowId))?.name;
     return `${n ? `used ${n} · ` : ""}${secs(j.durationMs)} · ${money(j.costUsd)}`;
   }
-  const model = j.tier === "quick" ? "quick" : j.tier === "heavy" ? "heavy" : null;
+  const model = j.voiced ? `${j.tier === "quick" ? "quick" : "workhorse"} + heavy` : j.tier === "quick" ? "quick" : j.tier === "heavy" ? "heavy" : null;
   return [j.escalated ? "moved up" : null, model, secs(j.durationMs), money(j.costUsd)].filter(Boolean).join(" · ");
 }
 
@@ -1139,6 +1139,35 @@ function tile(t: any) {
 
 // ---------------- voice ----------------
 
+/** Connect speech-to-text: paste a Deepgram key once; the hub checks it, keeps it, and never shows it again. */
+async function openVoice() {
+  let v: any;
+  try { v = await call("/api/voice"); } catch (e) { return handleError(e); }
+  const key = h("input", { class: "field", type: "password", placeholder: "Deepgram API key", autocomplete: "off", autocapitalize: "off", spellcheck: false });
+  const err = h("p", { class: "err small", hidden: true });
+  const connect = h("button", { class: "btn primary big", on: { click: async () => {
+    if (!key.value.trim()) return key.focus();
+    connect.disabled = true; connect.textContent = "Checking with Deepgram…"; err.hidden = true;
+    try { await call("/api/voice", { method: "PUT", body: { key: key.value } }); await refreshState(); closeSheet(); toast("Voice is on. Hold the mic to talk."); }
+    catch (e: any) { err.textContent = e.message; err.hidden = false; connect.disabled = false; connect.textContent = "Connect"; }
+  } } }, "Connect");
+  openSheet("Voice", [
+    h("div", { class: "phero" }, emoji3d("🎙️", "ideaicon"), h("b", null, v.provider ? "Voice is on" : "Talk instead of typing"),
+      h("small", null, v.provider ? `Deepgram · key ${v.hint}${v.source === "env" ? " · set in the hub's .env" : ""}` : "Hold the mic and ramble; Hearth turns it into tasks.")),
+    v.source === "env" ? h("p", { class: "muted" }, "This key comes from the hub's .env file, so change it there.")
+      : v.provider ? h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet("Turn voice off?", "The key is removed from the hub.", "Disconnect", async () => { await call("/api/voice", { method: "DELETE" }); await refreshState(); toast("Voice is off"); }) } }, "Disconnect Deepgram")
+      : [
+        h("ol", { class: "steps" },
+          h("li", null, "Make a free account at ", h("a", { href: "https://console.deepgram.com/signup", target: "_blank", rel: "noopener noreferrer" }, "console.deepgram.com"), " (it comes with free credit)."),
+          h("li", null, "Go to API Keys, create a key with Member access, and copy it."),
+          h("li", null, "Paste it here.")),
+        key, err, connect,
+        h("p", { class: "muted small" }, "The key is checked with Deepgram, then stays on your hub in a private file. It's never stored in your data or exports and never sent back to this app. Your recordings go from the hub to Deepgram only to be transcribed."),
+      ],
+  ]);
+  setTimeout(() => key.focus(), 80);
+}
+
 let recording = false;
 let recorder: MediaRecorder | null = null;
 let chunks: Blob[] = [];
@@ -1150,7 +1179,7 @@ function autosize(t: HTMLTextAreaElement) { t.style.height = "auto"; t.style.hei
 async function onMicDown() {
   if (recording) { stopRecording(true); return; } // second tap ends open-mic
   pressAt = Date.now();
-  if (!S.state?.voice) return toast("Voice isn't set up on this hub yet (add a Deepgram key to its .env).", "err");
+  if (!S.state?.voice) { openVoice(); return; }
   try {
     const media = await navigator.mediaDevices.getUserMedia({ audio: true });
     const type = ["audio/webm;codecs=opus", "audio/mp4", "audio/webm"].find((t) => MediaRecorder.isTypeSupported(t)) || "";
@@ -1294,6 +1323,10 @@ async function openBrains() {
     ["heavy", "Heavy", "Long research and careful writing, and anything the others can't finish (they move up on their own)."],
   ];
   const state: any = JSON.parse(JSON.stringify(data.current));
+  state.hybrid = data.hybrid;
+  const hy = h("button", { class: "item", on: { click: () => { state.hybrid = !state.hybrid; hy.querySelector(".switch")!.classList.toggle("on", state.hybrid); } } },
+    h("span", { class: "grow left" }, h("b", null, "Smart voice (hybrid)"), h("small", { class: "sub" }, "Cheaper models do the legwork (searching, reminders, gathering); Heavy reads their notes and writes every answer you see. Redoes the job itself if the notes fall short.")),
+    h("span", { class: `switch ${state.hybrid ? "on" : ""}` }, h("i")));
   const block = ([key, title, blurb]: [string, string, string]) => {
     const model = h("input", { class: "field", value: state[key].model, placeholder: "harness default", list: `models-${key}`, autocapitalize: "off", spellcheck: false,
       on: { input: () => { state[key].model = model.value.trim(); } } });
@@ -1309,6 +1342,7 @@ async function openBrains() {
   };
   openSheet("Brains", [
     h("p", { class: "muted" }, "Pick a harness and model for each role. The harnesses listed are the ones installed on this hub."),
+    h("div", { class: "list" }, hy),
     roles.map(block),
     h("button", { class: "btn primary big", on: { click: async () => {
       try { await call("/api/brains", { method: "PATCH", body: state }); toast("Saved"); closeSheet(); } catch (e) { handleError(e); }
@@ -1555,7 +1589,8 @@ function openSettings() {
       row("Name and time zone", `${p.userName || "Not set"} · ${p.tz}`, openProfile),
       row("Notifications", st.push.subscribed ? "On for this device" : "Off", () => togglePush(st.push.subscribed), sw(st.push.subscribed)),
       row("Quiet hours and daily limit", `${p.quietStart}–${p.quietEnd} · up to ${p.maxProactivePerDay}/day`, openQuiet)),
-    h("div", { class: "list" }, row("Brains", "Orchestrator, workhorse, heavy", openBrains)),
+    h("div", { class: "list" }, row("Brains", "Which models do what, and smart voice", openBrains),
+      row("Voice", st.voice ? `On · ${st.voice === "deepgram" ? "Deepgram" : st.voice}` : "Off · connect Deepgram to talk", openVoice)),
     h("h4", null, "Location"),
     h("div", { class: "list" },
       row("Share when I open the app", "For place reminders and “near me”", () => { localStorage.setItem("hearth.autoLocation", autoLoc ? "0" : "1"); if (!autoLoc) shareLocation(false); closeSheet(); openSettings(); }, sw(autoLoc)),

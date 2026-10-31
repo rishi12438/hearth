@@ -101,6 +101,8 @@ export type Job = Doc & {
   depth?: number;
   startedAt?: string;
   tier?: "quick" | "workhorse" | "heavy";
+  /** Hybrid: the heavy model wrote the answer from a cheaper model's legwork. */
+  voiced?: boolean;
   escalated?: boolean;
   result?: string;
   did?: Done[];
@@ -172,6 +174,8 @@ export type Prefs = {
   /** "About you": a short profile the assistant keeps (and you can edit). Always in context. */
   about?: string;
   aboutUpdatedAt?: string;
+  /** Hybrid: cheaper models do a job's legwork, the heavy model writes what the user reads. On unless turned off. */
+  hybrid?: boolean;
 };
 
 /** Something the assistant could do for you, suggested on its own ("I can follow up on your airline refund"). */

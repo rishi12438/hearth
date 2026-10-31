@@ -3,7 +3,7 @@ import { join, resolve, extname } from "node:path";
 type Server = Bun.Server<unknown>;
 import { sha256, deviceForToken, newPairingCode, redeemPairingCode, RateLimiter } from "./auth.ts";
 import type { Hub } from "./hub.ts";
-import type { SpeechToText } from "./voice.ts";
+import type { VoiceSettings } from "./voice.ts";
 import { availableHarnesses } from "./brain.ts";
 import { MAX_FILE_BYTES } from "./files.ts";
 import { appCsp } from "./apps.ts";
@@ -51,7 +51,8 @@ export async function buildWeb() {
 
 class HttpError extends Error { constructor(public status: number, msg: string) { super(msg); } }
 
-export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
+export async function startServer(hub: Hub, voice: VoiceSettings | null = null) {
+  const voiceLimiter = new RateLimiter(5, 10 * 60_000);
   const { config, store } = hub;
   const web = await buildWeb();
   const pairLimiter = new RateLimiter(5, 10 * 60_000);
@@ -140,7 +141,7 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
           device: { id: device.id, name: device.name }, prefs: publicPrefs(prefs), thinking: hub.thinking,
           push: { available: !!hub.push, subscribed: hub.push ? await hub.push.hasDevice(device.id) : false },
           pendingScripts: (await hub.scripts.list()).filter((s) => s.status === "proposed").length,
-          voice: stt ? stt.name : null,
+          voice: voice?.current?.name ?? null,
         });
       }
       case "stream": {
@@ -282,7 +283,7 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
         break;
       }
       case "brains": {
-        if (method === "GET") return json({ current: await hub.brains(), available: availableHarnesses(config) });
+        if (method === "GET") return json({ current: await hub.brains(), available: availableHarnesses(config), hybrid: (await hub.prefs()).hybrid !== false });
         if (method === "PATCH") { const r = await hub.setBrains(await body(req)); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         break;
       }
@@ -297,9 +298,25 @@ export async function startServer(hub: Hub, stt: SpeechToText | null = null) {
         if (method === "DELETE" && id) return json({ ok: await hub.removeTeammate(id) });
         break;
       }
+      case "voice": {
+        // Connect speech-to-text from the app. The key is checked with Deepgram, kept in a 0600 file on the hub,
+        // and never sent back (only its last 4 characters).
+        if (!voice) throw new HttpError(503, "Voice isn't available on this hub.");
+        if (method === "GET") return json(voice.status());
+        if (method === "PUT") {
+          if (!voiceLimiter.allow("connect")) throw new HttpError(429, "Too many tries. Wait a few minutes.");
+          const r = await voice.connect(String((await body(req)).key || ""));
+          if (r.error) throw new HttpError(400, r.error);
+          hub.emit("voice");
+          return json(r.value);
+        }
+        if (method === "DELETE") { const r = voice.disconnect(); if (r.error) throw new HttpError(400, r.error); hub.emit("voice"); return json(r.value); }
+        break;
+      }
       case "transcribe": {
         if (method !== "POST") break;
-        if (!stt) throw new HttpError(503, "Voice isn't set up on this hub. Add HEARTH_DEEPGRAM_API_KEY to its .env.");
+        const stt = voice?.current;
+        if (!stt) throw new HttpError(503, "Voice isn't set up yet. Connect Deepgram in Settings → Voice.");
         const type = req.headers.get("content-type") || "";
         if (!/^audio\//.test(type)) throw new HttpError(415, "Send audio.");
         const audio = new Uint8Array(await req.arrayBuffer());

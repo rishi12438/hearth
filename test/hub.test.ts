@@ -192,7 +192,40 @@ test("light jobs escalate to the heavy model when the workhorse gives up", async
   expect(job.escalated).toBe(true);
   expect(job.tier).toBe("heavy");
   expect(job.result).toBe("Here's your plan.");
-  expect(calls.filter((c) => c.startsWith("job"))).toEqual(["job:small", "job:big"]);
+  expect(calls.filter((c) => !c.startsWith("orchestrate"))).toEqual(["legwork:small", "job:big"]); // heavy does it all, no extra voice step
+});
+
+test("hybrid: the cheap model does the legwork, the heavy model writes what you read (or redoes it)", async () => {
+  await hub.ensureTeammates();
+  const calls: string[] = [];
+  let redo = false;
+  (hub.brain as any).think = async (b: any, p: any) => {
+    calls.push(`${b.mode}:${p.model}`);
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "Find a pottery gift", teammate: "Research", effort: "light" }] });
+    if (b.mode === "legwork") return "NOTES: Clayroom Oakland gift card $60 (clayroom.com); Etsy mug set $45.";
+    if (b.mode === "voice") return redo ? "[[redo]] notes miss her taste" : "Two good picks: a $60 Clayroom gift card, or a $45 handmade mug set.";
+    return "Heavy did it all: a $60 Clayroom gift card.";
+  };
+  await hub.setBrains({ workhorse: { harness: "echo", model: "small" }, heavy: { harness: "echo", model: "big" } });
+  await hub.ramble("gift for priya");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done"));
+  let [job] = await store.all<Job>("jobs");
+  expect([job.voiced, job.tier, job.result]).toEqual([true, "workhorse", "Two good picks: a $60 Clayroom gift card, or a $45 handmade mug set."]);
+  expect(calls.slice(1)).toEqual(["legwork:small", "voice:big"]);
+
+  redo = true; calls.length = 0;
+  for (const c of COLLECTIONS) if (c === "jobs") await store.clear(c);
+  await hub.ramble("gift for priya again");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done"));
+  [job] = await store.all<Job>("jobs");
+  expect([job.voiced, job.tier, job.escalated, job.result]).toEqual([false, "heavy", true, "Heavy did it all: a $60 Clayroom gift card."]);
+  expect(calls.slice(1)).toEqual(["legwork:small", "voice:big", "job:big"]);
+
+  await hub.setBrains({ hybrid: false }); calls.length = 0;
+  await store.clear("jobs");
+  await hub.ramble("one more");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done"));
+  expect(calls.slice(1)).toEqual(["job:small"]); // switched off: the workhorse answers directly
 });
 
 test("the app can only pick harnesses the hub has", async () => {

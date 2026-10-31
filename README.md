@@ -26,9 +26,10 @@ Run one hub on an always-on box so routines fire while your laptop sleeps. Run a
 ### Rambles, teammates and escalation
 
 1. You ramble into a chat. The **orchestrator** (default `claude-sonnet-5-5`, fast because you wait on it) returns a title, a short reply, facts to remember, and jobs. Each job has a teammate and an effort, `light` or `heavy`.
-2. Light jobs run on the **workhorse** (default `claude-sonnet-5-5`), heavy ones on **heavy** (default `claude-opus-5-5`). If the workhorse fails or answers `[[escalate]]`, the job reruns on heavy and its card says "escalated".
+2. **The model deck.** Each job starts on the cheapest model that can do it: **quick** (Haiku: reminders, notes, pinning), **workhorse** (Sonnet: most jobs) or **heavy** (Opus: long research, careful writing). A job too hard for its model moves up a step on its own.
+3. **Smart voice (hybrid, on by default).** The cheaper model does the legwork (searches, pages, actions) and writes notes; **heavy** reads them and writes the answer you see, or redoes the job itself if the notes fall short. You never talk to the cheap model. Every `claude` call runs slim (own short system prompt, only the tools it needs, no MCP servers or settings), which cuts ~22k tokens of overhead per call. A real gift search: 29 s and $0.15, written by Opus.
 3. Teammates are a name plus a role prompt. If no teammate fits, the orchestrator creates one, which you can see and delete in the app.
-4. Voice: the app records audio and the hub transcribes it with Deepgram (`HEARTH_DEEPGRAM_API_KEY`), so the key never reaches the phone. Speech-to-text is an interface in [src/voice.ts](src/voice.ts), so other providers can be added.
+4. Voice: hold the mic and talk. Connect Deepgram in **Settings → Voice** (paste a key once; the hub checks it, keeps it in a private 0600 file and never shows it again) or set `HEARTH_DEEPGRAM_API_KEY`. The phone only uploads audio. Speech-to-text is an interface in [src/voice.ts](src/voice.ts), so other providers can be added.
 
 ### How it looks (like Slack on your phone)
 
