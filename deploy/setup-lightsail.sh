@@ -9,8 +9,14 @@
 # Safe to run again: it keeps an existing .env and data.
 set -euo pipefail
 
-DOMAIN="${1:-}"; EMAIL="${2:-}"; SKIP_DNS=0
-for a in "$@"; do [ "$a" = "--skip-dns-check" ] && SKIP_DNS=1; done
+DOMAIN="${1:-}"; EMAIL="${2:-}"; SKIP_DNS=0; BRAINS=""; NO_PAIR=0
+for a in "$@"; do
+  case "$a" in
+    --skip-dns-check) SKIP_DNS=1 ;;
+    --brains=*) BRAINS="${a#--brains=}" ;;   # claude,codex: install these coding agents for the hub user
+    --no-pair) NO_PAIR=1 ;;                  # the Mac app shows the phone QR itself
+  esac
+done
 if [ -z "$DOMAIN" ] || [ -z "$EMAIL" ] || [[ "$DOMAIN" == --* ]]; then
   echo "usage: sudo bash deploy/setup.sh lightsail <domain> <email> [--skip-dns-check]"; exit 1
 fi
@@ -61,6 +67,19 @@ id hearth >/dev/null 2>&1 || adduser --disabled-password --gecos "" hearth >/dev
 [ -x /home/hearth/.bun/bin/bun ] || sudo -iu hearth bash -c 'curl -fsSL https://bun.sh/install | bash' >/dev/null
 mkdir -p /home/hearth/.claude /home/hearth/.codex && chown hearth: /home/hearth/.claude /home/hearth/.codex
 
+if [ -n "$BRAINS" ]; then
+  say "Brains: $BRAINS"
+  case ",$BRAINS," in *,claude,*)
+    [ -x /home/hearth/.local/bin/claude ] || sudo -iu hearth bash -c 'curl -fsSL https://claude.ai/install.sh | bash' >/dev/null
+    echo "   Claude Code $(sudo -iu hearth /home/hearth/.local/bin/claude --version 2>/dev/null | head -1)" ;;
+  esac
+  case ",$BRAINS," in *,codex,*)
+    command -v npm >/dev/null || apt-get install -yq nodejs npm >/dev/null
+    command -v codex >/dev/null || npm install -g @openai/codex >/dev/null 2>&1
+    echo "   Codex $(codex --version 2>/dev/null | head -1)" ;;
+  esac
+fi
+
 say "Master key for the hub's encrypted API keys"
 # API keys (E2B, Deepgram, your VMs' SSH keys) are encrypted in data/keys/vault.db with this key. It lives outside the
 # data folder, so a copy of the data alone can't be read. Made once; kept on every later run.
@@ -102,11 +121,13 @@ systemctl restart hearth
 sleep 3
 systemctl is-active --quiet hearth || { journalctl -u hearth -n 30 --no-pager; exit 1; }
 
-if ! sudo -iu hearth bash -c 'test -e ~/.claude/.credentials.json || test -e ~/.codex/auth.json'; then
+if ! sudo -iu hearth bash -c 'test -e ~/.claude/.credentials.json || test -e ~/.hearth/claude-token.json || test -e ~/.codex/auth.json'; then
   say "One manual step: log in the brain (once)"
   echo "   sudo -iu hearth claude      # or: sudo -iu hearth codex login"
   echo "   then: sudo systemctl restart hearth"
 fi
+
+[ "$NO_PAIR" = 1 ] && { say "Hub is up at https://$DOMAIN"; exit 0; }
 
 say "Set up your primary phone"
 sudo -iu hearth bash -c "cd $APP && ~/.bun/bin/bun run setup"

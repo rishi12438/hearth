@@ -36,7 +36,12 @@ export class Connections {
     try { const v = this.vault?.get(`cookies:${domain}`); return v ? JSON.parse(v) : null; } catch { return null; }
   }
 
-  connected(id: string) { return id === "google" ? this.google.connected : !!this.saved(this.key(id) || id)?.cookies.length; }
+  /** Connections other modules own (WhatsApp, Slack): id -> is it connected. */
+  extra: Record<string, () => boolean> = {};
+  connected(id: string) {
+    if (this.extra[id]) return this.extra[id]();
+    return id === "google" ? this.google.connected : !!this.saved(this.key(id) || id)?.cookies.length;
+  }
   cookies(id: string): Cookie[] { const d = this.key(id); return (d && this.saved(d)?.cookies) || []; }
 
   private store(domain: string, cookies: Cookie[], source: Saved["source"], hash?: string) {

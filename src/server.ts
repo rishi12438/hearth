@@ -10,6 +10,9 @@ import { availableHarnesses } from "./brain.ts";
 import { Computers, COPY_ITEMS, isCopyItem } from "./computers.ts";
 import { Machines, realE2b, realSsh, type E2b, type Ssh } from "./machines.ts";
 import { Vault } from "./vault.ts";
+import { Connect } from "./connectors/index.ts";
+import { adminToken, isAdminRequest } from "./admin.ts";
+import { detectBrains } from "./brains/logins.ts";
 import { hasLogin, readLogin } from "./computer.ts";
 import { homedir } from "node:os";
 import { MAX_FILE_BYTES } from "./files.ts";
@@ -102,6 +105,11 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   const vault = drivers.vault ?? new Vault(config.dataDir);
   vault.migrate(config.dataDir);
   hub.vault = vault;
+  // Every connector (the grid in Settings, the API, the `hearth` CLI) goes through this one object.
+  const connect = new Connect(hub, vault, voice);
+  void connect.start();
+  hub.connect = connect;
+  const admin = adminToken(config.dataDir);
   const machines = new Machines({
     dataDir: config.dataDir, vault,
     hubUrl: () => process.env.HEARTH_PUBLIC_URL || null,
@@ -243,19 +251,23 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
     }
 
     // ---- everything else needs a paired device ----
-    const device = await deviceForToken(store, req.headers.get("authorization"));
+    // The `hearth` CLI on this machine (you or an agent over SSH): acts as the owner, but only on a direct localhost call.
+    const cli = isAdminRequest(req, server.requestIP(req)?.address || "?", admin);
+    const device = cli
+      ? ({ id: "cli", name: "hearth CLI", tokenHash: "", lastSeenAt: new Date().toISOString(), createdAt: "1970-01-01T00:00:00.000Z", role: "owner" } as Device)
+      : await deviceForToken(store, req.headers.get("authorization"));
     if (!device) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not paired."); }
     // A linked computer's key opens its link and nothing else: it can't read chats or memory through the API.
     if (device.role === "computer") throw new HttpError(403, "This key only links a computer to the hub.");
     // Face ID lock: a device with a passkey (or every device, with HEARTH_REQUIRE_PASSKEY=1) needs a recent unlock.
     // A copied device token alone then gets nothing but this lock screen.
-    if ((device.passkey || config.requirePasskey) && !sessions.valid(req.headers.get("x-hearth-unlock"), device.id)) {
+    if (!cli && (device.passkey || config.requirePasskey) && !sessions.valid(req.headers.get("x-hearth-unlock"), device.id)) {
       const lockOk = seg[1] === "unlock" || (seg[1] === "passkey" && !device.passkey);
       if (!lockOk) return json({ error: "Locked.", locked: true, hasPasskey: !!device.passkey }, 423);
     }
-    const owner = await isOwner(store, device);
+    const owner = cli || (await isOwner(store, device));
     const ownerOnly = () => { if (!owner) throw new HttpError(403, "Only your primary device can do that."); };
-    if (Date.now() - new Date(device.lastSeenAt).getTime() > 5 * 60_000) await store.put<Device>("devices", { ...device, lastSeenAt: new Date().toISOString() });
+    if (!cli && Date.now() - new Date(device.lastSeenAt).getTime() > 5 * 60_000) await store.put<Device>("devices", { ...device, lastSeenAt: new Date().toISOString() });
     const id = seg[2];
 
     switch (seg[1]) {
@@ -414,8 +426,53 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         break;
       }
       case "brains": {
-        if (method === "GET") return json({ current: await hub.brains(), available: availableHarnesses(config), hybrid: (await hub.prefs()).hybrid !== false });
+        // Which brains are installed and signed in here, which ones you picked, and each one's live plan usage.
+        if (method === "GET" && id === "detect") return json({ brains: detectBrains() });
+        if (method === "GET" && id === "usage") {
+          const pool = await hub.brainPool();
+          await Promise.all(pool.map((h) => hub.brain.usage.refresh(h, url.searchParams.get("fresh") === "1").catch(() => {})));
+          return json({ pool, usage: hub.brain.usage.view(pool) });
+        }
+        if (method === "PUT" && id === "pool") { ownerOnly(); const r = await hub.setBrainPool((await body(req)).pool); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        // A long-lived login copied up from your Mac: a Claude setup-token, or Codex's auth.json.
+        if (method === "PUT" && id === "login" && seg[3]) {
+          ownerOnly();
+          const r = connect.brainLogin(seg[3], await body(req));
+          if (r.error) throw new HttpError(400, r.error);
+          await hub.log("brains.login", `${seg[3] === "claude" ? "Claude" : "Codex"} login copied to the hub by ${device.name}`);
+          return json({ result: r.value, brains: detectBrains() });
+        }
+        if (method === "DELETE" && id === "login" && seg[3]) { ownerOnly(); const r = connect.brainLogout(seg[3]); if (r.error) throw new HttpError(400, r.error); return json({ brains: detectBrains() }); }
+        if (method === "GET") return json({ current: await hub.brains(), available: availableHarnesses(config), hybrid: (await hub.prefs()).hybrid !== false, pool: await hub.brainPool() });
         if (method === "PATCH") { const r = await hub.setBrains(await body(req)); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        break;
+      }
+      case "connectors": {
+        // The grid: every brain, key and account, and adding or removing one.
+        if (method === "GET" && !id) return json({ connectors: await connect.tiles() });
+        ownerOnly();
+        if (method === "POST" && id && seg[3] === "risk") { const r = await connect.acceptRisk(id, device.name); if (r.error) throw new HttpError(400, r.error); return json({ connectors: await connect.tiles() }); }
+        if (method === "PUT" && id) {
+          if (!voiceLimiter.allow(`connect:${id}`)) throw new HttpError(429, "Too many tries. Wait a few minutes.");
+          const r = await connect.add(id, await body(req), device.name);
+          if (r.error) throw new HttpError(400, r.error);
+          return json(r.value);
+        }
+        if (method === "DELETE" && id) { const r = await connect.remove(id, device.name); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        break;
+      }
+      case "whatsapp": {
+        // Status (and the QR code while linking), the ignore rules, and the chats to pick from.
+        if (method === "GET" && !id) return json(await connect.whatsappView());
+        ownerOnly();
+        if (method === "PUT" && id === "ignore") { const rules = await connect.setIgnore(await body(req)); hub.emit("connections"); return json({ rules }); }
+        if (method === "POST" && id === "ignore") {
+          const b = await body(req);
+          const kind = b.kind === "group" || b.kind === "keyword" ? b.kind : "contact";
+          try { const rules = await connect.whatsapp.editRule(kind, String(b.value || ""), b.remove === true); hub.emit("connections"); return json({ rules }); }
+          catch (e: any) { throw new HttpError(400, e.message); }
+        }
+        if (method === "GET" && id === "messages") return json({ messages: await connect.whatsapp.recent(Math.min(Number(url.searchParams.get("limit")) || 50, 200)) });
         break;
       }
       case "roster": return json(await hub.roster());

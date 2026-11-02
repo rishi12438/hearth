@@ -10,6 +10,8 @@ User=hearth
 WorkingDirectory=/opt/hearth
 EnvironmentFile=/opt/hearth/.env
 ExecStart=/home/hearth/.bun/bin/bun src/cli.ts start
+# Claude Code (native install) lives in ~/.local/bin, Codex (npm) in /usr/local/bin.
+Environment=PATH=/home/hearth/.local/bin:/home/hearth/.bun/bin:/usr/local/bin:/usr/bin:/bin
 Restart=always
 RestartSec=3
 # Hardening: the hub only needs its own folder.
@@ -17,7 +19,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/opt/hearth/data /home/hearth/.claude /home/hearth/.codex
+ReadWritePaths=/opt/hearth/data /home/hearth/.claude /home/hearth/.codex -/home/hearth/.claude.json -/home/hearth/.local/share/claude -/home/hearth/.local/state/claude
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true

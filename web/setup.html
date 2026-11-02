@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Set up Hearth</title>
+<style>
+  :root { --bg:#fbfaf8; --card:#fff; --line:#ebe8e3; --ink:#1d1b19; --muted:#8c8781; --ok:#2f9e6b; --warn:#d98a1c; --danger:#d9534f; --blue:#2f6feb;
+    --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","Inter","Segoe UI",Roboto,sans-serif; --mono:ui-monospace,"SF Mono",Menlo,monospace; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 var(--font); -webkit-font-smoothing:antialiased; }
+  main { max-width:620px; margin:0 auto; padding:44px 28px 60px; }
+  .dots { display:flex; gap:6px; margin-bottom:28px; } .dots i { width:26px; height:4px; border-radius:2px; background:var(--line); } .dots i.on { background:var(--ink); }
+  h1 { font-size:26px; letter-spacing:-.02em; margin:0 0 6px; } p.sub { color:var(--muted); margin:0 0 24px; }
+  .opt { display:flex; align-items:center; gap:14px; background:var(--card); border:1.5px solid var(--line); border-radius:14px; padding:14px 16px; margin-bottom:10px; cursor:pointer; user-select:none; }
+  .opt:hover { border-color:#d6d1ca; } .opt.on { border-color:var(--ink); box-shadow:0 0 0 1px var(--ink) inset; } .opt.off { opacity:.5; cursor:default; }
+  .box { width:22px; height:22px; border-radius:6px; border:1.5px solid #cfc9c1; flex:none; display:grid; place-items:center; font-size:14px; color:#fff; }
+  .opt.on .box { background:var(--ink); border-color:var(--ink); } .radio .box { border-radius:50%; }
+  .logo { width:36px; height:36px; border-radius:9px; display:grid; place-items:center; font-weight:700; color:#fff; flex:none; }
+  .name { font-weight:600; } .meta { color:var(--muted); font-size:13px; } .grow { flex:1; min-width:0; }
+  .pill { font-size:12px; padding:2px 8px; border-radius:99px; background:#eef7f2; color:var(--ok); white-space:nowrap; } .pill.w { background:#fbf3e6; color:var(--warn); } .pill.x { background:#f4f2ef; color:var(--muted); }
+  .form { display:none; background:var(--card); border:1px solid var(--line); border-radius:14px; padding:6px 16px 14px; margin:-2px 0 12px; }
+  .form.show { display:block; }
+  label { display:block; font-size:13px; color:var(--muted); margin:12px 0 4px; }
+  input[type=text], input[type=email], input[type=password] { width:100%; font:inherit; padding:10px 12px; border:1px solid var(--line); border-radius:10px; background:#fff; outline:none; }
+  input:focus { border-color:var(--ink); } .row { display:flex; gap:10px; } .row > div { flex:1; }
+  .check { display:flex; gap:8px; align-items:center; font-size:13px; color:var(--muted); margin-top:12px; }
+  .bar { display:flex; justify-content:space-between; align-items:center; margin-top:26px; }
+  button { font:inherit; font-weight:600; border:0; border-radius:12px; padding:12px 20px; background:var(--ink); color:#fff; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--muted); padding-left:0; } button:disabled { opacity:.35; cursor:default; }
+  .err { color:var(--danger); font-size:14px; min-height:20px; margin-top:12px; }
+  .steps { list-style:none; padding:0; margin:0; } .steps li { display:flex; gap:12px; padding:9px 0; border-bottom:1px solid var(--line); }
+  .steps .i { width:20px; flex:none; text-align:center; } .steps .ok .i { color:var(--ok); } .steps .warn .i { color:var(--warn); } .steps .fail .i { color:var(--danger); }
+  .steps .start .i::after { content:""; display:inline-block; width:12px; height:12px; border:2px solid #cfc9c1; border-top-color:var(--ink); border-radius:50%; animation:spin .8s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .log { font:12px/1.5 var(--mono); color:var(--muted); background:#f4f2ef; border-radius:10px; padding:10px 12px; max-height:150px; overflow:auto; margin-top:14px; white-space:pre-wrap; display:none; }
+  .qr { background:#fff; border:1px solid var(--line); border-radius:16px; padding:18px; width:240px; margin:8px auto 14px; } .qr svg { width:100%; height:auto; display:block; }
+  .center { text-align:center; } .link { font:12px var(--mono); color:var(--muted); word-break:break-all; }
+  .warnbox { background:#fbf3e6; border-radius:12px; padding:12px 14px; font-size:13px; color:#7a5313; margin-top:12px; }
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script>
+const KEY = "__WIZARD_KEY__";
+const api = (p, body) => fetch(p + (p.includes("?") ? "&" : "?") + "k=" + KEY, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}).then((r) => r.json());
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const S = { step: 0, brains: [], picked: new Set(), where: "local", f: { host: "", user: "ubuntu", key: "~/.ssh/id_ed25519", domain: "", email: "", skipDns: false, lan: false }, steps: [], result: null };
+const COLORS = { claude: "#d97757", codex: "#10a37f" };
+const dots = (n) => `<div class="dots">${[0, 1, 2, 3].map((i) => `<i class="${i <= n ? "on" : ""}"></i>`).join("")}</div>`;
+
+async function start() {
+  S.brains = (await api("/brains")).brains;
+  for (const b of S.brains) if (b.installed && b.loggedIn) S.picked.add(b.id);
+  draw();
+}
+
+function draw() { $("#app").innerHTML = [brainsView, whereView, runView, doneView][S.step](); bind(); }
+
+function brainsView() {
+  return `${dots(0)}<h1>Who do you want the brain to be?</h1>
+  <p class="sub">Pick one or both. With both, each job goes to whichever has the most room on its plan right now.</p>
+  ${S.brains.map((b) => {
+    const usable = b.installed;
+    const pill = !b.installed ? `<span class="pill x">Not installed</span>` : b.loggedIn ? `<span class="pill">Signed in</span>` : `<span class="pill w">Not signed in</span>`;
+    return `<div class="opt ${S.picked.has(b.id) ? "on" : ""} ${usable ? "" : "off"}" data-brain="${b.id}">
+      <div class="box">${S.picked.has(b.id) ? "✓" : ""}</div>
+      <div class="logo" style="background:${COLORS[b.id]}">${b.id === "claude" ? "C" : "◎"}</div>
+      <div class="grow"><div class="name">${esc(b.label)}</div><div class="meta">${b.installed ? `${esc(b.version || "")}${b.loggedIn ? ` · ${esc(b.how)}` : ` · run <code>${b.id === "claude" ? "claude" : "codex login"}</code> once in Terminal`}` : b.id === "claude" ? "Install: curl -fsSL https://claude.ai/install.sh | bash" : "Install: npm install -g @openai/codex"}</div></div>
+      ${pill}</div>`;
+  }).join("")}
+  <div class="err" id="err"></div>
+  <div class="bar"><button class="ghost" id="rescan">Detect again</button><button id="next" ${S.picked.size ? "" : "disabled"}>Continue</button></div>`;
+}
+
+function whereView() {
+  const f = S.f;
+  return `${dots(1)}<h1>Where should your hub live?</h1>
+  <p class="sub">The hub is where Hearth thinks, remembers and runs your reminders. Your phone talks to it.</p>
+  <div class="opt radio ${S.where === "local" ? "on" : ""}" data-where="local"><div class="box"></div>
+    <div class="grow"><div class="name">This Mac</div><div class="meta">Uses the logins already on this Mac. Works while it's awake.</div></div></div>
+  <div class="form ${S.where === "local" ? "show" : ""}">
+    <div class="check"><input type="checkbox" id="lan" ${f.lan ? "checked" : ""}><span>Let my phone reach it on this Wi-Fi (plain http, so only on a network you trust)</span></div>
+  </div>
+  <div class="opt radio ${S.where === "remote" ? "on" : ""}" data-where="remote"><div class="box"></div>
+    <div class="grow"><div class="name">My server</div><div class="meta">Always on, at your own domain, with HTTPS. AWS Lightsail or any Ubuntu box.</div></div></div>
+  <div class="form ${S.where === "remote" ? "show" : ""}">
+    <label>Domain</label><input type="text" id="domain" placeholder="assistant.example.com" value="${esc(f.domain)}" autocapitalize="off" spellcheck="false">
+    <div class="row"><div><label>Server IP</label><input type="text" id="host" placeholder="203.0.113.10" value="${esc(f.host)}" spellcheck="false"></div>
+      <div><label>SSH user</label><input type="text" id="user" value="${esc(f.user)}" spellcheck="false"></div></div>
+    <label>SSH key</label><input type="text" id="key" value="${esc(f.key)}" spellcheck="false">
+    <label>Email (for the HTTPS certificate)</label><input type="email" id="email" placeholder="you@example.com" value="${esc(f.email)}">
+    <div class="check"><input type="checkbox" id="skipDns" ${f.skipDns ? "checked" : ""}><span>The domain isn't pointing at the server yet; set up anyway</span></div>
+    ${S.picked.has("claude") ? `<div class="warnbox">Claude on the server signs in with a long-lived login made on this Mac (<code>claude setup-token</code>): a browser opens once for you to approve.${S.picked.has("codex") ? " Codex's login is copied from this Mac." : ""}</div>` : S.picked.has("codex") ? `<div class="warnbox">Codex's login is copied from this Mac to the server.</div>` : ""}
+  </div>
+  <div class="err" id="err"></div>
+  <div class="bar"><button class="ghost" id="back">Back</button><button id="next">Set up</button></div>`;
+}
+
+function runView() {
+  const main = S.steps.filter((s) => s.state !== "log" && s.step !== "end");
+  const byStep = new Map(); for (const s of main) byStep.set(s.step, s);
+  const logs = S.steps.filter((s) => s.state === "log" && s.text).slice(-60).map((s) => esc(s.text)).join("\n");
+  const failed = main.some((s) => s.state === "fail");
+  return `${dots(2)}<h1>${failed ? "Setup stopped" : "Setting up…"}</h1><p class="sub">${S.where === "remote" ? esc(S.f.domain) : "This Mac"}</p>
+  <ul class="steps">${[...byStep.values()].map((s) => `<li class="${s.state}"><span class="i">${{ ok: "✓", warn: "!", fail: "✗", done: "★", start: "" }[s.state] ?? ""}</span><span>${esc(s.text)}</span></li>`).join("")}</ul>
+  <div class="log" id="log" style="${logs ? "display:block" : ""}">${logs}</div>
+  ${failed ? `<div class="bar"><button class="ghost" id="back">Back</button><button id="retry">Try again</button></div>` : ""}`;
+}
+
+function doneView() {
+  const r = S.result || {};
+  return `${dots(3)}<h1>Hearth is ready</h1>
+  <p class="sub">${r.pair ? "Scan this with your phone's camera. That phone becomes your primary device: it approves every other device, like a router's admin." : "Your hub is running."}</p>
+  ${r.pair ? `<div class="qr" id="qr"></div><div class="center link">${esc(r.pair)}</div>` : ""}
+  <p class="sub" style="margin-top:22px">Next, add your connectors (Serper, Deepgram, WhatsApp, Slack, Instagram, LinkedIn) from the grid in Settings → Connectors.</p>
+  <div class="bar"><span></span><button id="open">${r.pair && S.where === "local" ? "Use Hearth on this Mac" : "Open Hearth"}</button></div>`;
+}
+
+function bind() {
+  document.querySelectorAll("[data-brain]").forEach((el) => el.onclick = () => {
+    const b = S.brains.find((x) => x.id === el.dataset.brain); if (!b?.installed) return;
+    S.picked.has(b.id) ? S.picked.delete(b.id) : S.picked.add(b.id); draw();
+  });
+  document.querySelectorAll("[data-where]").forEach((el) => el.onclick = () => { save(); S.where = el.dataset.where; draw(); });
+  $("#rescan") && ($("#rescan").onclick = start);
+  $("#back") && ($("#back").onclick = () => { save(); S.step = Math.max(0, S.step === 2 ? 1 : S.step - 1); draw(); });
+  $("#retry") && ($("#retry").onclick = install);
+  if (S.step === 0 && $("#next")) $("#next").onclick = () => { S.step = 1; draw(); };
+  if (S.step === 1 && $("#next")) $("#next").onclick = async () => {
+    save();
+    const r = await api("/check", payload());
+    if (r.error) { $("#err").textContent = r.error; return; }
+    install();
+  };
+  if (S.step === 3) {
+    const r = S.result || {};
+    if (r.pair) api("/qr?text=" + encodeURIComponent(r.pair)).then((q) => { $("#qr").innerHTML = q.svg; });
+    $("#open").onclick = () => { location.href = (S.where === "local" && r.pair) ? r.pair : r.url; };
+  }
+  const log = $("#log"); if (log) log.scrollTop = log.scrollHeight;
+}
+
+function save() {
+  for (const k of ["host", "user", "key", "domain", "email"]) { const el = $("#" + k); if (el) S.f[k] = el.value.trim(); }
+  for (const k of ["skipDns", "lan"]) { const el = $("#" + k); if (el) S.f[k] = el.checked; }
+}
+const payload = () => ({ where: S.where, brains: [...S.picked].join(","), ...S.f });
+
+async function install() {
+  S.step = 2; S.steps = []; draw();
+  const { id } = await api("/install", payload());
+  const es = new EventSource(`/install/${id}/events?k=${KEY}`);
+  es.onmessage = (e) => {
+    const s = JSON.parse(e.data);
+    if (s.step === "end") { es.close(); return; }
+    S.steps.push(s);
+    if (s.state === "done") { S.result = s.data; S.step = 3; es.close(); }
+    draw();
+  };
+}
+
+start();
+</script>
+</body>
+</html>

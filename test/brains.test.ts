@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BrainUsage, claudeEventWindows, parseClaudeUsage, parseCodexRateLimits, pickBrain, score, type Reading } from "../src/brain-usage.ts";
-import { detectBrains, lastRefresh, readClaudeToken, redactTokens, saveClaudeToken, saveCodexAuth, tokenInTranscript } from "../src/brain-logins.ts";
+import { BrainUsage, claudeEventWindows, parseClaudeUsage, parseCodexRateLimits, pickBrain, score, type Reading } from "../src/brains/usage.ts";
+import { detectBrains, lastRefresh, readClaudeToken, redactTokens, saveClaudeToken, saveCodexAuth, tokenInTranscript } from "../src/brains/logins.ts";
 
 const NOW = Date.parse("2026-11-01T12:00:00Z");
 const ok = (harness: string, ...pcts: [number, number | null][]): Reading =>

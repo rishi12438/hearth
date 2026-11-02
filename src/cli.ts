@@ -15,8 +15,15 @@ import { VoiceSettings } from "./voice.ts";
 import { Vault, masterKeyPath } from "./vault.ts";
 import { Library, createEmbeddings } from "./library.ts";
 import type { Device, Hook } from "./types.ts";
+import { connectCli } from "./connectors/cli.ts";
+import { brainsCli } from "./brains/cli.ts";
+import { setupCli } from "./setup/cli.ts";
+import { loadLocalEnv } from "./setup/local.ts";
 
 const cmd = process.argv[2] || "start";
+// A hub the setup made on this Mac keeps its settings in ~/Library/Application Support/Hearth/hub.env; use them unless
+// this is a checkout with its own .env or data folder.
+if (!process.env.HEARTH_DATA && !existsSync(".env") && !existsSync("data")) loadLocalEnv();
 const config = loadConfig();
 mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
 
@@ -40,6 +47,13 @@ if (cmd === "computer") {
   process.on("SIGINT", quit);
   process.on("SIGTERM", quit);
   await new Promise(() => {});
+}
+
+// Brains, connectors and setup: flags in, --json out, never a prompt (so an agent can do all of it).
+{
+  const argv = process.argv.slice(2);
+  const code = argv[0] === "brains" ? await brainsCli(config, argv.slice(1)) : (await connectCli(config, argv)) ?? (await setupCli(config, argv));
+  if (code !== null) process.exit(code);
 }
 
 const store = await createStore(config.dbUrl, config.dataDir);
@@ -101,7 +115,11 @@ if (cmd === "setup" || cmd === "pair") {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 } else {
-  console.log("usage: hearth [start|setup|recover|status|doctor]   on a computer: hearth [join <hub-url>|computer]");
+  console.log(`usage: hearth [start|setup|recover|status|doctor]   on a computer: hearth [join <hub-url>|computer]
+       hearth install local|remote …      set up a hub (see: hearth install --help)
+       hearth brains detect|pick|usage|token|login|logout
+       hearth connectors | connect <id> | disconnect <id> | whatsapp chats|ignore …
+       add --json to any of these for machine-readable output`);
   process.exit(1);
 }
 

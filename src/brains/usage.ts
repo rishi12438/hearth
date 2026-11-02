@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { readClaudeToken } from "./brain-logins.ts";
+import { readClaudeToken } from "./logins.ts";
 
 // Live usage of each brain's subscription, read from the provider (the way Mako does it), so work goes to the brain
 // with the most room on its own limits instead of whichever we happened to use less.

@@ -303,7 +303,7 @@ export type Approval = Doc & {
   jobId?: string;
   summary: string;
   details?: string;
-  action: { type: "script"; script: string; args: string[] };
+  action: { type: "script"; script: string; args: string[] } | { type: "message"; channel: "whatsapp" | "slack"; to: string; text: string };
   status: "pending" | "approved" | "rejected" | "done" | "failed";
   result?: string;
   decidedAt?: string;

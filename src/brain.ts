@@ -4,11 +4,12 @@ import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import { wallParts, zonedToUtc } from "./time.ts";
 import { SOURCES } from "./sources/index.ts";
-import { BrainUsage, isLimitError } from "./brain-usage.ts";
-import { readClaudeToken } from "./brain-logins.ts";
+import { BrainUsage, isLimitError } from "./brains/usage.ts";
+import { readClaudeToken } from "./brains/logins.ts";
 
 /** Each trigger module's own description of its config, for the hook docs below. */
-const SOURCE_DOCS = SOURCES.map((s) => `        ${s.id}: ${s.doc}`).join("\n");
+/** Each trigger module's own description, read when a prompt is built (the hub adds WhatsApp and Slack at start). */
+const sourceDocs = () => SOURCES.map((s) => `        ${s.id}: ${s.doc}`).join("\n");
 
 // The brain is whatever coding agent you already use, run headless: one call per event.
 // It gets context in, and replies with text plus an optional ```hearth block of actions.
@@ -34,7 +35,7 @@ mis-hearings. Keep their words, tone, language and every detail: names, numbers,
 add anything or drop anything they meant. Reply with only the cleaned text.`;
 const SYSTEM_PROMPT = "You are part of Hearth, the user's personal assistant hub. The message holds your instructions, context and task. Follow its format exactly: when it asks for JSON reply with only the JSON, and put any actions in the ```hearth block it describes.";
 
-const PROTOCOL = `
+const protocol = () => `
 You are a personal assistant that lives on the user's own server ("hub"). You talk to one person.
 CONTEXT.you says which teammate you are right now (name and role). Speak as that teammate. CONTEXT.teammates lists the others;
 if a request clearly belongs to another teammate, do it anyway but mention who usually handles it.
@@ -68,7 +69,7 @@ ACTIONS
                            script.propose in the same reply; it starts once the user approves the code. Read-only only.
       {"type":"source","source":"<id>","config":{…},"minutes":n}   a trigger module; CONTEXT.sources lists them and
                            whether each is connected. You get only the items that are new since the last check. Modules:
-${SOURCE_DOCS}
+${sourceDocs()}
                            If a source isn't connected, tell the user to connect it in Menu → Connections first.
     Actions:
       {"type":"notify","text":"exact message to send"}            (plain reminders)
@@ -115,6 +116,8 @@ ${SOURCE_DOCS}
 - approval.request {summary, details, script, args}   ANYTHING that sends, posts, pays, books, deletes or changes something
     outside the hub goes through this: the user sees an Approve card and the hub runs it only after their tap.
     Scripts that do such things refuse to run any other way. Write summary as what will happen ("Email Sam: Tuesday works").
+- message.send {channel:"whatsapp"|"slack", to, text, summary}   draft a WhatsApp or Slack message (to = a WhatsApp chat id
+    or phone number, or a Slack channel/user id from what you read). It's only sent after the user taps Approve.
 - skill.save {name, description, inputs:[{name,description}], kind, ...}   save how you did this so nobody works it out again:
     kind "recipe": steps:[...] in plain language, uses:[approved script names it needs]  (a recipe can't use anything else)
     kind "script": script:"<approved or just-proposed script name>"  (runs directly, no model, inputs become args in order)
@@ -270,7 +273,7 @@ export function buildPrompt(b: BrainInput) {
   if (b.mode === "orchestrate") {
     return [ORCHESTRATOR, "", "CONTEXT (JSON):", JSON.stringify(b.context, null, 1), "", "USER RAMBLE:", b.input].join("\n");
   }
-  const parts = [PROTOCOL, "", "CONTEXT (JSON):", JSON.stringify(b.context, null, 1)];
+  const parts = [protocol(), "", "CONTEXT (JSON):", JSON.stringify(b.context, null, 1)];
   if (b.mode === "hook") {
     parts.push("", "A hook just fired. Do what its prompt says. If there's nothing worth telling the user, reply exactly " + QUIET + ".");
     parts.push("HOOK PROMPT:", b.input);

@@ -89,7 +89,11 @@ export class Hub {
   /** Every account teammates can read (Google, LinkedIn, X), all kept in the vault. */
   get connections() {
     const g = this.google;
-    if (!this._connections || (this._connections as any).google !== g) this._connections = new Connections(this.vault, g);
+    if (!this._connections || (this._connections as any).google !== g) {
+      const extra = this._connections?.extra ?? {};
+      this._connections = new Connections(this.vault, g);
+      this._connections.extra = extra;
+    }
     return this._connections;
   }
   /** Headless Chrome for logged-in sites. Swapped in tests. */
@@ -1121,13 +1125,46 @@ export class Hub {
     return { value: ap };
   }
 
+  /** Every connector (set by the server). */
+  connect: import("./connectors/index.ts").Connect | null = null;
+  /** Senders for message.send, set at start (WhatsApp, Slack). */
+  senders: Partial<Record<"whatsapp" | "slack", { connected(): boolean; send(to: string, text: string): Promise<string> }>> = {};
+
+  /** A WhatsApp or Slack message a teammate drafted: an Approve card, sent only after the tap. */
+  async requestMessage(a: any, where: { threadId?: string; jobId?: string }) {
+    const channel = a?.channel === "slack" ? "slack" : a?.channel === "whatsapp" ? "whatsapp" : null;
+    const to = String(a?.to || "").trim().slice(0, 120);
+    const text = String(a?.text || "").trim().slice(0, 4000);
+    if (!channel) return { error: "channel is whatsapp or slack." };
+    if (!this.senders[channel]?.connected()) return { error: `${channel === "slack" ? "Slack" : "WhatsApp"} isn't connected.` };
+    if (!to || !text) return { error: "Say who it's to and what it says." };
+    const label = channel === "slack" ? "Slack" : "WhatsApp";
+    const ap = await this.store.put<Approval>("approvals", {
+      ...this.doc({}), threadId: where.threadId, jobId: where.jobId,
+      summary: String(a.summary || `${label} to ${to}: ${text.slice(0, 80)}`).slice(0, 200), details: text,
+      action: { type: "message", channel, to, text }, status: "pending",
+    } as Approval);
+    if (where.jobId) {
+      const job = await this.store.get<Job>("jobs", where.jobId);
+      if (job) await this.saveJob({ ...job, approvalIds: [...(job.approvalIds || []), ap.id] });
+    }
+    await this.log("approval.requested", ap.summary);
+    this.emit("approval", ap);
+    await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: ap.threadId ? threadLink(ap.threadId) : "/" });
+    return { value: ap };
+  }
+
   async decideApproval(id: string, yes: boolean) {
     const ap = await this.store.get<Approval>("approvals", id);
     if (!ap || ap.status !== "pending") return { error: "Already decided." };
     let next: Approval = { ...ap, status: yes ? "approved" : "rejected", decidedAt: this.clock().toISOString() };
     await this.store.put("approvals", next);
     if (yes) {
-      const out = await this.scripts.run(ap.action.script, ap.action.args, { approvedRun: true });
+      const act = ap.action;
+      const out = act.type === "message"
+        ? await (this.senders[act.channel]?.send(act.to, act.text).then(() => ({ ok: true, output: "Sent." }), (e: any) => ({ ok: false, output: String(e?.message || e) }))
+          ?? { ok: false, output: `${act.channel} isn't connected.` })
+        : await this.scripts.run(act.script, act.args, { approvedRun: true });
       next = { ...next, status: out.ok ? "done" : "failed", result: out.output.slice(0, 2000) };
       await this.store.put("approvals", next);
     }
@@ -1386,6 +1423,12 @@ export class Hub {
             done.push({ kind: "blocked", label: `Blocked: ${b.need}` });
             await this.log("job.blocked", `${b.need} (${b.unblock})`);
             await this.push?.send({ title: "I'm stuck", body: `${b.need}. ${b.unblock}`, tag: where.jobId, url: where.threadId ? threadLink(where.threadId) : "/" });
+            break;
+          }
+          case "message.send": {
+            if (where.recipe) break;
+            const r = await this.requestMessage(a, where);
+            done.push({ kind: "approval", label: r.value ? `Waiting for your Approve: ${r.value.summary}` : `Couldn't draft: ${r.error}`, id: r.value?.id });
             break;
           }
           case "approval.request": {
