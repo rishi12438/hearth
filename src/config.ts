@@ -29,6 +29,8 @@ export type Config = {
   /** Spend caps in USD (only harnesses that report cost count). */
   costCapRambleUsd: number;
   costCapDayUsd: number;
+  /** Where hearth-boxctl keeps each box's data and socket (docker runner). */
+  boxesRoot: string;
 };
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
@@ -62,5 +64,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       .map(([k, v]) => [k.slice("HEARTH_MAX_PARALLEL_".length).toLowerCase(), Math.max(1, Number(v))])),
     costCapRambleUsd: Number(env.HEARTH_COST_CAP_RAMBLE_USD || 2),
     costCapDayUsd: Number(env.HEARTH_COST_CAP_DAY_USD || 10),
+    boxesRoot: resolve(env.HEARTH_BOXES_ROOT || "/var/lib/hearth-boxes"),
   };
 }

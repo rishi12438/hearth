@@ -1,0 +1,14 @@
+ok    no hub settings in the environment
+ok    not root  (uid 10001)
+ok    hub folder not visible
+ok    host docker socket not visible
+ok    bundle is read-only
+ok    image filesystem is read-only
+ok    no route to cloud metadata (169.254.169.254:80)
+ok    no route to the open web (1.1.1.1:443)
+ok    no route to the host (172.17.0.1:22)
+ok    no route to the host's hub port (172.17.0.1:8790)
+ok    no DNS for the outside world
+ok    proxy reaches api.anthropic.com  (HTTP/1.1 200 Connection Established)
+ok    proxy refuses other hosts  (HTTP/1.1 403 Forbidden)
+ok    proxy refuses the metadata address  (HTTP/1.1 403 Forbidden)

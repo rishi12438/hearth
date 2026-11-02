@@ -33,6 +33,7 @@ export function clear(el: Element, ...children: Child[]) { el.replaceChildren();
 
 // Inline SVG icons (Lucide-style strokes), built as nodes.
 const PATHS: Record<string, string[]> = {
+  share: ["M12 3v12", "M8 7l4-4 4 4", "M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"],
   sun: ["M12 3v2", "M12 19v2", "M5.6 5.6l1.4 1.4", "M17 17l1.4 1.4", "M3 12h2", "M19 12h2", "M5.6 18.4L7 17", "M17 7l1.4-1.4", "M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8"],
   chat: ["M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"],
   bell: ["M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9", "M10.3 21a1.9 1.9 0 0 0 3.4 0"],

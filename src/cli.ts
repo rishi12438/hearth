@@ -6,7 +6,7 @@ import QRCode from "qrcode";
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Brain, availableHarnesses } from "./brain.ts";
-import { connect, joinHub, readLink } from "./computer.ts";
+import { connect, joinHub, readLink, sendShareKey } from "./computer.ts";
 import { Scripts } from "./scripts.ts";
 import { Push } from "./push.ts";
 import { Hub } from "./hub.ts";
@@ -14,11 +14,13 @@ import { startServer } from "./server.ts";
 import { VoiceSettings } from "./voice.ts";
 import { Vault, masterKeyPath } from "./vault.ts";
 import { Library, createEmbeddings } from "./library.ts";
-import type { Device, Hook } from "./types.ts";
 import { connectCli } from "./connectors/cli.ts";
 import { brainsCli } from "./brains/cli.ts";
 import { setupCli } from "./setup/cli.ts";
 import { loadLocalEnv } from "./setup/local.ts";
+import { Shares } from "./shares.ts";
+import { DockerSandbox, E2bSandbox, type Sandbox, type SandboxKind } from "./sandboxes.ts";
+import type { Device, Hook, Share, Teammate } from "./types.ts";
 
 const cmd = process.argv[2] || "start";
 // A hub the setup made on this Mac keeps its settings in ~/Library/Application Support/Hearth/hub.env; use them unless
@@ -36,6 +38,12 @@ if (cmd === "join") {
   const url = rest[0] || process.env.HEARTH_HUB_URL;
   if (!url) { console.log('usage: bun run join https://yournameassistant.com [--name "Studio"]'); process.exit(1); }
   try { await joinHub(url, config.dataDir, name || undefined); process.exit(0); } catch (e: any) { console.error(`  ${e.message}`); process.exit(1); }
+}
+if (cmd === "share-key") {
+  // On a linked Mac: make (or replace) the Claude token shared links use, with this Mac's subscription.
+  const link = readLink(config.dataDir);
+  if (!link) { console.log("This computer isn't linked yet. Run: bun run join https://yournameassistant.com"); process.exit(1); }
+  process.exit((await sendShareKey(link)) ? 0 : 1);
 }
 if (cmd === "computer") {
   const link = readLink(config.dataDir);
@@ -58,6 +66,14 @@ if (cmd === "computer") {
 
 const store = await createStore(config.dbUrl, config.dataDir);
 const publicUrl = process.env.HEARTH_PUBLIC_URL || `http://${config.host === "0.0.0.0" ? "localhost" : config.host}:${config.port}`;
+
+/** Shared links always run in a sandbox: Docker on this machine if it has it, and E2B once you've added an E2B key. */
+function sandboxes(vault: Vault): Partial<Record<SandboxKind, Sandbox>> {
+  const out: Partial<Record<SandboxKind, Sandbox>> = {};
+  if (DockerSandbox.available()) out.docker = new DockerSandbox(config.dataDir, { boxesRoot: config.boxesRoot });
+  out.e2b = new E2bSandbox(() => process.env.HEARTH_E2B_API_KEY || vault.get("e2b") || "");
+  return out;
+}
 
 async function printPair(code: string, minutes: number, what = "Set up your primary phone") {
   const link = `${publicUrl}/#pair=${code}`;
@@ -93,6 +109,35 @@ if (cmd === "setup" || cmd === "pair") {
   console.log(`devices: ${devices.length}\nactive hooks: ${hooks.length}`);
   for (const h of hooks) console.log(`  - ${h.title}  next: ${h.nextAt ?? "on event"}`);
   await store.close();
+} else if (cmd === "share" || cmd === "shares" || cmd === "unshare") {
+  // Share a teammate from the server's terminal. The running hub starts the box within a few seconds.
+  const args = process.argv.slice(3);
+  const flag = (name: string) => args.flatMap((a, i) => (a === `--${name}` && args[i + 1] ? [args[i + 1]] : []));
+  const hub = new Hub(config, store, new Brain(config), new Scripts(store, config.dataDir), null);
+  const shares = new Shares(hub, sandboxes(new Vault(config.dataDir)), new Vault(config.dataDir));
+  if (cmd === "shares") {
+    for (const s of await shares.list()) console.log(`${s.id}  ${s.status.padEnd(7)} ${s.kind.padEnd(6)} ${publicUrl}/t/${s.link}/  chats:${s.stats.chats} refused:${s.stats.refused} $${s.stats.costUsd}`);
+  } else if (cmd === "unshare") {
+    console.log((await shares.revoke(args[0] || "")) ? "Turned off. The hub stops its box within a few seconds." : "No such link.");
+  } else {
+    const t = (await store.all<Teammate>("teammates")).find((x) => x.name.toLowerCase() === (args[0] || "").toLowerCase());
+    if (!t) { console.log(`usage: hearth share <teammate> [--guest NAME] [--owner NAME] [--does TEXT] [--example TEXT]... [--not TEXT]...
+                    [--notebook NAME]... [--note TEXT]... [--folder PATH] [--edit GLOB]... [--read GLOB]... [--hidden GLOB]...
+                    [--cap-usd N] [--auto-apply] [--subscription]`); process.exit(1); }
+    const folder = flag("folder")[0];
+    const r = await shares.create({
+      teammateId: t.id, kind: flag("guest").length ? "guest" : "public", label: flag("guest")[0], ownerName: flag("owner")[0],
+      scope: { does: flag("does")[0], examples: flag("example"), not: flag("not") }, notebooks: flag("notebook"), notes: flag("note"),
+      ...(folder ? { folder: { path: folder, rules: { edit: flag("edit"), read: flag("read").length ? flag("read") : ["**"], hidden: flag("hidden") } } } : {}),
+      ...(flag("cap-usd").length ? { limits: { costCapDayUsd: Number(flag("cap-usd")[0]) } } : {}),
+      autoApply: args.includes("--auto-apply"), ...(args.includes("--subscription") ? { models: { brain: "hub" } } : {}),
+    }, { start: false });
+    if (r.error) { console.log(r.error); process.exit(1); }
+    const s = r.value as Share;
+    console.log(`Shared ${t.name}: ${publicUrl}/t/${s.link}/`);
+    if (s.folder?.excluded.length) console.log(`Left out of the copy:\n${s.folder.excluded.map((x) => `  ${x.path} (${x.why})`).join("\n")}`);
+  }
+  await store.close();
 } else if (cmd === "start") {
   const scripts = new Scripts(store, config.dataDir);
   await scripts.syncRepo();
@@ -103,19 +148,21 @@ if (cmd === "setup" || cmd === "pair") {
   // API keys live encrypted in <data>/keys/vault.db; the master key is outside the data folder (vault.ts).
   const vault = new Vault(config.dataDir);
   const stt = new VoiceSettings(config.dataDir, process.env, vault);
-  const { server, build } = await startServer(hub, stt, { vault });
+  const shares = new Shares(hub, sandboxes(vault), vault);
+  const { server, build } = await startServer(hub, stt, { vault, shares });
   await hub.start();
+  shares.start();
   console.log(`hearth · ${config.name} · ${config.target} · build ${build}`);
   console.log(`listening on http://${server.hostname}:${server.port}  storage: ${store.kind}  brain: ${hub.brain.label}  voice: ${stt.current?.name ?? "off"}  library search: ${library.mode}`);
   if ((await store.all("devices")).length === 0) {
     const { code, expiresInMin } = await newPairingCode(store, "owner");
     await printPair(code, expiresInMin);
   }
-  const shutdown = async () => { hub.stop(); server.stop(); await hub.idle(20_000); await store.close(); process.exit(0); };
+  const shutdown = async () => { hub.stop(); shares.stop(); server.stop(); await hub.idle(20_000); await store.close(); process.exit(0); };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 } else {
-  console.log(`usage: hearth [start|setup|recover|status|doctor]   on a computer: hearth [join <hub-url>|computer]
+  console.log(`usage: hearth [start|setup|recover|status|doctor|share|shares|unshare]   on a computer: hearth [join <hub-url>|computer]
        hearth install local|remote …      set up a hub (see: hearth install --help)
        hearth brains detect|pick|usage|token|login|logout
        hearth connectors | connect <id> | disconnect <id> | whatsapp chats|ignore …
