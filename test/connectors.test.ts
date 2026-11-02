@@ -269,6 +269,20 @@ describe("WhatsApp names and calls", () => {
     wa.stop();
   });
 
+  test("the call log brings in people you called, not just people who called you", async () => {
+    const { wa, sock } = await setup();
+    sock.emit("connection.update", { connection: "open" });
+    sock.emit("call-log.set", { records: [
+      { isIncoming: false, callCreatorJid: "1@s.whatsapp.net", startTime: 1793600000, participants: [{ userJid: "1@s.whatsapp.net" }, { userJid: "15550123@s.whatsapp.net" }] },
+      { isIncoming: true, callCreatorJid: "15550456@s.whatsapp.net", startTime: 1793500000, participants: [{ userJid: "1@s.whatsapp.net" }] },
+    ] });
+    const rows = Object.fromEntries(wa.chatList().map((c) => [c.jid, c.lastCallAt]));
+    expect(rows["15550123@s.whatsapp.net"]).toBe(1793600000_000);
+    expect(rows["15550456@s.whatsapp.net"]).toBe(1793500000_000);
+    expect(rows["1@s.whatsapp.net"]).toBeUndefined();
+    wa.stop();
+  });
+
   test("a call makes the caller recent", async () => {
     const { wa, sock } = await setup();
     const at = new Date("2026-11-02T10:00:00Z");

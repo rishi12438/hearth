@@ -254,12 +254,17 @@ export class WhatsApp {
     });
     // Calls: someone you're talking to by phone is as recent as a message. Only metadata (who, when) is kept.
     sock.ev.on("call", (calls: any[]) => {
-      for (const c of calls || []) {
-        const jid = c?.groupJid || c?.chatId || c?.from;
-        const at = c?.date ? new Date(c.date).getTime() : Date.now();
-        if (!jid || !Number.isFinite(at)) continue;
-        this.chat(jid, undefined, { conversationTimestamp: Math.floor(at / 1000) });
-        const cur = this.chats.get(jid)!; cur.lastCallAt = Math.max(cur.lastCallAt || 0, at);
+      for (const c of calls || []) this.called(c?.groupJid || c?.chatId || c?.from, c?.date ? new Date(c.date).getTime() : Date.now());
+    });
+    // Your call log, calls you made too (WhatsApp shares it with linked devices that ask; patches/baileys adds the ask
+    // and this event): the past log arrives with the link-time history, then each new call as it happens.
+    sock.ev.on("call-log.set", ({ records }: any) => {
+      const mine = (j?: string) => !!j && !!this.me && j.split(/[:@]/)[0] === this.me;
+      for (const r of records || []) {
+        const others = (r?.participants || []).map((p: any) => p?.userJid).filter((j: any) => typeof j === "string" && !mine(j));
+        const peer = r?.groupJid || (r?.isIncoming ? r?.callCreatorJid : others[0]) || (!mine(r?.callCreatorJid) ? r?.callCreatorJid : undefined);
+        const t = seconds(r?.startTime);
+        this.called(peer, t > 1e12 ? t : t * 1000);
       }
     });
     sock.ev.on("groups.update", (gs: any[]) => { for (const g of gs || []) this.chat(g.id, g.subject); });
@@ -289,6 +294,13 @@ export class WhatsApp {
       else if (theirs && !this.names.get(jid)?.saved) this.names.set(jid, { name: theirs, saved: false });
     }
     if (saved || theirs) this.keepChats();
+  }
+
+  /** A call with someone: as recent as a message. Only who and when are kept. */
+  private called(jid: string | undefined, at: number) {
+    if (!jid || typeof jid !== "string" || !Number.isFinite(at) || at <= 0) return;
+    this.chat(jid, undefined, { conversationTimestamp: Math.floor(at / 1000) });
+    const cur = this.chats.get(jid)!; cur.lastCallAt = Math.max(cur.lastCallAt || 0, at);
   }
 
   /** Tie a phone-number id to its @lid twin. */
