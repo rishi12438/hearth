@@ -44,7 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default() // keeps this Mac paired with the hub between launches
         config.applicationNameForUserAgent = "HearthMac" // lets Hearth's pages offer "Set up a new hub"
-        config.userContentController.add(self, name: "hearth") // the hub page tells the app: "ready", "notify"
+        config.userContentController.add(self, name: "hearth") // the hub page tells the app: "ready", "notify", "chrome-…"
         web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = self
         web.uiDelegate = self
@@ -176,8 +176,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             c.userInfo = ["url": (m["url"] as? String) ?? "/"]
             let tag = (m["tag"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? UUID().uuidString
             UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: tag, content: c, trigger: nil))
+        case "chrome-logins", "chrome-cookies":
+            // Only your hub's own page (main frame), never the setup page or anything it links to.
+            guard message.frameInfo.isMainFrame, let id = m["id"] as? String, isHubPage(message.frameInfo.request.url ?? web.url) else { return }
+            var args = ["chrome", type == "chrome-logins" ? "logins" : "cookies"]
+            if type == "chrome-cookies" {
+                guard let site = m["site"] as? String, site.range(of: "^[a-z]{1,20}$", options: .regularExpression) != nil,
+                      let profile = m["profile"] as? String, profile.range(of: "^(Default|Profile [0-9]{1,4})$", options: .regularExpression) != nil else { return }
+                args += [site, profile]
+            }
+            chrome(args) { [weak self] out in self?.reply(id, out) }
         default: break
         }
+    }
+
+    /// The hub this app opens (saved after setup), or a hub on this Mac.
+    func isHubPage(_ url: URL?) -> Bool {
+        guard let url, let host = url.host else { return false }
+        if let saved = try? String(contentsOf: hubFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), let hub = URL(string: saved) {
+            return hub.host == host && hub.scheme == url.scheme && hub.port == url.port
+        }
+        return false
+    }
+
+    /// Read Chrome on this Mac with Hearth's own `hearth chrome …` (src/chrome.ts). It runs here, never on the hub.
+    func chrome(_ args: [String], done: @escaping (String) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async { [path] in
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: bun)
+            p.arguments = ["\(src)/src/cli.ts"] + args
+            p.currentDirectoryURL = URL(fileURLWithPath: src)
+            var env = ProcessInfo.processInfo.environment
+            env["PATH"] = path; env["HEARTH_APP"] = "1"
+            p.environment = env
+            let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
+            var text = "{\"error\":\"Couldn't read Chrome on this Mac.\"}"
+            do {
+                try p.run()
+                let data = out.fileHandleForReading.readDataToEndOfFile()
+                p.waitUntilExit()
+                if let s = String(data: data, encoding: .utf8), s.hasPrefix("{") { text = s }
+            } catch {}
+            DispatchQueue.main.async { done(text) }
+        }
+    }
+
+    /// Hand the answer back to the page: window.hearthNative(id, json).
+    func reply(_ id: String, _ json: String) {
+        guard let data = try? JSONSerialization.data(withJSONObject: [id, json]), let args = String(data: data, encoding: .utf8) else { return }
+        web.evaluateJavaScript("window.hearthNative && window.hearthNative(...\(args))", completionHandler: nil)
     }
 
     /// Once, after this Mac is signed in to a hub: notifications (macOS asks), then "open at login".

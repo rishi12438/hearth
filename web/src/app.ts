@@ -1718,6 +1718,20 @@ function accessLog(entries: any[], domain: string) {
       h("span", { class: "grow" }, h("b", { class: "light" }, `${e.by} ${verb[e.action] || e.action}`), h("small", { class: "sub" }, `${relTime(e.createdAt)}${e.ok === false ? " · failed" : ""}${e.detail ? ` · ${e.detail}` : ""}`))))));
 }
 
+/** Ask the Mac app (it reads Chrome on this Mac) and wait for its answer. Generous default: macOS may be asking you. */
+const macAsks = new Map<string, (r: any) => void>();
+(window as any).hearthNative = (id: string, json: string) => { const f = macAsks.get(id); macAsks.delete(id); try { f?.(JSON.parse(json)); } catch { f?.({ error: "The Mac app sent something odd back." }); } };
+function askMac(type: string, args: Record<string, unknown>, timeoutMs = 120_000): Promise<any> {
+  const mac = (window as any).webkit?.messageHandlers?.hearth;
+  if (!mac) return Promise.reject(new Error("Open the Hearth app on your Mac for this."));
+  const id = Math.random().toString(36).slice(2);
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => { macAsks.delete(id); reject(new Error("The Mac app didn't answer. Update Hearth for Mac, then try again.")); }, timeoutMs);
+    macAsks.set(id, (r) => { clearTimeout(t); resolve(r); });
+    mac.postMessage({ type, id, ...args });
+  });
+}
+
 async function openCookieSetup(c: Connector | { via: string; name: string; blurb: string; bg?: string; shapes?: Shape[] }) {
   const tile = (c as any).shapes ? connectorTile(c as Connector, 52) : connectorTile({ id: c.via!, name: c.name, blurb: c.blurb, group: "Social", via: c.via, bg: (c as any).bg || "#eef2f7", shapes: GENERIC_SHAPES } as Connector, 52);
   const [connResp, browsers, auditAll] = await Promise.all([call("/api/connections").catch(() => ({})), call(`/api/connections/${c.via}/browsers`).catch(() => []), call("/api/conn-audit").catch(() => [])]);
@@ -1728,16 +1742,55 @@ async function openCookieSetup(c: Connector | { via: string; name: string; blurb
   const showResult = (t: any) => clear(out0, t.ok
     ? h("p", { class: "okline" }, icon("check", 16), ` Works: read ${t.count} ${t.count === 1 ? "item" : "items"}${t.sample?.length ? `, like “${t.sample[0].replace(/^● /, "")}”` : ""}.`)
     : h("p", { class: "err small" }, t.error));
-  // One tap: read the login straight from your browser on this Mac (macOS asks once; choose Always Allow).
-  const importRow = (browsers as any[]).length ? h("div", { class: "stack" },
-    h("p", { class: "muted small" }, `Found ${c.name} logged in on this Mac. Import it — no copy-paste:`),
+  // In the Mac app: check Chrome on this Mac and bring the login over in one tap (the app reads it; the hub never does).
+  const inApp = !!(window as any).webkit?.messageHandlers?.hearth && /^[a-z]+$/.test(c.via!);
+  const useChrome = async (btn: HTMLButtonElement, profile: { id: string; label: string }, again: string) => {
+    btn.disabled = true; btn.textContent = "Reading from Chrome…"; clear(out0);
+    try {
+      const r = await askMac("chrome-cookies", { site: c.via, profile: profile.id });
+      if (r.error) throw new Error(r.error);
+      const saved = await call(`/api/connections/${c.via}`, { method: "PUT", body: { cookies: JSON.stringify({ cookies: r.cookies }), source: "chrome" } });
+      showResult(saved.test);
+      if (saved.test?.ok) { setTimeout(() => openCookieSetup(c), 1400); return; }
+    } catch (err: any) { showResult({ ok: false, error: err.message }); }
+    btn.disabled = false; btn.textContent = again;
+  };
+  const chromeBox = h("div", { class: "stack" });
+  const checkChrome = async () => {
+    clear(chromeBox, h("p", { class: "muted small" }, "Checking Chrome on this Mac…"));
+    let r: any;
+    try { r = await askMac("chrome-logins", {}, 15_000); } catch (e: any) { r = { error: e.message }; }
+    const found: { id: string; label: string }[] = r?.logins?.[c.via!] || [];
+    const recheck = h("button", { class: "btn ghost", on: { click: () => checkChrome() } }, icon("repeat", 16), "Check again");
+    if (r?.error) return clear(chromeBox, h("p", { class: "err small" }, r.error), recheck);
+    if (!r?.chrome) return clear(chromeBox, h("p", { class: "muted small" }, `Chrome isn't installed on this Mac. Install it, sign in to ${c.name}, then check again — or paste cookies below.`), recheck);
+    if (!found.length) return clear(chromeBox,
+      h("p", null, h("b", null, `You're not logged in to ${c.name} in Chrome on this Mac.`)),
+      h("p", { class: "muted small" }, "Open ", h("a", { href: help.site, target: "_blank", rel: "noopener noreferrer" }, help.site.replace("https://", "")), " in Chrome and sign in, then check again."),
+      recheck);
+    const one = found.length === 1;
+    clear(chromeBox,
+      h("p", null, icon("check", 16), h("b", null, ` ${c.name} is logged in on Chrome`), one ? h("small", { class: "sub" }, ` · ${found[0].label.replace(/^Chrome · /, "")}` ) : null),
+      ...found.map((p) => {
+        const label = one ? (st?.connected ? "Use my Chrome login again" : "Use my Chrome login") : `Use ${p.label}`;
+        const b = h("button", { class: "btn primary big", on: { click: () => useChrome(b, p, label) } }, label) as HTMLButtonElement;
+        return b;
+      }),
+      out0,
+      h("p", { class: "muted small" }, "The first time, macOS asks to let Hearth use “Chrome Safe Storage”. Choose Always Allow. Only these cookies go to your hub, kept encrypted, never shown."));
+  };
+  if (inApp) void checkChrome();
+  // A hub running on this Mac can also read its own Chrome (opened in a browser rather than the app).
+  const importRow = inApp ? chromeBox : (browsers as any[]).length ? h("div", { class: "stack" },
+    h("p", null, icon("check", 16), h("b", null, ` ${c.name} is logged in on Chrome`)),
     ...(browsers as any[]).map((b) => h("button", { class: "btn primary big", on: { click: async (e: Event) => {
-      const btn = e.currentTarget as HTMLButtonElement; btn.disabled = true; btn.textContent = "Reading from your browser…"; clear(out0);
+      const btn = e.currentTarget as HTMLButtonElement; btn.disabled = true; btn.textContent = "Reading from Chrome…"; clear(out0);
       try { const r = await call(`/api/connections/${c.via}/import`, { body: { profile: b.id } }); showResult(r.test); setTimeout(() => openCookieSetup(c), 1400); }
-      catch (err: any) { showResult({ ok: false, error: err.message }); btn.disabled = false; btn.textContent = `Import from ${b.label}`; }
-    } } }, `Import from ${b.label}`)),
+      catch (err: any) { showResult({ ok: false, error: err.message }); btn.disabled = false; btn.textContent = `Use ${b.label}`; }
+    } } }, `Use ${b.label}`)),
     out0,
-    h("p", { class: "muted small" }, "The first time, macOS asks to let Hearth use the browser's Safe Storage key — choose Always Allow. Cookies only, kept encrypted in the hub, never shown.")) : null;
+    h("p", { class: "muted small" }, "The first time, macOS asks to let Hearth use “Chrome Safe Storage”. Choose Always Allow.")) 
+    : h("p", { class: "muted small" }, `On your Mac? Open the Hearth app there to bring your ${c.name} login from Chrome in one tap. Or paste cookies below.`);
   const box = h("textarea", { class: "field mono", rows: 4, placeholder: `Paste cookies: the Cookie-Editor export, or ${help.need.replace(/ \(.*\)/, "")} as name=value; name=value`, autocapitalize: "off", spellcheck: false }) as HTMLTextAreaElement;
   const out = h("div", { class: "ctest" });
   const show = (t: any) => clear(out, t.ok
@@ -1759,12 +1812,14 @@ async function openCookieSetup(c: Connector | { via: string; name: string; blurb
     out,
     accessLog(auditAll as any[], st?.domain || c.via!),
     importRow,
-    importRow ? h("p", { class: "muted small", style: "text-align:center" }, "— or paste cookies —") : null,
-    h("ol", { class: "steps" },
-      h("li", null, "On your computer, open ", h("a", { href: help.site, target: "_blank", rel: "noopener noreferrer" }, help.site.replace("https://", "")), " in Chrome, logged in."),
-      h("li", null, "Easiest: install the ", h("a", { href: "https://chromewebstore.google.com/search/cookie-editor", target: "_blank", rel: "noopener noreferrer" }, "Cookie-Editor"), " extension, open it on that tab, Export → JSON, and paste it below."),
-      h("li", null, `Or: DevTools → Application → Cookies, and copy ${help.need} as name=value; name=value.`)),
-    box, save,
+    // Pasting is the fallback: folded away when the app can read Chrome, open when it can't.
+    h("details", { class: "stack", open: !inApp && !(browsers as any[]).length },
+      h("summary", { class: "muted small" }, "Or paste cookies instead"),
+      h("ol", { class: "steps" },
+        h("li", null, "On your computer, open ", h("a", { href: help.site, target: "_blank", rel: "noopener noreferrer" }, help.site.replace("https://", "")), " in Chrome, logged in."),
+        h("li", null, "Easiest: install the ", h("a", { href: "https://chromewebstore.google.com/search/cookie-editor", target: "_blank", rel: "noopener noreferrer" }, "Cookie-Editor"), " extension, open it on that tab, Export → JSON, and paste it below."),
+        h("li", null, `Or: DevTools → Application → Cookies, and copy ${help.need} as name=value; name=value.`)),
+      box, save),
     st?.connected ? h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet(`Disconnect ${c.name}?`, "The cookies are deleted from the hub. Triggers on it stop until you connect again.", "Disconnect", async () => { await call(`/api/connections/${c.via}`, { method: "DELETE" }); toast(`${c.name} disconnected`); openConnections(); }) } }, `Disconnect ${c.name}`) : null,
     h("p", { class: "muted small" }, "Cookies are your login: they're kept encrypted in the hub's vault and only used to open these pages. Logging out of " + c.name + " in your browser ends them, and then Hearth tells you to reconnect."),
   ]);
