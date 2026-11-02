@@ -245,7 +245,7 @@ test("a login from Chrome on your Mac is read as that same browser; a pasted one
 
 test("recent conversations: kept from the last read, re-read only when stale or refreshed", async () => {
   hub.connections.saveCookies("linkedin", "li_at=A; JSESSIONID=B");
-  page = { url: "https://www.linkedin.com/messaging/", data: [{ ...conv("Ada Lovelace", "You: see you tomorrow", "2:14 PM", true), text: "Ada Lovelace\n2:14 PM\nYou: see you tomorrow\nOpen the options list in your conversation with Ada Lovelace" }, conv("Alan", "thanks!", "Oct 28")] };
+  page = { url: "https://www.linkedin.com/messaging/", data: [{ ...conv("Ada Lovelace", "You: see you tomorrow", "2:14 PM", true), text: "Ada Lovelace\n2:14 PM\nYou: see you tomorrow\n. Active conversation\n. Press return to go to conversation details\nOpen the options list in your conversation with Ada Lovelace" }, conv("Alan", "thanks!", "Oct 28")] };
   const r = await hub.recentConversations("linkedin");
   expect(r.items.map((i) => [i.name, i.preview, i.when, i.unread])).toEqual([["Ada Lovelace", "You: see you tomorrow", "2:14 PM", true], ["Alan", "thanks!", "Oct 28", false]]);
   expect(r.items[0].url).toContain("/messaging/thread/");

@@ -1833,7 +1833,7 @@ async function openCookieSetup(c: Connector | { via: string; name: string; blurb
 
 /** Connected LinkedIn or Instagram: who you've been talking to lately, newest first. Tap a name to open it. */
 function conversationsSheet(c: any, st: any, auditAll: any[]) {
-  const hidden = /^(open the options list|status is|active now)/i; // lists kept before the hub dropped these
+  const hidden = /^(\.\s|open the options list|status is|active now|press return)/i; // lists kept before the hub dropped these
   const list = h("div", { class: "list" }, h("p", { class: "muted small" }, "Loading…"));
   const foot = h("p", { class: "muted small" });
   const load = async (fresh = false) => {
@@ -1842,7 +1842,7 @@ function conversationsSheet(c: any, st: any, auditAll: any[]) {
     try { r = await call(`/api/connections/${c.via}/recent${fresh ? "?fresh=1" : ""}`); } catch (e: any) { r = { items: [], readAt: null, error: e.message }; }
     const items: any[] = (r.items || []).slice(0, 8);
     clear(list, items.length ? items.map((x) => {
-      const last = [...(x.lines || [])].reverse().find((l: string) => !hidden.test(l) && l !== x.when) || "";
+      const last = (x.lines || []).find((l: string) => !hidden.test(l) && l !== x.when) || ""; // the message comes first
       return h("a", { class: "item", href: x.url || undefined, target: "_blank", rel: "noopener noreferrer" },
         h("span", { class: "grow" }, h("b", { class: "light" }, x.name), h("small", { class: "sub" }, [x.when, last].filter(Boolean).join(" · "))));
     }) : h("p", { class: "muted small" }, r.error || "No conversations yet."));
