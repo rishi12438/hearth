@@ -1,0 +1,37 @@
+src/setup/keys.ts
+  s_c3abf54b0d0d60::t_401f582670ed20 1-49
+test/connectors.test.ts
+  s_c3abf54b0d0d60::t_94a073bd643582 19-20,122-123,126-141
+deploy/Caddyfile
+  s_c3abf54b0d0d60::t_e8a0ff4d90857c 2-3
+README.md
+  s_c3abf54b0d0d60::t_e8a0ff4d90857c 106,146
+src/setup/cli.ts
+  s_c3abf54b0d0d60::t_e8a0ff4d90857c 13,56
+src/setup/wizard.ts
+  s_c3abf54b0d0d60::t_ff2f7744134cd3 9,34-35,49
+deploy/setup-lightsail.sh
+  s_c3abf54b0d0d60::t_e8a0ff4d90857c 5,20-22,107-108,114-118
+src/setup/remote.ts
+  s_c3abf54b0d0d60::t_e8a0ff4d90857c 15,27,64
+  s_c3abf54b0d0d60::t_ff2f7744134cd3 6,28,40
+web/setup.html
+  s_c3abf54b0d0d60::t_98fc6254148b2a 26-30,65-68,106-107,109-110,147-152
+  s_c3abf54b0d0d60::t_4567257d6cd0df 108
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "1bdf71ee784b96286ef532c6ee6d229559e973ec",
+  "prompts": {},
+  "sessions": {
+    "s_c3abf54b0d0d60": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5d7396f8-5253-434f-b3b7-b8db95db4fed",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
