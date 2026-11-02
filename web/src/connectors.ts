@@ -225,7 +225,7 @@ async function whatsappSheet() {
     // Only redraw when something changed, so a button isn't swapped out under your finger. Once linked, WhatsApp's
     // recent-chats sync keeps landing for a while, so the chat counts are part of the key too.
     const chats: any[] = s.chats || [];
-    const key = `${s.state}|${s.qr || ""}|${s.detail || ""}|${chats.length}|${chats.filter((c) => c.lastAt).length}`;
+    const key = `${s.state}|${s.syncing ? 1 : 0}|${s.qr || ""}|${s.detail || ""}|${chats.length}|${chats.filter((c) => c.lastAt).length}`;
     if (!force && key === last) return;
     // Don't redraw the list under someone typing a search or keyword.
     if (!force && s.state === "connected" && last.startsWith("connected|") && body.contains(document.activeElement) && document.activeElement?.tagName === "INPUT") return;
@@ -299,6 +299,7 @@ function linked(s: any): any[] {
         c.group && r.allGroups && byRule(c) ? null
           : h("button", { class: `wa-btn ${off ? "on" : ""}`, on: { click: () => edit(c.group ? "group" : "contact", c.jid, off) } }, off ? "Ignored" : "Ignore"));
     }) : h("p", { class: "wa-empty" }, q ? "No chats match." : tab === "ignored" ? "Nothing ignored yet. Tap Ignore on any chat."
+      : s.syncing ? "Your chats will appear here in a moment."
       : "Your recent chats show up here as messages come in. Search to find any chat or group."));
   };
   const tabs = h("div", { class: "wa-tabs" });
@@ -317,6 +318,10 @@ function linked(s: any): any[] {
     h("div", { class: "wa-head" }, logo("whatsapp", 40), h("span", { class: "grow" }, h("b", null, "WhatsApp is linked"), h("small", null, `${phone ? phone + " · " : ""}Teammates read new messages and only send after you Approve`))),
     h("p", { class: "wa-note" }, "Ignore a chat and its messages never reach Hearth: not stored, never shown to a model."),
     // Linked before Hearth kept track of recent chats: WhatsApp only sends that list while linking, so offer a relink.
+    // A new link: WhatsApp is still sending your chats.
+    s.syncing ? h("div", { class: "wa-relink" }, h("span", { class: "spin" }),
+      h("span", { class: "grow" }, h("b", null, "Loading your chats from WhatsApp…"),
+        h("small", null, "Usually under a minute. Keep this open; the list fills in as they arrive."))) :
     chats.filter((c) => c.lastAt).length < 5 ? h("div", { class: "wa-relink" },
       h("span", { class: "grow" }, h("b", null, "Load your recent chats"),
         h("small", null, "WhatsApp sends your recent chats only while linking. Relink once (scan the QR again, about 20 seconds) and this list matches your phone. Messages Hearth kept so far are cleared; ignore settings stay.")),

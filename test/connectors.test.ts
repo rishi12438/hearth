@@ -297,6 +297,23 @@ describe("WhatsApp names and calls", () => {
     wa.stop();
   });
 
+  test("a new link reports it's loading chats; a reconnect of the same link doesn't", async () => {
+    const { wa, sock } = await setup();
+    sock.user = { id: "1:7@s.whatsapp.net" };
+    sock.emit("connection.update", { connection: "open" });
+    expect((await wa.status()).syncing).toBe(true);
+    sock.emit("messaging-history.set", { chats: [], contacts: [], messages: [said("42@g.us", 100)] });
+    expect((await wa.status()).syncing).toBe(true);
+    wa.stop();
+    const again = await setup();
+    // Same device as the saved list: nothing new is coming, so no loading state.
+    (again.wa as any).device = "1:7@s.whatsapp.net";
+    again.sock.user = { id: "1:7@s.whatsapp.net" };
+    again.sock.emit("connection.update", { connection: "open" });
+    expect((await again.wa.status()).syncing).toBe(false);
+    again.wa.stop();
+  });
+
   test("a hidden-number chat takes the name WhatsApp shows for it", async () => {
     const { wa, sock } = await setup();
     sock.emit("messaging-history.set", { chats: [{ id: "321@lid", displayName: "Priya" }], contacts: [], messages: [said("321@lid", 5)] });
