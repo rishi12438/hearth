@@ -242,3 +242,17 @@ test("a login from Chrome on your Mac is read as that same browser; a pasted one
   expect(reads.at(-1)?.ua).toBe(mac.userAgent);
   expect(JSON.stringify(c.status())).not.toContain("Macintosh"); // never shown to the app
 });
+
+test("recent conversations: kept from the last read, re-read only when stale or refreshed", async () => {
+  hub.connections.saveCookies("linkedin", "li_at=A; JSESSIONID=B");
+  page = { url: "https://www.linkedin.com/messaging/", data: [conv("Ada Lovelace", "You: see you tomorrow", "2:14 PM", true), conv("Alan", "thanks!", "Oct 28")] };
+  const r = await hub.recentConversations("linkedin");
+  expect(r.items.map((i) => [i.name, i.preview, i.when, i.unread])).toEqual([["Ada Lovelace", "You: see you tomorrow", "2:14 PM", true], ["Alan", "thanks!", "Oct 28", false]]);
+  expect(r.items[0].url).toContain("/messaging/thread/");
+  const n = reads.length;
+  await hub.recentConversations("linkedin");
+  expect(reads.length).toBe(n); // fresh enough: no new read
+  await hub.recentConversations("linkedin", true);
+  expect(reads.length).toBe(n); // refresh within a minute: still kept
+  expect(readFileSync(hub.vault!.path).includes("see you tomorrow")).toBe(false); // encrypted
+});

@@ -891,6 +891,10 @@ button.wrow:hover { background: var(--bg); }
 .wa-btn { font: inherit; font-size: 13px; font-weight: 600; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; flex: none; }
 .wa-btn:hover { background: var(--bg); }
 .wa-btn.on { background: var(--surface); border-color: transparent; color: var(--muted); }
+a.wa-row { color: inherit; text-decoration: none; cursor: pointer; } a.wa-row:hover { background: var(--bg); }
+.wa-row.unread b { font-weight: 750; } .wa-row.unread small { color: var(--ink); }
+.wa-dot { width: 9px; height: 9px; border-radius: 50%; background: #0a66c2; flex: none; }
+.wa-link { font: inherit; font-size: 13px; font-weight: 600; color: var(--ink); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
 .wa-empty { padding: 22px 16px; text-align: center; color: var(--muted); font-size: 14px; margin: 0; }
 .wa-more { margin-top: 14px; }
 .wa-more summary { font-size: 14px; font-weight: 600; color: var(--ink-2); cursor: pointer; padding: 6px 2px; list-style: none; }

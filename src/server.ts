@@ -672,7 +672,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           return json({ status: r.value, test: await hub.testConnection(id) });
         }
         if (method === "POST" && seg[3] === "test") { ownerOnly(); return json(await hub.testConnection(id)); }
-        if (method === "DELETE" && !seg[3]) { ownerOnly(); const st = hub.connections.remove(id); await hub.log("connection.removed", `${labelFor(id)} disconnected`); await hub.audit("remove", hub.connections.domainFor(id) || id, "you", { ok: true }); hub.emit("connections"); return json(st); }
+        if (method === "GET" && seg[3] === "recent") { ownerOnly(); return json(await hub.recentConversations(id, url.searchParams.get("fresh") === "1")); }
+        if (method === "DELETE" && !seg[3]) { ownerOnly(); hub.vault?.delete(`recent:${id}`); const st = hub.connections.remove(id); await hub.log("connection.removed", `${labelFor(id)} disconnected`); await hub.audit("remove", hub.connections.domainFor(id) || id, "you", { ok: true }); hub.emit("connections"); return json(st); }
         break;
       }
       case "trigger-recipes": {
