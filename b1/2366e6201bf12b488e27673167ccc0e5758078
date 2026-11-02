@@ -1,0 +1,37 @@
+src/cli.ts
+  s_df4f79c5692915::t_4bec95725641dd 33
+  s_df4f79c5692915::t_9aea01d283bf89 46-48
+test/slack-chrome.test.ts
+  s_df4f79c5692915::t_7178d633c0590c 1-44,46-58
+  s_df4f79c5692915::t_68e3ce5937246a 45
+src/server.ts
+  s_df4f79c5692915::t_94ffed89a86565 14,512-513,515-521
+  s_df4f79c5692915::t_4bec95725641dd 15,514
+src/connectors/slack.ts
+  s_df4f79c5692915::t_e170297c2c4dfa 4,6-12,14-16,23-26,29,35,40-46,104-105,109,111-121,123-178,181-182,184
+  s_df4f79c5692915::t_baaee2ee44afb6 106-108,110
+  s_df4f79c5692915::t_94ffed89a86565 122
+src/cookie-sites.ts
+  s_df4f79c5692915::t_4bec95725641dd 17-22
+web/src/app.ts
+  s_df4f79c5692915::t_228116a334cd28 1628
+web/src/connectors.ts
+  s_df4f79c5692915::t_112254c7e9371c 187-188
+  s_df4f79c5692915::t_228116a334cd28 26-27,117,191,201-205,211-274
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "b12366e6201bf12b488e27673167ccc0e5758078",
+  "prompts": {},
+  "sessions": {
+    "s_df4f79c5692915": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "93f30f3c-2fb0-477d-8dc1-ed2e8b44ed63",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
