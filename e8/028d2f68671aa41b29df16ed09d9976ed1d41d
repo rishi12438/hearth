@@ -1,0 +1,32 @@
+web/src/connectors.ts
+  s_77a662a8979961::t_10a18d5f934246 228,302,321-324
+test/connectors.test.ts
+  s_f00f78c305b664::t_bb002eb2599a0d 300-316
+src/connectors/whatsapp.ts
+  s_77a662a8979961::t_8f53739a40c16c 35,101-103,120,246-250
+  s_77a662a8979961::t_10a18d5f934246 274-275
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "e8028d2f68671aa41b29df16ed09d9976ed1d41d",
+  "prompts": {},
+  "sessions": {
+    "s_77a662a8979961": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f62379c6-c427-4225-8f37-3e91680c2add",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    },
+    "s_f00f78c305b664": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "da112a7f-bf76-42e8-9da1-efce8d02f39f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
