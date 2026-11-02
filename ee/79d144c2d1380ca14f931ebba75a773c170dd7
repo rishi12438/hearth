@@ -1,0 +1,29 @@
+src/brain.ts
+  s_f00f78c305b664::t_db5364dc369538 344,346
+  s_f00f78c305b664::t_faa879f0b78623 10,464-468,566-568,600
+deploy/install-tools.sh
+  s_f00f78c305b664::t_db5364dc369538 33-46
+src/brains/skills.ts
+  s_f00f78c305b664::t_faa879f0b78623 12-13,32,39,47-48,107,112,137-158
+test/skills.test.ts
+  s_f00f78c305b664::t_125d9f86d65cd8 80-95
+deploy/setup-lightsail.sh
+  s_f00f78c305b664::t_db5364dc369538 84-85,88-89
+  s_f00f78c305b664::t_125d9f86d65cd8 86-87
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "ee79d144c2d1380ca14f931ebba75a773c170dd7",
+  "prompts": {},
+  "sessions": {
+    "s_f00f78c305b664": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "da112a7f-bf76-42e8-9da1-efce8d02f39f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
