@@ -9,6 +9,8 @@ import { call } from "./api.ts";
 export type Tile = {
   id: string; label: string; kind: "brain" | "key" | "account"; how: string; blurb: string; risk?: string; getFrom?: string;
   state: "connected" | "off" | "needs-you" | "not-installed"; detail: string | null; riskAccepted?: boolean; usage?: Usage | null;
+  /** Has a login, but the brain turns it away (bad, expired or revoked): reconnect it. */
+  signedOut?: boolean;
 };
 type Usage = { harness: string; percent: number; full: boolean; fullUntil: number | null; plan: string | null; detail: string | null; windows: { label: string; usedPercent: number; resetsAt: number | null }[] };
 
@@ -154,13 +156,40 @@ async function brainSheet(t: Tile) {
     : "Codex signs in with your ChatGPT login. The Hearth app copies ~/.codex/auth.json from your Mac; or paste that file below.";
   const box = h("textarea", { class: "field mono", rows: 3, placeholder: t.id === "claude" ? "sk-ant-oat01-…" : "Contents of ~/.codex/auth.json", autocapitalize: "off", spellcheck: false }) as HTMLTextAreaElement;
   const err = h("p", { class: "err small", hidden: true });
+  const inApp = !!(window as any).webkit?.messageHandlers?.hearth;
+  const fail = (x: any) => { err.textContent = x?.message || String(x); err.hidden = false; };
+  const reopen = async () => { try { const n = (await loadTiles()).find((x) => x.id === t.id); if (n) return brainSheet(n); } catch {} D.back(); };
+  // One tap in the Mac app: this Mac signs in again (Claude: the browser asks once) and the login goes up to the hub.
+  const reconnect = inApp && t.state !== "not-installed" ? h("button", { class: "btn primary big", on: { click: async (e: Event) => {
+    const b = e.currentTarget as HTMLButtonElement; b.disabled = true; err.hidden = true;
+    b.textContent = t.id === "claude" ? "Finish signing in in your browser…" : "Copying this Mac's Codex login…";
+    try {
+      const r = await D.askMac("brain-login", { brain: t.id }, 5 * 60_000);
+      if (r?.error) throw new Error(r.error);
+      b.textContent = "Checking it on the hub…";
+      await call(`/api/connectors/${t.id}`, { method: "PUT", body: t.id === "claude" ? { token: r.token } : { auth: r.auth } });
+      toast(`${t.label} is signed in`); reopen();
+    } catch (x) { fail(x); b.disabled = false; b.textContent = "Try again"; }
+  } } }, t.id === "claude" ? "Reconnect with this Mac" : "Use this Mac's Codex login") : null;
+  const checkAgain = picked || t.signedOut ? h("button", { class: "btn ghost", on: { click: async (e: Event) => {
+    const b = e.currentTarget as HTMLButtonElement; b.disabled = true; b.textContent = "Checking…"; err.hidden = true;
+    try {
+      const r = await call(`/api/brains/check/${t.id}`, { method: "POST", body: {} });
+      if (r.ok) { toast(`${t.label} is signed in and working`); reopen(); }
+      else { fail(new Error(r.message || "It still won't sign in.")); b.disabled = false; b.textContent = "Check again"; }
+    } catch (x) { fail(x); b.disabled = false; b.textContent = "Check again"; }
+  } } }, icon("repeat", 16), "Check again") : null;
   D.openSheet(t.label, [
     h("button", { class: "btn ghost", on: { click: D.back } }, icon("back", 16), "All connectors"),
-    h("div", { class: "phero" }, logo(t.id, 52), h("b", null, picked ? `${t.label} is one of your brains` : t.label), h("small", null, t.detail || t.blurb)),
+    h("div", { class: "phero" }, logo(t.id, 52),
+      h("b", null, t.signedOut ? `${t.label} is signed out` : picked ? `${t.label} is one of your brains` : t.label),
+      h("small", { class: t.signedOut ? "err" : "" }, t.detail || t.blurb)),
+    t.signedOut ? h("p", { class: "muted small" }, `The hub has a login for ${t.label}, but ${t.label} turns it away, so it can't think for the team. Reconnect it; jobs go to your other brain meanwhile, if you have one.`) : null,
     picked && usage ? [h("h4", null, `Live usage${usage.plan ? ` · ${usage.plan}` : ""}`), bars(usage),
       h("p", { class: "muted small" }, "With more than one brain, each job goes to whichever has the most room on its plan right now.")] : null,
+    t.state === "needs-you" ? [reconnect, checkAgain] : null,
     t.state === "needs-you" || t.state === "off" ? [
-      h("h4", null, t.state === "needs-you" ? "Sign it in on the hub" : "Use it"),
+      h("h4", null, t.state === "needs-you" ? (reconnect ? "Or paste a login" : t.signedOut ? "Reconnect it" : "Sign it in on the hub") : "Use it"),
       t.state === "needs-you" ? [h("p", { class: "muted small" }, signIn), box, err] : null,
       h("button", { class: "btn primary big", on: { click: async (e: Event) => {
         const b = e.currentTarget as HTMLButtonElement; b.disabled = true; err.hidden = true;
@@ -171,6 +200,8 @@ async function brainSheet(t: Tile) {
         } catch (x: any) { err.textContent = x.message; err.hidden = false; b.disabled = false; }
       } } }, t.state === "needs-you" ? "Save and use it" : `Use ${t.label}`),
     ] : null,
+    picked ? checkAgain : null,
+    picked ? err : null,
     t.state === "not-installed" ? h("p", { class: "muted" }, t.id === "claude" ? "Install Claude Code on the hub: curl -fsSL https://claude.ai/install.sh | bash" : "Install Codex on the hub: npm install -g @openai/codex") : null,
     picked ? h("button", { class: "btn danger-ghost", on: { click: () => D.confirmSheet(`Stop using ${t.label}?`, "Jobs go to your other brain. Its login stays on the hub.", "Stop using it", async () => {
       await call(`/api/connectors/${t.id}`, { method: "DELETE" }); toast(`${t.label} is off`); D.back();

@@ -26,8 +26,8 @@ export type ConnectorDef = {
 
 export type TileState = "connected" | "off" | "needs-you" | "not-installed";
 /** What a tile shows. */
-export type Tile = ConnectorDef & { state: TileState; detail: string | null; riskAccepted?: boolean; usage?: unknown };
-export type TileStatus = { state: TileState; detail: string | null; usage?: unknown };
+export type Tile = ConnectorDef & { state: TileState; detail: string | null; riskAccepted?: boolean; usage?: unknown; signedOut?: boolean };
+export type TileStatus = { state: TileState; detail: string | null; usage?: unknown; signedOut?: boolean };
 
 /** What connector modules can reach. Built once by Connect. */
 export type Ctx = {

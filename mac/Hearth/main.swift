@@ -186,6 +186,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 args += [site, profile]
             }
             chrome(args) { [weak self] out in self?.reply(id, out) }
+        case "brain-login":
+            // Reconnect a brain on the hub with this Mac's login: Claude makes a long-lived token (the browser asks you
+            // once); Codex hands over ~/.codex/auth.json. The page sends it to the hub, the same as pasting it.
+            guard message.frameInfo.isMainFrame, let id = m["id"] as? String, isHubPage(message.frameInfo.request.url ?? web.url),
+                  let brain = m["brain"] as? String, brain == "claude" || brain == "codex" else { return }
+            chrome(brain == "claude" ? ["brains", "token", "claude", "--json"] : ["brains", "export", "codex", "--json"]) { [weak self] out in self?.reply(id, out) }
         default: break
         }
     }
@@ -210,7 +216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             env["PATH"] = path; env["HEARTH_APP"] = "1"
             p.environment = env
             let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
-            var text = "{\"error\":\"Couldn't read Chrome on this Mac.\"}"
+            var text = "{\"error\":\"That didn't work on this Mac.\"}"
             do {
                 try p.run()
                 let data = out.fileHandleForReading.readDataToEndOfFile()

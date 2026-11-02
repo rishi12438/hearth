@@ -322,6 +322,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           pendingScripts: (await hub.scripts.list()).filter((s) => s.status === "proposed").length,
           voice: voice?.current?.name ?? null,
           computers: await computerSummary(),
+          brainProblems: await hub.brainProblems(),
+          brains: await hub.brainStatus(),
           tileKey,
         });
       }
@@ -490,6 +492,12 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           const pool = await hub.brainPool();
           await Promise.all(pool.map((h) => hub.brain.usage.refresh(h, url.searchParams.get("fresh") === "1").catch(() => {})));
           return json({ pool, usage: hub.brain.usage.view(pool) });
+        }
+        // "Check again": one tiny real call, so you see right away whether the brain is signed in.
+        if (method === "POST" && id === "check" && (seg[3] === "claude" || seg[3] === "codex")) {
+          ownerOnly();
+          if (!availableHarnesses(config).includes(seg[3])) throw new HttpError(400, `${seg[3] === "claude" ? "Claude Code" : "Codex"} isn't installed on the hub.`);
+          return json(await hub.brain.check(seg[3]));
         }
         if (method === "PUT" && id === "pool") { ownerOnly(); const r = await hub.setBrainPool((await body(req)).pool); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         // A long-lived login copied up from your Mac: a Claude setup-token, or Codex's auth.json.
