@@ -285,6 +285,18 @@ describe("WhatsApp names and calls", () => {
     wa.stop();
   });
 
+  test("history's number pairs turn a hidden number into the saved name", async () => {
+    const { wa, sock } = await setup();
+    const log = console.log; console.log = () => {};
+    sock.emit("messaging-history.set", { chats: [{ id: "321@lid" }], contacts: [], messages: [said("321@lid", 5)] });
+    sock.emit("contacts.upsert", [{ id: "15550100@s.whatsapp.net", name: "Girish" }]);
+    expect(wa.chatList()[0].name).toBe("Hidden number");
+    sock.emit("lid-mapping.set", { mappings: [{ lidJid: "321@lid", pnJid: "15550100@s.whatsapp.net" }] });
+    console.log = log;
+    expect(wa.chatList()[0].name).toBe("Girish");
+    wa.stop();
+  });
+
   test("a hidden-number chat takes the name WhatsApp shows for it", async () => {
     const { wa, sock } = await setup();
     sock.emit("messaging-history.set", { chats: [{ id: "321@lid", displayName: "Priya" }], contacts: [], messages: [said("321@lid", 5)] });

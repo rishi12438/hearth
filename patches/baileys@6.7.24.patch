@@ -1,3 +1,6 @@
+diff --git a/node_modules/baileys/.bun-tag-b6ffa46214038f88 b/.bun-tag-b6ffa46214038f88
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/lib/Utils/chat-utils.js b/lib/Utils/chat-utils.js
 index 31615b9d2df86841619903cd64b9687eddb6e67a..729bb1b9f83986ba2c9c39bb0fba92797293e9d9 100644
 --- a/lib/Utils/chat-utils.js
@@ -14,28 +17,33 @@ index 31615b9d2df86841619903cd64b9687eddb6e67a..729bb1b9f83986ba2c9c39bb0fba9279
          const name = action?.pushNameSetting?.name;
          if (name && me?.name !== name) {
 diff --git a/lib/Utils/history.js b/lib/Utils/history.js
-index def974244282d3c62714e7229d4437b611730347..e8bb7fe473308cde9e5e979e059cf56596a37db2 100644
+index def974244282d3c62714e7229d4437b611730347..49aaf0b43adbe25ac89f9aa0a16418d937239791 100644
 --- a/lib/Utils/history.js
 +++ b/lib/Utils/history.js
-@@ -69,6 +69,7 @@ export const processHistoryMessage = (item) => {
+@@ -69,6 +69,8 @@ export const processHistoryMessage = (item) => {
          chats,
          contacts,
          messages,
 +        callLogRecords: item.callLogRecords || [],
++        lidMappings: item.phoneNumberToLidMappings || [],
          syncType: item.syncType,
          progress: item.progress
      };
 diff --git a/lib/Utils/process-message.js b/lib/Utils/process-message.js
-index f94b53a17b39d1adafffa3c567d2a3445b162e76..72040d69db0c506946da77daaeaec1e086a0b10f 100644
+index f94b53a17b39d1adafffa3c567d2a3445b162e76..36ad1437ddbce40ec28fa77911b7b416a39a72e6 100644
 --- a/lib/Utils/process-message.js
 +++ b/lib/Utils/process-message.js
-@@ -165,6 +165,10 @@ const processMessage = async (message, { shouldProcessHistoryMsg, placeholderRes
+@@ -165,6 +165,14 @@ const processMessage = async (message, { shouldProcessHistoryMsg, placeholderRes
                          });
                      }
                      const data = await downloadAndProcessHistorySyncNotification(histNotification, options);
 +                    // hearth patch: call logs ride along with history; the buffered history event drops extra fields
 +                    if (data.callLogRecords?.length) {
 +                        ev.emit('call-log.set', { records: data.callLogRecords });
++                    }
++                    // hearth patch: private @lid id <-> phone number pairs, how WhatsApp's own apps name hidden numbers
++                    if (data.lidMappings?.length) {
++                        ev.emit('lid-mapping.set', { mappings: data.lidMappings });
 +                    }
                      ev.emit('messaging-history.set', {
                          ...data,

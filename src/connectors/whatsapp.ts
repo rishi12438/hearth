@@ -287,6 +287,12 @@ export class WhatsApp {
     });
     // Your call log, calls you made too (WhatsApp shares it with linked devices that ask; patches/baileys adds the ask
     // and this event): the past log arrives with the link-time history, then each new call as it happens.
+    // Private-id <-> phone-number pairs from the link-time history (patches/baileys surfaces them): names hidden numbers.
+    sock.ev.on("lid-mapping.set", ({ mappings }: any) => {
+      for (const m of mappings || []) this.link(m?.lidJid, m?.pnJid);
+      const hidden = [...this.chats.values()].filter((c) => !c.group && c.lastAt && c.jid.endsWith("@lid") && !this.alias.has(c.jid)).length;
+      console.log(`whatsapp: ${mappings?.length || 0} number pairs from history; ${hidden} recent chats still without a number`);
+    });
     sock.ev.on("call-log.set", ({ records }: any) => {
       const mine = (j?: string) => !!j && !!this.me && j.split(/[:@]/)[0] === this.me;
       for (const r of records || []) {
