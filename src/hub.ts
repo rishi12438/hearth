@@ -4,17 +4,24 @@ import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store, Collection } from "./store/index.ts";
 import type { Brain, BrainInput, BrainProfile, Brains, Meter } from "./brain.ts";
-import { QUIET, ESCALATE, REDO, HARNESSES, MODEL_RE, availableHarnesses, NeedsComputer } from "./brain.ts";
+import { QUIET, ESCALATE, REDO, HARNESSES, MODEL_RE, availableHarnesses, NeedsComputer, BrainsFull, POOL_HARNESSES } from "./brain.ts";
 import type { Scripts } from "./scripts.ts";
 import type { Push } from "./push.ts";
 import { parseReply } from "./reply.ts";
 import { validateHook, computeNextAt, describeTrigger, isUserReminder } from "./hooks.ts";
 import { look, lineDiff } from "./watch.ts";
 import { Google } from "./google.ts";
-import { SOURCES, sourceById, formatItems } from "./sources/index.ts";
+import { Connections } from "./connections.ts";
+import { readPage } from "./browser.ts";
+import { SignedOut } from "./sources/pages.ts";
+import type { Vault } from "./vault.ts";
+import { SOURCES, sourceById, formatItems, needOf } from "./sources/index.ts";
 import { recall, isActive, validateFact } from "./memory.ts";
 import { describeLocal, inQuietHours, quietEndsAt, localDate, distanceMeters } from "./time.ts";
-import type { TriggerRecipe, Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
+import { CHANNELS, CHANNEL_LABEL, type Channel } from "./types.ts";
+import { badChatLink } from "./connectors/web-senders.ts";
+import type { Project } from "./types.ts";
+import type { ConnAudit, TriggerRecipe, Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
 import { Library, validateSkill, validateWorkflow, validateTriggerRecipe, fillDeep, fill, type LibraryItem } from "./library.ts";
 import { cleanTile, cleanOptions, extractTiles, type Tile } from "./tiles.ts";
 import { Files, extractFiles } from "./files.ts";
@@ -72,8 +79,31 @@ export class Hub {
   private listeners = new Set<(e: HubEvent) => void>();
   private firing = new Set<string>();
   private _google: Google | null = null;
+  /** The encrypted key vault (vault.ts), set by the server. Connections keep their sign-ins in it. */
+  vault: Vault | null = null;
   /** Your Google account (Gmail, Calendar), if you've connected one. */
-  get google() { return (this._google ??= new Google(this.config.dataDir)); }
+  get google() {
+    // Made again once the vault arrives, so an early look (before the server set it) doesn't stick.
+    if (!this._google || this._googleVault !== this.vault) { this._google = new Google(this.vault); this._googleVault = this.vault; }
+    return this._google;
+  }
+  private _googleVault: Vault | null = null;
+  private _connections: Connections | null = null;
+  /** Every account teammates can read (Google, LinkedIn, X), all kept in the vault. */
+  get connections() {
+    const g = this.google;
+    if (!this._connections || (this._connections as any).google !== g) {
+      const extra = this._connections?.extra ?? {};
+      this._connections = new Connections(this.vault, g);
+      this._connections.extra = extra;
+    }
+    return this._connections;
+  }
+  /** Headless Chrome for logged-in sites. Swapped in tests. */
+  readPage = readPage;
+  /** Linked computers (your Mac), set by the server. A Mac can copy browser logins up and be re-asked when one dies. */
+  computers: { refreshCookies(site?: string): void; canCopyCookies(): boolean } | null = null;
+  private sourceCtx = async () => ({ google: this.google, cookies: (domain: string) => this.connections.cookies(domain), readPage: this.readPage, now: this.clock(), tz: (await this.prefs()).tz });
   /** Webhook calls that arrived while their hook was still busy with the last one; handled together right after. */
   private webhookQueue = new Map<string, string[]>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -85,6 +115,7 @@ export class Hub {
   private memoryLock = new Lock();
   private started = new Set<string>();   // job ids already handed to runJob
   private stops = new Map<string, AbortController>(); // running jobs, so a new message can restart one
+  private cancelled = new Set<string>();              // running jobs you tapped Stop on
   private additions = new Map<string, string[]>();    // what the user added to a running job, applied when it restarts
   private inflight = 0;                   // orchestrations, splits and retries still running
   private rambleSpend = new Map<string, number>(); // message id -> USD
@@ -95,7 +126,11 @@ export class Hub {
     readonly library: Library = new Library(null),
     readonly files: Files = new Files(store, config.dataDir),
     readonly apps: Apps = new Apps(store),
-  ) {}
+  ) {
+    brain.pool = () => this.brainPool();
+    // Every phone notification also goes out on the live stream, so the Mac app can show it as a Mac notification.
+    if (push) push.onSend = (payload, only) => this.emit("notify", { ...payload, only: only ?? null });
+  }
 
   // ---------- plumbing ----------
 
@@ -139,6 +174,21 @@ export class Hub {
     this.emit("activity", a);
   }
 
+  /** The audit trail for connected accounts: who touched which login, when. Kept long (not trimmed like activity). */
+  async audit(action: ConnAudit["action"], site: string, by: string, extra: { ok?: boolean; detail?: string } = {}) {
+    const e = await this.store.put<ConnAudit>("connAudit", this.doc({ action, site, by, ok: extra.ok, detail: extra.detail?.slice(0, 200) }));
+    await this.trim("connAudit", 5000);
+    this.emit("connAudit", e);
+  }
+  async connAudit() { return (await this.store.recent<ConnAudit>("connAudit", 200)).reverse(); }
+
+  /** A readable actor name for the audit: a teammate's name, else a fallback ("you", "system"). */
+  private async actorName(teammateId?: string | null, fallback = "a teammate") {
+    if (!teammateId) return fallback;
+    if (teammateId === "hearth") return "Hearth";
+    return (await this.teammate(teammateId))?.name || fallback;
+  }
+
   private async trim(col: Collection, keep: number) {
     const rows = await this.store.all(col);
     for (const r of rows.slice(0, Math.max(0, rows.length - keep))) await this.store.remove(col, r.id);
@@ -146,7 +196,7 @@ export class Hub {
 
   // ---------- context for the brain ----------
 
-  async context(query: string, mode: BrainInput["mode"], teammate?: Teammate | null) {
+  async context(query: string, mode: BrainInput["mode"], teammate?: Teammate | null, threadId?: string) {
     const now = this.clock();
     const prefs = await this.prefs();
     // The voice pass only writes the answer from the legwork notes: who it is, who the user is, the time. Nothing else.
@@ -159,7 +209,11 @@ export class Hub {
       };
     }
     const facts = await this.store.all<Fact>("memory");
-    const memory = mode === "review" ? facts.filter((f) => isActive(f, now)) : recall(facts, query, 40, now);
+    // In a project's ramble: everything in its notebook comes first, then what's relevant from the rest.
+    const project = await this.projectOf(threadId);
+    const own = project ? facts.filter((f) => f.notebook === project.notebook && isActive(f, now)).slice(-30) : [];
+    const memory = mode === "review" ? facts.filter((f) => isActive(f, now))
+      : [...own, ...recall(facts.filter((f) => !own.includes(f)), query, 40 - own.length, now)];
     const hooks = (await this.store.all<Hook>("hooks")).filter((h) => h.status !== "done" && h.source !== "system");
     const places = await this.store.all<Place>("places");
     const fix = (await this.store.recent<LocationFix>("locations", 1))[0];
@@ -186,7 +240,9 @@ export class Hub {
       proactiveMessagesLeftToday: Math.max(0, prefs.maxProactivePerDay - used),
       location,
       places: places.map((p) => ({ name: p.name, radiusM: p.radiusM })),
-      sources: SOURCES.map((s) => ({ id: s.id, label: s.label, connected: s.needs === "google" ? this.google.connected : false })),
+      sources: SOURCES.map((s) => ({ id: s.id, label: s.label, connected: typeof s.needs === "function" ? undefined : this.connections.connected(s.needs) })),
+      ...(project ? { project: { name: project.name, notebook: project.notebook, about: project.about || undefined,
+        rambles: (await this.store.all<Thread>("threads")).filter((t) => t.projectId === project.id).map((t) => channelOf(t)).slice(0, 20) } } : {}),
       memory: memory.map((f) => ({ id: f.id, fact: f.fact, notebook: f.notebook, importance: f.importance, ...(f.expiresAt ? { expiresAt: f.expiresAt } : {}) })),
       notebooks: (await this.store.all<Notebook>("notebooks")).map((n) => ({ name: n.name, summary: n.summary })),
       // Every plan while there are few; with many, the ones that match this request plus the newest (search finds the rest).
@@ -210,7 +266,7 @@ export class Hub {
     const { teammate, extra } = opts;
     const profile = opts.profile || (await this.brains()).workhorse;
     const where = { teammateId: teammate?.id, threadId: opts.threadId, jobId: opts.jobId, recipe: opts.allowedScripts };
-    const ctx = await this.context(input, mode, teammate);
+    const ctx = await this.context(input, mode, teammate, opts.threadId);
     const first = parseReply(await this.brain.think({ mode, context: ctx, input, toolResults: extra }, profile, opts.meter));
     if (first.text.includes(ESCALATE)) return { text: ESCALATE, did: [] as Done[], used: [] as string[] };
     const applied = await this.applyActions(first.actions, evidence, where);
@@ -221,7 +277,7 @@ export class Hub {
     const results: string[] = [];
     for (const r of applied.runs.slice(0, 3)) {
       if (r.name === "@history") { results.push(`## Past conversations matching "${r.args[0]}"\n${await this.searchHistory(r.args[0])}`); continue; }
-      if (r.name === "@source") { results.push(await this.readSource(JSON.parse(r.args[0]))); continue; }
+      if (r.name === "@source") { results.push(await this.readSource(JSON.parse(r.args[0]), teammate?.name || "a teammate")); continue; }
       if (opts.allowedScripts && !opts.allowedScripts.includes(r.name)) {
         results.push(`## ${r.name}\nNot allowed: this recipe may only use ${opts.allowedScripts.join(", ") || "no scripts"}.`);
         continue;
@@ -243,7 +299,7 @@ export class Hub {
       scriptTiles.push(...ex.tiles);
       results.push(`## ${r.name}\n${ex.text}${ex.tiles.length ? `\n(${ex.tiles.length} tile(s) already shown to the user)` : ""}`);
     }
-    const ctx2 = await this.context(input, mode, teammate);
+    const ctx2 = await this.context(input, mode, teammate, opts.threadId);
     const second = parseReply(await this.brain.think({ mode, context: ctx2, input, toolResults: [extra, ...results].filter(Boolean).join("\n\n") }, profile, opts.meter));
     const applied2 = await this.applyActions(second.actions.filter((a: any) => a?.type !== "script.run"), evidence, where);
     const tiles = [...applied.tiles, ...applied2.tiles, ...scriptTiles].slice(0, 4);
@@ -255,7 +311,33 @@ export class Hub {
 
   async brains(): Promise<Brains> {
     const saved = (await this.prefs()).brains;
-    return { ...this.brain.defaults(), ...(saved || {}) };
+    const b: Brains = { ...this.brain.defaults(), ...(saved || {}) };
+    for (const role of ["orchestrator", "quick", "workhorse", "heavy"] as const) b[role] = { ...b[role], role };
+    return b;
+  }
+
+  /** The brains the user picked. None picked yet: whichever ones the roles already use. */
+  async brainPool(): Promise<string[]> {
+    const saved = (await this.prefs()).brainPool;
+    if (saved?.length) return saved;
+    const b = await this.brains();
+    return [...new Set([b.orchestrator, b.quick, b.workhorse, b.heavy].map((p) => p.harness))];
+  }
+
+  /** Pick the brains (multi-select). The roles move onto a picked brain if theirs was dropped. */
+  async setBrainPool(list: unknown) {
+    const allowed = availableHarnesses(this.config);
+    const pool = [...new Set((Array.isArray(list) ? list : []).map(String))];
+    if (!pool.length) return { error: "Pick at least one brain." };
+    const bad = pool.find((h) => !(POOL_HARNESSES as readonly string[]).includes(h) || !allowed.includes(h));
+    if (bad) return { error: `${bad} isn't installed on this hub.` };
+    const cur = await this.brains();
+    const next: Brains = { ...cur };
+    for (const role of ["orchestrator", "quick", "workhorse", "heavy"] as const)
+      if (!pool.includes(cur[role].harness)) { const { role: _, ...p } = this.brain.onBrain(cur[role], pool[0]); next[role] = p; }
+    await this.setPrefs({ brainPool: pool, brains: next });
+    await this.log("brains", `Brains: ${pool.join(", ")}${pool.length > 1 ? " (the one with the most room on its plan takes each job)" : ""}`);
+    return { value: { pool, brains: next } };
   }
 
   async setBrains(patch: any) {
@@ -309,6 +391,74 @@ export class Hub {
   }
 
   /** Name a ramble's channel ("japan-trip"). Names are lowercase words and dashes, unique among rambles. */
+  // ---------- projects: folders of rambles, each with its own memory notebook ----------
+
+  async projectOf(threadId?: string): Promise<Project | null> {
+    if (!threadId) return null;
+    const t = await this.store.get<Thread>("threads", threadId);
+    return t?.projectId ? await this.store.get<Project>("projects", t.projectId) : null;
+  }
+
+  async listProjects() {
+    const threads = (await this.store.all<Thread>("threads")).filter((t) => t.projectId);
+    return (await this.store.all<Project>("projects")).sort((a, b) => a.name.localeCompare(b.name))
+      .map((p) => ({ ...p, rambles: threads.filter((t) => t.projectId === p.id).length }));
+  }
+
+  async createProject(name: string, emoji?: string) {
+    const n = name.trim().slice(0, 60);
+    if (!n) return { error: "Give the project a name." };
+    if ((await this.store.all<Project>("projects")).some((p) => p.name.toLowerCase() === n.toLowerCase())) return { error: `There's already a project called ${n}.` };
+    const p = await this.store.put<Project>("projects", { ...this.doc({}), name: n, emoji: emoji?.slice(0, 8) || undefined, notebook: `project-${(slugOf(n) || "project").slice(0, 31)}` } as Project);
+    await this.log("project.created", n);
+    this.emit("projects");
+    return { value: p };
+  }
+
+  async updateProject(id: string, patch: { name?: string; emoji?: string; about?: string }) {
+    const p = await this.store.get<Project>("projects", id);
+    if (!p) return { error: "No such project." };
+    const next = { ...p, ...(patch.name?.trim() ? { name: patch.name.trim().slice(0, 60) } : {}), ...(patch.emoji !== undefined ? { emoji: patch.emoji.slice(0, 8) || undefined } : {}),
+      ...(patch.about !== undefined ? { about: patch.about.slice(0, 1000) || undefined } : {}), updatedAt: this.clock().toISOString() };
+    await this.store.put("projects", next);
+    this.emit("projects");
+    return { value: next };
+  }
+
+  /** Delete a project: its rambles stay (just not filed), and its memory stays in your memory. */
+  async removeProject(id: string) {
+    const p = await this.store.get<Project>("projects", id);
+    if (!p) return false;
+    for (const t of (await this.store.all<Thread>("threads")).filter((t) => t.projectId === id)) await this.store.put("threads", { ...t, projectId: undefined });
+    await this.store.remove("projects", id);
+    await this.log("project.removed", p.name);
+    this.emit("projects"); this.emit("threads");
+    return true;
+  }
+
+  /** File a ramble under a project (or take it out with null). */
+  async fileThread(threadId: string, projectId: string | null) {
+    const t = await this.store.get<Thread>("threads", threadId);
+    if (!t || t.id.startsWith("tm-") || t.id === "main") return { error: "No such ramble." };
+    if (projectId && !(await this.store.get<Project>("projects", projectId))) return { error: "No such project." };
+    const saved = await this.store.put<Thread>("threads", { ...t, projectId: projectId || undefined });
+    this.emit("threads"); this.emit("projects");
+    return { value: saved };
+  }
+
+  /** A project's page: its rambles, what's in its memory, and files from its rambles. */
+  async projectDetail(id: string) {
+    const p = await this.store.get<Project>("projects", id);
+    if (!p) return null;
+    const rambles = (await this.listThreads()).filter((t: any) => t.projectId === id);
+    const ids = new Set(rambles.map((t: any) => t.id));
+    return {
+      project: p, rambles,
+      memory: (await this.store.all<Fact>("memory")).filter((f) => f.notebook === p.notebook && isActive(f, this.clock())).map((f) => ({ id: f.id, fact: f.fact, createdAt: f.createdAt })),
+      files: (await this.store.all<StoredFile>("files")).filter((f) => f.threadId && ids.has(f.threadId)).reverse().slice(0, 50),
+    };
+  }
+
   async renameThread(id: string, name: string, byUser = true) {
     const t = await this.store.get<Thread>("threads", id);
     if (!t || t.id.startsWith("tm-")) return { error: "No such ramble." };
@@ -531,6 +681,12 @@ export class Hub {
     let cur: Job = await this.saveJob({ ...job, status: "working", startedAt: this.clock().toISOString() });
     const finish = async (patch: Partial<Job>) => {
       this.stops.delete(job.id);
+      if (stop.signal.aborted && this.cancelled.delete(job.id)) {
+        this.additions.delete(job.id); this.additions.delete(`${job.id}:label`);
+        await this.addSpend(job.messageId, meter.costUsd);
+        cur = await this.saveJob({ ...cur, status: "failed", result: "Stopped by you.", durationMs: Date.now() - started, finishedAt: this.clock().toISOString() });
+        return;
+      }
       if (stop.signal.aborted) {
         // Stopped for a restart: back in the queue with what the user added; pump picks it up again.
         const more = this.additions.get(job.id) || [];
@@ -634,6 +790,11 @@ export class Hub {
       }
       await finish({ how: failedSkill ? "repaired" : "fresh", tier, escalated, voiced, result: r.text.slice(0, 4000), did: r.did, tiles: r.tiles, fileIds: r.fileIds });
     } catch (err: any) {
+      if (err instanceof BrainsFull) {
+        cur = await this.saveJob({ ...cur, blocked: { need: "Room on a brain", why: err.message, unblock: "It starts again by itself when a plan resets, or tap Try again", needs: "brains", until: err.until } });
+        this.wakeForBrains(err.until);
+        return await finish({ how: "fresh", tier });
+      }
       if (err instanceof NeedsComputer) {
         // Parks instead of failing; resumeForComputer picks it up the moment a computer links in. A cloud sandbox that's
         // allowed to start on its own is woken for it.
@@ -713,6 +874,19 @@ export class Hub {
   /** Set by the server: wake a cloud computer when a job is waiting for one. */
   onNeedsComputer: (() => void) | null = null;
 
+  private brainsTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Every brain was full: try the parked jobs again when the first plan resets (and at least every 30 min). */
+  private wakeForBrains(until: number | null) {
+    const wait = Math.min(Math.max((until ?? 0) - Date.now() + 60_000, 60_000), 30 * 60_000);
+    if (this.brainsTimer) clearTimeout(this.brainsTimer);
+    this.brainsTimer = setTimeout(async () => {
+      this.brainsTimer = null;
+      const parked = (await this.store.all<Job>("jobs")).filter((j) => j.status === "blocked" && j.blocked?.needs === "brains");
+      for (const j of parked) await this.retryJob(j.id);
+    }, wait);
+    (this.brainsTimer as any).unref?.();
+  }
+
   /** A linked computer came online: run every job that was parked waiting for one. */
   async resumeForComputer() {
     const parked = (await this.store.all<Job>("jobs")).filter((j) => j.status === "blocked" && j.blocked?.needs === "computer");
@@ -721,6 +895,17 @@ export class Hub {
   }
 
   /** You unblocked it (opened the laptop, logged in, tapped Allow): run the job again from the top. */
+  /** Stop button: a running job is cut off where it is; a queued one never starts. */
+  async stopJob(id: string) {
+    const j = await this.store.get<Job>("jobs", id);
+    if (!j || !["queued", "working"].includes(j.status)) return { error: "That isn't running." };
+    const stop = this.stops.get(id);
+    if (stop) { this.cancelled.add(id); stop.abort(); }
+    else await this.saveJob({ ...j, status: "failed", result: "Stopped by you.", finishedAt: this.clock().toISOString() });
+    await this.log("job.stopped", (j.label || j.task).slice(0, 80));
+    return { value: { ok: true } };
+  }
+
   async retryJob(id: string) {
     const job = await this.store.get<Job>("jobs", id);
     if (!job || !["blocked", "failed"].includes(job.status)) return { error: "Only blocked or failed jobs can be retried." };
@@ -1037,13 +1222,75 @@ export class Hub {
     return { value: ap };
   }
 
-  async decideApproval(id: string, yes: boolean) {
+  /** Every connector (set by the server). */
+  connect: import("./connectors/index.ts").Connect | null = null;
+  /** Senders for message.send, set at start (WhatsApp, Slack). */
+  senders: Partial<Record<Channel, { connected(): boolean; send(to: string, text: string, extra?: { subject?: string; threadId?: string }): Promise<string> }>> = {};
+
+  /** A WhatsApp or Slack message a teammate drafted: an Approve card, sent only after the tap. */
+  async requestMessage(a: any, where: { threadId?: string; jobId?: string }) {
+    const channel = (CHANNELS as string[]).includes(String(a?.channel)) ? (a.channel as Channel) : null;
+    const to = String(a?.to || "").trim().slice(0, 300);
+    const text = String(a?.text || "").trim().slice(0, channel === "gmail" ? 20_000 : 4000);
+    const subject = channel === "gmail" ? String(a?.subject || "").trim().slice(0, 200) || "(no subject)" : undefined;
+    const threadId = channel === "gmail" && a?.threadId ? String(a.threadId).slice(0, 100) : undefined;
+    if (!channel) return { error: `channel is one of ${CHANNELS.join(", ")}.` };
+    const label = CHANNEL_LABEL[channel];
+    if (!this.senders[channel]?.connected()) return { error: channel === "gmail" && this.google.connected ? "Google is connected without permission to send. Ask the user to reconnect Google in Connectors and allow sending." : `${label} isn't connected.` };
+    if (!to || !text) return { error: "Say who it's to and what it says." };
+    if (channel === "gmail" && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to.replace(/^.*<|>$/g, ""))) return { error: "For Gmail, \"to\" is an email address." };
+    if (channel === "instagram" || channel === "linkedin" || channel === "x") { const bad = badChatLink(channel, to); if (bad) return { error: bad }; }
+    const action = { type: "message" as const, channel, to, text, ...(subject ? { subject } : {}), ...(threadId ? { threadId } : {}) };
+    const sendNow = () => this.senders[channel]!.send(to, text, { subject, threadId });
+    // You said "Always allow" for this chat before: send now, and leave a note in Activity instead of asking.
+    if ((await this.alwaysAllowed()).includes(allowKey(channel, to))) {
+      const out = await sendNow().then(() => ({ ok: true, output: "Sent (always allowed)." }), (e: any) => ({ ok: false, output: String(e?.message || e) }));
+      const ap = await this.store.put<Approval>("approvals", {
+        ...this.doc({}), threadId: where.threadId, jobId: where.jobId,
+        summary: String(a.summary || `${label} to ${to}: ${subject ? subject + " · " : ""}${text.slice(0, 80)}`).slice(0, 200), details: text,
+        action, status: out.ok ? "done" : "failed", result: out.output, decidedAt: this.clock().toISOString(), auto: true,
+      } as Approval);
+      await this.log(out.ok ? "message.sent" : "message.failed", `${ap.summary} (always allowed)`);
+      this.emit("approval", ap);
+      return out.ok ? { value: ap } : { error: `Couldn't send: ${out.output}` };
+    }
+    const ap = await this.store.put<Approval>("approvals", {
+      ...this.doc({}), threadId: where.threadId, jobId: where.jobId,
+      summary: String(a.summary || `${label} to ${to}: ${subject ? subject + " · " : ""}${text.slice(0, 80)}`).slice(0, 200), details: text,
+      action, status: "pending",
+    } as Approval);
+    if (where.jobId) {
+      const job = await this.store.get<Job>("jobs", where.jobId);
+      if (job) await this.saveJob({ ...job, approvalIds: [...(job.approvalIds || []), ap.id] });
+    }
+    await this.log("approval.requested", ap.summary);
+    this.emit("approval", ap);
+    await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: ap.threadId ? threadLink(ap.threadId) : "/" });
+    return { value: ap };
+  }
+
+  /** Chats you've said "Always allow" for: a teammate's message there sends without asking ("whatsapp:<to>"). */
+  async alwaysAllowed(): Promise<string[]> { return ((await this.store.get<any>("settings", "always-allow"))?.keys as string[]) || []; }
+  async setAlwaysAllowed(keys: string[]) {
+    await this.store.put("settings", { id: "always-allow", createdAt: "1970-01-01T00:00:00.000Z", keys: [...new Set(keys)].slice(0, 500) });
+    this.emit("prefs");
+  }
+
+  async decideApproval(id: string, yes: boolean, always = false) {
     const ap = await this.store.get<Approval>("approvals", id);
     if (!ap || ap.status !== "pending") return { error: "Already decided." };
+    if (yes && always && ap.action.type === "message") {
+      await this.setAlwaysAllowed([...(await this.alwaysAllowed()), allowKey(ap.action.channel, ap.action.to)]);
+      await this.log("approval.always", `Always allow ${CHANNEL_LABEL[ap.action.channel]} messages to ${ap.action.to}`);
+    }
     let next: Approval = { ...ap, status: yes ? "approved" : "rejected", decidedAt: this.clock().toISOString() };
     await this.store.put("approvals", next);
     if (yes) {
-      const out = await this.scripts.run(ap.action.script, ap.action.args, { approvedRun: true });
+      const act = ap.action;
+      const out = act.type === "message"
+        ? await (this.senders[act.channel]?.send(act.to, act.text, { subject: act.subject, threadId: act.threadId }).then(() => ({ ok: true, output: "Sent." }), (e: any) => ({ ok: false, output: String(e?.message || e) }))
+          ?? { ok: false, output: `${act.channel} isn't connected.` })
+        : await this.scripts.run(act.script, act.args, { approvedRun: true });
       next = { ...next, status: out.ok ? "done" : "failed", result: out.output.slice(0, 2000) };
       await this.store.put("approvals", next);
     }
@@ -1255,6 +1502,13 @@ export class Hub {
           case "source.read":
             if (typeof a.source === "string") runs.push({ name: "@source", args: [JSON.stringify({ source: a.source, config: a.config || {} })] });
             break;
+          case "connection.refresh": {
+            const site = String(a.site || "").trim();
+            if (!site) break;
+            const r = await this.refreshConnection(site, await this.actorName(where.teammateId));
+            done.push({ kind: "memory", label: r.ok ? `Refreshed the ${site} login (${r.how})` : `Couldn't refresh ${site} — reconnect it in Connectors` });
+            break;
+          }
           case "history.search":
             if (typeof a.query === "string" && a.query.trim()) runs.push({ name: "@history", args: [a.query.trim().slice(0, 200)] });
             break;
@@ -1295,6 +1549,12 @@ export class Hub {
             done.push({ kind: "blocked", label: `Blocked: ${b.need}` });
             await this.log("job.blocked", `${b.need} (${b.unblock})`);
             await this.push?.send({ title: "I'm stuck", body: `${b.need}. ${b.unblock}`, tag: where.jobId, url: where.threadId ? threadLink(where.threadId) : "/" });
+            break;
+          }
+          case "message.send": {
+            if (where.recipe) break;
+            const r = await this.requestMessage(a, where);
+            done.push({ kind: "approval", label: r.value ? `Waiting for your Approve: ${r.value.summary}` : `Couldn't draft: ${r.error}`, id: r.value?.id });
             break;
           }
           case "approval.request": {
@@ -1572,8 +1832,12 @@ export class Hub {
     for (const j of jobs.filter((x) => (x.status === "done" || x.status === "failed") && x.finishedAt).sort((a, b) => b.finishedAt!.localeCompare(a.finishedAt!)).slice(0, 25)) {
       items.push({ kind: j.status === "failed" ? "failed" : "done", at: j.finishedAt, id: j.id, summary: j.task, result: (j.result || "").split("\n").find((l) => l.trim()) || "", teammateId: j.teammateId, threadId: j.threadId, jobId: rootOf(j) });
     }
-    const urgent = (k: string) => (k === "approval" || k === "blocked" ? 0 : 1);
-    return items.sort((a, b) => urgent(a.kind) - urgent(b.kind) || String(b.at).localeCompare(String(a.at))).slice(0, 60);
+    // Everyone working right now, and what's waiting its turn.
+    for (const j of jobs.filter((x) => x.status === "working" || x.status === "queued")) {
+      items.push({ kind: j.status === "working" ? "running" : "queued", at: j.startedAt || j.createdAt, startedAt: j.startedAt, id: j.id, summary: j.label || shortLabel(undefined, j.task), teammateId: j.teammateId, threadId: j.threadId, jobId: rootOf(j) });
+    }
+    const urgent = (k: string) => (k === "running" || k === "queued" ? 0 : k === "approval" || k === "blocked" ? 1 : 2);
+    return items.sort((a, b) => urgent(a.kind) - urgent(b.kind) || String(b.at).localeCompare(String(a.at))).slice(0, 80);
   }
 
   /** Everything one teammate has done, across chats, plus its routines and direct messages. */
@@ -1915,7 +2179,7 @@ export class Hub {
     await this.tick();
   }
 
-  stop() { if (this.timer) clearInterval(this.timer); }
+  stop() { if (this.timer) clearInterval(this.timer); if (this.brainsTimer) clearTimeout(this.brainsTimer); }
 
   /** Resolves when no job or brain call is running (or after `ms`). Used for graceful shutdown. */
   async idle(ms = 30_000) {
@@ -2060,26 +2324,40 @@ export class Hub {
   }
 
   /** source.read: what a trigger module sees right now, for a teammate answering a question. */
-  async readSource(req: { source: string; config: unknown }) {
+  async readSource(req: { source: string; config: unknown }, by = "a teammate") {
     const src = sourceById(req.source);
     if (!src) return `## ${req.source}\nNo such source. Sources: ${SOURCES.map((s) => s.id).join(", ")}.`;
     const config = src.validate(req.config);
     if (typeof config === "string") return `## ${src.label}\n${config}`;
-    if (src.needs === "google" && !this.google.connected) return `## ${src.label}\nGoogle isn't connected. Tell the user to connect it in Menu → Connections.`;
+    const need = needOf(src, config);
+    if (!this.connections.connected(need)) return `## ${src.label}\n${src.label} isn't connected. Tell the user to connect it in Menu → Connectors.`;
     try {
-      const items = await src.items(config, { google: this.google, now: this.clock(), tz: (await this.prefs()).tz });
+      const items = await src.items(config, await this.sourceCtx());
+      this.connections.problem(need, null);
+      await this.audit("read", need, by, { ok: true, detail: `read ${src.label} (${items.length})` });
       return `## ${src.label}: ${src.describe(config)}\n<untrusted>\n${formatItems(items)}\n</untrusted>`;
-    } catch (e: any) { return `## ${src.label}\nCouldn't read it: ${e.message}`; }
+    } catch (e: any) {
+      if (e instanceof SignedOut) this.connections.problem(need, e.message);
+      await this.audit("read", need, by, { ok: false, detail: String(e.message).slice(0, 120) });
+      return `## ${src.label}\nCouldn't read it: ${e.message}`;
+    }
   }
 
   /** A source hook's check: items it hasn't seen before, or null. The first check only remembers what's there. */
   private async pollSource(h: Hook & { trigger: { type: "source" } }) {
     const t = h.trigger, src = sourceById(t.source);
     if (!src) { await this.log("hook.source", `${h.title}: unknown source ${t.source}`); return null; }
-    if (src.needs === "google" && !this.google.connected) { await this.log("hook.source", `${h.title}: Google isn't connected`); return null; }
+    const need = needOf(src, t.config);
+    if (!this.connections.connected(need)) { await this.log("hook.source", `${h.title}: ${src.label} isn't connected`); return null; }
     let items;
-    try { items = await src.items(t.config as never, { google: this.google, now: this.clock(), tz: (await this.prefs()).tz }); }
-    catch (e: any) { await this.log("hook.source", `${h.title}: ${String(e.message).slice(0, 200)}`); return null; }
+    const by = await this.actorName(h.teammateId, "Hearth");
+    try { items = await src.items(t.config as never, await this.sourceCtx()); this.connections.problem(need, null); await this.audit("read", need, by, { ok: true, detail: `${h.title} (${items.length})` }); }
+    catch (e: any) {
+      await this.log("hook.source", `${h.title}: ${String(e.message).slice(0, 200)}`);
+      await this.audit("read", need, by, { ok: false, detail: String(e.message).slice(0, 120) });
+      if (e instanceof SignedOut) await this.signedOut(need, e.message);
+      return null;
+    }
     const cur = (await this.store.get<Hook>("hooks", h.id)) || h;
     const known = new Set((cur.seen?.text || "").split("\n").filter(Boolean));
     const fresh = cur.seen ? items.filter((i) => !known.has(i.id)) : [];
@@ -2088,6 +2366,64 @@ export class Hub {
     await this.store.put<Hook>("hooks", { ...cur, seen: { hash: sha256(ids.join("\n")), text: ids.join("\n"), at: this.clock().toISOString() } });
     if (!cur.seen) { await this.log("hook.source", `${h.title}: first look saved (${items.length} already there)`); return null; }
     return fresh.length ? { count: fresh.length, text: `## ${fresh.length} new from ${src.label}\n<untrusted>\n${formatItems(fresh)}\n</untrusted>`, items: fresh } : null;
+  }
+
+  /** A site signed Hearth out: say so once (not on every check), until it's connected again. */
+  private async signedOut(id: string, message: string) {
+    const was = this.connections.problemFor(id);
+    this.connections.problem(id, message);
+    this.emit("connections");
+    // Just flag it (Connectors shows "needs reconnecting") and tell you once. No auto-pull: a teammate or you can
+    // run connection.refresh when you actually want a fresh login, so a transient blip doesn't churn the Mac.
+    if (was) return;
+    const msg = await this.addMessage({ role: "assistant", threadId: await this.updatesThread(), text: message });
+    await this.push?.send({ title: "Reconnect needed", body: message.slice(0, 180), tag: `signedout-${id}`, url: threadLink(msg.threadId!) });
+  }
+
+  /** Connectors' "Save and test": read one list now and say what came back. */
+  /**
+   * The agent's one tool to (re)load a logged-in site's cookies on demand, wherever the hub runs:
+   * a server hub asks the linked Mac; a laptop hub reads its own browser. Logged every time.
+   */
+  async refreshConnection(site: string, by = "a teammate"): Promise<{ ok: boolean; how: string }> {
+    const domain = this.connections.domainFor(site) || site;
+    if (this.computers?.canCopyCookies()) {
+      this.connections.wantFromMac(site);
+      this.computers.refreshCookies(domain);
+      this.emit("connections");
+      await this.log("connection.refresh", `${domain}: ${by} asked your Mac for a fresh login`);
+      await this.audit("refresh", domain, by, { ok: true, detail: "asked the Mac" });
+      return { ok: true, how: "mac" };
+    }
+    const opt = this.connections.browserOptions(site)[0];
+    if (opt) {
+      const r = this.importFromBrowser(site, opt.id);
+      await this.log("connection.refresh", `${domain}: ${by} ${r.value ? `read from ${opt.label}` : `couldn't read it (${r.error})`}`);
+      await this.audit("refresh", domain, by, { ok: !!r.value, detail: r.value ? `read from ${opt.label}` : r.error });
+      return { ok: !!r.value, how: "browser" };
+    }
+    await this.log("connection.refresh", `${domain}: no Mac online and no local browser to read`);
+    await this.audit("refresh", domain, by, { ok: false, detail: "no Mac or local browser" });
+    return { ok: false, how: "none" };
+  }
+
+  importFromBrowser(site: string, profileId: string) {
+    const r = this.connections.importFromBrowser(site, profileId);
+    if (r.value) this.emit("connections");
+    return r;
+  }
+
+  async testConnection(id: string) {
+    const src = sourceById(id)!;
+    try {
+      const items = await src.items(src.validate({}), await this.sourceCtx());
+      this.connections.problem(id, null);
+      this.emit("connections");
+      return { ok: true, count: items.length, sample: items.slice(0, 3).map((i) => i.title) };
+    } catch (e: any) {
+      if (e instanceof SignedOut) this.connections.problem(id, e.message);
+      return { ok: false, error: String(e.message) };
+    }
   }
 
   async fire(h: Hook, reason: string, late = false, extra?: string) {
@@ -2240,3 +2576,6 @@ const slugOf = (name: string) => String(name).toLowerCase().replace(/^#/, "").re
 /** A short channel name from a title: its first three words that carry meaning ("Lisbon trip and Portuguese" -> lisbon-trip-portuguese). */
 const FILLER = new Set(["a", "an", "the", "and", "or", "in", "on", "at", "to", "for", "of", "with", "before", "after", "from", "my", "your", "about", "this", "that"]);
 const nameFrom = (title: string) => title.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w && !FILLER.has(w)).slice(0, 3).join(" ");
+
+/** The key an "Always allow" is saved under: one chat on one app. */
+export const allowKey = (channel: string, to: string) => `${channel}:${to.trim().toLowerCase()}`;

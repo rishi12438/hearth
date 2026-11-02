@@ -5,4 +5,5 @@ data/
 !.env.example
 *.log
 .DS_Store
+mac/build/
 dist/

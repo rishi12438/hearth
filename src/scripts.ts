@@ -32,10 +32,16 @@ export function describeScript(code: string) {
   return (m?.[1] || "No description").trim().slice(0, 200);
 }
 
+/** Keys a script can ask for by name, and the env var it gets. */
+export const SCRIPT_KEYS: Record<string, string> = { serper: "SERPER_API_KEY" };
+
 export class Scripts {
   readonly repoDir: string;
   readonly ownDir: string;
   readonly workDir: string;
+
+  /** API keys a script may ask for with a `// needs: serper` header (the hub's vault). Only the named ones are passed. */
+  keys: (name: string) => string | null = () => null;
 
   constructor(private store: Store, dataDir: string, repoDir = resolve("scripts")) {
     this.repoDir = repoDir;
@@ -119,6 +125,14 @@ export class Scripts {
    * Runs an approved script. Scripts with external effects only run with `approvedRun` set, which the hub
    * sets only after you tap Approve on that specific run.
    */
+  /** `// needs: serper` -> SERPER_API_KEY, when the key is connected. Nothing else from the vault reaches a script. */
+  private neededKeys(code: string): Record<string, string> {
+    const out: Record<string, string> = {};
+    const m = /^\s*\/\/\s*needs:\s*([a-z, -]+)$/m.exec(code);
+    for (const n of (m?.[1] || "").split(/[ ,]+/).filter((x) => SCRIPT_KEYS[x])) { const v = this.keys(n); if (v) out[SCRIPT_KEYS[n]] = v; }
+    return out;
+  }
+
   async run(name: string, args: string[] = [], opts: { approvedRun?: boolean; timeoutMs?: number; last?: string } = {}): Promise<{ ok: boolean; output: string; needsApproval?: boolean }> {
     const timeoutMs = opts.timeoutMs ?? 60_000;
     const s = await this.byName(name);
@@ -137,7 +151,7 @@ export class Scripts {
     const proc = Bun.spawn([process.execPath, file, ...args.map(String)], {
       cwd: this.workDir,
       // HEARTH_LAST: what this script printed last time, for check hooks (so it can say only what's new).
-      env: { PATH: process.env.PATH || "/usr/bin:/bin", HOME: this.workDir, LANG: process.env.LANG || "en_US.UTF-8", TZ: process.env.TZ || "", ...(opts.last !== undefined ? { HEARTH_LAST: opts.last } : {}) },
+      env: { PATH: process.env.PATH || "/usr/bin:/bin", HOME: this.workDir, LANG: process.env.LANG || "en_US.UTF-8", TZ: process.env.TZ || "", ...(opts.last !== undefined ? { HEARTH_LAST: opts.last } : {}), ...this.neededKeys(code.toString()) },
       stdin: "ignore", stdout: "pipe", stderr: "pipe",
     });
     const timer = setTimeout(() => proc.kill(), timeoutMs);

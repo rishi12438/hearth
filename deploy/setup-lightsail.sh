@@ -2,17 +2,24 @@
 # Target "lightsail": one-shot server setup for Hearth on a fresh Ubuntu 24.04 box (AWS Lightsail or any VPS).
 #
 #   git clone https://github.com/<you>/hearth && cd hearth
-#   sudo bash deploy/setup.sh lightsail yournameassistant.com you@example.com
+#   sudo bash deploy/setup.sh lightsail yournameassistant.com [you@example.com]
 #
 # It installs Caddy (automatic HTTPS), a firewall, automatic security updates and fail2ban, locks SSH to keys,
 # installs the hub as a systemd service at https://<domain>, and prints the QR code for your primary phone.
 # Safe to run again: it keeps an existing .env and data.
 set -euo pipefail
 
-DOMAIN="${1:-}"; EMAIL="${2:-}"; SKIP_DNS=0
-for a in "$@"; do [ "$a" = "--skip-dns-check" ] && SKIP_DNS=1; done
-if [ -z "$DOMAIN" ] || [ -z "$EMAIL" ] || [[ "$DOMAIN" == --* ]]; then
-  echo "usage: sudo bash deploy/setup.sh lightsail <domain> <email> [--skip-dns-check]"; exit 1
+DOMAIN="${1:-}"; EMAIL="${2:-}"; SKIP_DNS=0; BRAINS=""; NO_PAIR=0
+for a in "$@"; do
+  case "$a" in
+    --skip-dns-check) SKIP_DNS=1 ;;
+    --brains=*) BRAINS="${a#--brains=}" ;;   # claude,codex: install these coding agents for the hub user
+    --no-pair) NO_PAIR=1 ;;                  # the Mac app shows the phone QR itself
+  esac
+done
+[[ "$EMAIL" == --* ]] && EMAIL=""   # the email is optional: Let's Encrypt only uses it for expiry notices
+if [ -z "$DOMAIN" ] || [[ "$DOMAIN" == --* ]]; then
+  echo "usage: sudo bash deploy/setup.sh lightsail <domain> [email] [--skip-dns-check]"; exit 1
 fi
 [ "$(id -u)" = 0 ] || { echo "Run with sudo."; exit 1; }
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
@@ -33,6 +40,16 @@ say "Installing Caddy, firewall, fail2ban and automatic security updates"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
 apt-get install -yq caddy ufw fail2ban unattended-upgrades git unzip curl rsync
+# Headless Chrome: teammates read (and, after your Approve, reply on) sites with no API (Instagram, LinkedIn, X) through it.
+if ! command -v google-chrome >/dev/null && ! command -v chromium >/dev/null; then
+  if [ "$(uname -m)" = "x86_64" ]; then
+    curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+    apt-get update -q && apt-get install -yq google-chrome-stable >/dev/null && echo "   Chrome $(google-chrome --version 2>/dev/null)"
+  else
+    echo "   No Chrome for $(uname -m) from Google; Instagram, LinkedIn and X need Chromium installed by hand."
+  fi
+fi
 printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' > /etc/apt/apt.conf.d/20auto-upgrades
 systemctl enable --now fail2ban
 
@@ -61,6 +78,19 @@ id hearth >/dev/null 2>&1 || adduser --disabled-password --gecos "" hearth >/dev
 [ -x /home/hearth/.bun/bin/bun ] || sudo -iu hearth bash -c 'curl -fsSL https://bun.sh/install | bash' >/dev/null
 mkdir -p /home/hearth/.claude /home/hearth/.codex && chown hearth: /home/hearth/.claude /home/hearth/.codex
 
+if [ -n "$BRAINS" ]; then
+  say "Brains: $BRAINS"
+  case ",$BRAINS," in *,claude,*)
+    [ -x /home/hearth/.local/bin/claude ] || sudo -iu hearth bash -c 'curl -fsSL https://claude.ai/install.sh | bash' >/dev/null
+    echo "   Claude Code $(sudo -iu hearth /home/hearth/.local/bin/claude --version 2>/dev/null | head -1)" ;;
+  esac
+  case ",$BRAINS," in *,codex,*)
+    command -v npm >/dev/null || apt-get install -yq nodejs npm >/dev/null
+    command -v codex >/dev/null || npm install -g @openai/codex >/dev/null 2>&1
+    echo "   Codex $(codex --version 2>/dev/null | head -1)" ;;
+  esac
+fi
+
 say "Master key for the hub's encrypted API keys"
 # API keys (E2B, Deepgram, your VMs' SSH keys) are encrypted in data/keys/vault.db with this key. It lives outside the
 # data folder, so a copy of the data alone can't be read. Made once; kept on every later run.
@@ -84,13 +114,18 @@ set_env HEARTH_HOST 127.0.0.1
 set_env HEARTH_DATA "$APP/data"
 set_env HEARTH_BEHIND_PROXY 1
 set_env HEARTH_PUBLIC_URL "https://$DOMAIN"
-set_env HEARTH_CONTACT "mailto:$EMAIL"
+# Push services want a contact for the sender: your email if you gave one, otherwise the hub's own address.
+if [ -n "$EMAIL" ]; then set_env HEARTH_CONTACT "mailto:$EMAIL"; else set_env HEARTH_CONTACT "https://$DOMAIN"; fi
 grep -q '^HEARTH_REQUIRE_PASSKEY=' "$ENV" || set_env HEARTH_REQUIRE_PASSKEY 0
 chown hearth: "$ENV" && chmod 600 "$ENV"
 sudo -u hearth mkdir -p "$APP/data" && chmod 700 "$APP/data"
 
 say "HTTPS for $DOMAIN (Caddy gets and renews the certificate)"
-sed -e "s/hub.example.com/$DOMAIN/" -e "s/you@example.com/$EMAIL/" "$APP/deploy/Caddyfile" > /etc/caddy/Caddyfile
+if [ -n "$EMAIL" ]; then
+  sed -e "s/hub.example.com/$DOMAIN/" -e "s/you@example.com/$EMAIL/" "$APP/deploy/Caddyfile" > /etc/caddy/Caddyfile
+else  # no email: drop the global block, Caddy gets the certificate without one
+  sed -e "s/hub.example.com/$DOMAIN/" -e '/^{$/,/^}$/d' "$APP/deploy/Caddyfile" > /etc/caddy/Caddyfile
+fi
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
 systemctl reload caddy || systemctl restart caddy
 
@@ -102,11 +137,13 @@ systemctl restart hearth
 sleep 3
 systemctl is-active --quiet hearth || { journalctl -u hearth -n 30 --no-pager; exit 1; }
 
-if ! sudo -iu hearth bash -c 'test -e ~/.claude/.credentials.json || test -e ~/.codex/auth.json'; then
+if ! sudo -iu hearth bash -c 'test -e ~/.claude/.credentials.json || test -e ~/.hearth/claude-token.json || test -e ~/.codex/auth.json'; then
   say "One manual step: log in the brain (once)"
   echo "   sudo -iu hearth claude      # or: sudo -iu hearth codex login"
   echo "   then: sudo systemctl restart hearth"
 fi
+
+[ "$NO_PAIR" = 1 ] && { say "Hub is up at https://$DOMAIN"; exit 0; }
 
 say "Set up your primary phone"
 sudo -iu hearth bash -c "cd $APP && ~/.bun/bin/bun run setup"

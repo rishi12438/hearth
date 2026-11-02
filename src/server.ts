@@ -10,10 +10,15 @@ import { availableHarnesses } from "./brain.ts";
 import { Computers, COPY_ITEMS, isCopyItem } from "./computers.ts";
 import { Machines, realE2b, realSsh, type E2b, type Ssh } from "./machines.ts";
 import { Vault } from "./vault.ts";
+import { Connect } from "./connectors/index.ts";
+import { adminToken, isAdminRequest } from "./admin.ts";
+import { detectBrains } from "./brains/logins.ts";
 import { hasLogin, readLogin } from "./computer.ts";
 import { homedir } from "node:os";
 import { MAX_FILE_BYTES } from "./files.ts";
 import { fetchPublic } from "./watch.ts";
+import { isCookieSite } from "./connections.ts";
+import { labelFor } from "./cookie-sites.ts";
 import { appCsp } from "./apps.ts";
 import { isActive, search } from "./memory.ts";
 import { isValidTimeZone } from "./time.ts";
@@ -51,7 +56,7 @@ export async function buildWeb() {
   }
   for (const f of readdirSync(WEB)) {
     const ext = extname(f);
-    if (!TYPES[ext]) continue;
+    if (!TYPES[ext] || f === "setup.html") continue; // the setup window is served by `hearth wizard`, never by a hub
     let body: Buffer | string = readFileSync(join(WEB, f));
     if (ext === ".html") body = body.toString().replaceAll("{{BUILD}}", build);
     assets.set(f === "index.html" ? "/" : `/${f}`, { body, type: TYPES[ext], immutable: false });
@@ -87,17 +92,28 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   const visitorLimiter = new RateLimiter(60, 60_000);
   // Computers linked to this hub (your Mac): brain calls run there when one is online, here (the cloud) when none is.
   const computers = new Computers({ dataDir: config.dataDir, homeDir: homedir(), acceptCopies: config.target === "lightsail", readLogin: drivers.readLogin ?? readLogin,
-    hasLogin: drivers.readLogin ? (i) => !!drivers.readLogin!(i) : hasLogin });
+    hasLogin: drivers.readLogin ? (i) => !!drivers.readLogin!(i) : hasLogin,
+    // Browser logins (LinkedIn, X) the user chose to feed from their Mac: the Mac decrypts and copies them up here.
+    cookieSites: () => hub.connections.macSites(),
+    cookieHave: (site) => hub.connections.cookieHave(site),
+    onCookies: (site, data) => { hub.connections.receiveFromMac(site, data); hub.emit("connections"); hub.audit("mac-copy", site, "your Mac", { ok: true }).catch(() => {}); } });
   const linkedComputers = async () => (await store.all<Device>("devices")).filter((d) => d.role === "computer");
   const recount = async () => { computers.known = (await linkedComputers()).length; };
   await recount();
   hub.brain.remote = computers;
+  hub.computers = computers;
   computers.onChange = () => hub.emit("computers", {});
   computers.onOnline = () => { hub.resumeForComputer().catch((e) => console.error(e)); };
   computers.start();
   // Cloud computers the hub sets up itself: an E2B sandbox or your VM. Each becomes a linked computer.
   const vault = drivers.vault ?? new Vault(config.dataDir);
   vault.migrate(config.dataDir);
+  hub.vault = vault;
+  // Every connector (the grid in Settings, the API, the `hearth` CLI) goes through this one object.
+  const connect = new Connect(hub, vault, voice);
+  void connect.start();
+  hub.connect = connect;
+  const admin = adminToken(config.dataDir);
   const machines = new Machines({
     dataDir: config.dataDir, vault,
     hubUrl: () => process.env.HEARTH_PUBLIC_URL || null,
@@ -273,19 +289,23 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
     }
 
     // ---- everything else needs a paired device ----
-    const device = await deviceForToken(store, req.headers.get("authorization"));
+    // The `hearth` CLI on this machine (you or an agent over SSH): acts as the owner, but only on a direct localhost call.
+    const cli = isAdminRequest(req, server.requestIP(req)?.address || "?", admin);
+    const device = cli
+      ? ({ id: "cli", name: "hearth CLI", tokenHash: "", lastSeenAt: new Date().toISOString(), createdAt: "1970-01-01T00:00:00.000Z", role: "owner" } as Device)
+      : await deviceForToken(store, req.headers.get("authorization"));
     if (!device) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not paired."); }
     // A linked computer's key opens its link and nothing else: it can't read chats or memory through the API.
     if (device.role === "computer") throw new HttpError(403, "This key only links a computer to the hub.");
     // Face ID lock: a device with a passkey (or every device, with HEARTH_REQUIRE_PASSKEY=1) needs a recent unlock.
     // A copied device token alone then gets nothing but this lock screen.
-    if ((device.passkey || config.requirePasskey) && !sessions.valid(req.headers.get("x-hearth-unlock"), device.id)) {
+    if (!cli && (device.passkey || config.requirePasskey) && !sessions.valid(req.headers.get("x-hearth-unlock"), device.id)) {
       const lockOk = seg[1] === "unlock" || (seg[1] === "passkey" && !device.passkey);
       if (!lockOk) return json({ error: "Locked.", locked: true, hasPasskey: !!device.passkey }, 423);
     }
-    const owner = await isOwner(store, device);
+    const owner = cli || (await isOwner(store, device));
     const ownerOnly = () => { if (!owner) throw new HttpError(403, "Only your primary device can do that."); };
-    if (Date.now() - new Date(device.lastSeenAt).getTime() > 5 * 60_000) await store.put<Device>("devices", { ...device, lastSeenAt: new Date().toISOString() });
+    if (!cli && Date.now() - new Date(device.lastSeenAt).getTime() > 5 * 60_000) await store.put<Device>("devices", { ...device, lastSeenAt: new Date().toISOString() });
     const id = seg[2];
 
     switch (seg[1]) {
@@ -343,7 +363,16 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           return json(r.value);
         }
         if (method === "DELETE" && id) return json({ ok: await hub.removeThread(id) });
+        if (method === "POST" && id && seg[3] === "project") { const r = await hub.fileThread(id, (await body(req)).projectId || null); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "PATCH" && id) { const r = await hub.renameThread(id, String((await body(req)).channel || "")); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        break;
+      }
+      case "projects": {
+        if (method === "GET" && !id) return json(await hub.listProjects());
+        if (method === "GET" && id) { const d = await hub.projectDetail(id); if (!d) break; return json(d); }
+        if (method === "POST" && !id) { const b = await body(req); const r = await hub.createProject(String(b.name || ""), b.emoji ? String(b.emoji) : undefined); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "PATCH" && id) { const r = await hub.updateProject(id, await body(req)); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "DELETE" && id) return json({ ok: await hub.removeProject(id) });
         break;
       }
       case "files": {
@@ -407,10 +436,17 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (method === "DELETE" && id) { const ok = await store.remove("workflows", id); hub.emit("skills"); return json({ ok }); }
         break;
       }
+      case "always-allow": {
+        // The chats teammates may message without asking. You can only remove from here; adding is "Always allow" on a card.
+        if (method === "GET") return json({ keys: await hub.alwaysAllowed() });
+        ownerOnly();
+        if (method === "DELETE") { const k = String(url.searchParams.get("key") || ""); await hub.setAlwaysAllowed((await hub.alwaysAllowed()).filter((x) => x !== k)); return json({ keys: await hub.alwaysAllowed() }); }
+        break;
+      }
       case "approvals": {
         if (method === "GET") return json((await store.all<Approval>("approvals")).filter((a) => !url.searchParams.get("thread") || a.threadId === url.searchParams.get("thread")));
         if (method === "POST" && (seg[3] === "approve" || seg[3] === "reject")) {
-          const r = await hub.decideApproval(id, seg[3] === "approve");
+          const r = await hub.decideApproval(id, seg[3] === "approve", (await body(req).catch(() => ({}))).always === true);
           if (r.error) throw new HttpError(409, r.error);
           return json(r.value);
         }
@@ -439,13 +475,65 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       }
       case "jobs": {
         if (method === "POST" && seg[3] === "reply") { const r = await hub.replyToJob(id, String((await body(req)).text || "")); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "POST" && seg[3] === "stop") { const r = await hub.stopJob(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "POST" && seg[3] === "retry") { const r = await hub.retryJob(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "POST" && seg[3] === "save-skill") { const r = await hub.saveJobAsSkill(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         break;
       }
       case "brains": {
-        if (method === "GET") return json({ current: await hub.brains(), available: availableHarnesses(config), hybrid: (await hub.prefs()).hybrid !== false });
+        // Which brains are installed and signed in here, which ones you picked, and each one's live plan usage.
+        if (method === "GET" && id === "detect") return json({ brains: detectBrains() });
+        if (method === "GET" && id === "usage") {
+          const pool = await hub.brainPool();
+          await Promise.all(pool.map((h) => hub.brain.usage.refresh(h, url.searchParams.get("fresh") === "1").catch(() => {})));
+          return json({ pool, usage: hub.brain.usage.view(pool) });
+        }
+        if (method === "PUT" && id === "pool") { ownerOnly(); const r = await hub.setBrainPool((await body(req)).pool); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        // A long-lived login copied up from your Mac: a Claude setup-token, or Codex's auth.json.
+        if (method === "PUT" && id === "login" && seg[3]) {
+          ownerOnly();
+          const r = connect.brainLogin(seg[3], await body(req));
+          if (r.error) throw new HttpError(400, r.error);
+          await hub.log("brains.login", `${seg[3] === "claude" ? "Claude" : "Codex"} login copied to the hub by ${device.name}`);
+          return json({ result: r.value, brains: detectBrains() });
+        }
+        if (method === "DELETE" && id === "login" && seg[3]) { ownerOnly(); const r = connect.brainLogout(seg[3]); if (r.error) throw new HttpError(400, r.error); return json({ brains: detectBrains() }); }
+        if (method === "GET") return json({ current: await hub.brains(), available: availableHarnesses(config), hybrid: (await hub.prefs()).hybrid !== false, pool: await hub.brainPool() });
         if (method === "PATCH") { const r = await hub.setBrains(await body(req)); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        break;
+      }
+      case "connectors": {
+        // The grid: every brain, key and account, and adding or removing one.
+        if (method === "GET" && !id) return json({ connectors: await connect.tiles() });
+        ownerOnly();
+        if (method === "POST" && id && seg[3] === "risk") { const r = await connect.acceptRisk(id, device.name); if (r.error) throw new HttpError(400, r.error); return json({ connectors: await connect.tiles() }); }
+        if (method === "PUT" && id) {
+          if (!voiceLimiter.allow(`connect:${id}`)) throw new HttpError(429, "Too many tries. Wait a few minutes.");
+          const r = await connect.add(id, await body(req), device.name);
+          if (r.error) throw new HttpError(400, r.error);
+          return json(r.value);
+        }
+        if (method === "DELETE" && id) { const r = await connect.remove(id, device.name); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        break;
+      }
+      case "whatsapp": {
+        // Status (and the QR code while linking), the ignore rules, and the chats to pick from.
+        if (method === "GET" && !id) return json(await connect.whatsappView());
+        ownerOnly();
+        if (method === "PUT" && id === "ignore") { const rules = await connect.setIgnore(await body(req)); hub.emit("connections"); return json({ rules }); }
+        if (method === "POST" && id === "ignore") {
+          const b = await body(req);
+          const kind = b.kind === "group" || b.kind === "keyword" ? b.kind : "contact";
+          try { const rules = await connect.whatsapp.editRule(kind, String(b.value || ""), b.remove === true); hub.emit("connections"); return json({ rules }); }
+          catch (e: any) { throw new HttpError(400, e.message); }
+        }
+        if (method === "GET" && id === "qr") {
+          // Only ever draws the code WhatsApp gave us right now, never arbitrary text.
+          const st = await connect.whatsapp.status();
+          if (!st.qr || url.searchParams.get("text") !== st.qr) throw new HttpError(404, "No QR code to show.");
+          return json({ dataUrl: await QRCode.toDataURL(st.qr, { margin: 1, width: 320 }) });
+        }
+        if (method === "GET" && id === "messages") return json({ messages: await connect.whatsapp.recent(Math.min(Number(url.searchParams.get("limit")) || 50, 200)) });
         break;
       }
       case "roster": return json(await hub.roster());
@@ -552,6 +640,31 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           return json({ url: r.value });
         }
         if (method === "DELETE" && !id) { ownerOnly(); const st = await hub.google.disconnect(); await hub.log("google.disconnected", "Google disconnected"); hub.emit("connections"); return json({ ...st, redirectUri }); }
+        break;
+      }
+      case "connections": {
+        if (method === "GET" && !id) return json({ connections: hub.connections.status() });
+        if (!isCookieSite(id)) break;
+        if (method === "GET" && seg[3] === "browsers") { ownerOnly(); return json(hub.connections.browserOptions(id)); }
+        if (method === "POST" && seg[3] === "import") {
+          ownerOnly();
+          const r = hub.importFromBrowser(id, String((await body(req)).profile || ""));
+          if (r.error) throw new HttpError(400, r.error);
+          await hub.log("connection.saved", `${labelFor(id)} imported from browser`);
+          await hub.audit("import", hub.connections.domainFor(id) || id, "you", { ok: true });
+          return json({ status: r.value, test: await hub.testConnection(id) });
+        }
+        if (method === "PUT" && !seg[3]) {
+          ownerOnly();
+          const r = hub.connections.saveCookies(id, String((await body(req)).cookies || ""));
+          if (r.error) throw new HttpError(400, r.error);
+          await hub.log("connection.saved", `${labelFor(id)} cookies saved`);
+          await hub.audit("paste", hub.connections.domainFor(id) || id, "you", { ok: true });
+          hub.emit("connections");
+          return json({ status: r.value, test: await hub.testConnection(id) });
+        }
+        if (method === "POST" && seg[3] === "test") { ownerOnly(); return json(await hub.testConnection(id)); }
+        if (method === "DELETE" && !seg[3]) { ownerOnly(); const st = hub.connections.remove(id); await hub.log("connection.removed", `${labelFor(id)} disconnected`); await hub.audit("remove", hub.connections.domainFor(id) || id, "you", { ok: true }); hub.emit("connections"); return json(st); }
         break;
       }
       case "trigger-recipes": {
@@ -791,6 +904,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         break;
       }
       case "activity": return json((await store.recent("activity", 200)).reverse());
+      case "conn-audit": { ownerOnly(); return json(await hub.connAudit()); }
       case "export": {
         const data = await hub.exportAll();
         return new Response(JSON.stringify(data, null, 2), { headers: { "Content-Type": "application/json", "Content-Disposition": `attachment; filename="hearth-export-${new Date().toISOString().slice(0, 10)}.json"`, "Cache-Control": "no-store" } });

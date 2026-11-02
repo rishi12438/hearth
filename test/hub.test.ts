@@ -439,3 +439,50 @@ test("Hearth names rambles from the plan and renames them when the topic changes
   await until(async () => !hub.thinking);
   expect((await store.get<any>("threads", t.id)).channel).toBe("honeymoon"); // yours sticks
 });
+
+test("projects: file rambles under one, its memory comes first in that ramble, and deleting it keeps the rambles", async () => {
+  const p = (await hub.createProject("Wedding", "💍")).value!;
+  expect(p.notebook).toBe("project-wedding");
+  expect((await hub.createProject("wedding")).error).toContain("already");
+  await store.put<Thread>("threads", { id: "t1", createdAt: now.toISOString(), updatedAt: now.toISOString(), title: "Photographers" } as Thread);
+  await store.put<Thread>("threads", { id: "t2", createdAt: now.toISOString(), updatedAt: now.toISOString(), title: "Groceries" } as Thread);
+  await hub.addFact({ fact: "The wedding is in Chennai in February 2027.", notebook: p.notebook, importance: 3 }, "assistant");
+  await hub.addFact({ fact: "Likes oat milk.", importance: 1 }, "assistant");
+  expect((await hub.fileThread("t1", p.id)).value?.projectId).toBe(p.id);
+  expect((await hub.fileThread("t1", "nope")).error).toBeTruthy();
+  const inProject: any = await hub.context("anything", "chat", null, "t1");
+  expect(inProject.project).toMatchObject({ name: "Wedding", notebook: "project-wedding" });
+  expect(inProject.memory[0].fact).toContain("Chennai");
+  const outside: any = await hub.context("anything", "chat", null, "t2");
+  expect(outside.project).toBeUndefined();
+  const d = (await hub.projectDetail(p.id))!;
+  expect(d.rambles.map((t: any) => t.id)).toEqual(["t1"]);
+  expect(d.memory.map((f) => f.fact)).toEqual(["The wedding is in Chennai in February 2027."]);
+  expect((await hub.listProjects())[0]).toMatchObject({ name: "Wedding", rambles: 1 });
+  expect(await hub.removeProject(p.id)).toBe(true);
+  expect((await store.get<Thread>("threads", "t1"))?.projectId).toBeUndefined();
+});
+
+test("Activity lists who's working right now, and Stop ends a running job without restarting it", async () => {
+  await hub.ensureTeammates();
+  let release = () => {};
+  (hub.brain as any).think = async (b: any) => {
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "Plan a trip to Goa", teammate: "Travel", effort: "light" }] });
+    await new Promise<void>((ok) => { release = ok; });
+    return "Here's the plan.";
+  };
+  await hub.ramble("plan goa");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "working"));
+  const [job] = await store.all<Job>("jobs");
+  const live = (await hub.inbox()).find((x: any) => x.id === job.id);
+  expect(live.kind).toBe("running");
+  expect((await hub.inbox())[0].kind).toBe("running"); // on top
+  expect((await hub.stopJob(job.id)).value).toBeTruthy();
+  release();
+  await until(async () => (await store.get<Job>("jobs", job.id))!.status === "failed");
+  await Bun.sleep(30);
+  const done = (await store.get<Job>("jobs", job.id))!;
+  expect(done.status).toBe("failed"); // not back in the queue
+  expect(done.result).toBe("Stopped by you.");
+  expect((await hub.stopJob(job.id)).error).toBeTruthy();
+});

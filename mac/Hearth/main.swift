@@ -1,0 +1,297 @@
+// Hearth for Mac: open the app and the setup appears. It's a window around Hearth's own pages:
+//
+//   first run      runs the bundled `hearth wizard` (Bun + Hearth's files inside the app) and shows it:
+//                  pick your brains, then this Mac or your server, then pair your phone.
+//   after setup    opens your hub (this Mac's at http://127.0.0.1:<port>, or your server's https://<domain>).
+//
+// Everything real happens in Hearth's TypeScript (src/setup/*); this file only starts it and shows it.
+
+import Cocoa
+import WebKit
+import UserNotifications
+import ServiceManagement
+
+let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Hearth")
+let resources = Bundle.main.resourceURL!
+let bun = resources.appendingPathComponent("bun").path
+let src = resources.appendingPathComponent("hearth-src").path
+let hubFile = appSupport.appendingPathComponent("app-hub.txt") // the hub this app opens after setup
+let wizardLog = appSupport.appendingPathComponent("wizard.log") // the setup process's output, for when it goes wrong
+
+/// The PATH your Terminal has, so Hearth finds Claude Code and Codex (apps start with a bare PATH).
+func loginPath() -> String {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
+    p.arguments = ["-lic", "printf %s \"$PATH\""]
+    let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
+    try? p.run(); p.waitUntilExit()
+    let found = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    let home = NSHomeDirectory()
+    let extra = ["\(home)/.local/bin", "\(home)/.bun/bin", "\(home)/.npm-global/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+    return (found.split(separator: ":").map(String.init) + extra).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }.joined(separator: ":")
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, UNUserNotificationCenterDelegate, NSWindowDelegate {
+    var window: NSWindow!
+    var web: WKWebView!
+    var wizard: Process?
+    var statusItem: NSStatusItem?
+    let path = loginPath()
+
+    func applicationDidFinishLaunching(_ note: Notification) {
+        try? FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        buildMenu()
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .default() // keeps this Mac paired with the hub between launches
+        config.applicationNameForUserAgent = "HearthMac" // lets Hearth's pages offer "Set up a new hub"
+        config.userContentController.add(self, name: "hearth") // the hub page tells the app: "ready", "notify"
+        web = WKWebView(frame: .zero, configuration: config)
+        web.navigationDelegate = self
+        web.uiDelegate = self
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 860), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window.title = "Hearth"
+        window.center()
+        window.setFrameAutosaveName("HearthMain")
+        window.contentView = web
+        window.delegate = self
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        UNUserNotificationCenter.current().delegate = self
+        buildStatusItem()
+        NSApp.activate(ignoringOtherApps: true)
+        if let hub = try? String(contentsOf: hubFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), let url = URL(string: hub), !hub.isEmpty {
+            web.load(URLRequest(url: url))
+        } else {
+            startWizard()
+        }
+    }
+
+    /// Run `hearth wizard` and open the address it prints.
+    @objc func startWizard() { startWizard(fresh: false) }
+
+    func startWizard(fresh: Bool) {
+        let old = wizard; wizard = nil; old?.terminate() // cleared first, so its exit isn't taken for a crash
+        showMessage("Starting setup…")
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: bun)
+        p.arguments = ["\(src)/src/cli.ts", "wizard", "--no-open"] + (fresh ? ["--fresh"] : [])
+        p.currentDirectoryURL = appSupport
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = path
+        env["HEARTH_APP"] = "1"
+        env["HEARTH_SRC"] = src
+        env["HEARTH_DATA"] = appSupport.appendingPathComponent("wizard").path
+        p.environment = env
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = out
+        // Keep reading its output for as long as it runs (a full pipe would freeze it), into a log for when things go wrong.
+        if !FileManager.default.fileExists(atPath: wizardLog.path) { FileManager.default.createFile(atPath: wizardLog.path, contents: nil) }
+        let log = try? FileHandle(forWritingTo: wizardLog); log?.seekToEndOfFile()
+        log?.write("\n[Hearth] setup started at \(Date())\n".data(using: .utf8)!)
+        var buffer = "", opened = false
+        out.fileHandleForReading.readabilityHandler = { [weak self] h in
+            let data = h.availableData
+            if data.isEmpty { h.readabilityHandler = nil; try? log?.close(); return }
+            log?.write(data)
+            guard !opened, let chunk = String(data: data, encoding: .utf8) else { return }
+            buffer += chunk
+            if let line = buffer.split(separator: "\n").first(where: { $0.hasPrefix("WIZARD ") }), let url = URL(string: String(line.dropFirst(7))) {
+                opened = true; buffer = ""
+                DispatchQueue.main.async { self?.web.load(URLRequest(url: url)) }
+            }
+        }
+        // If it stops on its own, start it again: your answers come back from the saved draft, and a server that was
+        // mid-setup carries on by itself and is picked back up when you press Set up.
+        p.terminationHandler = { [weak self] proc in
+            DispatchQueue.main.async {
+                guard let self, self.wizard === proc else { return }
+                self.wizard = nil
+                let note = "\n[Hearth] setup stopped (status \(proc.terminationStatus), reason \(proc.terminationReason == .uncaughtSignal ? "signal" : "exit")) at \(Date())\n"
+                if let h = try? FileHandle(forWritingTo: wizardLog) { h.seekToEndOfFile(); h.write(note.data(using: .utf8)!); try? h.close() }
+                self.showMessage("Setup stopped unexpectedly. Restarting it…")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { if self.wizard == nil { self.startWizard() } }
+            }
+        }
+        do { try p.run(); wizard = p } catch { showMessage("Couldn't start setup: \(error.localizedDescription)") }
+    }
+
+    func showMessage(_ text: String) {
+        let safe = text.replacingOccurrences(of: "<", with: "&lt;")
+        web.loadHTMLString("<body style=\"font:15px -apple-system;color:#8c8781;display:grid;place-items:center;height:90vh;background:#fbfaf8\">\(safe)</body>", baseURL: nil)
+    }
+
+    /// Leaving the wizard for a hub (the "Open Hearth" button): remember it, so the next launch opens it directly.
+    func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard let url = action.request.url else { return decisionHandler(.allow) }
+        // "Set up a new hub" (Settings → Hubs): run setup again. The hub you're on stays as it is.
+        if url.scheme == "hearth-app" { if url.host == "new-hub" { rerun() }; return decisionHandler(.cancel) }
+        let isWizard = url.host == "127.0.0.1" && url.query?.contains("k=") == true
+        if !isWizard, url.scheme == "http" || url.scheme == "https", let host = url.host, host != "", action.targetFrame?.isMainFrame == true {
+            let isHub = (host == "127.0.0.1" || host == "localhost") ? url.port != nil : true
+            // Links out of the hub (docs, Google Cloud, serper.dev…) open in your browser.
+            if let current = webView.url, current.host != host, !(current.host == "127.0.0.1" && current.query?.contains("k=") == true) {
+                NSWorkspace.shared.open(url); return decisionHandler(.cancel)
+            }
+            if isHub, var c = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+                c.fragment = nil; c.path = "/"; c.query = nil
+                if let base = c.string { try? base.write(to: hubFile, atomically: true, encoding: .utf8) }
+                let old = wizard; wizard = nil; old?.terminate()
+            }
+        }
+        decisionHandler(.allow)
+    }
+
+    /// <input type="file"> (the SSH key in setup): the usual Open panel. Picking a file this way is what lets the app
+    /// read it, so macOS doesn't ask for access to the folder it's in. Starts in ~/.ssh, hidden files shown.
+    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        panel.showsHiddenFiles = true
+        let ssh = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".ssh")
+        if FileManager.default.fileExists(atPath: ssh.path) { panel.directoryURL = ssh }
+        panel.beginSheetModal(for: window) { r in completionHandler(r == .OK ? panel.urls : nil) }
+    }
+
+    /// target=_blank links open in the browser.
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let url = action.request.url { NSWorkspace.shared.open(url) }
+        return nil
+    }
+
+    // ---------- notifications, the menu bar, open at login ----------
+
+    /// Messages from the hub page: "ready" once signed in (ask for notifications then), "notify" for each one.
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let m = message.body as? [String: Any], let type = m["type"] as? String else { return }
+        switch type {
+        case "ready": firstRunAsks()
+        case "notify":
+            let c = UNMutableNotificationContent()
+            c.title = (m["title"] as? String) ?? "Hearth"
+            c.body = (m["body"] as? String) ?? ""
+            c.sound = .default
+            c.userInfo = ["url": (m["url"] as? String) ?? "/"]
+            let tag = (m["tag"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? UUID().uuidString
+            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: tag, content: c, trigger: nil))
+        default: break
+        }
+    }
+
+    /// Once, after this Mac is signed in to a hub: notifications (macOS asks), then "open at login".
+    func firstRunAsks() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in
+            DispatchQueue.main.async { self.askOpenAtLogin() }
+        }
+    }
+
+    func askOpenAtLogin() {
+        let key = "askedOpenAtLogin"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        let a = NSAlert()
+        a.messageText = "Open Hearth when you log in?"
+        a.informativeText = "Hearth stays in the menu bar so your teammates' notifications reach you even with the window closed."
+        if Bundle.main.bundlePath.hasPrefix("/Volumes/") {
+            a.informativeText += "\n\nFirst drag Hearth from this disk into your Applications folder, then open it from there; otherwise it can't start at login."
+        }
+        a.addButton(withTitle: "Open at Login")
+        a.addButton(withTitle: "Not Now")
+        if a.runModal() == .alertFirstButtonReturn { setOpenAtLogin(true) }
+    }
+
+    func setOpenAtLogin(_ on: Bool) {
+        if #available(macOS 13.0, *) {
+            do { if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() } }
+            catch {
+                let a = NSAlert(); a.messageText = "Couldn't change Open at Login"
+                a.informativeText = Bundle.main.bundlePath.hasPrefix("/Volumes/") ? "Move Hearth to your Applications folder and try again." : error.localizedDescription
+                a.runModal()
+            }
+        }
+        buildStatusItem()
+    }
+
+    var opensAtLogin: Bool {
+        if #available(macOS 13.0, *) { return SMAppService.mainApp.status == .enabled }
+        return false
+    }
+
+    @objc func toggleOpenAtLogin() { setOpenAtLogin(!opensAtLogin) }
+
+    /// Tapping a notification: bring the window back and open what it's about.
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler done: @escaping () -> Void) {
+        showWindow()
+        if let path = response.notification.request.content.userInfo["url"] as? String, let base = web.url, let url = URL(string: path, relativeTo: base) {
+            web.load(URLRequest(url: url))
+        }
+        done()
+    }
+    /// Show it even while Hearth is in front.
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent n: UNNotification, withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void) {
+        done([.banner, .sound])
+    }
+
+    /// The menu bar icon: Hearth keeps running there when the window is closed.
+    func buildStatusItem() {
+        if statusItem == nil {
+            statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+            statusItem?.button?.image = NSImage(systemSymbolName: "flame", accessibilityDescription: "Hearth")
+        }
+        let m = NSMenu()
+        m.addItem(withTitle: "Open Hearth", action: #selector(showWindow), keyEquivalent: "")
+        let login = NSMenuItem(title: "Open at Login", action: #selector(toggleOpenAtLogin), keyEquivalent: "")
+        login.state = opensAtLogin ? .on : .off
+        m.addItem(login)
+        m.addItem(.separator())
+        m.addItem(withTitle: "Quit Hearth", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
+        statusItem?.menu = m
+    }
+
+    @objc func showWindow() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+
+    /// Closing the window hides it; Hearth stays in the menu bar so notifications keep coming. Quit from the menu.
+    func windowShouldClose(_ sender: NSWindow) -> Bool { sender.orderOut(nil); return false }
+    func applicationShouldHandleReopen(_ app: NSApplication, hasVisibleWindows: Bool) -> Bool { showWindow(); return true }
+
+    /// If the page's process dies (memory pressure, a crash), reload instead of leaving a blank window.
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { webView.reload() }
+
+    func buildMenu() {
+        let main = NSMenu()
+        let appItem = NSMenuItem(); main.addItem(appItem)
+        let app = NSMenu()
+        app.addItem(withTitle: "Run setup again…", action: #selector(rerun), keyEquivalent: "")
+        app.addItem(withTitle: "Open at Login", action: #selector(toggleOpenAtLogin), keyEquivalent: "")
+        app.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        app.addItem(.separator())
+        app.addItem(withTitle: "Quit Hearth", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = app
+        let editItem = NSMenuItem(); main.addItem(editItem)
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = edit
+        let viewItem = NSMenuItem(); main.addItem(viewItem)
+        let view = NSMenu(title: "View")
+        view.addItem(withTitle: "Reload", action: #selector(reload), keyEquivalent: "r")
+        viewItem.submenu = view
+        NSApp.mainMenu = main
+    }
+
+    @objc func reload() { web.reload() }
+    @objc func rerun() { try? FileManager.default.removeItem(at: hubFile); startWizard(fresh: true) }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { false }
+    func applicationWillTerminate(_ note: Notification) { let old = wizard; wizard = nil; old?.terminate() }
+}
+
+let app = NSApplication.shared
+let delegate = AppDelegate()
+app.delegate = delegate
+app.setActivationPolicy(.regular)
+app.run()

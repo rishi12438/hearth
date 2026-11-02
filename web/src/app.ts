@@ -1,4 +1,5 @@
 import { h, clear, icon, richText, relTime, shortAgo, clockTime, dayLabel, greeting, toast } from "./dom.ts";
+import { initConnectors, loadTiles, grid as connectorGrid, rows as connectorRows } from "./connectors.ts";
 import { activeHub, call, hubs, pair, removeHub, setActive, stream, normalizeUrl, ApiError, authHeaders, passkeysWork, registerPasskey, passkeyProof, unlock, requestAccess, waitForApproval, type HubRef } from "./api.ts";
 
 declare const __BUILD__: string;
@@ -11,6 +12,9 @@ declare const __BUILD__: string;
 // - Everything else (plans, memory, skills, brains, settings) is behind the menu.
 
 const S = {
+  projects: [] as any[],
+  /** A ramble started from a project's page is filed under it once it exists. */
+  newProject: null as string | null,
   state: null as any,
   roster: [] as any[],
   threads: [] as any[],
@@ -41,7 +45,7 @@ const S = {
 
 let live: ReturnType<typeof stream> | null = null;
 const app = document.getElementById("app")!;
-type Route = { view: "home" } | { view: "dms" } | { view: "activity" } | { view: "board"; id?: string } | { view: "chat"; id: string; job?: string } | { view: "dm"; id: string } | { view: "app"; id: string };
+type Route = { view: "home" } | { view: "dms" } | { view: "activity" } | { view: "board"; id?: string } | { view: "chat"; id: string; job?: string } | { view: "dm"; id: string } | { view: "app"; id: string } | { view: "project"; id: string };
 const route = (): Route => {
   if (location.hash === "#dms") return { view: "dms" };
   if (location.hash === "#activity") return { view: "activity" };
@@ -51,6 +55,8 @@ const route = (): Route => {
   if (m) return { view: "app", id: m[1] };
   m = location.hash.match(/^#b(?:\/([\w-]+))?$/);
   if (m) return { view: "board", id: m[1] };
+  m = location.hash.match(/^#p\/([\w-]+)/);
+  if (m) return { view: "project", id: m[1] };
   m = location.hash.match(/^#t\/([\w-]+)/);
   return m ? { view: "dm", id: m[1] } : { view: "home" };
 };
@@ -60,28 +66,40 @@ const wide = () => matchMedia("(min-width: 980px)").matches;
 
 async function boot() {
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
-  const pairCode = new URLSearchParams(location.hash.slice(1)).get("pair");
-  if (!activeHub() || pairCode) return renderPairing(pairCode || "");
+  const hp = new URLSearchParams(location.hash.slice(1));
+  const pairCode = hp.get("pair");
+  // Straight from setup on this computer (#pair=CODE&auto=1&name=…): pair without the form, then show Devices, where
+  // the phone gets added. Whoever pairs first with the setup code is the primary device, so that's this computer.
+  if (pairCode && hp.get("auto") === "1") {
+    try { await pair(location.origin, pairCode, hp.get("name") || "This computer"); history.replaceState(null, "", "#welcome"); }
+    catch { return renderPairing(pairCode); }
+  } else if (!activeHub() || pairCode) return renderPairing(pairCode || "");
   if (/^#(chat\/|hearth)/.test(location.hash)) history.replaceState(null, "", "#"); // old links
   // Face ID lock: nothing loads until this device unlocks (or sets up Face ID, if the hub requires it).
   try { await call("/api/state"); } catch (e) { if (e instanceof ApiError && e.status === 423) return renderLock(!!e.data?.hasPasskey); }
   const wantsAccess = location.hash === "#access";
-  if (wantsAccess) history.replaceState(null, "", "#");
+  const welcome = location.hash === "#welcome";
+  if (wantsAccess || welcome) history.replaceState(null, "", "#");
   // Back from Google's sign-in: #connections=google, or #connections=error:<why>.
   const backFromGoogle = location.hash.startsWith("#connections=") ? decodeURIComponent(location.hash.slice(13)) : null;
   if (backFromGoogle) history.replaceState(null, "", "#");
-  await Promise.all([refreshState(), loadTeammates(), loadSkills(), loadFiles(), loadApps(), loadIdeas()]);
+  await Promise.all([refreshState(), loadTeammates(), loadSkills(), loadFiles(), loadApps(), loadIdeas(), loadProjects()]);
+  (window as any).webkit?.messageHandlers?.hearth?.postMessage({ type: "ready" });
   show();
   connect();
   if (localStorage.getItem("hearth.autoLocation") === "1") shareLocation(true);
   window.addEventListener("hashchange", show);
+  // Crossing the desktop width (resizing the window, full screen) swaps sidebar ⇄ tab bar.
+  matchMedia("(min-width: 980px)").addEventListener("change", () => { lastLayout = ""; show(); });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) { checkForUpdate(); refresh(); live?.restart(); } });
   document.addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openJump(); } });
   setInterval(checkForUpdate, 5 * 60_000);
   setInterval(() => { if (route().view === "home") drawHome(); }, 30_000);
   if (backFromGoogle) { openConnections(backFromGoogle === "google" ? "connected" : "available"); toast(backFromGoogle === "google" ? "Google connected" : `Google: ${backFromGoogle.replace(/^error:/, "")}`, backFromGoogle === "google" ? undefined : "err"); }
+  else if (welcome) openWelcome();
   else if (wantsAccess || S.state?.pendingAccess) openDevices();
-  else if (S.state?.device.primary && !S.state.device.passkey && passkeysWork() && !localStorage.getItem("hearth.faceIdAsked")) {
+  // Not in the Mac app: it can't use Face ID (or Touch ID) for the hub, so there's nothing to offer there.
+  else if (S.state?.device.primary && !S.state.device.passkey && passkeysWork() && !/HearthMac/.test(navigator.userAgent) && !localStorage.getItem("hearth.faceIdAsked")) {
     localStorage.setItem("hearth.faceIdAsked", "1");
     openSheet("Lock with Face ID?", [
       h("p", { class: "muted" }, "This is your primary device. With Face ID on, a copied key alone can't open your hub, and letting a new device in needs your face."),
@@ -113,7 +131,7 @@ function show() {
   closeSheet();
   const r = route();
   // Re-render the skeleton only when the layout changes (opening a thread beside the chat keeps the chat in place).
-  const layout = r.view === "chat" ? `chat:${r.id}:${r.job && !wide() ? "thread" : wide() && r.job ? "split" : "chat"}` : r.view === "dm" ? `dm:${r.id}` : r.view === "board" ? `board:${r.id || ""}` : r.view;
+  const layout = r.view === "chat" ? `chat:${r.id}:${r.job && !wide() ? "thread" : wide() && r.job ? "split" : "chat"}` : r.view === "dm" ? `dm:${r.id}` : r.view === "board" ? `board:${r.id || ""}` : r.view === "project" ? `project:${r.id}` : r.view;
   if (layout !== lastLayout) {
     lastLayout = layout;
     if (r.view === "home") renderHome();
@@ -122,6 +140,7 @@ function show() {
     else if (r.view === "dm") renderDm();
     else if (r.view === "app") renderApp(r.id);
     else if (r.view === "board") renderBoard(r.id);
+    else if (r.view === "project") renderProject(r.id!);
     else renderChatLayout(r);
   } else if (r.view === "chat") drawChat();
   refresh();
@@ -139,7 +158,7 @@ function refresh() {
 
 function connect() {
   live?.stop();
-  live = stream(onEvent, (s) => { S.conn = s; drawHeader(); });
+  live = stream(onEvent, (s) => { S.conn = s; drawHeader(); drawSide(); });
 }
 
 let rosterTimer: ReturnType<typeof setTimeout> | null = null;
@@ -156,6 +175,14 @@ function onEvent(e: { type: string; data?: any }) {
   const open = r.view === "chat" ? r.id : null;
   switch (e.type) {
     case "hello": if (e.data?.build && e.data.build !== __BUILD__) markUpdate(); return;
+    case "projects": loadProjects(); if (r.view === "project") drawProject(r.id!); return;
+    case "notify": {
+      // In the Mac app: show it as a native notification (phones get the same thing as a push).
+      const mac = (window as any).webkit?.messageHandlers?.hearth;
+      const only: string[] | null = e.data?.only ?? null;
+      if (mac && (!only || only.includes(S.state?.device?.id))) mac.postMessage({ type: "notify", title: e.data.title, body: e.data.body, tag: e.data.tag || "", url: e.data.url || "/" });
+      return;
+    }
     case "unpaired": toast("This device was signed out of the hub.", "err"); removeHub(activeHub()!.id); location.reload(); return;
     case "locked": location.reload(); return;
     case "access": if (S.state?.device.primary && e.data?.pending) { toast("A new device wants in. Settings → Devices"); refreshState(); } return;
@@ -391,11 +418,11 @@ function openFiles() {
 }
 
 async function loadRoster() {
-  try { S.roster = await call("/api/roster"); const v = route().view; if (v === "home") drawHome(); else if (v === "dms") drawDms(); drawHeader(); } catch (e) { handleError(e); }
+  try { S.roster = await call("/api/roster"); const v = route().view; if (v === "home") drawHome(); else if (v === "dms") drawDms(); drawHeader(); drawSide(); } catch (e) { handleError(e); }
 }
 
 async function loadThreads() {
-  try { S.threads = await call("/api/threads"); if (route().view === "home") drawHome(); } catch (e) { handleError(e); }
+  try { S.threads = await call("/api/threads"); if (route().view === "home") drawHome(); drawSide(); } catch (e) { handleError(e); }
 }
 
 // ---------------- chrome: floating glass header, tab bar, search (Slack mobile) ----------------
@@ -412,7 +439,10 @@ function frame(opts: { header: Node; body: Node; composer?: boolean; fab?: boole
         h("button", { class: `tab ${tab === id ? "on" : ""}`, on: { click: () => { location.hash = hash; } } },
           h("span", { class: "tabicon" }, icon(ic, 24), id === "activity" && needsYouCount() ? h("i", { class: "dot" }) : null), h("span", null, label)))),
     h("button", { class: "searchbtn glass", "aria-label": "Search (⌘K)", on: { click: openJump } }, icon("search", 24)));
+  // Wide windows (the Mac app, a desktop browser): a sidebar beside the screen instead of the phone's tab bar.
+  app.classList.toggle("desk", wide());
   clear(app,
+    wide() ? h("aside", { class: "side", id: "side" }) : null,
     h("div", { class: `screen ${opts.purple ? "purple" : ""}` },
       h("main", { class: "scroll", id: "scroll" }, opts.body),
       h("header", { class: "chrome-top", id: "top" }, opts.header),
@@ -421,6 +451,127 @@ function frame(opts: { header: Node; body: Node; composer?: boolean; fab?: boole
         opts.composer ? h("div", { class: "composer-wrap", id: "composerwrap" }) : null,
         tabs)));
   if (opts.composer) renderComposer();
+  drawSide();
+}
+
+/** The desktop sidebar: where you are, your projects and rambles, your teammates, and the rest. One place for each thing. */
+function drawSide() {
+  const el = document.getElementById("side");
+  if (!el) return;
+  const r = route(), tab = tabOf(r);
+  const nav = (ic: string, label: string, on: boolean, go: () => void, badge?: number) =>
+    h("button", { class: `snav ${on ? "on" : ""}`, on: { click: go } }, icon(ic, 18), h("span", { class: "grow" }, label), badge ? h("em", null, String(badge)) : null);
+  const ramble = (t: any, nested = false) => h("button", { class: `snav ${nested ? "nested" : ""} ${r.view === "chat" && r.id === t.id ? "on" : ""}`, on: { click: () => { location.hash = `#c/${t.id}`; } } },
+    h("span", { class: "shash" }, "#"), h("span", { class: "grow" }, channelName(t)));
+  const team = [...(S.roster.length ? S.roster : S.teammates)].sort((a, b) => (b.at || "").localeCompare(a.at || ""));
+  const live = S.threads.filter((t: any) => !t.archived);
+  const loose = live.filter((t: any) => !t.projectId).slice(0, 12);
+  const openProject = r.view === "project" ? r.id : r.view === "chat" ? S.threads.find((t: any) => t.id === r.id)?.projectId : null;
+  const host = (activeHub()?.url || location.origin).replace(/^https?:\/\//, "");
+  clear(el,
+    h("button", { class: "sbrand", on: { click: openHubs } },
+      h("span", { class: "grow" }, h("b", null, S.state?.hub?.name || "Hearth"), h("small", null, host)), h("i", { class: `status ${S.conn}` })),
+    h("button", { class: "ssearch", on: { click: openJump } }, icon("search", 16), h("span", { class: "grow" }, "Search"), h("kbd", null, "⌘K")),
+    h("nav", { class: "sgroup" },
+      nav("home", "Home", r.view === "home", () => { location.hash = ""; }),
+      nav("dms", "DMs", tab === "dms", () => { location.hash = "#dms"; }),
+      nav("bell", "Activity", tab === "activity", () => { location.hash = "#activity"; }, needsYouCount()),
+      nav("sparkle", "Ideas", false, lookForIdeas),
+      nav("plug", "Connectors", false, () => openConnections())),
+    h("div", { class: "slabel" }, "Projects", h("button", { class: "sadd", "aria-label": "New project", on: { click: newProject } }, icon("plus", 14))),
+    h("nav", { class: "sgroup" }, S.projects.length ? S.projects.map((p: any) => [
+      h("button", { class: `snav ${r.view === "project" && r.id === p.id ? "on" : ""}`, on: { click: () => { location.hash = `#p/${p.id}`; } } },
+        p.emoji ? h("span", { class: "semoji" }, p.emoji) : icon("folder", 18), h("span", { class: "grow" }, p.name), p.rambles ? h("small", { class: "scount" }, String(p.rambles)) : null),
+      openProject === p.id ? live.filter((t: any) => t.projectId === p.id).map((t: any) => ramble(t, true)) : null,
+    ]) : h("p", { class: "snone" }, "Group rambles, files and memory, like Wedding or Move to SF.")),
+    h("div", { class: "slabel" }, "Rambles", h("button", { class: "sadd", "aria-label": "New ramble", on: { click: () => { S.newProject = null; location.hash = "#c/new"; } } }, icon("plus", 14))),
+    h("nav", { class: "sgroup" }, loose.length ? loose.map((t: any) => ramble(t)) : h("p", { class: "snone" }, "Tap + to start one.")),
+    team.length ? [h("div", { class: "slabel" }, "Teammates"), h("nav", { class: "sgroup" }, team.map((t: any) =>
+      h("button", { class: `snav mate ${r.view === "dm" && r.id === t.id ? "on" : ""}`, on: { click: () => { location.hash = `#t/${t.id}`; } } },
+        face(t, 22, t.state || "idle"), h("span", { class: "grow" }, t.name), t.needsYou ? h("em", null, String(t.needsYou)) : null)))] : null,
+    h("div", { class: "slabel" }, "Your hub"),
+    h("nav", { class: "sgroup" },
+      nav("brain", "Memory", false, openMemory),
+      nav("users", "People", false, openPeople),
+      nav("sparkle", "Skills", false, openSkills),
+      nav("code", "Scripts", false, openScripts, S.state?.pendingScripts || 0)),
+    h("div", { class: "sfoot" },
+      nav("settings", "Settings", false, openSettings)),
+  );
+}
+
+// ---------------- projects ----------------
+
+async function loadProjects() {
+  try { S.projects = await call("/api/projects"); drawSide(); } catch (e) { handleError(e); }
+}
+
+function newProject() {
+  const name = h("input", { class: "field", placeholder: "Wedding, Move to SF, Taxes 2026…", maxLength: 60 }) as HTMLInputElement;
+  const emoji = h("input", { class: "field", placeholder: "💍 (optional)", maxLength: 4, style: "width:120px" }) as HTMLInputElement;
+  const err = h("p", { class: "error" });
+  openSheet("New project", [
+    h("p", { class: "wlede" }, "A project holds rambles, their files and its own memory. Teammates working in its rambles remember what was learned in the others."),
+    h("label", null, h("span", null, "Name"), name), h("label", null, h("span", null, "Emoji"), emoji), err,
+    h("button", { class: "btn primary big", on: { click: async () => {
+      try { const p = await call("/api/projects", { body: { name: name.value, emoji: emoji.value.trim() } }); closeSheet(); await loadProjects(); location.hash = `#p/${p.id}`; }
+      catch (e: any) { err.textContent = e.message; }
+    } } }, "Create project"),
+  ]);
+  setTimeout(() => name.focus(), 50);
+}
+
+function renderProject(id: string) {
+  frame({ header: h("div"), body: h("div", { id: "project", class: "pproj" }) });
+  drawProject(id);
+}
+
+async function drawProject(id: string) {
+  const el = document.getElementById("project");
+  if (!el) return;
+  let d: any;
+  try { d = await call(`/api/projects/${id}`); } catch (e) { if (e instanceof ApiError && e.status === 404) { location.hash = ""; return; } return handleError(e); }
+  const p = d.project;
+  const start = () => { S.newProject = p.id; location.hash = "#c/new"; };
+  const sec = (title: string, extra: Node | null, body: Node) => h("section", { class: "psec" }, h("div", { class: "psec-head" }, h("h3", null, title), extra), body);
+  clear(el,
+    h("div", { class: "phead" },
+      h("span", { class: "pemoji" }, p.emoji || icon("folder", 26)),
+      h("span", { class: "grow" }, h("h1", null, p.name), h("small", null, `${d.rambles.length} ramble${d.rambles.length === 1 ? "" : "s"} · ${d.memory.length} thing${d.memory.length === 1 ? "" : "s"} remembered`)),
+      h("button", { class: "sbtn", on: { click: () => projectMenu(p) } }, "Edit"),
+      h("button", { class: "sbtn primary", on: { click: start } }, icon("plus", 14), "New ramble")),
+    sec("Rambles", null, d.rambles.length ? h("div", { class: "wcard" }, d.rambles.map((t: any) =>
+      h("button", { class: "wrow", on: { click: () => { location.hash = `#c/${t.id}`; } } }, h("span", { class: "shash big" }, "#"),
+        h("span", { class: "grow" }, h("b", null, channelName(t)), h("small", null, `${t.title || ""}${t.archived ? " · archived" : ""}`)))))
+      : h("p", { class: "wlede" }, "No rambles yet. Start one here, or open any ramble and choose Move to project.")),
+    sec("Memory", null, d.memory.length ? h("div", { class: "wcard" }, d.memory.map((f: any) =>
+      h("div", { class: "wrow" }, h("span", { class: "grow" }, h("b", { class: "plain" }, f.fact), h("small", null, dayLabel(f.createdAt))))))
+      : h("p", { class: "wlede" }, "What teammates learn while working in this project's rambles shows up here, and they use it in every ramble in it.")),
+    d.files.length ? sec("Files", null, h("div", { class: "wcard" }, d.files.map((f: any) =>
+      h("button", { class: "wrow", on: { click: () => downloadFile(f) } }, icon("clip", 18), h("span", { class: "grow" }, h("b", null, f.name), h("small", null, dayLabel(f.createdAt))))))) : null,
+  );
+}
+
+function projectMenu(p: any) {
+  const name = h("input", { class: "field", value: p.name, maxLength: 60 }) as HTMLInputElement;
+  const emoji = h("input", { class: "field", value: p.emoji || "", maxLength: 4, style: "width:120px" }) as HTMLInputElement;
+  openSheet(p.name, [
+    h("label", null, h("span", null, "Name"), name), h("label", null, h("span", null, "Emoji"), emoji),
+    h("button", { class: "btn primary big", on: { click: async () => { try { await call(`/api/projects/${p.id}`, { method: "PATCH", body: { name: name.value, emoji: emoji.value.trim() } }); closeSheet(); } catch (e) { handleError(e); } } } }, "Save"),
+    h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet(`Delete ${p.name}?`, "Its rambles and what it remembered stay; they're just not grouped anymore.", "Delete", async () => { await call(`/api/projects/${p.id}`, { method: "DELETE" }); location.hash = ""; }) } }, icon("trash", 16), "Delete project"),
+  ]);
+}
+
+/** File this ramble under a project (or take it out). */
+function moveToProject(t: any) {
+  const pick = async (projectId: string | null) => { try { await call(`/api/threads/${t.id}/project`, { body: { projectId } }); closeSheet(); loadThreads(); toast(projectId ? "Moved" : "Taken out of the project"); } catch (e) { handleError(e); } };
+  openSheet("Move to project", [
+    h("div", { class: "wcard" },
+      S.projects.map((p: any) => h("button", { class: "wrow", on: { click: () => pick(p.id) } }, p.emoji ? h("span", { class: "semoji" }, p.emoji) : icon("folder", 18),
+        h("span", { class: "grow" }, h("b", null, p.name)), t.projectId === p.id ? icon("check", 16) : null)),
+      h("button", { class: "wrow", on: { click: () => { closeSheet(); newProject(); } } }, icon("plus", 18), h("span", { class: "grow" }, h("b", null, "New project…")))),
+    t.projectId ? h("button", { class: "btn ghost", on: { click: () => pick(null) } }, "Take it out of the project") : null,
+  ]);
 }
 
 function needsYouCount() {
@@ -436,6 +587,8 @@ function drawHeader() {
   const r = route();
   const top = document.getElementById("top");
   if (!top) return;
+  // A project's page has its own title; just a way back on phones.
+  if (r.view === "project") { clear(top, wide() ? h("div") : h("div", { class: "toprow" }, h("button", { class: "circle glass", "aria-label": "Back", on: { click: () => { location.hash = ""; } } }, icon("back", 22)))); return; }
   if (r.view === "home" || r.view === "dms" || r.view === "activity") {
     const left = h("button", { class: "circle glass", "aria-label": "Menu", on: { click: openMenu } }, icon("filter", 22), (S.state?.pendingScripts || 0) ? h("i", { class: "dot" }) : null);
     const right = h("div", { class: "pillgroup glass" },
@@ -726,19 +879,39 @@ function drawActivity() {
   if (!el) return;
   const items = S.inbox || [];
   const chan = (id?: string) => { const t = S.threads.find((x) => x.id === id); return t ? `#${channelName(t)}` : id?.startsWith("tm-") ? "DM" : ""; };
-  if (!items.length) return clear(el, h("p", { class: "hempty" }, "Nothing yet. Approvals, results and check-ins show up here."));
-  clear(el, items.map((it: any) => {
+  if (!items.length) return clear(el, h("p", { class: "hempty" }, "Nothing yet. Teammates at work, approvals and results show up here."));
+  const go = (it: any) => () => { location.hash = it.jobId && it.threadId && !it.threadId.startsWith("tm-") ? `#c/${it.threadId}/${it.jobId}` : it.threadId?.startsWith("tm-") ? `#t/${it.threadId.slice(3)}` : it.threadId ? `#c/${it.threadId}` : ""; };
+  const stopBtn = (it: any) => h("button", { class: "sbtn", on: { click: () => confirmSheet("Stop this?", `${mate(it.teammateId).name} stops where it is. Nothing it already sent is undone.`, "Stop", async () => { await call(`/api/jobs/${it.id}/stop`, { body: {} }); toast("Stopped"); renderActivity(); }) } }, "Stop");
+  const runRow = (it: any) => {
     const t = mate(it.teammateId);
-    const go = () => { location.hash = it.jobId && it.threadId && !it.threadId.startsWith("tm-") ? `#c/${it.threadId}/${it.jobId}` : it.threadId?.startsWith("tm-") ? `#t/${it.threadId.slice(3)}` : it.threadId ? `#c/${it.threadId}` : ""; };
+    const on = it.kind === "running";
+    return h("div", { class: "actrow" },
+      h("button", { class: "actmain", on: { click: go(it) } }, face(t, 40, on ? "working" : "thinking"),
+        h("span", { class: "grow" },
+          h("span", { class: "l1" }, h("b", null, it.summary), h("small", null, [t.name, chan(it.threadId)].filter(Boolean).join(" · ")),
+            on && it.startedAt ? h("time", { "data-since": it.startedAt }, elapsed(it.startedAt)) : h("time", null, "Up next")),
+          h("span", { class: "l2 live" }, on ? h("i", { class: "spin" }) : null, h("span", { "data-progress": it.id }, on ? S.progress.get(it.id) || "On it" : "Waiting its turn")))),
+      h("div", { class: "actbtns" }, stopBtn(it)));
+  };
+  const row = (it: any) => {
+    const t = mate(it.teammateId);
     const line = it.kind === "approval" ? `${t.name} needs your OK` : it.kind === "blocked" ? `${t.name} is stuck` : it.kind === "proactive" ? `${t.name} · ${it.title}` : it.kind === "failed" ? `${t.name} couldn't finish` : `${t.name} replied`;
     return h("div", { class: `actrow ${it.kind === "approval" || it.kind === "blocked" ? "hot" : ""}` },
-      h("button", { class: "actmain", on: { click: go } }, face(t, 40, it.kind === "approval" ? "waiting" : it.kind === "blocked" ? "blocked" : "idle"),
+      h("button", { class: "actmain", on: { click: go(it) } }, face(t, 40, it.kind === "approval" ? "waiting" : it.kind === "blocked" ? "blocked" : "idle"),
         h("span", { class: "grow" },
           h("span", { class: "l1" }, h("b", null, line), h("small", null, chan(it.threadId)), h("time", null, shortAgo(it.at))),
           h("span", { class: "l2" }, it.kind === "done" || it.kind === "failed" ? `${it.summary}${it.result ? ` — ${it.result}` : ""}` : it.kind === "blocked" ? `${it.summary}. ${it.unblock || ""}` : it.summary))),
-      it.kind === "approval" ? h("div", { class: "actbtns" }, h("button", { class: "sbtn", on: { click: async () => { await decide(it.approval.id, false); renderActivity(); } } }, "No"), h("button", { class: "sbtn primary", on: { click: async () => { await decide(it.approval.id, true); renderActivity(); } } }, "Approve")) : null,
+      it.kind === "approval" ? h("div", { class: "actbtns" }, h("button", { class: "sbtn", on: { click: async () => { await decide(it.approval.id, false); renderActivity(); } } }, "No"), h("button", { class: "sbtn primary", on: { click: async () => { await decide(it.approval.id, true); renderActivity(); } } }, "Approve"), alwaysBtn(it.approval, renderActivity)) : null,
       it.kind === "blocked" ? h("div", { class: "actbtns" }, h("button", { class: "sbtn primary", on: { click: async () => { await retry(it.id); renderActivity(); } } }, "Try again")) : null);
-  }));
+  };
+  const of = (...k: string[]) => items.filter((it: any) => k.includes(it.kind));
+  const running = [...of("running"), ...of("queued")];
+  const sec = (title: string, list: any[], draw: (it: any) => Node) => list.length ? h("section", { class: "actsec" }, h("h4", null, title, h("em", null, String(list.length))), list.map(draw)) : null;
+  clear(el, [
+    sec("Working now", running, runRow),
+    sec("Needs you", of("approval", "blocked"), row),
+    sec("Earlier", of("proactive", "done", "failed"), row),
+  ].filter(Boolean) as Node[]);
 }
 
 // ---------------- jump to (⌘K) ----------------
@@ -937,7 +1110,7 @@ function taskMessage(m: any) {
       st === "working" && latest.startedAt ? h("time", { "data-since": latest.startedAt }, elapsed(latest.startedAt)) : null));
   } else if (st === "waiting") {
     body.push(h("div", { class: "block" }, h("div", { class: "blockhead" }, icon("lock", 15), h("b", null, aps[0]?.summary || "Needs your OK")),
-      aps.length ? h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => decide(aps[0].id, true) } }, "Approve"), h("button", { class: "sbtn", on: { click: () => decide(aps[0].id, false) } }, "No")) : null));
+      aps.length ? h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => decide(aps[0].id, true) } }, "Approve"), alwaysBtn(aps[0]), h("button", { class: "sbtn", on: { click: () => decide(aps[0].id, false) } }, "No")) : null));
   } else if (st === "blocked") {
     body.push(h("div", { class: "block" }, h("div", { class: "blockhead" }, h("b", null, `Stuck: ${latest.blocked?.need || ""}`)), latest.blocked?.unblock ? h("p", null, latest.blocked.unblock) : null,
       h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => retry(latest.id) } }, "Try again"))));
@@ -970,7 +1143,12 @@ function elapsed(since: string) {
 }
 setInterval(() => { for (const el of document.querySelectorAll<HTMLElement>("[data-since]")) el.textContent = elapsed(el.dataset.since!); }, 1000);
 
-async function decide(id: string, yes: boolean) { try { await call(`/api/approvals/${id}/${yes ? "approve" : "reject"}`, { body: {} }); } catch (e) { handleError(e); } }
+async function decide(id: string, yes: boolean, always = false) { try { await call(`/api/approvals/${id}/${yes ? "approve" : "reject"}`, { body: { always } }); } catch (e) { handleError(e); } }
+const CHANNEL_NAME: Record<string, string> = { whatsapp: "WhatsApp", slack: "Slack", gmail: "Gmail", instagram: "Instagram", linkedin: "LinkedIn", x: "X" };
+/** "Always allow": only for a message to one chat (scripts and payments always ask). */
+const alwaysBtn = (ap: any, then?: () => void) => ap?.action?.type === "message"
+  ? h("button", { class: "sbtn", title: `Send future ${CHANNEL_NAME[ap.action.channel] || ""} messages to ${ap.action.to} without asking`, on: { click: async () => { await decide(ap.id, true, true); then?.(); } } }, "Always allow")
+  : null;
 async function retry(id: string) { try { await call(`/api/jobs/${id}/retry`, { body: {} }); } catch (e) { handleError(e); } }
 
 /** A task's thread: the task on top, "N replies" divider, the teammate's answers and your replies. */
@@ -1012,7 +1190,7 @@ function answer(j: any) {
     const aps = (S.chat.approvals || []).filter((a: any) => a.jobId === j.id);
     return row(who, at, [j.result ? richText(j.result) : null, aps.map((a: any) => h("div", { class: "block" },
       h("div", { class: "blockhead" }, icon("lock", 15), h("b", null, a.summary)), a.details ? h("p", null, a.details) : null,
-      a.status === "pending" ? h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => decide(a.id, true) } }, "Approve"), h("button", { class: "sbtn", on: { click: () => decide(a.id, false) } }, "No"))
+      a.status === "pending" ? h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => decide(a.id, true) } }, "Approve"), alwaysBtn(a), h("button", { class: "sbtn", on: { click: () => decide(a.id, false) } }, "No"))
         : h("small", { class: "muted" }, a.status === "done" ? "Approved and done" : a.status === "rejected" ? "You said no" : a.status)))]);
   }
   if (j.status === "blocked") return row(who, at, [h("div", { class: "block" }, h("div", { class: "blockhead" }, h("b", null, j.blocked?.need)), j.blocked?.why ? h("p", null, j.blocked.why) : null,
@@ -1055,6 +1233,7 @@ function chatMenu() {
       members.map((id) => h("button", { class: "item", on: { click: () => { closeSheet(); location.hash = `#t/${id}`; } } }, face(mate(id), 30, "idle"), h("span", { class: "grow" }, mate(id).name)))),
     h("p", { class: "muted small" }, "Rambles archive themselves an hour after everything in them is done. Posting here brings it back."),
     h("button", { class: "btn ghost", on: { click: () => renameRamble(t) } }, icon("edit", 16), "Rename"),
+    h("button", { class: "btn ghost", on: { click: () => moveToProject(t) } }, icon("folder", 16), t.projectId ? `In ${S.projects.find((p: any) => p.id === t.projectId)?.name || "a project"} · Move` : "Move to project"),
     h("div", { class: "stack" },
       doneAll && lastRamble ? h("button", { class: "btn ghost", on: { click: async () => {
         try { const wf = await call("/api/workflows/from-ramble", { body: { messageId: lastRamble.id } }); toast(`Saved workflow ${wf.name}. Say “run ${wf.name}” any time.`); closeSheet(); loadSkills(); } catch (e) { handleError(e); }
@@ -1192,7 +1371,10 @@ async function send(text: string, threadJob?: string) {
     const inChat = r.view === "chat" && r.id !== "new";
     const res = inChat ? await call(`/api/threads/${r.id}/messages`, { body: { text: t, fileIds } }) : await call("/api/threads", { body: { text: t, fileIds } });
     S.planning = res.thread.id;
-    if (!inChat) { S.chat = { thread: res.thread, messages: [res.message], jobs: [], approvals: [] }; location.hash = `#c/${res.thread.id}`; return; }
+    if (!inChat) {
+      if (S.newProject) { await call(`/api/threads/${res.thread.id}/project`, { body: { projectId: S.newProject } }).catch(() => {}); res.thread.projectId = S.newProject; S.newProject = null; loadThreads(); }
+      S.chat = { thread: res.thread, messages: [res.message], jobs: [], approvals: [] }; location.hash = `#c/${res.thread.id}`; return;
+    }
     upsert(S.chat.messages, res.message);
     drawChat();
   } catch (e) {
@@ -1396,7 +1578,7 @@ function tile(t: any) {
 
 type Shape = [string, Record<string, string | number>];
 /** A connector's tile: a brand color and a simple mark drawn as SVG (no images, no innerHTML). */
-type Connector = { id: string; name: string; blurb: string; group: "Featured" | "Social" | "Productivity"; via?: "google"; bg: string; shapes: Shape[] };
+type Connector = { id: string; name: string; blurb: string; group: "Featured" | "Social" | "Productivity"; via?: string; bg: string; shapes: Shape[] };
 const CONNECTORS: Connector[] = [
   { id: "gmail", name: "Gmail", blurb: "New mail you care about, read-only", group: "Featured", via: "google", bg: "#fff", shapes: [
     ["path", { d: "M5 18V8.5l7 5 7-5V18", fill: "none", stroke: "#EA4335", "stroke-width": 2.4, "stroke-linejoin": "round" }],
@@ -1405,18 +1587,23 @@ const CONNECTORS: Connector[] = [
   { id: "calendar", name: "Google Calendar", blurb: "New invites and heads-ups before events", group: "Featured", via: "google", bg: "#fff", shapes: [
     ["rect", { x: 4, y: 5, width: 16, height: 15, rx: 3, fill: "#4285F4" }], ["rect", { x: 4, y: 5, width: 16, height: 4, rx: 2, fill: "#1A73E8" }],
     ["text", { x: 12, y: 18, "text-anchor": "middle", "font-size": 8.5, "font-weight": 800, fill: "#fff", "font-family": "-apple-system, sans-serif" }]] },
-  { id: "linkedin", name: "LinkedIn", blurb: "Messages and invites", group: "Social", bg: "#0A66C2", shapes: [
+  { id: "linkedin", name: "LinkedIn", blurb: "Messages, notifications and invites", group: "Social", via: "linkedin", bg: "#0A66C2", shapes: [
     ["text", { x: 12, y: 16.5, "text-anchor": "middle", "font-size": 12, "font-weight": 800, fill: "#fff", "font-family": "-apple-system, sans-serif" }]] },
-  { id: "x", name: "X", blurb: "Mentions and DMs", group: "Social", bg: "#000", shapes: [
+  { id: "x", name: "X", blurb: "Notifications, mentions and DMs", group: "Social", via: "x", bg: "#000", shapes: [
     ["path", { d: "M6 6l12 12M18 6L6 18", stroke: "#fff", "stroke-width": 2.2, "stroke-linecap": "round" }]] },
-  { id: "instagram", name: "Instagram Messages", blurb: "DMs", group: "Social", bg: "#E1306C", shapes: [
+  { id: "instagram", name: "Instagram", blurb: "DMs and notifications", group: "Social", via: "instagram", bg: "#E1306C", shapes: [
     ["rect", { x: 6, y: 6, width: 12, height: 12, rx: 3.5, fill: "none", stroke: "#fff", "stroke-width": 1.8 }], ["circle", { cx: 12, cy: 12, r: 2.8, fill: "none", stroke: "#fff", "stroke-width": 1.8 }]] },
   { id: "outlook", name: "Outlook Mail", blurb: "New mail, read-only", group: "Productivity", bg: "#0F6CBD", shapes: [
     ["text", { x: 12, y: 16.5, "text-anchor": "middle", "font-size": 12, "font-weight": 800, fill: "#fff", "font-family": "-apple-system, sans-serif" }]] },
+  { id: "reddit", name: "Reddit", blurb: "Messages and replies", group: "Social", via: "reddit", bg: "#FF4500", shapes: [
+    ["circle", { cx: 12, cy: 13, r: 7, fill: "#fff" }], ["circle", { cx: 9.3, cy: 12.5, r: 1, fill: "#FF4500" }], ["circle", { cx: 14.7, cy: 12.5, r: 1, fill: "#FF4500" }]] },
+  { id: "github", name: "GitHub", blurb: "Notifications and mentions", group: "Productivity", via: "github", bg: "#111", shapes: [
+    ["circle", { cx: 12, cy: 12, r: 7, fill: "none", stroke: "#fff", "stroke-width": 2 }]] },
   { id: "drive", name: "Google Drive", blurb: "Find and read your files", group: "Productivity", bg: "#fff", shapes: [
     ["path", { d: "M9 5h6l5 9h-6z", fill: "#FBBC04" }], ["path", { d: "M9 5l-5 9 3 5 5-9z", fill: "#34A853" }], ["path", { d: "M7 19h10l3-5H10z", fill: "#4285F4" }]] },
 ];
 const TILE_TEXT: Record<string, string> = { calendar: "31", linkedin: "in", outlook: "O" };
+const GENERIC_SHAPES: Shape[] = [["circle", { cx: 12, cy: 12, r: 7, fill: "none", stroke: "#64748b", "stroke-width": 2 }], ["path", { d: "M5 12h14M12 5a11 11 0 0 1 0 14M12 5a11 11 0 0 0 0 14", fill: "none", stroke: "#64748b", "stroke-width": 1.3 }]];
 
 function connectorTile(c: Connector, size = 40) {
   const ns = "http://www.w3.org/2000/svg";
@@ -1433,35 +1620,78 @@ function connectorTile(c: Connector, size = 40) {
   return tile;
 }
 
+// The grid's own sheets (brains, keys, WhatsApp, Slack) live in connectors.ts; it reuses these screens.
+initConnectors({
+  openSheet: (t, b, o) => openSheet(t, b, o), closeSheet: () => closeSheet(), confirmSheet: (a, b, c, d) => confirmSheet(a, b, c, d),
+  handleError: (e) => handleError(e), back: () => void openConnections(), openVoice: () => void openVoice(), openGoogle: () => void openGoogleSetup(),
+  openCookies: (id) => { const c = CONNECTORS.find((x) => x.via === id); if (c) void openCookieSetup(c); },
+  logo: (id, size) => { const c = CONNECTORS.find((x) => x.via === id && x.id === id) || (id === "google" ? CONNECTORS[0] : null); return c ? connectorTile(c, size) : null; },
+});
+
 /** Connectors, laid out like an app store: search, Available / Connected, Featured, then groups. */
 async function openConnections(tab: "available" | "connected" = "available") {
-  let g: any;
-  try { g = await call("/api/google"); } catch (e) { return handleError(e); }
-  const isOn = (c: Connector) => c.via === "google" && g.connected;
+  let g: any, connResp: any, tiles: any[] = [];
+  try { [g, connResp, tiles] = await Promise.all([call("/api/google"), call("/api/connections"), loadTiles().catch(() => [])]); } catch (e) { return handleError(e); }
+  const conns: any[] = connResp.connections || connResp;
+  const conn = (c: Connector) => conns.find((x) => x.id === c.via);
+  const isOn = (c: Connector) => !!conn(c)?.connected;
+  const open = (c: Connector) => (c.via === "google" ? openGoogleSetup() : openCookieSetup(c));
+  const sub = (c: Connector) => conn(c)?.problem ? `Needs reconnecting` : isOn(c) ? `Connected · ${c.via === "google" ? g.email || "Google" : conn(c).detail}` : c.blurb;
   const body = h("div", { class: "connectors" });
   let q = "";
   const action = (c: Connector) => !c.via ? h("span", { class: "csoon" }, "Soon")
-    : h("button", { class: "clink", on: { click: () => openGoogleSetup() } }, isOn(c) ? "Manage" : "Connect");
+    : h("button", { class: "clink", on: { click: () => open(c) } }, isOn(c) ? "Manage" : "Connect");
+  // Sites you connected that aren't one of the presets above (any domain).
+  const presetVias = new Set(CONNECTORS.map((c) => c.via).filter(Boolean));
+  const extraRows = () => {
+    const extra = conns.filter((x: any) => x.id !== "google" && x.connected && !presetVias.has(x.id) && !CONNECTORS.some((c) => c.via === x.domain));
+    if (!extra.length) return null;
+    return [h("h4", null, "Your sites"), h("div", { class: "list" }, extra.map((x: any) => h("div", { class: "crow" },
+      connectorTile({ id: x.id, name: x.label, blurb: "", group: "Social", via: x.id, bg: "#eef2f7", shapes: GENERIC_SHAPES } as Connector),
+      h("span", { class: "grow" }, h("b", null, x.label), h("small", { class: x.problem ? "err" : "" }, x.problem ? "Needs reconnecting" : (x.detail || ""))),
+      h("button", { class: "clink", on: { click: () => openCookieSetup({ via: x.domain, name: x.label, blurb: "this site" }) } }, "Manage"))))];
+  };
+  const addSite = () => {
+    const input = h("input", { class: "field", placeholder: "example.com or a full URL you're logged into", autocapitalize: "off", spellcheck: false }) as HTMLInputElement;
+    const err = h("p", { class: "err small", hidden: true });
+    openSheet("Add a site", [
+      h("p", { class: "muted" }, "Connect any site you're signed into in Chrome. A teammate can then watch a page on it or read it on request."),
+      input, err,
+      h("button", { class: "btn primary big", on: { click: () => {
+        const v = input.value.trim(); if (!v) return input.focus();
+        let dom = v.toLowerCase(); try { dom = new URL(v.includes("://") ? v : `https://${v}`).hostname.replace(/^www\./, ""); } catch {}
+        if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(dom)) { err.textContent = "That doesn't look like a site."; err.hidden = false; return; }
+        openCookieSetup({ via: dom, name: dom, blurb: "this site" });
+      } } }, "Next"),
+    ]);
+  };
   const draw = () => {
     const match = (c: Connector) => !q || `${c.name} ${c.blurb}`.toLowerCase().includes(q);
     const shown = CONNECTORS.filter((c) => match(c) && (tab === "available" || isOn(c)));
-    const row = (c: Connector) => h("div", { class: "crow" }, connectorTile(c), h("span", { class: "grow" }, h("b", null, c.name), h("small", null, isOn(c) ? `Connected · ${g.email || "Google"}` : c.blurb)), action(c));
+    const row = (c: Connector) => h("div", { class: "crow" }, connectorTile(c), h("span", { class: "grow" }, h("b", null, c.name), h("small", { class: conn(c)?.problem ? "err" : "" }, sub(c))), action(c));
     const featured = tab === "available" && !q ? shown.filter((c) => c.group === "Featured") : [];
     const groups = tab === "connected" || q ? [["", shown]] as [string, Connector[]][]
       : (["Social", "Productivity"] as const).map((n) => [n, shown.filter((c) => c.group === n)] as [string, Connector[]]);
+    // Available: the grid of every brain, key and account (connectors.ts). Connected: the list below, as before.
+    const gridIds = new Set(tiles.map((t) => t.id));
+    const rest = shown.filter((c) => !gridIds.has(c.via || "") && !gridIds.has(c.id));
     clear(body,
       h("div", { class: "search" }, icon("search", 18), h("input", { placeholder: "Search connectors", type: "search", value: q,
         on: { input: (e: Event) => { q = (e.target as HTMLInputElement).value.trim().toLowerCase(); draw(); setTimeout(() => (body.querySelector("input") as HTMLInputElement)?.focus(), 0); } } })),
       h("div", { class: "segmented" },
         h("button", { class: tab === "available" ? "on" : "", on: { click: () => { tab = "available"; draw(); } } }, "Available"),
         h("button", { class: tab === "connected" ? "on" : "", on: { click: () => { tab = "connected"; draw(); } } }, "Connected")),
-      featured.length ? [h("h4", null, "Featured"), h("div", { class: "cfeatured" }, featured.map((c) =>
-        h("button", { class: "cfeat", on: { click: () => openGoogleSetup() } }, h("span", { class: "grow" }, h("b", null, c.name), h("small", null, isOn(c) ? `Connected · ${g.email || "Google"}` : c.blurb)), connectorTile(c, 56))))] : null,
-      groups.filter(([, list]) => list.length || tab === "connected").map(([name, list]) => [
+      tab === "available" && tiles.length ? connectorGrid(tiles, q) : null,
+      tab === "available" && tiles.length && rest.length ? [h("h4", null, "More"), h("div", { class: "list" }, rest.map(row))] : null,
+      featured.length && !tiles.length ? [h("h4", null, "Featured"), h("div", { class: "cfeatured" }, featured.map((c) =>
+        h("button", { class: "cfeat", on: { click: () => open(c) } }, h("span", { class: "grow" }, h("b", null, c.name), h("small", null, sub(c))), connectorTile(c, 56))))] : null,
+      groups.filter(([, list]) => (tab === "connected" || !tiles.length) && (list.length || tab === "connected")).map(([name, list]) => [
         name ? h("h4", null, name) : null,
         list.length ? h("div", { class: "list" }, list.map(row))
           : h("p", { class: "empty" }, "Nothing connected yet. Connect Gmail or Calendar and your teammates can watch them for you."),
       ]),
+      extraRows(),
+      h("button", { class: "btn ghost", on: { click: addSite } }, icon("plus", 16), "Add any site you're logged into"),
       h("p", { class: "muted small" }, "Everything you connect stays on your hub. Sign-ins never go to the model, this app or your exports."));
   };
   draw();
@@ -1472,9 +1702,77 @@ async function openConnections(tab: "available" | "connected" = "available") {
  * Connect your Google account with your own OAuth client: make one in Google Cloud, paste its ID and secret,
  * tap Connect. The hub keeps the sign-in in a private file; teammates read Gmail and Calendar, never change them.
  */
+/** LinkedIn and X: paste the cookies from your logged-in browser; the hub keeps them encrypted and tests them at once. */
+const COOKIE_HELP: Record<string, { site: string; need: string }> = {
+  linkedin: { site: "https://www.linkedin.com", need: "li_at (and JSESSIONID)" },
+  x: { site: "https://x.com", need: "auth_token and ct0" },
+};
+/** Who has touched this login, newest first: a plain audit trail the owner can always check. */
+function accessLog(entries: any[], domain: string) {
+  const mine = entries.filter((e) => e.site === domain).slice(-12).reverse();
+  if (!mine.length) return null;
+  const verb: Record<string, string> = { read: "read it", refresh: "refreshed it", import: "imported it", paste: "connected it", "mac-copy": "copied it from your Mac", remove: "disconnected it" };
+  return h("details", { class: "auditlog" },
+    h("summary", { class: "muted small" }, `Access log · ${mine.length}`),
+    h("div", { class: "list" }, mine.map((e) => h("div", { class: "item" },
+      h("span", { class: "grow" }, h("b", { class: "light" }, `${e.by} ${verb[e.action] || e.action}`), h("small", { class: "sub" }, `${relTime(e.createdAt)}${e.ok === false ? " · failed" : ""}${e.detail ? ` · ${e.detail}` : ""}`))))));
+}
+
+async function openCookieSetup(c: Connector | { via: string; name: string; blurb: string; bg?: string; shapes?: Shape[] }) {
+  const tile = (c as any).shapes ? connectorTile(c as Connector, 52) : connectorTile({ id: c.via!, name: c.name, blurb: c.blurb, group: "Social", via: c.via, bg: (c as any).bg || "#eef2f7", shapes: GENERIC_SHAPES } as Connector, 52);
+  const [connResp, browsers, auditAll] = await Promise.all([call("/api/connections").catch(() => ({})), call(`/api/connections/${c.via}/browsers`).catch(() => []), call("/api/conn-audit").catch(() => [])]);
+  const conns: any[] = connResp.connections || [];
+  const st = conns.find((x) => x.id === c.via);
+  const help = COOKIE_HELP[c.via!] || { site: `https://${c.via}`, need: "a login (session) cookie" };
+  const out0 = h("div", { class: "ctest" });
+  const showResult = (t: any) => clear(out0, t.ok
+    ? h("p", { class: "okline" }, icon("check", 16), ` Works: read ${t.count} ${t.count === 1 ? "item" : "items"}${t.sample?.length ? `, like “${t.sample[0].replace(/^● /, "")}”` : ""}.`)
+    : h("p", { class: "err small" }, t.error));
+  // One tap: read the login straight from your browser on this Mac (macOS asks once; choose Always Allow).
+  const importRow = (browsers as any[]).length ? h("div", { class: "stack" },
+    h("p", { class: "muted small" }, `Found ${c.name} logged in on this Mac. Import it — no copy-paste:`),
+    ...(browsers as any[]).map((b) => h("button", { class: "btn primary big", on: { click: async (e: Event) => {
+      const btn = e.currentTarget as HTMLButtonElement; btn.disabled = true; btn.textContent = "Reading from your browser…"; clear(out0);
+      try { const r = await call(`/api/connections/${c.via}/import`, { body: { profile: b.id } }); showResult(r.test); setTimeout(() => openCookieSetup(c), 1400); }
+      catch (err: any) { showResult({ ok: false, error: err.message }); btn.disabled = false; btn.textContent = `Import from ${b.label}`; }
+    } } }, `Import from ${b.label}`)),
+    out0,
+    h("p", { class: "muted small" }, "The first time, macOS asks to let Hearth use the browser's Safe Storage key — choose Always Allow. Cookies only, kept encrypted in the hub, never shown.")) : null;
+  const box = h("textarea", { class: "field mono", rows: 4, placeholder: `Paste cookies: the Cookie-Editor export, or ${help.need.replace(/ \(.*\)/, "")} as name=value; name=value`, autocapitalize: "off", spellcheck: false }) as HTMLTextAreaElement;
+  const out = h("div", { class: "ctest" });
+  const show = (t: any) => clear(out, t.ok
+    ? h("p", { class: "okline" }, icon("check", 16), ` Works: read ${t.count} ${t.count === 1 ? "item" : "items"}${t.sample?.length ? `, like “${t.sample[0].replace(/^● /, "")}”` : ""}.`)
+    : h("p", { class: "err small" }, t.error));
+  const save = h("button", { class: "btn primary big", on: { click: async () => {
+    if (!box.value.trim()) return box.focus();
+    save.disabled = true; save.textContent = "Saving and testing…"; clear(out);
+    try { const r = await call(`/api/connections/${c.via}`, { method: "PUT", body: { cookies: box.value } }); box.value = ""; show(r.test); }
+    catch (e: any) { show({ ok: false, error: e.message }); }
+    save.disabled = false; save.textContent = "Save and test";
+  } } }, "Save and test");
+  openSheet(c.name, [
+    h("button", { class: "btn ghost", on: { click: () => openConnections() } }, icon("back", 16), "All connectors"),
+    h("div", { class: "phero" }, tile, h("b", null, st?.connected ? (st.problem ? `${c.name} needs reconnecting` : `${c.name} is connected`) : `Connect ${c.name}`),
+      h("small", null, st?.problem || (st?.connected ? `${st.detail} · read-only, checked at most every 15 min` : `Teammates read your ${c.blurb.toLowerCase()} through your own login. Read-only.`))),
+    st?.connected ? h("div", { class: "stack" },
+      h("button", { class: "btn ghost", on: { click: async (e: Event) => { const b = e.currentTarget as HTMLButtonElement; b.disabled = true; show(await call(`/api/connections/${c.via}/test`, { body: {} }).catch((x: any) => ({ ok: false, error: x.message }))); b.disabled = false; } } }, icon("play", 16), "Test now")) : null,
+    out,
+    accessLog(auditAll as any[], st?.domain || c.via!),
+    importRow,
+    importRow ? h("p", { class: "muted small", style: "text-align:center" }, "— or paste cookies —") : null,
+    h("ol", { class: "steps" },
+      h("li", null, "On your computer, open ", h("a", { href: help.site, target: "_blank", rel: "noopener noreferrer" }, help.site.replace("https://", "")), " in Chrome, logged in."),
+      h("li", null, "Easiest: install the ", h("a", { href: "https://chromewebstore.google.com/search/cookie-editor", target: "_blank", rel: "noopener noreferrer" }, "Cookie-Editor"), " extension, open it on that tab, Export → JSON, and paste it below."),
+      h("li", null, `Or: DevTools → Application → Cookies, and copy ${help.need} as name=value; name=value.`)),
+    box, save,
+    st?.connected ? h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet(`Disconnect ${c.name}?`, "The cookies are deleted from the hub. Triggers on it stop until you connect again.", "Disconnect", async () => { await call(`/api/connections/${c.via}`, { method: "DELETE" }); toast(`${c.name} disconnected`); openConnections(); }) } }, `Disconnect ${c.name}`) : null,
+    h("p", { class: "muted small" }, "Cookies are your login: they're kept encrypted in the hub's vault and only used to open these pages. Logging out of " + c.name + " in your browser ends them, and then Hearth tells you to reconnect."),
+  ]);
+}
+
 async function openGoogleSetup() {
-  let g: any;
-  try { g = await call("/api/google"); } catch (e) { return handleError(e); }
+  let g: any, auditAll: any[] = [];
+  try { [g, auditAll] = await Promise.all([call("/api/google"), call("/api/conn-audit").catch(() => [])]); } catch (e) { return handleError(e); }
   const copyRow = (text: string) => h("button", { class: "codeline", title: "Copy", on: { click: () => navigator.clipboard?.writeText(text).then(() => toast("Copied"), () => toast("Couldn't copy", "err")) } }, h("code", null, text), icon("clip", 14));
   const err = h("p", { class: "err small", hidden: true });
   const fail = (e: any) => { err.textContent = e.message; err.hidden = false; };
@@ -1495,6 +1793,7 @@ async function openGoogleSetup() {
       h("small", null, g.connected ? `${g.email || "Your account"} · read-only` : "Teammates can watch your inbox and calendar and tell you what matters. Read-only.")),
     g.connected ? [
       h("p", { class: "muted" }, "Ask for things like “tell me when the school emails”, “LinkedIn digest every 30 min” or “what's on tomorrow?”. They show up under Triggers in Plans."),
+      accessLog(auditAll, "google"),
       h("div", { class: "stack" },
         h("button", { class: "btn ghost", on: { click: connect } }, icon("repeat", 16), "Reconnect"),
         h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet("Disconnect Google?", "Hearth signs out of your Google account. Gmail and Calendar triggers stop until you connect again.", "Disconnect", async () => { await call("/api/google", { method: "DELETE" }); toast("Google disconnected"); openConnections(); }) } }, "Disconnect Google")),
@@ -2065,7 +2364,9 @@ function openSettings() {
   openSheet("Settings", [
     h("div", { class: "list" },
       row("Name and time zone", `${p.userName || "Not set"} · ${p.tz}`, openProfile),
-      row("Notifications", st.push.subscribed ? "On for this device" : "Off", () => togglePush(st.push.subscribed), sw(st.push.subscribed)),
+      // The Mac app shows them as Mac notifications (allowed or not in System Settings → Notifications → Hearth).
+      inMacApp ? row("Notifications", "Mac notifications · change them in System Settings → Notifications → Hearth", () => toast("Open System Settings → Notifications → Hearth"))
+        : row("Notifications", st.push.subscribed ? "On for this device" : "Off", () => togglePush(st.push.subscribed), sw(st.push.subscribed)),
       row("Quiet hours and daily limit", `${p.quietStart}–${p.quietEnd} · up to ${p.maxProactivePerDay}/day`, openQuiet)),
     h("div", { class: "list" }, row("Brains", "Which models do what, and smart voice", openBrains),
       row("Voice", st.voice ? `On · ${st.voice === "deepgram" ? "Deepgram" : st.voice}` : "Off · connect Deepgram to talk", openVoice)),
@@ -2076,7 +2377,10 @@ function openSettings() {
     h("h4", null, "Security and data"),
     h("div", { class: "list" },
       row("Devices", st.device.primary ? (st.pendingAccess ? `${st.pendingAccess} waiting to join` : "This is your primary device") : "Who can talk to this hub", openDevices),
+      st.device.primary ? row("Finish setting up", "Your devices and connectors, in one place", openWelcome) : null,
+      row("Hubs", inMacApp ? "Switch hubs, or set up a new one" : "Switch between your hubs", openHubs),
       passkeysWork() ? row("Face ID lock", st.device.passkey ? "On · asked each time you open the app" : "Off · a copied key alone could open this hub", toggleFaceId, sw(st.device.passkey)) : null,
+      row("Always allowed", "Chats teammates can message without asking", openAlwaysAllowed),
       st.device.primary ? row("Shared links", "Let someone chat with one teammate", openShares) : null,
       row("Activity log", "Everything the hub did", openActivity),
       row("Export everything", "One JSON file", exportData),
@@ -2699,6 +3003,58 @@ function openScript(s: any) {
   ]);
 }
 
+/** The chats you said "Always allow" for; remove one and its messages ask again. */
+async function openAlwaysAllowed() {
+  try {
+    const { keys } = await call("/api/always-allow");
+    const nice = (k: string) => { const [ch, ...rest] = k.split(":"); const to = rest.join(":"); return { app: CHANNEL_NAME[ch] || ch, to: ch === "whatsapp" ? to.replace(/@.*/, "") : to }; };
+    openSheet("Always allowed", [
+      h("p", { class: "wlede" }, "Teammates send messages to these chats without asking first. Everything else still waits for your Approve."),
+      keys.length ? h("div", { class: "wcard" }, keys.map((k: string) => h("div", { class: "wrow" },
+        h("span", { class: "grow" }, h("b", null, nice(k).to), h("small", null, nice(k).app)),
+        h("button", { class: "wa-btn", on: { click: async () => { await call(`/api/always-allow?key=${encodeURIComponent(k)}`, { method: "DELETE" }); openAlwaysAllowed(); } } }, "Ask again"))))
+        : h("p", { class: "wlede" }, "Nothing yet. On a \"Needs your OK\" message, tap Always allow."),
+    ]);
+  } catch (e) { handleError(e); }
+}
+
+/** "Add a device": a one-time code and its QR, drawn into `box`. */
+async function showPairCode(box: HTMLElement) {
+  try {
+    const { code, expiresInMin, qr } = await call("/api/devices/pair-code", { body: {} });
+    clear(box, h("div", { class: "paircode" },
+      h("img", { src: `data:image/svg+xml;utf8,${encodeURIComponent(qr)}`, alt: "Pairing QR code", width: 200, height: 200, class: "qr" }),
+      h("small", null, "Scan with the new device's camera, or enter"), h("b", null, code),
+      h("small", null, `Single use · expires in ${expiresInMin} min · ${activeHub()!.url}`)));
+  } catch (e) { handleError(e); }
+}
+
+/** Right after setup (and from Settings): this device, adding the others, and the connectors, on one screen. */
+async function openWelcome() {
+  try {
+    const [devices, tiles] = await Promise.all([call("/api/devices"), loadTiles().catch(() => [])]);
+    const codeBox = h("div", { class: "wcode" });
+    const mine = devices.filter((d: any) => d.role !== "computer");
+    const isComputer = (n: string) => /mac|computer|laptop|pc\b|desktop/i.test(n);
+    openSheet("Finish setting up", [
+      h("p", { class: "wlede" }, "Your hub is live at ", h("b", null, location.host), ". Add your phone, then connect what you want your teammates to use. All optional; it's in Settings later too."),
+      h("div", { class: "wsec" }, "Devices"),
+      h("div", { class: "wcard" },
+        mine.map((d: any) => h("div", { class: "wrow" },
+          h("span", { class: "wdev" }, icon(isComputer(d.name) ? "laptop" : "phone", 18)),
+          h("span", { class: "grow" }, h("b", null, d.name),
+            h("small", null, [d.current ? "This device" : `Paired ${dayLabel(d.createdAt)}`, d.primary ? "lets your other devices in" : ""].filter(Boolean).join(" · "))),
+          d.primary ? h("span", { class: "wst" }, "Main") : null)),
+        h("button", { class: "wrow wadd-row", on: { click: () => showPairCode(codeBox) } },
+          h("span", { class: "wdev plus" }, icon("plus", 18)),
+          h("span", { class: "grow" }, h("b", null, "Add your phone"), h("small", null, "Or an iPad, or another computer")))),
+      codeBox,
+      ...(tiles.length ? connectorRows(tiles) : [h("p", { class: "wlede" }, "Connectors show here once the hub is up to date.")]),
+      h("button", { class: "btn primary big wdone", on: { click: closeSheet } }, "Done"),
+    ]);
+  } catch (e) { handleError(e); }
+}
+
 async function openDevices() {
   try {
     const primary = !!S.state?.device.primary;
@@ -2722,23 +3078,15 @@ async function openDevices() {
         h("div", { class: "grow" }, h("div", { class: "title" }, r.name, h("span", { class: "tag soft" }, `code ${r.code}`)), h("div", { class: "sub" }, `${r.kind === "computer" ? "Wants to link as a computer · " : ""}Asked ${relTime(r.createdAt)} · only approve if the same code is on its screen`)),
         h("button", { class: "btn small primary", on: { click: () => decide(r, "approve") } }, "Approve"),
         h("button", { class: "btn small danger-ghost", on: { click: () => decide(r, "deny") } }, "Deny")))) : null,
-      h("h4", null, "Phones and browsers"),
+      h("h4", null, "Your devices"),
       h("div", { class: "list" }, devices.filter((d: any) => d.role !== "computer").map((d: any) => h("div", { class: "item" },
-        h("div", { class: "hicon" }, icon(d.passkey ? "lock" : "phone", 16)),
-        h("div", { class: "grow" }, h("div", { class: "title" }, d.name, d.primary ? h("span", { class: "tag soft" }, "Primary") : null, d.current ? h("span", { class: "tag soft" }, "This device") : null), h("div", { class: "sub" }, `Paired ${dayLabel(d.createdAt)} · seen ${relTime(d.lastSeenAt)}${d.passkey ? " · Face ID" : ""}`)),
+        h("div", { class: "hicon" }, icon(d.passkey ? "lock" : /mac|computer|laptop|pc\b|desktop/i.test(d.name) ? "laptop" : "phone", 16)),
+        h("div", { class: "grow" }, h("div", { class: "title" }, d.name, d.primary ? h("span", { class: "tag soft" }, "Main device") : null, d.current ? h("span", { class: "tag soft" }, "This device") : null), h("div", { class: "sub" }, `Paired ${dayLabel(d.createdAt)} · seen ${relTime(d.lastSeenAt)}${d.passkey ? " · Face ID" : ""}`)),
         primary && !d.primary ? h("button", { class: "btn small ghost", on: { click: () => confirmSheet(`Make ${d.name} primary?`, "It will be the one that lets new devices in. This device stays paired.", "Make primary", async () => { await call(`/api/devices/${d.id}/primary`, { body: {} }); toast(`${d.name} is primary`); refreshState(); }) } }, "Make primary") : null,
         primary || d.current ? h("button", { class: "btn small danger-ghost", on: { click: () => confirmSheet(`Sign out ${d.name}?`, "It will need to be let in again to come back.", "Sign out", async () => { await call(`/api/devices/${d.id}`, { method: "DELETE" }); if (d.current) { removeHub(activeHub()!.id); location.reload(); } toast("Signed out"); }) } }, "Sign out") : null))),
       codeBox,
       computersSection(devices.filter((d: any) => d.role === "computer"), primary, cloud),
-      primary ? h("button", { class: "btn ghost", on: { click: async () => {
-        try {
-          const { code, expiresInMin, qr } = await call("/api/devices/pair-code", { body: {} });
-          clear(codeBox, h("div", { class: "paircode" },
-            h("img", { src: `data:image/svg+xml;utf8,${encodeURIComponent(qr)}`, alt: "Pairing QR code", width: 200, height: 200, class: "qr" }),
-            h("small", null, "Scan with the new device's camera, or enter"), h("b", null, code),
-            h("small", null, `Single use · expires in ${expiresInMin} min · ${activeHub()!.url}`)));
-        } catch (e) { handleError(e); }
-      } } }, icon("plus", 16), "Add a device") : null,
+      primary ? h("button", { class: "btn ghost", on: { click: () => showPairCode(codeBox) } }, icon("plus", 16), "Add a device (phone, iPad, another computer)") : null,
     ]);
   } catch (e) { handleError(e); }
 }
@@ -2975,6 +3323,9 @@ function openWipe() {
 }
 
 
+/** Inside the Hearth Mac app (it adds "HearthMac" to its user agent): it can run setup for a new hub. */
+const inMacApp = /HearthMac/.test(navigator.userAgent);
+
 function openHubs() {
   const list = hubs();
   const current = activeHub();
@@ -2989,7 +3340,8 @@ function openHubs() {
         h("div", { class: "grow" }, h("div", { class: "title" }, hb.name), h("div", { class: "sub" }, hb.url.replace(/^https?:\/\//, "")))),
       hb.id === current?.id ? h("span", { class: "tick" }, icon("check", 18)) : null,
       h("button", { class: "iconbtn", "aria-label": `Forget ${hb.name}`, on: { click: () => confirmSheet(`Forget ${hb.name} on this phone?`, "The hub keeps your data. You'll need a new code to reconnect.", "Forget", async () => { try { await call("/api/devices/" + hb.id, { method: "DELETE", hub: hb }); } catch {} removeHub(hb.id); location.reload(); }) } }, icon("trash", 16))))),
-    h("h4", null, "Add a hub"),
+    inMacApp ? h("button", { class: "btn primary big", on: { click: () => { location.href = "hearth-app://new-hub"; } } }, icon("plus", 16), "Set up a new hub") : null,
+    h("h4", null, inMacApp ? "Or join a hub you already have" : "Add a hub"),
     h("label", null, h("span", null, "Address"), url),
     h("label", null, h("span", null, "Pairing code"), code),
     err,

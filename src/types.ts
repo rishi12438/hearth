@@ -89,7 +89,13 @@ export type Thread = Doc & { title: string; updatedAt: string; preview?: string;
   /** The channel name ("japan-trip"): from the plan, or set by you. Falls back to ramble-N. */
   channel?: string;
   /** Who named it: you (then it's never renamed for you) or Hearth. */
-  channelBy?: "you" | "hearth" };
+  channelBy?: "you" | "hearth";
+  /** The project this ramble is filed under, if any. */
+  projectId?: string };
+
+/** A folder of rambles ("Wedding", "Move to SF") with its own memory: teammates working in its rambles read and save
+ *  facts in its notebook, so what's learned in one ramble is there in the next. */
+export type Project = Doc & { name: string; emoji?: string; notebook: string; about?: string };
 
 export type Job = Doc & {
   threadId: string;
@@ -101,7 +107,7 @@ export type Job = Doc & {
   status: "queued" | "working" | "waiting" | "blocked" | "done" | "failed";
   /** Set when the job can't go on without you (a login, your laptop, a permission). It parks until you unblock it. */
   /** needs "computer": parked until a linked computer is online, then it resumes on its own. */
-  blocked?: { need: string; why: string; unblock: string; needs?: "computer" };
+  blocked?: { need: string; why: string; unblock: string; needs?: "computer" | "brains"; until?: number | null };
   /** Where the model ran: a linked computer's name, or "cloud" for this hub. */
   ranOn?: string;
   effort: "quick" | "light" | "heavy";
@@ -185,6 +191,16 @@ export type Script = Doc & {
 
 export type Activity = Doc & { kind: string; text: string };
 
+/** Audit trail for every access to a connected account (who, what site, when), kept so you can always check later. */
+export type ConnAudit = Doc & {
+  action: "read" | "refresh" | "import" | "paste" | "mac-copy" | "remove";
+  site: string;
+  /** Who did it: a teammate's name, "you", "your Mac", or "system". */
+  by: string;
+  ok?: boolean;
+  detail?: string;
+};
+
 export type Prefs = {
   userName: string;
   tz: string;
@@ -195,6 +211,8 @@ export type Prefs = {
   lastUserAt?: string;
   placeState: Record<string, boolean>;
   brains?: import("./brain.ts").Brains;
+  /** The brains the user picked in setup (claude, codex). Two or more share the work by live usage. */
+  brainPool?: string[];
   spend?: { date: string; usd: number };
   costCaps?: { rambleUsd: number; dayUsd: number };
   /** "About you": a short profile the assistant keeps (and you can edit). Always in context. */
@@ -291,10 +309,12 @@ export type Approval = Doc & {
   jobId?: string;
   summary: string;
   details?: string;
-  action: { type: "script"; script: string; args: string[] };
+  action: { type: "script"; script: string; args: string[] } | { type: "message"; channel: Channel; to: string; text: string; subject?: string; threadId?: string };
   status: "pending" | "approved" | "rejected" | "done" | "failed";
   result?: string;
   decidedAt?: string;
+  /** Sent without asking, because you'd said "Always allow" for that chat. */
+  auto?: boolean;
 };
 
 /** A file on the hub: one you attached, or one a teammate or script made. Bytes live in <data>/files/<id>. */
@@ -353,6 +373,10 @@ export type Component = Doc & {
 /** What an app saved for itself (flashcard progress, ticked boxes). */
 export type AppState = Doc & { state: unknown };
 
+/** Where a teammate can send a message (each one only after your Approve, or a chat you said "Always allow" for). */
+export type Channel = "whatsapp" | "slack" | "gmail" | "instagram" | "linkedin" | "x";
+export const CHANNELS: Channel[] = ["whatsapp", "slack", "gmail", "instagram", "linkedin", "x"];
+export const CHANNEL_LABEL: Record<Channel, string> = { whatsapp: "WhatsApp", slack: "Slack", gmail: "Gmail", instagram: "Instagram", linkedin: "LinkedIn", x: "X" };
 // ---- Shared teammates (a link someone else can chat with; runs sealed in its own box, see docs/design/public-teammates.md) ----
 
 export type Share = Doc & {

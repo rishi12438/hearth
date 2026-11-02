@@ -1,2 +1,4 @@
 [test]
 preload = ["./test/setup.ts"]
+# Only this repo's tests (not the copy inside mac/build/Hearth.app).
+root = "./test"

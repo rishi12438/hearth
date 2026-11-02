@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { sha256 } from "./auth.ts";
+import { lastRefresh } from "./brains/logins.ts";
 import { ComputerGone, MODEL_RE, type BrainInput, type BrainProfile, type Meter, type Remote, type RemoteRunner } from "./brain.ts";
 
 // Computers linked to this hub (a Mac at home, say). The hub has a public address and the computer doesn't, so the
@@ -10,7 +11,8 @@ import { ComputerGone, MODEL_RE, type BrainInput, type BrainProfile, type Meter,
 //
 // computer -> hub   hello {harnesses, platform}   alive   pong {ts}   step {id, text}   done {id, reply, costUsd?}
 //                   error {id, message}   copy {item, data, hash}
-// hub -> computer   ping {ts}   run {id, input, profile}   stop {id}   want {items, have}
+// hub -> computer   ping {ts}   run {id, input, profile}   stop {id}   want {items, have}   wantCookies {sites, have}
+// computer -> hub   cookies {site, data, hash}   (browser cookies the owner asked this Mac to copy up)
 //                   logins {items}   (only to computers the hub set up itself, never to your Mac)
 
 /** What a computer can copy up so the cloud can work while it's off. Each is a login file the harness reads. */
@@ -67,7 +69,9 @@ export class Computers implements Remote {
   }
 
   /** readLogin reads a login's secret (only when handing it to a cloud computer); hasLogin just checks it's there. */
-  constructor(private opts: { dataDir: string; homeDir: string; acceptCopies: boolean; now?: () => number; readLogin?: (item: CopyItem) => string | null; hasLogin?: (item: CopyItem) => boolean }) {}
+  constructor(private opts: { dataDir: string; homeDir: string; acceptCopies: boolean; now?: () => number; readLogin?: (item: CopyItem) => string | null; hasLogin?: (item: CopyItem) => boolean;
+    /** Which browser logins (cookie sites) the hub wants Macs to copy up, the hash it already has, and where they go. */
+    cookieSites?: () => string[]; cookieHave?: (site: string) => string | undefined; onCookies?: (site: string, data: string) => void }) {}
   private now() { return this.opts.now ? this.opts.now() : Date.now(); }
 
   start() { this.timer ??= setInterval(() => this.tick(), 5000); }
@@ -94,6 +98,7 @@ export class Computers implements Remote {
         link.harnesses = Array.isArray(m.harnesses) ? m.harnesses.filter((h: unknown) => typeof h === "string").slice(0, 8) : [];
         link.platform = String(m.platform || "").slice(0, 20);
         this.sendWant(link);
+        this.sendCookieWant(link);
         if (link.cloud) this.sendLogins(link);
         this.changed();
         this.onOnline(deviceId);
@@ -113,6 +118,7 @@ export class Computers implements Remote {
         return;
       }
       case "copy": this.receiveCopy(link, m); return;
+      case "cookies": this.receiveCookies(link, m); return;
     }
   }
 
@@ -209,6 +215,40 @@ export class Computers implements Remote {
     this.send(link.deviceId, { t: "want", items: this.opts.acceptCopies ? link.want : [], have });
   }
 
+  /** Tell a Mac which browser logins to copy up, and the hash the hub already holds (so it only re-sends on change). */
+  private sendCookieWant(link: Link) {
+    if (link.cloud) return; // cloud boxes have no browser; only your own Mac copies cookies up
+    const sites = this.opts.acceptCopies ? (this.opts.cookieSites?.() || []) : [];
+    const have: Record<string, string> = {};
+    for (const site of sites) { const h = this.opts.cookieHave?.(site); if (h) have[site] = h; }
+    this.send(link.deviceId, { t: "wantCookies", sites, have });
+  }
+
+  /** Ask every online Mac to copy these logins up now (a fresh "want", so a changed login is re-sent). */
+  refreshCookies(site?: string) {
+    for (const link of this.links.values()) {
+      if (link.cloud) continue;
+      const sites = this.opts.acceptCopies ? (this.opts.cookieSites?.() || []) : [];
+      const have: Record<string, string> = {};
+      // Drop the hash for the site we want fresh, so the Mac re-reads and re-sends even if it thinks it's unchanged.
+      for (const s of sites) { if (s === site) continue; const h = this.opts.cookieHave?.(s); if (h) have[s] = h; }
+      this.send(link.deviceId, { t: "wantCookies", sites, have });
+    }
+  }
+
+  /** A Mac can copy cookies up, and it's online. */
+  canCopyCookies() { return this.online().some((id) => { const l = this.links.get(id); return l && !l.cloud; }); }
+
+  private receiveCookies(link: Link, m: any) {
+    if (!this.opts.acceptCopies || link.cloud) return;
+    const site: unknown = m.site;
+    if (typeof site !== "string" || !(this.opts.cookieSites?.() || []).includes(site)) return;
+    const data = typeof m.data === "string" ? m.data : "";
+    if (!data || data.length > MAX_COPY) return;
+    try { const j = JSON.parse(data); if (!Array.isArray(j.cookies)) return; } catch { return; }
+    this.opts.onCookies?.(site, data);
+  }
+
   private receiveCopy(link: Link, m: any) {
     // Only what the owner asked this computer for, only on a server hub, small and well-formed.
     const item: unknown = m.item;
@@ -217,6 +257,8 @@ export class Computers implements Remote {
     if (!data || data.length > MAX_COPY) return;
     try { JSON.parse(data); } catch { return; }
     const path = join(this.opts.homeDir, COPY_ITEMS[item].path);
+    // Codex renews its own login and rotates the refresh token: never replace a newer one with an older copy.
+    if (item === "codex" && existsSync(path)) { try { if (lastRefresh(readFileSync(path, "utf8")) > lastRefresh(data)) return; } catch {} }
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     writeFileSync(path, data, { mode: 0o600 });
     chmodSync(path, 0o600);

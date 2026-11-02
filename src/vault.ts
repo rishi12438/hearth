@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, st
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-// The hub's API keys (E2B, Deepgram, your VMs' SSH keys) in their own SQLite file, <data>/keys/vault.db, each value
+// The hub's API keys and sign-ins (E2B, Deepgram, Google, your VMs' SSH keys) in their own SQLite file, <data>/keys/vault.db, each value
 // encrypted at rest with AES-256-GCM. The master key lives outside the data folder (~/.hearth/master.key, or
 // HEARTH_MASTER_KEY), so a copy or backup of the data folder alone doesn't give anyone your keys. Each value is bound to
 // its name, so a row moved to another name won't decrypt. This is separate from the main store on purpose: secrets stay
@@ -98,7 +98,7 @@ export class Vault {
 
   /**
    * Keys that used to sit in plain files move in here, and the plain copies are deleted: the Deepgram key in voice.json,
-   * the E2B key in keys/secrets.json, and each VM's keys/ssh-<id>.
+   * the E2B key in keys/secrets.json, the Google sign-in in google.json, and each VM's keys/ssh-<id>.
    */
   migrate(dataDir: string) {
     const moved: string[] = [];
@@ -108,6 +108,7 @@ export class Vault {
     };
     take(join(dataDir, "voice.json"), (t) => { const k = JSON.parse(t).deepgramKey; if (k) this.set("deepgram", k); });
     take(join(dataDir, "keys", "secrets.json"), (t) => { const k = JSON.parse(t).e2bKey; if (k) this.set("e2b", k); });
+    take(join(dataDir, "google.json"), (t) => { JSON.parse(t); this.set("google", t); });
     const keys = join(dataDir, "keys");
     for (const f of existsSync(keys) ? readdirSync(keys) : []) {
       const m = /^ssh-([0-9a-f-]{36})$/.exec(f);

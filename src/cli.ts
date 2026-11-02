@@ -14,11 +14,18 @@ import { startServer } from "./server.ts";
 import { VoiceSettings } from "./voice.ts";
 import { Vault, masterKeyPath } from "./vault.ts";
 import { Library, createEmbeddings } from "./library.ts";
+import { connectCli } from "./connectors/cli.ts";
+import { brainsCli } from "./brains/cli.ts";
+import { setupCli } from "./setup/cli.ts";
+import { loadLocalEnv } from "./setup/local.ts";
 import { Shares } from "./shares.ts";
 import { DockerSandbox, E2bSandbox, type Sandbox, type SandboxKind } from "./sandboxes.ts";
 import type { Device, Hook, Share, Teammate } from "./types.ts";
 
 const cmd = process.argv[2] || "start";
+// A hub the setup made on this Mac keeps its settings in ~/Library/Application Support/Hearth/hub.env; use them unless
+// this is a checkout with its own .env or data folder.
+if (!process.env.HEARTH_DATA && !existsSync(".env") && !existsSync("data")) loadLocalEnv();
 const config = loadConfig();
 mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
 
@@ -48,6 +55,13 @@ if (cmd === "computer") {
   process.on("SIGINT", quit);
   process.on("SIGTERM", quit);
   await new Promise(() => {});
+}
+
+// Brains, connectors and setup: flags in, --json out, never a prompt (so an agent can do all of it).
+{
+  const argv = process.argv.slice(2);
+  const code = argv[0] === "brains" ? await brainsCli(config, argv.slice(1)) : (await connectCli(config, argv)) ?? (await setupCli(config, argv));
+  if (code !== null) process.exit(code);
 }
 
 const store = await createStore(config.dbUrl, config.dataDir);
@@ -148,7 +162,11 @@ if (cmd === "setup" || cmd === "pair") {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 } else {
-  console.log("usage: hearth [start|setup|recover|status|doctor|share|shares|unshare]   on a computer: hearth [join <hub-url>|computer]");
+  console.log(`usage: hearth [start|setup|recover|status|doctor|share|shares|unshare]   on a computer: hearth [join <hub-url>|computer]
+       hearth install local|remote …      set up a hub (see: hearth install --help)
+       hearth brains detect|pick|usage|token|login|logout
+       hearth connectors | connect <id> | disconnect <id> | whatsapp chats|ignore …
+       add --json to any of these for machine-readable output`);
   process.exit(1);
 }
 
@@ -189,7 +207,7 @@ async function doctor() {
   }
   try { if (process.env.HEARTH_MASTER_KEY || existsSync(keyPath)) { const v = new Vault(config.dataDir); check(true, `API keys are encrypted at rest (${v.names().length} in the vault)`, ""); v.close(); } }
   catch (e: any) { check(false, "", e.message); }
-  const plain = ["voice.json", "keys/secrets.json"].filter((f) => existsSync(join(config.dataDir, f)));
+  const plain = ["voice.json", "keys/secrets.json", "google.json"].filter((f) => existsSync(join(config.dataDir, f)));
   check(plain.length === 0, "No API keys in plain files", `Plain key files left: ${plain.join(", ")}. Start the hub once to move them into the vault`);
 
   const devices = await store.all<Device>("devices");
