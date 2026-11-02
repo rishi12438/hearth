@@ -1,0 +1,24 @@
+web/src/connectors.ts
+  s_df4f79c5692915::t_7e32d1ab3a7d66 289,291-292
+test/slack-chrome.test.ts
+  s_df4f79c5692915::t_f6813699572d36 76-92
+src/connectors/slack.ts
+  s_df4f79c5692915::t_b8ddafc352865d 21-23,92-100,103,105,109-119
+  s_df4f79c5692915::t_899c6dc92897e7 14-20,24-31,64
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "4046f4abbd61b493e857ed3898f540b4d441198f",
+  "prompts": {},
+  "sessions": {
+    "s_df4f79c5692915": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "93f30f3c-2fb0-477d-8dc1-ed2e8b44ed63",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
