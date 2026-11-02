@@ -15,7 +15,7 @@ import { Connections } from "./connections.ts";
 import { readPage } from "./browser.ts";
 import { SignedOut } from "./sources/pages.ts";
 import type { Vault } from "./vault.ts";
-import { SOURCES, sourceById, formatItems, needOf } from "./sources/index.ts";
+import { SOURCES, sourceById, formatItems, needOf, type Item } from "./sources/index.ts";
 import { recall, isActive, validateFact } from "./memory.ts";
 import { describeLocal, inQuietHours, quietEndsAt, localDate, distanceMeters } from "./time.ts";
 import { CHANNELS, CHANNEL_LABEL, type Channel } from "./types.ts";
@@ -2416,11 +2416,37 @@ export class Hub {
     return r;
   }
 
+  /**
+   * Your recent conversations on a logged-in site (LinkedIn, Instagram), for its Connectors screen, like WhatsApp's
+   * chat list. Kept from the last read (encrypted in the vault); a new read happens only when that's over 15 minutes
+   * old, or you tap Refresh (not more than once a minute), so opening the screen doesn't keep hitting the site.
+   */
+  async recentConversations(id: string, fresh = false): Promise<{ items: { name: string; preview: string; when: string; unread: boolean; url: string }[]; readAt: string | null; error?: string }> {
+    const key = `recent:${id}`;
+    let kept: { items: any[]; readAt: string } | null = null;
+    try { kept = JSON.parse(this.vault?.get(key) || "null"); } catch {}
+    const age = kept ? Date.now() - Date.parse(kept.readAt) : Infinity;
+    if (kept && (fresh ? age < 60_000 : age < 15 * 60_000)) return kept;
+    const r = await this.testConnection(id);
+    if (!r.ok) return { items: kept?.items || [], readAt: kept?.readAt || null, error: r.error };
+    return JSON.parse(this.vault?.get(key) || "null") || { items: [], readAt: null };
+  }
+
+  private keepRecent(id: string, items: Item[]) {
+    if (!this.vault || !["linkedin", "instagram"].includes(id)) return;
+    const list = items.slice(0, 30).map((i) => {
+      const lines = i.text.split("\n").filter(Boolean);
+      return { name: i.title.replace(/^● /, "").slice(0, 80), preview: (lines.at(-1) || "").slice(0, 160), when: i.when || "", unread: !!i.unread, url: i.url || "" };
+    });
+    this.vault.set(`recent:${id}`, JSON.stringify({ items: list, readAt: new Date().toISOString() }));
+  }
+
   async testConnection(id: string) {
     const src = sourceById(id)!;
     try {
       const items = await src.items(src.validate({}), await this.sourceCtx());
       this.connections.problem(id, null);
+      this.keepRecent(id, items);
       this.emit("connections");
       return { ok: true, count: items.length, sample: items.slice(0, 3).map((i) => i.title) };
     } catch (e: any) {

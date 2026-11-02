@@ -53,7 +53,9 @@ export async function readList(site: string, page: Page, cookies: Cookie[], ctx:
   if (!raw) throw new Error(`${site}'s page didn't look like the list Hearth expects (it may have changed). Nothing was read.`);
   return raw.map((x) => {
     const lines = stableText(x.text).split("\n");
+    const when = x.text.split("\n").map((l) => l.trim()).find((l) => l && TIME_LINE.test(l) && !/^(·|•)$/.test(l) && !/notifications?$/i.test(l));
     return {
+      when, unread: x.unread,
       id: createHash("sha256").update(stableText(x.text)).digest("hex").slice(0, 24),
       title: `${x.unread ? "● " : ""}${lines[0] || site}`.slice(0, 120),
       text: lines.slice(1).join("\n") || lines[0] || "",

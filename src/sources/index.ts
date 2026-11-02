@@ -20,6 +20,9 @@ export type Item = {
   text: string;
   at?: string;
   url?: string;
+  /** For a conversation list: when it was last active, as the site shows it ("2:14 PM", "Oct 28"), and whether it's unread. */
+  when?: string;
+  unread?: boolean;
 };
 
 export type SourceCtx = { google: Google; cookies: (domain: string) => Cookie[]; readPage: typeof readPage; now: Date; tz: string };
