@@ -68,11 +68,6 @@ id hearth >/dev/null 2>&1 || adduser --disabled-password --gecos "" hearth >/dev
 [ -x /home/hearth/.bun/bin/bun ] || sudo -iu hearth bash -c 'curl -fsSL https://bun.sh/install | bash' >/dev/null
 mkdir -p /home/hearth/.claude /home/hearth/.codex && chown hearth: /home/hearth/.claude /home/hearth/.codex
 
-say "Tools for the brain: Chrome, a virtual screen, enkidu-browser and enkidu-cua"
-# Teammates read (and, after your Approve, reply on) sites with no API (Instagram, LinkedIn, X) through headless Chrome;
-# the brain finds enkidu-browser and enkidu-cua as skills. A failure here doesn't stop setup: the rest of the hub works.
-bash "$SRC/deploy/install-tools.sh" || echo "   Not every tool installed; run it again later: sudo bash $APP/deploy/install-tools.sh"
-
 if [ -n "$BRAINS" ]; then
   say "Brains: $BRAINS"
   case ",$BRAINS," in *,claude,*)
@@ -85,6 +80,12 @@ if [ -n "$BRAINS" ]; then
     echo "   Codex $(codex --version 2>/dev/null | head -1)" ;;
   esac
 fi
+
+say "Tools for the brain: Chrome, a virtual screen, enkidu-browser and enkidu-cua"
+# Teammates read (and, after your Approve, reply on) sites with no API (Instagram, LinkedIn, X) through headless Chrome;
+# the brain finds enkidu-browser and enkidu-cua as skills. Runs after the brains: it also fixes Codex's sandbox.
+# A failure here doesn't stop setup: the rest of the hub works.
+bash "$SRC/deploy/install-tools.sh" || echo "   Not every tool installed; run it again later: sudo bash $APP/deploy/install-tools.sh"
 
 say "Master key for the hub's encrypted API keys"
 # API keys (E2B, Deepgram, your VMs' SSH keys) are encrypted in data/keys/vault.db with this key. It lives outside the

@@ -30,6 +30,20 @@ echo "   $(google-chrome --version 2>/dev/null || chromium --version 2>/dev/null
 # enkidu-cua starts on :99 (Xvfb, with openbox so windows can be listed).
 apt-get install -yq fonts-liberation fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji xvfb openbox x11-utils >/dev/null 2>&1
 
+# Codex runs shell commands in a bubblewrap sandbox. Ubuntu 24.04+ only lets a program make the user namespaces that needs
+# when an AppArmor profile allows it, and none ships for bwrap, so every Codex command fails ("bwrap: loopback: Failed
+# RTM_NEWADDR: Operation not permitted"). Allow it for /usr/bin/bwrap only, the fix Ubuntu documents, rather than
+# turning the restriction off for the whole system.
+if command -v codex >/dev/null; then
+  apt-get install -yq bubblewrap >/dev/null 2>&1
+  if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ] && [ ! -e /etc/apparmor.d/bwrap ]; then
+    printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' '' '# Hearth: lets Codex'"'"'s sandbox (bubblewrap) make its namespaces.' \
+      'profile bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '  include if exists <local/bwrap>' '}' > /etc/apparmor.d/bwrap
+    apparmor_parser -r /etc/apparmor.d/bwrap
+  fi
+  echo "   Codex sandbox: bubblewrap $(bwrap --version 2>/dev/null | awk '{print $2}')"
+fi
+
 if [ "$(uname -m)" != "x86_64" ]; then
   echo "   Enkidu's tools have no $(uname -m) Linux build yet; skipped."
   exit 0

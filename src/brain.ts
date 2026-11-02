@@ -7,7 +7,7 @@ import { wallParts, zonedToUtc } from "./time.ts";
 import { SOURCES } from "./sources/index.ts";
 import { BrainUsage, isLimitError } from "./brains/usage.ts";
 import { readClaudeToken } from "./brains/logins.ts";
-import { describeSkillStep, hubSkills, installSkills, skillCatalog, skillFlags, type Skill } from "./brains/skills.ts";
+import { describeSkillStep, hubSkills, installCodexRules, installSkills, skillCatalog, skillFlags, type Skill } from "./brains/skills.ts";
 
 /** Each trigger module's own description of its config, for the hook docs below. */
 /** Each trigger module's own description, read when a prompt is built (the hub adds WhatsApp and Slack at start). */
@@ -341,9 +341,9 @@ function agentEnv(harness?: string, paths: string[] = []) {
   // Agents need their own login (HOME, PATH) but nothing of the hub's: drop HEARTH_* (DB URL, etc.).
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("HEARTH_")) env[k] = v;
-  // A long-lived Claude login copied up from your Mac (`claude setup-token`) signs Claude in here.
-  // Skill commands run by their bare names (that's what their Bash rules match).
+  // Skill commands run by their bare names (that's what Claude's Bash rules and Codex's prefix rules match).
   if (paths.length) env.PATH = [...paths, env.PATH || "/usr/bin:/bin"].join(":");
+  // A long-lived Claude login copied up from your Mac (`claude setup-token`) signs Claude in here.
   if (harness === "claude" && !env.CLAUDE_CODE_OAUTH_TOKEN) {
     const t = readClaudeToken();
     if (t) env.CLAUDE_CODE_OAUTH_TOKEN = t;
@@ -461,6 +461,11 @@ export class Brain {
     let paths: string[] = [];
     try {
       const bin = installSkills(this.workDir, skills);
+      // Codex's rules live in its home, not the brain's folder. A server hub's hearth user exists only for Hearth, so its
+      // ~/.codex is ours to write; on your own computer that's your personal Codex, so only with HEARTH_CODEX_RULES=on.
+      if (this.config.target === "lightsail" || process.env.HEARTH_CODEX_RULES === "on") {
+        installCodexRules(process.env.CODEX_HOME || join(homedir(), ".codex"), skills);
+      }
       paths = [...new Set([bin, ...skills.flatMap((s) => s.commands.map((c) => findCommandDir(c)).filter(Boolean) as string[])])];
     } catch { return { skills: [], paths: [] }; }
     this.skillState = { at: Date.now(), key, skills, paths };
@@ -558,7 +563,9 @@ export class Brain {
     const { harness } = profile;
     const model = MODEL_RE.test(profile.model) ? profile.model : "";
     if (harness === "echo") return b.mode === "orchestrate" ? echoOrchestrator(b) : echoBrain(b);
-    const prompt = buildPrompt(b);
+    // Codex has no system prompt flag: the skills catalog goes at the top of its message.
+    const codexSkills = harness === "codex" && !NO_TOOLS.has(b.mode) ? this.skills().skills : [];
+    const prompt = (codexSkills.length ? skillCatalog(codexSkills, "codex").trim() + "\n\n" : "") + buildPrompt(b);
     const planning = b.mode === "orchestrate";
     const name = `${harness}${model ? ` (${model})` : ""}`;
     let outFile: string | null = null;
@@ -590,7 +597,7 @@ export class Brain {
         throw new Error(`Unknown harness: ${harness}`);
     }
     const proc = Bun.spawn(cmd, {
-      cwd: this.workDir, env: agentEnv(harness, harness === "claude" ? this.skills().paths : []),
+      cwd: this.workDir, env: agentEnv(harness, harness === "claude" || harness === "codex" ? this.skills().paths : []),
       stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe",
     });
     let timedOut = false;

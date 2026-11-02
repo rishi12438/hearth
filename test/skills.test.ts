@@ -77,3 +77,19 @@ test("skill steps read as plain progress lines", () => {
   expect(describeSkillStep("hearth-skill show enkidu-cua")).toBe("Reading the enkidu-cua skill");
   expect(describeSkillStep("ls -la")).toBeNull();
 });
+
+test("Codex gets rules for the skills' commands only, and the catalog without the Skill tool", async () => {
+  const { codexRules, installCodexRules } = await import("../src/brains/skills.ts");
+  const { home, data } = hub();
+  const skills = hubSkills(data, {}, home);
+  expect(codexRules(skills)).toContain('prefix_rule(pattern=["enkidu-browser"], decision="allow")');
+  expect(codexRules(skills)).toContain('prefix_rule(pattern=["hearth-open"], decision="allow")');
+  expect(codexRules(skills)).not.toContain("hearth-skill");
+  expect(codexRules([])).toBe("");
+  expect(skillCatalog(skills, "codex")).not.toContain("Skill tool");
+  const codexHome = join(home, "codex");
+  installCodexRules(codexHome, skills);
+  expect(readFileSync(join(codexHome, "rules", "hearth.rules"), "utf8")).toContain("enkidu-cua");
+  installCodexRules(codexHome, []);
+  expect(existsSync(join(codexHome, "rules", "hearth.rules"))).toBe(false);
+});
