@@ -2421,38 +2421,47 @@ export class Hub {
    * chat list. Kept from the last read (encrypted in the vault); a new read happens only when that's over 15 minutes
    * old, or you tap Refresh (not more than once a minute), so opening the screen doesn't keep hitting the site.
    */
-  async recentConversations(id: string, fresh = false): Promise<{ items: { name: string; preview: string; when: string; unread: boolean; url: string }[]; readAt: string | null; error?: string }> {
-    const key = `recent:${id}`;
+  async recentConversations(id: string, fresh = false, what = "messages"): Promise<{ items: { name: string; preview: string; lines: string[]; when: string; unread: boolean; url: string }[]; readAt: string | null; error?: string }> {
+    const src = sourceById(id);
+    if (!src || !["linkedin", "instagram"].includes(id)) return { items: [], readAt: null, error: "Not a site with a list." };
+    const config = src.validate({ what });
+    const kind = String((config as any).what || "messages");
+    const key = kind === "messages" ? `recent:${id}` : `recent:${id}:${kind}`;
     let kept: { items: any[]; readAt: string } | null = null;
     try { kept = JSON.parse(this.vault?.get(key) || "null"); } catch {}
     const age = kept ? Date.now() - Date.parse(kept.readAt) : Infinity;
     if (kept && (fresh ? age < 60_000 : age < 15 * 60_000)) return kept;
-    const r = await this.testConnection(id);
+    const r = await this.readConnection(id, config);
     if (!r.ok) return { items: kept?.items || [], readAt: kept?.readAt || null, error: r.error };
     return JSON.parse(this.vault?.get(key) || "null") || { items: [], readAt: null };
   }
 
-  private keepRecent(id: string, items: Item[]) {
+  private keepRecent(id: string, kind: string, items: Item[]) {
     if (!this.vault || !["linkedin", "instagram"].includes(id)) return;
     const list = items.slice(0, 30).map((i) => {
-      const lines = i.text.split("\n").filter(Boolean);
-      return { name: i.title.replace(/^● /, "").slice(0, 80), preview: (lines.at(-1) || "").slice(0, 160), when: i.when || "", unread: !!i.unread, url: i.url || "" };
+      const lines = i.text.split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 6).map((l) => l.slice(0, 200));
+      return { name: i.title.replace(/^● /, "").slice(0, 120), preview: (lines.at(-1) || "").slice(0, 160), lines, when: i.when || "", unread: !!i.unread, url: i.url || "" };
     });
-    this.vault.set(`recent:${id}`, JSON.stringify({ items: list, readAt: new Date().toISOString() }));
+    this.vault.set(kind === "messages" ? `recent:${id}` : `recent:${id}:${kind}`, JSON.stringify({ items: list, readAt: new Date().toISOString() }));
   }
 
-  async testConnection(id: string) {
+  /** One read of a logged-in site's list; keeps it for the Connectors screen and flags a sign-out. */
+  private async readConnection(id: string, config: any) {
     const src = sourceById(id)!;
     try {
-      const items = await src.items(src.validate({}), await this.sourceCtx());
+      const items = await src.items(config, await this.sourceCtx());
       this.connections.problem(id, null);
-      this.keepRecent(id, items);
+      this.keepRecent(id, String(config?.what || "messages"), items);
       this.emit("connections");
-      return { ok: true, count: items.length, sample: items.slice(0, 3).map((i) => i.title) };
+      return { ok: true as const, count: items.length, sample: items.slice(0, 3).map((i) => i.title) };
     } catch (e: any) {
       if (e instanceof SignedOut) this.connections.problem(id, e.message);
-      return { ok: false, error: String(e.message) };
+      return { ok: false as const, error: String(e.message) };
     }
+  }
+
+  async testConnection(id: string): Promise<{ ok: boolean; count?: number; sample?: string[]; error?: string }> {
+    return this.readConnection(id, sourceById(id)!.validate({}));
   }
 
   async fire(h: Hook, reason: string, late = false, extra?: string) {

@@ -1830,32 +1830,55 @@ async function openCookieSetup(c: Connector | { via: string; name: string; blurb
   ]);
 }
 
-/** Connected LinkedIn or Instagram: your recent conversations, like the WhatsApp list. Tap one to open it on the site. */
+/**
+ * Connected LinkedIn or Instagram, like the WhatsApp list: your recent messages and, on LinkedIn, connection requests and
+ * notifications in their own tabs. Each tab is read when you open it (then kept up to 15 minutes); tap a row to open it.
+ */
 function conversationsSheet(c: any, st: any, auditAll: any[]) {
-  const list = h("div", { class: "wa-list" }, h("p", { class: "wa-empty" }, "Loading your recent conversations…"));
+  const tabsFor: [string, string][] = c.via === "linkedin" ? [["messages", "Messages"], ["invitations", "Invitations"], ["notifications", "Notifications"]] : [["messages", "Messages"]];
+  let tab = "messages";
+  const got: Record<string, any> = {};
+  const list = h("div", { class: "wa-list" });
   const foot = h("p", { class: "wa-note" });
+  const tabs = h("div", { class: "wa-tabs" });
   const avatar = (name: string) => h("span", { class: "wa-av" }, (name.replace(/[^\p{L}\p{N}]/gu, "").slice(0, 1) || "#").toUpperCase());
-  const load = async (fresh = false) => {
-    clear(foot, fresh ? `Reading ${c.name}…` : "");
-    let r: any;
-    try { r = await call(`/api/connections/${c.via}/recent${fresh ? "?fresh=1" : ""}`); } catch (e: any) { r = { items: [], readAt: null, error: e.message }; }
+  const junk = /^(accept|ignore|message|follow|connect|wants to connect|view|reply|·)$/i;
+  const row = (x: any) => {
+    const rest: string[] = (x.lines || []).filter((l: string) => !junk.test(l));
+    // Messages: who, when, last message. Invitations: who, their headline, mutual connections. Notifications: the line.
+    const top = tab === "notifications" ? null : h("span", { class: "wa-top" }, h("b", null, x.name), h("time", null, x.when || ""));
+    const sub = tab === "notifications" ? h("span", { class: "wa-text" }, x.name)
+      : tab === "invitations" ? [h("small", null, rest[0] || ""), rest[1] ? h("small", null, rest[1]) : null]
+      : h("small", null, x.preview || "");
+    return h("a", { class: `wa-row ${x.unread ? "unread" : ""}`, href: x.url || undefined, target: "_blank", rel: "noopener noreferrer" },
+      avatar(x.name), h("span", { class: "grow" }, top, sub), x.unread ? h("span", { class: "wa-dot" }) : null);
+  };
+  const empty: Record<string, string> = { messages: "No conversations yet.", invitations: "No connection requests right now.", notifications: "No notifications." };
+  const draw = () => {
+    clear(tabs, tabsFor.length > 1 ? tabsFor.map(([k, label]) => {
+      const n = k === "invitations" && got[k]?.items?.length ? ` ${got[k].items.length}` : "";
+      return h("button", { class: `wa-tab ${tab === k ? "on" : ""}`, on: { click: () => { tab = k; draw(); if (!got[k]) void load(); } } }, label + n);
+    }) : null);
+    const r = got[tab];
+    if (!r) return clear(list, h("p", { class: "wa-empty" }, "Loading…"));
     const items: any[] = r.items || [];
-    clear(list, items.length ? items.map((x) => h("a", { class: `wa-row ${x.unread ? "unread" : ""}`, href: x.url || undefined, target: "_blank", rel: "noopener noreferrer" },
-      avatar(x.name),
-      h("span", { class: "grow" }, h("span", { class: "wa-top" }, h("b", null, x.name), h("time", null, x.when || "")), h("small", null, x.preview || "")),
-      x.unread ? h("span", { class: "wa-dot" }) : null))
-      : h("p", { class: "wa-empty" }, r.error ? r.error : `No conversations yet.`));
+    clear(list, items.length ? items.map(row) : h("p", { class: "wa-empty" }, r.error || empty[tab]));
     clear(foot, r.error && items.length ? h("span", { class: "err" }, `${r.error} `) : null, r.readAt ? `Updated ${relTime(r.readAt)} · ` : "",
       h("button", { class: "wa-link", on: { click: () => load(true) } }, "Refresh"));
-    if (r.error && /signed hearth out/i.test(r.error)) setTimeout(() => openCookieSetup(c), 1500); // back to Reconnect
   };
-  void load();
+  const load = async (fresh = false) => {
+    const k = tab;
+    if (fresh) clear(foot, `Reading ${c.name}…`);
+    try { got[k] = await call(`/api/connections/${c.via}/recent?what=${k}${fresh ? "&fresh=1" : ""}`); } catch (e: any) { got[k] = { items: got[k]?.items || [], readAt: got[k]?.readAt || null, error: e.message }; }
+    draw();
+    if (got[k].error && /signed hearth out/i.test(got[k].error)) setTimeout(() => openCookieSetup(c), 1500); // back to Reconnect
+  };
+  draw(); void load();
   openSheet(c.name, [
     h("button", { class: "btn ghost", on: { click: () => openConnections() } }, icon("back", 16), "All connectors"),
     h("div", { class: "wa-head" }, connectorTile({ id: c.via, name: c.name, blurb: c.blurb, group: "Social", via: c.via, bg: c.bg, shapes: c.shapes } as Connector, 40),
-      h("span", { class: "grow" }, h("b", null, `${c.name} is connected`), h("small", null, `${st.detail || "Connected"} · teammates read new messages, read-only`))),
-    h("p", { class: "wa-note" }, "Your recent conversations. Tap one to open it."),
-    list, foot,
+      h("span", { class: "grow" }, h("b", null, `${c.name} is connected`), h("small", null, `${st.detail || "Connected"} · read-only`))),
+    tabs, list, foot,
     accessLog(auditAll, st.domain || c.via),
     h("button", { class: "wa-unlink", on: { click: () => confirmSheet(`Disconnect ${c.name}?`, "Your login is deleted from the hub. Triggers on it stop until you connect again.", "Disconnect", async () => { await call(`/api/connections/${c.via}`, { method: "DELETE" }); toast(`${c.name} disconnected`); openConnections(); }) } }, `Disconnect ${c.name}`),
   ]);

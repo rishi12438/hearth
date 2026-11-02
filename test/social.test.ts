@@ -256,3 +256,15 @@ test("recent conversations: kept from the last read, re-read only when stale or 
   expect(reads.length).toBe(n); // refresh within a minute: still kept
   expect(readFileSync(hub.vault!.path).includes("see you tomorrow")).toBe(false); // encrypted
 });
+
+test("recent: LinkedIn connection requests are their own list, read from the received page", async () => {
+  hub.connections.saveCookies("linkedin", "li_at=A; JSESSIONID=B");
+  page = { url: "https://www.linkedin.com/mynetwork/invitation-manager/received/", data: [{ text: "Ada Lovelace\nwants to connect\nMathematician\n3 mutual connections\nIgnore\nAccept", unread: false, href: "https://www.linkedin.com/in/ada/" }] };
+  const r = await hub.recentConversations("linkedin", false, "invitations");
+  expect(reads.at(-1)?.url).toContain("/invitation-manager/received/");
+  expect(r.items[0].name).toBe("Ada Lovelace");
+  expect(r.items[0].lines).toContain("Mathematician");
+  expect(r.items[0].url).toBe("https://www.linkedin.com/in/ada/");
+  await hub.recentConversations("linkedin"); // messages: kept apart, so this is a read of its own
+  expect(reads.at(-1)?.url).toContain("/messaging/");
+});
