@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { Store } from "../store/index.ts";
 import type { Connector } from "./types.ts";
 import { RISK } from "./types.ts";
+import { parsePhoneNumberFromString } from "libphonenumber-js";
 
 // WhatsApp on your own number, linked like WhatsApp Web: scan a QR code from the phone (Settings → Linked devices).
 // Unofficial (Baileys): it breaks WhatsApp's terms and the number could be banned, so the owner accepts that once
@@ -25,6 +26,8 @@ export const NO_RULES: IgnoreRules = { contacts: [], groups: [], allGroups: fals
 
 export type WaMessage = { id: string; createdAt: string; jid: string; chat: string; from: string; fromMe: boolean; group: boolean; text: string; at: string };
 export type ChatInfo = { jid: string; name: string; group: boolean; archived?: boolean; mutedUntil?: number; /** ms of the latest message */ lastAt?: number; /** name came from your address book (beats their own WhatsApp name) */ saved?: boolean; /** ms of the latest call seen (WhatsApp doesn't share past call logs, so from linking on) */ lastCallAt?: number };
+/** "+65 9199 7824" from a WhatsApp number (digits with the country code). */
+export const prettyNumber = (digitsOnly: string) => parsePhoneNumberFromString(`+${digitsOnly}`)?.formatInternational() ?? `+${digitsOnly}`;
 /** Official WhatsApp accounts that aren't in anyone's address book. */
 const KNOWN: Record<string, string> = { "13135550002": "Meta AI" };
 /** Baileys timestamps are seconds, sometimes as a protobuf Long. */
@@ -143,8 +146,9 @@ export class WhatsApp {
     if (best) return best;
     const pn = jid.endsWith("@s.whatsapp.net") ? jid : twin?.endsWith("@s.whatsapp.net") ? twin : null;
     if (pn && KNOWN[pn.split("@")[0]]) return { name: KNOWN[pn.split("@")[0]], saved: false };
-    if (pn) return { name: `+${pn.split("@")[0]}`, saved: false };
-    return { name: "Unknown contact", saved: false };
+    if (pn) return { name: prettyNumber(pn.split("@")[0]), saved: false };
+    // Only WhatsApp's private id is known: the person hides their number (e.g. met in a community) and isn't saved.
+    return { name: "Hidden number", saved: false };
   }
 
   /** Recent messages that got through the ignore list, newest first. */
@@ -278,7 +282,8 @@ export class WhatsApp {
     setTimeout(async () => {
       if (this.sock !== sock || !(sock as any).resyncAppState) return;
       try { await (sock as any).resyncAppState(B.ALL_WA_PATCH_NAMES ?? ["critical_block", "critical_unblock_low", "regular_high", "regular_low", "regular"], true); }
-      catch { if (triesLeft > 1) this.syncNames(sock, B, 30_000, triesLeft - 1); }
+      catch { if (triesLeft > 1) this.syncNames(sock, B, 30_000, triesLeft - 1); return; }
+      await this.resolveSaved(sock);
     }, wait).unref?.();
   }
 
@@ -294,6 +299,18 @@ export class WhatsApp {
       else if (theirs && !this.names.get(jid)?.saved) this.names.set(jid, { name: theirs, saved: false });
     }
     if (saved || theirs) this.keepChats();
+  }
+
+  /** Some chats come only under WhatsApp's private @lid id. WhatsApp answers number -> private id (not the reverse),
+   * so ask it for the saved contacts we can't pair yet, a few at a time, once per connection. */
+  private async resolveSaved(sock: Sock) {
+    const lookup = (sock as any).onWhatsApp;
+    if (!lookup) return;
+    const todo = [...this.names].filter(([j, n]) => n.saved && j.endsWith("@s.whatsapp.net") && !this.alias.has(j)).map(([j]) => j);
+    for (let i = 0; i < todo.length && this.sock === sock; i += 50) {
+      try { for (const r of (await lookup(...todo.slice(i, i + 50))) || []) this.link(r?.jid, r?.lid); } catch { return; }
+      await Bun.sleep(1500);
+    }
   }
 
   /** A call with someone: as recent as a message. Only who and when are kept. */

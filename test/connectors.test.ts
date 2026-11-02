@@ -239,13 +239,19 @@ describe("WhatsApp names and calls", () => {
   test("one row per person when WhatsApp uses both their number and their private id", async () => {
     const { wa, sock } = await setup();
     sock.emit("messaging-history.set", { chats: [{ id: "15550100@s.whatsapp.net", conversationTimestamp: 100 }, { id: "999@lid", conversationTimestamp: 200 }], contacts: [], messages: [] });
-    expect(wa.chatList().map((c) => c.name).sort()).toEqual(["+15550100", "Unknown contact"]);
+    expect(wa.chatList().map((c) => c.name).sort()).toEqual(["+1 5550100", "Hidden number"]);
     // A message on the private id carries the phone number: now they're one row, named from the address book.
     sock.emit("messages.upsert", { type: "append", messages: [{ key: { remoteJid: "999@lid", senderPn: "15550100@s.whatsapp.net", fromMe: false }, message: {} }] });
     sock.emit("contacts.upsert", [{ id: "15550100@s.whatsapp.net", name: "Mom" }]);
     const rows = wa.chatList();
     expect(rows.map((c) => [c.jid, c.name, c.lastAt])).toEqual([["15550100@s.whatsapp.net", "Mom", 200_000]]);
     wa.stop();
+  });
+
+  test("numbers show with their country code", async () => {
+    const { prettyNumber } = await import("../src/connectors/whatsapp.ts");
+    expect(prettyNumber("6591997824")).toBe("+65 9199 7824");
+    expect(prettyNumber("16024132657")).toBe("+1 602 413 2657");
   });
 
   test("Meta AI is named", async () => {
