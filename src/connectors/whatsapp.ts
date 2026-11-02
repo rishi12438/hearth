@@ -77,6 +77,7 @@ export class WhatsApp {
   private chats = new Map<string, ChatInfo>();
   private stopping = false;
   private retries = 0;
+  private booting = false;
   readonly dir: string;
   onChange: () => void = () => {};
   onMessage: (m: WaMessage) => void = () => {};
@@ -137,9 +138,16 @@ export class WhatsApp {
   }
 
   async start() {
+    // Guard on a start actually in flight, not on the "starting" state: a reconnect sets that state before calling
+    // start(), and WhatsApp drops the socket right after every QR scan, so that guard left new links never reconnecting.
+    if (this.sock || this.booting) return;
+    this.booting = true;
+    try { await this.boot(); } finally { this.booting = false; }
+  }
+
+  private async boot() {
     await this.loadChats();
     if (!(await this.riskAccepted())) throw new Error("Accept the WhatsApp ban-risk warning first.");
-    if (this.sock || this.st === "starting") return;
     this.stopping = false;
     this.set("starting");
     const B: any = await this.load();

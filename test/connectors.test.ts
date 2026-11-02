@@ -164,3 +164,34 @@ describe("setup", () => {
     expect(statSync(loose).mode & 0o777).toBe(0o600);
   });
 });
+
+describe("WhatsApp link", () => {
+  test("reconnects after WhatsApp drops the socket right after a QR scan", async () => {
+    const { WhatsApp } = await import("../src/connectors/whatsapp.ts");
+    const socks: any[] = [];
+    const fake = {
+      default: (_: any) => {
+        const handlers: Record<string, ((u: any) => void)[]> = {};
+        const sock = { ev: { on: (e: string, f: any) => (handlers[e] ||= []).push(f) }, emit: (e: string, u: any) => (handlers[e] || []).forEach((f) => f(u)), end() {}, user: { id: "15550100:1@s.whatsapp.net" } };
+        socks.push(sock);
+        return sock;
+      },
+      useMultiFileAuthState: async () => ({ state: {}, saveCreds: () => {} }),
+      fetchLatestBaileysVersion: async () => ({ version: [2, 3000, 1] }),
+      Browsers: { macOS: (b: string) => ["Mac OS", b, "14.4.1"] },
+      DisconnectReason: { loggedOut: 401, restartRequired: 515 },
+    };
+    const store = { get: async () => null, put: async () => {}, all: async () => [], clear: async () => {}, remove: async () => {} } as any;
+    const wa = new WhatsApp(mkdtempSync(join(tmpdir(), "hearth-wa-")), store, () => true, async () => fake);
+    await wa.start();
+    expect(socks.length).toBe(1);
+    socks[0].emit("connection.update", { qr: "code" });
+    // The scan pairs, then WhatsApp closes and asks for a restart.
+    socks[0].emit("connection.update", { connection: "close", lastDisconnect: { error: { output: { statusCode: 515 } } } });
+    await Bun.sleep(1300);
+    expect(socks.length).toBe(2);
+    socks[1].emit("connection.update", { connection: "open" });
+    expect(wa.connected()).toBe(true);
+    wa.stop();
+  });
+});
