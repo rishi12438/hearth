@@ -162,7 +162,11 @@ export class WhatsApp {
       // [label, platform, version]. The platform must be one WhatsApp knows (Chrome, like web.whatsapp.com): a made-up
       // one was refused ("can't link new devices"). The label is free text, so Linked devices shows "Chrome (Hearth)".
       browser: ["Hearth", "Chrome", "14.4.1"],
-      markOnlineOnConnect: false, syncFullHistory: false });
+      markOnlineOnConnect: false, syncFullHistory: false,
+      // Baileys turns syncFullHistory: false into "skip every history message", which drops the recent-chats list WhatsApp
+      // sends once at link time. Take the recent sync (only names and times are kept, see messaging-history.set); still
+      // decline the full archive.
+      shouldSyncHistoryMessage: (m: any) => m?.syncType !== B.proto?.Message?.HistorySyncNotification?.HistorySyncType?.FULL });
     this.sock = sock;
     sock.ev.on("creds.update", saveCreds);
     sock.ev.on("connection.update", (u: any) => {

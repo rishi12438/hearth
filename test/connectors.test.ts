@@ -169,8 +169,10 @@ describe("WhatsApp link", () => {
   test("reconnects after WhatsApp drops the socket right after a QR scan", async () => {
     const { WhatsApp } = await import("../src/connectors/whatsapp.ts");
     const socks: any[] = [];
+    const configs: any[] = [];
     const fake = {
-      default: (_: any) => {
+      default: (cfg: any) => {
+        configs.push(cfg);
         const handlers: Record<string, ((u: any) => void)[]> = {};
         const sock = { ev: { on: (e: string, f: any) => (handlers[e] ||= []).push(f) }, emit: (e: string, u: any) => (handlers[e] || []).forEach((f) => f(u)), end() {}, user: { id: "15550100:1@s.whatsapp.net" } };
         socks.push(sock);
@@ -180,11 +182,16 @@ describe("WhatsApp link", () => {
       fetchLatestBaileysVersion: async () => ({ version: [2, 3000, 1] }),
       Browsers: { macOS: (b: string) => ["Mac OS", b, "14.4.1"] },
       DisconnectReason: { loggedOut: 401, restartRequired: 515 },
+      proto: { Message: { HistorySyncNotification: { HistorySyncType: { INITIAL_BOOTSTRAP: 0, FULL: 2, RECENT: 3 } } } },
     };
     const store = { get: async () => null, put: async () => {}, all: async () => [], clear: async () => {}, remove: async () => {} } as any;
     const wa = new WhatsApp(mkdtempSync(join(tmpdir(), "hearth-wa-")), store, () => true, async () => fake);
     await wa.start();
     expect(socks.length).toBe(1);
+    // The recent-chats sync WhatsApp sends at link time is taken; the full archive isn't.
+    expect(configs[0].shouldSyncHistoryMessage({ syncType: 0 })).toBe(true);
+    expect(configs[0].shouldSyncHistoryMessage({ syncType: 3 })).toBe(true);
+    expect(configs[0].shouldSyncHistoryMessage({ syncType: 2 })).toBe(false);
     socks[0].emit("connection.update", { qr: "code" });
     // The scan pairs, then WhatsApp closes and asks for a restart.
     socks[0].emit("connection.update", { connection: "close", lastDisconnect: { error: { output: { statusCode: 515 } } } });
