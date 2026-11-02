@@ -1,0 +1,115 @@
+deploy/hearth.service
+  s_c3abf54b0d0d60::t_308baa471aeb0b 13-14,22
+src/sources/index.ts
+  s_c3abf54b0d0d60::t_4c4c2b2e3a2751 9,41-47
+src/sources/instagram.ts
+  s_c3abf54b0d0d60::t_4c4c2b2e3a2751 1-20
+src/cli.ts
+  s_c3abf54b0d0d60::t_3f2a8172eb9cfa 18,20
+  s_c3abf54b0d0d60::t_07a481ac80b0b6 19,54-55
+  s_c3abf54b0d0d60::t_e54aaa27647e40 52-53,56-58,118-122
+  s_c3abf54b0d0d60::t_b397e6444751e8 24-26
+  s_c3abf54b0d0d60::t_b9bc7edafb8333 21
+src/brains/usage.ts
+  s_c3abf54b0d0d60::t_3f2a8172eb9cfa 1-299
+src/setup/ssh.ts
+  s_c3abf54b0d0d60::t_ade7d492f887fb 1-45
+src/connectors/brains.ts
+  s_c3abf54b0d0d60::t_955ba0901117b6 1-47
+test/brains.test.ts
+  s_c3abf54b0d0d60::t_3f2a8172eb9cfa 5-6
+src/store/types.ts
+  s_c3abf54b0d0d60::t_3f7d9d5ee2382b 6
+web/setup.html
+  s_c3abf54b0d0d60::t_e9dd9a2d40336f 1-167
+src/setup/local.ts
+  s_c3abf54b0d0d60::t_ade7d492f887fb 1-92
+src/connectors/index.ts
+  s_c3abf54b0d0d60::t_3f2a8172eb9cfa 1-3,23-24,28-31,33,35-36,38,41-43,45,47-48,51-52,56,58-60,62,65-67,70-71,76,80,82-86,90,92-93,96,101-107,110
+  s_c3abf54b0d0d60::t_4c9930bd52e7af 4-22,25-27,32,34,37,39-40,44,46,49-50,53-55,57,61,63-64,68-69,72-75,77-79,81,87-89,91,94-95,97-100,108-109
+src/setup/wizard.ts
+  s_c3abf54b0d0d60::t_b9bc7edafb8333 1-75
+src/connectors/slack.ts
+  s_c3abf54b0d0d60::t_846a1a7c7acbca 3,77-101
+  s_c3abf54b0d0d60::t_3f2a8172eb9cfa 1-2,4-76
+src/setup/remote.ts
+  s_c3abf54b0d0d60::t_ade7d492f887fb 1-99
+src/connectors/types.ts
+  s_c3abf54b0d0d60::t_603ae08a103843 1-59
+src/setup/steps.ts
+  s_c3abf54b0d0d60::t_ade7d492f887fb 1-27
+src/connectors/google.ts
+  s_c3abf54b0d0d60::t_955ba0901117b6 1-10
+src/admin.ts
+  s_c3abf54b0d0d60::t_0e9b2ebfa051a2 1-48
+src/connectors/cookies.ts
+  s_c3abf54b0d0d60::t_955ba0901117b6 1-23
+src/connectors/deepgram.ts
+  s_c3abf54b0d0d60::t_955ba0901117b6 1-21
+src/setup/cli.ts
+  s_c3abf54b0d0d60::t_3f2a8172eb9cfa 1-2,8-30,32-60
+  s_c3abf54b0d0d60::t_b9bc7edafb8333 3-7,31
+src/brains/cli.ts
+  s_c3abf54b0d0d60::t_aa70bb59440bb5 1-69
+deploy/setup-lightsail.sh
+  s_c3abf54b0d0d60::t_308baa471aeb0b 12-19,70-82,130-131
+  s_c3abf54b0d0d60::t_7ed53de710e59b 124
+src/hub.ts
+  s_c3abf54b0d0d60::t_ded53056949d65 1130-1156,1163-1167,1428-1433
+  s_c3abf54b0d0d60::t_6bd4204af5fe0b 1128
+  s_c3abf54b0d0d60::t_5e48ad44e605cb 92-96
+  s_c3abf54b0d0d60::t_3f2a8172eb9cfa 1129
+src/connections.ts
+  s_c3abf54b0d0d60::t_c704c8d5245101 39-44
+src/connectors/cli.ts
+  s_c3abf54b0d0d60::t_3f2a8172eb9cfa 1-2,4,6-17,20-95
+  s_c3abf54b0d0d60::t_07a481ac80b0b6 3,5,18-19
+src/connectors/serper.ts
+  s_c3abf54b0d0d60::t_955ba0901117b6 1-33
+src/server.ts
+  s_c3abf54b0d0d60::t_3f2a8172eb9cfa 13,15
+  s_c3abf54b0d0d60::t_6bd4204af5fe0b 14,108-109,111-112,254-258,264,268,270,429-446,450-477
+  s_c3abf54b0d0d60::t_6d6fee9ccce96f 110
+src/types.ts
+  s_c3abf54b0d0d60::t_ded53056949d65 306
+src/connectors/whatsapp-source.ts
+  s_c3abf54b0d0d60::t_6d6fee9ccce96f 1-17
+package.json
+  s_c3abf54b0d0d60::t_7038abc9158292 23
+src/cli-common.ts
+  s_c3abf54b0d0d60::t_aa70bb59440bb5 3-28
+  s_c3abf54b0d0d60::t_9b8ed03d6999ab 1-2
+scripts/web-search.ts
+  s_c3abf54b0d0d60::t_9bcf7e127a4601 1-14
+src/scripts.ts
+  s_c3abf54b0d0d60::t_27c6fb440c0def 35-37,43-45,128-135,154
+src/connectors/whatsapp.ts
+  s_c3abf54b0d0d60::t_eb36ae56c2cfa0 1-2,6-216
+  s_c3abf54b0d0d60::t_3f2a8172eb9cfa 3
+  s_c3abf54b0d0d60::t_846a1a7c7acbca 4-5,217-231
+src/brain.ts
+  s_c3abf54b0d0d60::t_3f2a8172eb9cfa 7-8
+  s_c3abf54b0d0d60::t_1b46904f00b7f5 38,276
+  s_c3abf54b0d0d60::t_4c4c2b2e3a2751 11-12,72
+  s_c3abf54b0d0d60::t_ded53056949d65 119-120
+test/connectors.test.ts
+  s_c3abf54b0d0d60::t_f4b4d0f89e68ae 1-122
+bun.lock
+  s_c3abf54b0d0d60::t_ecd9490dfd8ba7 9,23-24,27-32,39-98,101-104,107-130,147-156,167-170,183-184,187-190,195-198,201-202,209-218,221-226,229-232,235-246,251-252,261-264,267-268,271-278,291-294,309-314,319-326,329-332,339-340,343-344,347-352,357-358,361-366,369-370,381-382,385-386,396-401
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "b7d1d30122d88546a0da747380202525a776641d",
+  "prompts": {},
+  "sessions": {
+    "s_c3abf54b0d0d60": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5d7396f8-5253-434f-b3b7-b8db95db4fed",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
