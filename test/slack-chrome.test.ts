@@ -73,3 +73,20 @@ test("probe proves read access: identity, DM count, people", async () => {
   const r = await slack.probe();
   expect(r).toMatchObject({ ok: true, team: "Acme", user: "rishi", dmCount: 2, people: ["Alice", "Bob"] });
 });
+
+test("probe degrades when the app token lacks DM scopes: identity + scope note, mentions fallback", async () => {
+  const f = (async (url: string, init: any = {}) => {
+    if (url.includes("auth.test")) return Response.json({ ok: true, team: "Acme", user: "rishi" });
+    if (url.includes("conversations.list")) return Response.json({ ok: false, error: "missing_scope", needed: "channels:read,im:read", provided: "users:read,search:read" });
+    if (url.includes("search.messages")) return Response.json({ ok: true, messages: { matches: [{ channel: { id: "C1", name: "general" }, ts: "1700000000.0", text: "hi rishi", username: "Bob" }] } });
+    return Response.json({ ok: true });
+  }) as unknown as typeof fetch;
+  const vault = new Vault(mkdtempSync(join(tmpdir(), "hearth-sc-")), { masterKey: randomBytes(32) });
+  const slack = new Slack(vault, f);
+  slack.save("xoxp-tok", "Acme", "rishi");
+  const r: any = await slack.probe();
+  expect(r.ok).toBe(true);
+  expect(r.user).toBe("rishi");
+  expect(r.note).toContain("im:read");
+  expect(r.recent[0]).toContain("general"); // mentions still work via search:read
+});

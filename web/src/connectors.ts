@@ -286,8 +286,10 @@ function slackConnected(t: Tile) {
     clear(out,
       h("p", { class: "okline" }, icon("check", 16), ` ${who}`),
       typeof r.dmCount === "number" ? h("p", { class: "muted small" }, `Can read ${r.dmCount} direct-message ${r.dmCount === 1 ? "conversation" : "conversations"}${r.people?.length ? `, incl. ${r.people.slice(0, 5).join(", ")}` : ""}.`) : null,
+      r.note ? h("div", { class: "riskbox" }, h("b", null, "Needs one more permission"), h("p", { class: "small" }, r.note)) : null,
       r.recent?.length ? h("div", { class: "stack" }, h("small", { class: "sub" }, "Most recent:"), h("div", { class: "list" }, r.recent.map((line: string) => h("div", { class: "item" }, h("small", null, line)))))
-        : h("p", { class: "muted small" }, "No recent DMs to show right now — but the read above works."));
+        : r.note ? null
+        : h("p", { class: "muted small" }, "No recent DMs or mentions to show right now — but the read above works."));
   };
   const check = async (e: Event) => {
     const b = e.currentTarget as HTMLButtonElement; b.disabled = true; b.textContent = "Checking…"; clear(out);
