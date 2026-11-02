@@ -70,6 +70,18 @@ export function messageText(msg: any): string {
   return String(m?.conversation ?? m?.extendedTextMessage?.text ?? m?.imageMessage?.caption ?? m?.videoMessage?.caption ?? m?.documentMessage?.caption ?? "").trim();
 }
 
+/** Kinds of message a person actually sent (not system notices, reactions, receipts or key exchanges). */
+const REAL = ["conversation", "extendedTextMessage", "imageMessage", "videoMessage", "ptvMessage", "audioMessage", "documentMessage",
+  "documentWithCaptionMessage", "stickerMessage", "contactMessage", "contactsArrayMessage", "locationMessage", "liveLocationMessage",
+  "pollCreationMessage", "pollCreationMessageV2", "pollCreationMessageV3", "groupInviteMessage"];
+/** Did someone (you or them) really say something? WhatsApp's own "last active" moves for joins, leaves, setting changes
+ * and security notices, which made year-old chats look recent. */
+export function isRealMessage(msg: any): boolean {
+  if (!msg?.message || msg.messageStubType) return false;
+  const m = msg.message.ephemeralMessage?.message ?? msg.message.viewOnceMessage?.message ?? msg.message.viewOnceMessageV2?.message ?? msg.message;
+  return REAL.some((k) => m?.[k]);
+}
+
 type Sock = any;
 const KEEP = 2000;
 
@@ -125,6 +137,8 @@ export class WhatsApp {
   chatList(): ChatInfo[] {
     const out = new Map<string, ChatInfo>();
     for (const raw of this.chats.values()) {
+      // A 1:1 chat nobody has written in (WhatsApp keeps empty ones for people from groups and communities) isn't listed.
+      if (!raw.group && !raw.lastAt) continue;
       const twin = raw.group ? undefined : this.alias.get(raw.jid);
       // Prefer the phone-number form as the row's id when both exist.
       const key = twin && raw.jid.endsWith("@lid") && this.chats.has(twin) ? twin : raw.jid;
@@ -248,11 +262,11 @@ export class WhatsApp {
       for (const c of chats || []) {
         this.link(c.id, c.lidJid || c.pnJid);
         if (isGroupJid(c.id)) this.chat(c.id, c.name, c);
-        else { if (c.name) this.contact({ id: c.id, name: c.name }); if (c.conversationTimestamp) this.chat(c.id, undefined, c); }
+        else { if (c.name) this.contact({ id: c.id, name: c.name }); this.chat(c.id, undefined, c); }
       }
-      // Only the time of each recent message (to order the list like your phone does); history text isn't kept.
+      // Only the time of each recent real message (to order the list like your phone does); history text isn't kept.
       for (const m of messages || []) {
-        if (m?.key?.remoteJid && m.messageTimestamp) this.chat(m.key.remoteJid, undefined, { conversationTimestamp: m.messageTimestamp });
+        if (m?.key?.remoteJid && m.messageTimestamp && isRealMessage(m)) this.chat(m.key.remoteJid, undefined, { activeAt: m.messageTimestamp });
         this.learn(m);
       }
     });
@@ -272,7 +286,11 @@ export class WhatsApp {
       }
     });
     sock.ev.on("groups.update", (gs: any[]) => { for (const g of gs || []) this.chat(g.id, g.subject); });
-    sock.ev.on("messages.upsert", ({ messages, type }: any) => { for (const m of messages || []) { this.learn(m); if (type === "notify") void this.take(m); } });
+    sock.ev.on("messages.upsert", ({ messages, type }: any) => { for (const m of messages || []) {
+      this.learn(m);
+      if (m?.key?.remoteJid && isRealMessage(m)) this.chat(m.key.remoteJid, undefined, { activeAt: m.messageTimestamp || Math.floor(Date.now() / 1000) });
+      if (type === "notify") void this.take(m);
+    } });
   }
 
   /** Your address book's names (and people's own WhatsApp names, which never replace a saved one) live in WhatsApp's
@@ -316,7 +334,7 @@ export class WhatsApp {
   /** A call with someone: as recent as a message. Only who and when are kept. */
   private called(jid: string | undefined, at: number) {
     if (!jid || typeof jid !== "string" || !Number.isFinite(at) || at <= 0) return;
-    this.chat(jid, undefined, { conversationTimestamp: Math.floor(at / 1000) });
+    this.chat(jid, undefined, { activeAt: Math.floor(at / 1000) });
     const cur = this.chats.get(jid)!; cur.lastCallAt = Math.max(cur.lastCallAt || 0, at);
   }
 
@@ -347,7 +365,8 @@ export class WhatsApp {
     if (name) cur.name = String(name).slice(0, 100);
     if (c && "archived" in c) cur.archived = !!c.archived;
     if (c && "muteEndTime" in c) cur.mutedUntil = Number(c.muteEndTime) || 0;
-    if (c?.conversationTimestamp) cur.lastAt = Math.max(cur.lastAt || 0, seconds(c.conversationTimestamp) * 1000);
+    // Only real activity (a message or a call) moves a chat up; WhatsApp's conversationTimestamp also moves for notices.
+    if (c?.activeAt) cur.lastAt = Math.max(cur.lastAt || 0, seconds(c.activeAt) * 1000);
     this.chats.set(jid, cur);
     this.keepChats();
   }
@@ -360,7 +379,7 @@ export class WhatsApp {
     const group = isGroupJid(jid);
     const from = String(group ? raw.key.participant || "" : jid);
     // When it was last active, even if it's ignored (only the time: the text of an ignored chat is never kept).
-    this.chat(jid, undefined, { conversationTimestamp: raw.messageTimestamp || Math.floor(Date.now() / 1000) });
+    this.chat(jid, undefined, { activeAt: raw.messageTimestamp || Math.floor(Date.now() / 1000) });
     const m = { jid, from, text, group };
     // Rules may name either id for the same person, so check the message under its twin ids too.
     const rules = await this.rules(), chatInfo = this.chats.get(jid) ?? this.chats.get(this.alias.get(jid) || "");
@@ -402,7 +421,7 @@ export class WhatsApp {
     this.sock = null;
     rmSync(this.dir, { recursive: true, force: true });
     await this.store.clear("whatsapp");
-    this.chats.clear();
+    this.chats.clear(); this.names.clear(); this.alias.clear();
     await this.store.remove("settings", "whatsapp-chats").catch(() => {});
     this.me = null; this.qr = null;
     this.set("off");

@@ -204,6 +204,7 @@ describe("WhatsApp link", () => {
 });
 
 describe("WhatsApp names and calls", () => {
+  const said = (jid: string, ts: number) => ({ key: { remoteJid: jid, fromMe: false }, messageTimestamp: ts, message: { conversation: "hi" } });
   const setup = async () => {
     const { WhatsApp } = await import("../src/connectors/whatsapp.ts");
     let sock: any;
@@ -225,7 +226,7 @@ describe("WhatsApp names and calls", () => {
 
   test("address-book names go on phone and @lid chats, and beat their own WhatsApp name", async () => {
     const { wa, sock } = await setup();
-    sock.emit("messaging-history.set", { chats: [{ id: "555@lid", conversationTimestamp: 100 }], contacts: [], messages: [] });
+    sock.emit("messaging-history.set", { chats: [{ id: "555@lid" }], contacts: [], messages: [said("555@lid", 100)] });
     sock.emit("contacts.update", [{ id: "15550100@s.whatsapp.net", notify: "Their name" }]);
     sock.emit("contacts.upsert", [{ id: "15550100@s.whatsapp.net", name: "Mom", lid: "555@lid" }]);
     sock.emit("contacts.update", [{ id: "15550100@s.whatsapp.net", notify: "Their new name" }]);
@@ -238,7 +239,7 @@ describe("WhatsApp names and calls", () => {
 
   test("one row per person when WhatsApp uses both their number and their private id", async () => {
     const { wa, sock } = await setup();
-    sock.emit("messaging-history.set", { chats: [{ id: "15550100@s.whatsapp.net", conversationTimestamp: 100 }, { id: "999@lid", conversationTimestamp: 200 }], contacts: [], messages: [] });
+    sock.emit("messaging-history.set", { chats: [{ id: "15550100@s.whatsapp.net" }, { id: "999@lid" }], contacts: [], messages: [said("15550100@s.whatsapp.net", 100), said("999@lid", 200)] });
     expect(wa.chatList().map((c) => c.name).sort()).toEqual(["+1 5550100", "Hidden number"]);
     // A message on the private id carries the phone number: now they're one row, named from the address book.
     sock.emit("messages.upsert", { type: "append", messages: [{ key: { remoteJid: "999@lid", senderPn: "15550100@s.whatsapp.net", fromMe: false }, message: {} }] });
@@ -254,16 +255,33 @@ describe("WhatsApp names and calls", () => {
     expect(prettyNumber("16024132657")).toBe("+1 602 413 2657");
   });
 
+  test("only real messages make a chat recent, not WhatsApp's notices", async () => {
+    const { wa, sock } = await setup();
+    sock.emit("messaging-history.set", {
+      chats: [{ id: "321@lid", conversationTimestamp: 1793600000 }, { id: "42@g.us", name: "Old group", conversationTimestamp: 1793600000 }],
+      contacts: [],
+      messages: [
+        { key: { remoteJid: "42@g.us" }, messageTimestamp: 1793600000, messageStubType: 28, message: null }, // someone left
+        { key: { remoteJid: "42@g.us" }, messageTimestamp: 1700000000, message: { extendedTextMessage: { text: "see you" } } },
+        { key: { remoteJid: "321@lid" }, messageTimestamp: 1793600000, message: { reactionMessage: { text: "👍" } } },
+      ],
+    });
+    const rows = wa.chatList();
+    // An empty chat with someone from a community isn't listed; the group dates from its last real message.
+    expect(rows.map((c) => [c.jid, c.lastAt])).toEqual([["42@g.us", 1700000000_000]]);
+    wa.stop();
+  });
+
   test("Meta AI is named", async () => {
     const { wa, sock } = await setup();
-    sock.emit("messaging-history.set", { chats: [{ id: "13135550002@s.whatsapp.net", conversationTimestamp: 1 }], contacts: [], messages: [] });
+    sock.emit("messaging-history.set", { chats: [{ id: "13135550002@s.whatsapp.net" }], contacts: [], messages: [said("13135550002@s.whatsapp.net", 1)] });
     expect(wa.chatList()[0].name).toBe("Meta AI");
     wa.stop();
   });
 
   test("someone not saved gets the name on their messages, never over a saved name", async () => {
     const { wa, sock } = await setup();
-    sock.emit("messaging-history.set", { chats: [{ id: "777@lid", conversationTimestamp: 1 }, { id: "888@lid", conversationTimestamp: 1 }], contacts: [], messages: [] });
+    sock.emit("messaging-history.set", { chats: [{ id: "777@lid" }, { id: "888@lid" }], contacts: [], messages: [said("777@lid", 1), said("888@lid", 1)] });
     sock.emit("contacts.upsert", [{ id: "888@lid", name: "Saved Sam" }]);
     sock.emit("messages.upsert", { type: "notify", messages: [
       { key: { remoteJid: "777@lid", fromMe: false }, pushName: "Priya", message: {} },
