@@ -1,11 +1,13 @@
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import { wallParts, zonedToUtc } from "./time.ts";
 import { SOURCES } from "./sources/index.ts";
 import { BrainUsage, isLimitError } from "./brains/usage.ts";
 import { readClaudeToken } from "./brains/logins.ts";
+import { describeSkillStep, hubSkills, installCodexRules, installSkills, skillCatalog, skillFlags, type Skill } from "./brains/skills.ts";
 
 /** Each trigger module's own description of its config, for the hook docs below. */
 /** Each trigger module's own description, read when a prompt is built (the hub adds WhatsApp and Slack at start). */
@@ -335,10 +337,12 @@ export function buildPrompt(b: BrainInput) {
   return parts.join("\n");
 }
 
-function agentEnv(harness?: string) {
+function agentEnv(harness?: string, paths: string[] = []) {
   // Agents need their own login (HOME, PATH) but nothing of the hub's: drop HEARTH_* (DB URL, etc.).
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("HEARTH_")) env[k] = v;
+  // Skill commands run by their bare names (that's what Claude's Bash rules and Codex's prefix rules match).
+  if (paths.length) env.PATH = [...paths, env.PATH || "/usr/bin:/bin"].join(":");
   // A long-lived Claude login copied up from your Mac (`claude setup-token`) signs Claude in here.
   if (harness === "claude" && !env.CLAUDE_CODE_OAUTH_TOKEN) {
     const t = readClaudeToken();
@@ -379,10 +383,21 @@ export class NeedsComputer extends Error {}
 /** The computer running a call dropped off mid-way. */
 export class ComputerGone extends Error {}
 
+/** The folder a skill's command lives in (~/.enkidu/bin for Enkidu's tools), for PATH. */
+function findCommandDir(cmd: string): string | null {
+  const own = join(homedir(), ".enkidu", "bin", cmd);
+  if (existsSync(own)) return dirname(own);
+  const w = Bun.which(cmd);
+  return w ? dirname(w) : null;
+}
+
 /** One line on what the model is doing right now, from a streamed tool call ("Searching: pottery gifts"). */
 export function describeStep(name: string, input: any): string | null {
   const q = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 70);
   if (name === "WebSearch") return `Searching: ${q(input?.query)}`;
+  if (name === "Bash") return describeSkillStep(input?.command);
+  if (name === "Skill") return `Reading the ${String(input?.skill ?? input?.name ?? "").slice(0, 40)} skill`;
+  if (name === "Read" && /\.png$/i.test(String(input?.file_path ?? ""))) return "Looking at the page";
   if (name === "WebFetch") { try { return `Reading ${new URL(String(input?.url)).hostname.replace(/^www\./, "")}`; } catch { return "Reading a page"; } }
   return null;
 }
@@ -434,6 +449,27 @@ export class Brain {
     this.global = new Semaphore(config.maxParallel);
     this.workDir = join(config.dataDir, "brain");
     mkdirSync(this.workDir, { recursive: true, mode: 0o700 });
+  }
+
+  private skillState: { at: number; key: string; skills: Skill[]; paths: string[] } | null = null;
+  /** The hub's skills, re-scanned at most every 5 minutes (a tool installed later shows up without a restart). */
+  skills(): { skills: Skill[]; paths: string[] } {
+    if (this.skillState && Date.now() - this.skillState.at < 300_000) return this.skillState;
+    const skills = hubSkills(this.config.dataDir);
+    const key = JSON.stringify(skills);
+    if (this.skillState?.key === key) { this.skillState.at = Date.now(); return this.skillState; }
+    let paths: string[] = [];
+    try {
+      const bin = installSkills(this.workDir, skills);
+      // Codex's rules live in its home, not the brain's folder. A server hub's hearth user exists only for Hearth, so its
+      // ~/.codex is ours to write; on your own computer that's your personal Codex, so only with HEARTH_CODEX_RULES=on.
+      if (this.config.target === "lightsail" || process.env.HEARTH_CODEX_RULES === "on") {
+        installCodexRules(process.env.CODEX_HOME || join(homedir(), ".codex"), skills);
+      }
+      paths = [...new Set([bin, ...skills.flatMap((s) => s.commands.map((c) => findCommandDir(c)).filter(Boolean) as string[])])];
+    } catch { return { skills: [], paths: [] }; }
+    this.skillState = { at: Date.now(), key, skills, paths };
+    return this.skillState;
   }
 
   /** Defaults from .env; the app can change them (see Hub.brains). */
@@ -527,7 +563,9 @@ export class Brain {
     const { harness } = profile;
     const model = MODEL_RE.test(profile.model) ? profile.model : "";
     if (harness === "echo") return b.mode === "orchestrate" ? echoOrchestrator(b) : echoBrain(b);
-    const prompt = buildPrompt(b);
+    // Codex has no system prompt flag: the skills catalog goes at the top of its message.
+    const codexSkills = harness === "codex" && !NO_TOOLS.has(b.mode) ? this.skills().skills : [];
+    const prompt = (codexSkills.length ? skillCatalog(codexSkills, "codex").trim() + "\n\n" : "") + buildPrompt(b);
     const planning = b.mode === "orchestrate";
     const name = `${harness}${model ? ` (${model})` : ""}`;
     let outFile: string | null = null;
@@ -537,9 +575,14 @@ export class Brain {
         // Slim: our own short system prompt instead of Claude Code's, only the tools this call needs, none of the machine's
         // MCP servers, settings or hooks. Cuts ~22k tokens of overhead from every call (~$0.06 on Sonnet, ~5x that on Opus).
         const web = !NO_TOOLS.has(b.mode);
+        // Web calls also get the hub's skills: a catalog to search, and Bash/Read only for what those skills need.
+        const { skills } = web ? this.skills() : { skills: [] };
+        const sf = skillFlags(skills);
+        const tools = web ? ["WebSearch", "WebFetch", ...sf.tools] : [];
+        const allowed = web ? ["WebSearch", "WebFetch", ...sf.allowed] : [];
         cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence", ...(model ? ["--model", model] : []),
-          "--system-prompt", SYSTEM_PROMPT, "--strict-mcp-config", "--setting-sources", "project",
-          "--tools", web ? "WebSearch,WebFetch" : "", ...(web ? ["--allowedTools", "WebSearch", "WebFetch"] : [])];
+          "--system-prompt", SYSTEM_PROMPT + skillCatalog(skills), "--strict-mcp-config", "--setting-sources", "project",
+          "--tools", tools.join(","), ...(allowed.length ? ["--allowedTools", ...allowed] : [])];
         break;
       }
       case "codex":
@@ -554,7 +597,7 @@ export class Brain {
         throw new Error(`Unknown harness: ${harness}`);
     }
     const proc = Bun.spawn(cmd, {
-      cwd: this.workDir, env: agentEnv(harness),
+      cwd: this.workDir, env: agentEnv(harness, harness === "claude" || harness === "codex" ? this.skills().paths : []),
       stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe",
     });
     let timedOut = false;
