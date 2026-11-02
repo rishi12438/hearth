@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { Vault } from "../src/vault.ts";
-import { Slack, slackCookie, chromeWorkspaces, addFromChrome } from "../src/connectors/slack.ts";
+import { Slack, slackCookie, chromeWorkspaces, addFromChrome, cleanSlackText, snippet } from "../src/connectors/slack.ts";
 
 const D = "xoxd-abc%2Fdef%3D";
 const fp = { userAgent: "Mozilla/5.0 (Macintosh) Chrome/140.0.0.0", acceptLanguage: "en-US,en", platform: "MacIntel" };
@@ -89,4 +89,29 @@ test("probe degrades when the app token lacks DM scopes: identity + scope note, 
   expect(r.user).toBe("rishi");
   expect(r.note).toContain("im:read");
   expect(r.recent[0]).toContain("general"); // mentions still work via search:read
+});
+
+test("cleanSlackText strips mrkdwn and resolves entities; snippet trims on a word boundary", () => {
+  expect(cleanSlackText("*rishi* from *Verbiflow* was <@U1|added>")).toBe("rishi from Verbiflow was @added");
+  expect(cleanSlackText("see <https://x.com|the link> &amp; <#C1|general>")).toBe("see the link & #general");
+  const long = "slackbot in openai-yc-w25: rishi from Verbiflow was added to this channel by samanthak and you can invite more";
+  const out = snippet(long, 90);
+  expect(out.length).toBeLessThanOrEqual(91);
+  expect(out.endsWith("…")).toBe(true);
+  expect(out).not.toMatch(/\s…$/); // no space before the ellipsis, no mid-word cut
+});
+
+test("mentions skips channel-join and system notices", async () => {
+  const f = (async (url: string) => {
+    if (url.includes("search.messages")) return Response.json({ ok: true, messages: { matches: [
+      { channel: { id: "C1", name: "general" }, ts: "1700000002.0", text: "rishi was added to this channel by sam", username: "slackbot" },
+      { channel: { id: "C2", name: "random" }, ts: "1700000001.0", text: "hey <@U1> can you review this?", username: "Bob" },
+    ] } });
+    return Response.json({ ok: true });
+  }) as unknown as typeof fetch;
+  const vault = new Vault(mkdtempSync(join(tmpdir(), "hearth-mn-")), { masterKey: randomBytes(32) });
+  const slack = new Slack(vault, f); slack.save("xoxp-t", "Acme", "rishi");
+  const m = await slack.mentions(3);
+  expect(m.length).toBe(1);
+  expect(m[0].title).toContain("random");
 });
