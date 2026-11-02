@@ -32,7 +32,7 @@ export const prettyNumber = (digitsOnly: string) => parsePhoneNumberFromString(`
 const KNOWN: Record<string, string> = { "0": "WhatsApp", "13135550002": "Meta AI" };
 /** Baileys timestamps are seconds, sometimes as a protobuf Long. */
 const seconds = (t: any) => { const n = typeof t === "object" && t?.toNumber ? t.toNumber() : Number(t); return Number.isFinite(n) && n > 0 ? n : 0; };
-export type WaStatus = { state: "off" | "starting" | "qr" | "connected" | "signed-out" | "error"; qr?: string | null; me?: string | null; detail?: string | null; riskAccepted: boolean };
+export type WaStatus = { state: "off" | "starting" | "qr" | "connected" | "signed-out" | "error"; qr?: string | null; me?: string | null; detail?: string | null; riskAccepted: boolean; /** a new link's chats are still arriving */ syncing?: boolean };
 
 const digits = (s: string) => s.replace(/\D/g, "");
 export const isGroupJid = (jid: string) => jid.endsWith("@g.us");
@@ -98,6 +98,9 @@ export class WhatsApp {
   private alias = new Map<string, string>();
   /** The linked device the chat list was built from: a new link (new device) starts a fresh list. */
   private device: string | null = null;
+  /** While a new link's history arrives: until this time (ms), pushed back by each batch, capped from the start. */
+  private syncUntil = 0;
+  private syncCap = 0;
   private stopping = false;
   private retries = 0;
   private booting = false;
@@ -114,7 +117,7 @@ export class WhatsApp {
   connected() { return this.st === "connected"; }
 
   async status(): Promise<WaStatus> {
-    return { state: this.st, qr: this.st === "qr" ? this.qr : null, me: this.me, detail: this.detail, riskAccepted: await this.riskAccepted() };
+    return { state: this.st, qr: this.st === "qr" ? this.qr : null, me: this.me, detail: this.detail, riskAccepted: await this.riskAccepted(), syncing: this.st === "connected" && Date.now() < this.syncUntil };
   }
 
   async rules(): Promise<IgnoreRules> { return { ...NO_RULES, ...cleanRules((await this.store.get<any>("settings", "whatsapp-ignore")) || {}) }; }
@@ -240,7 +243,11 @@ export class WhatsApp {
         this.me = String(sock.user?.id || "").split(":")[0].split("@")[0] || null;
         // A new link: drop the old list so its dates and names can't mix with what this link's history brings.
         const device = String(sock.user?.id || "") || null;
-        if (device && device !== this.device) { this.chats.clear(); this.names.clear(); this.alias.clear(); this.device = device; this.keepChats(); }
+        if (device && device !== this.device) {
+          this.chats.clear(); this.names.clear(); this.alias.clear(); this.device = device; this.keepChats();
+          // WhatsApp starts sending this link's chats now; show "Loading" until the batches stop (or 2 minutes).
+          this.syncCap = Date.now() + 120_000; this.syncUntil = Date.now() + 45_000;
+        }
         this.set("connected");
         sock.groupFetchAllParticipating?.().then((gs: any) => { for (const g of Object.values(gs || {}) as any[]) this.chat(g.id, g.subject); }).catch(() => {});
         this.syncNames(sock, B);
@@ -264,6 +271,8 @@ export class WhatsApp {
     sock.ev.on("contacts.update", (cs: any[]) => { for (const c of cs || []) this.contact(c); });
     // The recent-chats list WhatsApp sends right after linking (and on reconnect): names, and when each was last active.
     sock.ev.on("messaging-history.set", ({ chats, contacts, messages }: any) => {
+      // Another batch: keep "Loading" up until none has come for 10 seconds (never past the cap).
+      if (Date.now() < this.syncCap) this.syncUntil = Math.min(this.syncCap, Date.now() + 10_000);
       for (const c of contacts || []) this.contact(c);
       for (const c of chats || []) {
         this.link(c.id, c.lidJid || c.pnJid);
