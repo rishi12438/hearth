@@ -11,6 +11,7 @@ import { Computers, COPY_ITEMS, isCopyItem } from "./computers.ts";
 import { Machines, realE2b, realSsh, type E2b, type Ssh } from "./machines.ts";
 import { Vault } from "./vault.ts";
 import { Connect } from "./connectors/index.ts";
+import { sourceById } from "./sources/index.ts";
 import { chromeWorkspaces, slackCookie } from "./connectors/slack.ts";
 import { cleanFingerprint } from "./browser.ts";
 import { adminToken, isAdminRequest } from "./admin.ts";
@@ -518,6 +519,13 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           const all = await chromeWorkspaces(d, cleanFingerprint(b.fingerprint)).catch(() => null);
           if (!all) throw new HttpError(502, "Couldn't reach Slack.");
           return json({ workspaces: all.map(({ domain, team, user }) => ({ domain, team, user })) });
+        }
+        // Proof it's reading: run the connector's source once and show what came back (Slack DMs, etc.).
+        if (method === "POST" && id && seg[3] === "test") {
+          if (!voiceLimiter.allow(`test:${id}`)) throw new HttpError(429, "Give it a moment, then try again.");
+          if (id === "slack") return json(await connect.slack.probe());
+          if (!sourceById(id)) throw new HttpError(400, `${id} can't be tested.`);
+          return json(await hub.testConnection(id));
         }
         if (method === "PUT" && id) {
           if (!voiceLimiter.allow(`connect:${id}`)) throw new HttpError(429, "Too many tries. Wait a few minutes.");
