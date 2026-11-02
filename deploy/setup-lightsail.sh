@@ -2,7 +2,7 @@
 # Target "lightsail": one-shot server setup for Hearth on a fresh Ubuntu 24.04 box (AWS Lightsail or any VPS).
 #
 #   git clone https://github.com/<you>/hearth && cd hearth
-#   sudo bash deploy/setup.sh lightsail yournameassistant.com you@example.com
+#   sudo bash deploy/setup.sh lightsail yournameassistant.com [you@example.com]
 #
 # It installs Caddy (automatic HTTPS), a firewall, automatic security updates and fail2ban, locks SSH to keys,
 # installs the hub as a systemd service at https://<domain>, and prints the QR code for your primary phone.
@@ -17,8 +17,9 @@ for a in "$@"; do
     --no-pair) NO_PAIR=1 ;;                  # the Mac app shows the phone QR itself
   esac
 done
-if [ -z "$DOMAIN" ] || [ -z "$EMAIL" ] || [[ "$DOMAIN" == --* ]]; then
-  echo "usage: sudo bash deploy/setup.sh lightsail <domain> <email> [--skip-dns-check]"; exit 1
+[[ "$EMAIL" == --* ]] && EMAIL=""   # the email is optional: Let's Encrypt only uses it for expiry notices
+if [ -z "$DOMAIN" ] || [[ "$DOMAIN" == --* ]]; then
+  echo "usage: sudo bash deploy/setup.sh lightsail <domain> [email] [--skip-dns-check]"; exit 1
 fi
 [ "$(id -u)" = 0 ] || { echo "Run with sudo."; exit 1; }
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
@@ -103,13 +104,18 @@ set_env HEARTH_HOST 127.0.0.1
 set_env HEARTH_DATA "$APP/data"
 set_env HEARTH_BEHIND_PROXY 1
 set_env HEARTH_PUBLIC_URL "https://$DOMAIN"
-set_env HEARTH_CONTACT "mailto:$EMAIL"
+# Push services want a contact for the sender: your email if you gave one, otherwise the hub's own address.
+if [ -n "$EMAIL" ]; then set_env HEARTH_CONTACT "mailto:$EMAIL"; else set_env HEARTH_CONTACT "https://$DOMAIN"; fi
 grep -q '^HEARTH_REQUIRE_PASSKEY=' "$ENV" || set_env HEARTH_REQUIRE_PASSKEY 0
 chown hearth: "$ENV" && chmod 600 "$ENV"
 sudo -u hearth mkdir -p "$APP/data" && chmod 700 "$APP/data"
 
 say "HTTPS for $DOMAIN (Caddy gets and renews the certificate)"
-sed -e "s/hub.example.com/$DOMAIN/" -e "s/you@example.com/$EMAIL/" "$APP/deploy/Caddyfile" > /etc/caddy/Caddyfile
+if [ -n "$EMAIL" ]; then
+  sed -e "s/hub.example.com/$DOMAIN/" -e "s/you@example.com/$EMAIL/" "$APP/deploy/Caddyfile" > /etc/caddy/Caddyfile
+else  # no email: drop the global block, Caddy gets the certificate without one
+  sed -e "s/hub.example.com/$DOMAIN/" -e '/^{$/,/^}$/d' "$APP/deploy/Caddyfile" > /etc/caddy/Caddyfile
+fi
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
 systemctl reload caddy || systemctl restart caddy
 

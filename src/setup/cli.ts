@@ -10,7 +10,7 @@ import { wizard } from "./wizard.ts";
 //
 //   hearth install local  --brains claude,codex [--lan] [--port 8790] [--no-service] [--json]
 //   hearth install remote --brains claude,codex --host 1.2.3.4 --user ubuntu --key ~/.ssh/id_ed25519
-//                         --domain assistant.example.com --email you@example.com [--skip-dns-check] [--claude-token-stdin] [--json]
+//                         --domain assistant.example.com [--email you@example.com] [--skip-dns-check] [--claude-token-stdin] [--json]
 //   hearth wizard [--port 0]     the setup window (the Mac app opens this): brains → where → progress → phone
 //
 // --json prints one JSON line per step, so an agent can follow along and know exactly what failed.
@@ -53,7 +53,7 @@ export async function setupCli(config: Config, argv: string[]): Promise<number |
   } catch { return 1; }
   console.log(`usage:
   hearth install local  --brains claude,codex [--lan] [--port 8790] [--data <dir>] [--no-service] [--json]
-  hearth install remote --brains claude,codex --host <ip> --user ubuntu --key <ssh key> --domain <domain> --email <email>
+  hearth install remote --brains claude,codex --host <ip> --user ubuntu --key <ssh key> --domain <domain> [--email <email>]
                         [--skip-dns-check] [--claude-token-stdin] [--json]`);
   return 2;
 }

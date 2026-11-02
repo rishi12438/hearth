@@ -1,9 +1,9 @@
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { lookup } from "node:dns/promises";
 import { BRAIN_LABELS, isBrainId, mintClaudeToken, readCodexAuth, type BrainId } from "../brains/logins.ts";
 import { pairLink, srcDir, type Emit } from "./steps.ts";
 import { APP, quote, remoteHearth, ssh, tarball } from "./ssh.ts";
+import { expandHome, tightenKey } from "./keys.ts";
 
 // A hub on your own server (domain + IP + SSH key): ship Hearth over SSH, run deploy/setup-lightsail.sh there (HTTPS,
 // firewall, the hub as a service, the brains you picked), then copy long-lived logins up the same SSH line the way
@@ -12,7 +12,7 @@ import { APP, quote, remoteHearth, ssh, tarball } from "./ssh.ts";
 
 export type RemoteOpts = {
   host: string; user: string; key?: string; port?: number;
-  domain: string; email: string; brains: BrainId[];
+  domain: string; /** Optional: Let's Encrypt only uses it for expiry notices. */ email?: string; brains: BrainId[];
   skipDns?: boolean;
   /** Where Hearth's own files are (the repo, or the copy inside the Mac app). */
   src?: string;
@@ -24,8 +24,8 @@ export function validRemote(o: Partial<RemoteOpts>): string | null {
   if (!o.host || !/^[A-Za-z0-9.:-]{1,253}$/.test(o.host)) return "Give the server's IP address or host name.";
   if (!o.user || !/^[a-z_][a-z0-9_-]{0,31}$/i.test(o.user)) return "Give the SSH user (on Lightsail it's ubuntu).";
   if (!o.domain || !/^([a-z0-9-]+\.)+[a-z]{2,}$/i.test(o.domain)) return "Give the domain for the hub, like assistant.example.com.";
-  if (!o.email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(o.email)) return "Give an email for the HTTPS certificate.";
-  if (o.key && !existsSync(o.key.replace(/^~(?=\/)/, homedir()))) return `No SSH key at ${o.key}.`;
+  if (o.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(o.email)) return "That email doesn't look right (or leave it empty).";
+  if (o.key && !existsSync(expandHome(o.key))) return `No SSH key at ${o.key}.`;
   if (!o.brains?.length || !(o.brains as string[]).every(isBrainId)) return "Pick at least one brain (claude, codex).";
   return null;
 }
@@ -37,6 +37,7 @@ export async function installRemote(o: RemoteOpts, emit: Emit): Promise<{ url: s
   const url = `https://${o.domain}`;
 
   emit({ step: "ssh", state: "start", text: `Connecting to ${o.user}@${o.host}` });
+  if (o.key && tightenKey(o.key)) emit({ step: "ssh", state: "log", text: `Made ${o.key} readable only by you (ssh refuses keys others can read)` });
   const hello = await ssh(o, "uname -sm && (lsb_release -ds 2>/dev/null || true) && sudo -n true && echo SUDO_OK");
   if (hello.code !== 0) { const t = `Couldn't log in over SSH: ${hello.out.trim().split("\n").at(-1) || "no answer"}. Check the IP, user and key.`; emit({ step: "ssh", state: "fail", text: t }); throw new Error(t); }
   if (!hello.out.includes("SUDO_OK")) { const t = `${o.user} can't use sudo without a password on that server.`; emit({ step: "ssh", state: "fail", text: t }); throw new Error(t); }
@@ -60,7 +61,7 @@ export async function installRemote(o: RemoteOpts, emit: Emit): Promise<{ url: s
   emit({ step: "upload", state: "ok", text: `Sent (${Math.round(tar.length / 1024)} KB)` });
 
   emit({ step: "server", state: "start", text: "Setting up the server: HTTPS, firewall, the hub and your brains (a few minutes)" });
-  const flags = [quote(o.domain), quote(o.email), `--brains=${o.brains.join(",")}`, "--no-pair", ...(o.skipDns ? ["--skip-dns-check"] : [])].join(" ");
+  const flags = [quote(o.domain), quote(o.email || ""), `--brains=${o.brains.join(",")}`, "--no-pair", ...(o.skipDns ? ["--skip-dns-check"] : [])].join(" ");
   const setup = await ssh(o, `sudo bash /tmp/hearth-src/deploy/setup-lightsail.sh ${flags}`, { line: (l) => l.trim() && emit({ step: "server", state: "log", text: l }) });
   if (setup.code !== 0) { const t = `The server setup stopped: ${setup.out.trim().split("\n").slice(-3).join(" ").slice(0, 400)}`; emit({ step: "server", state: "fail", text: t }); throw new Error(t); }
   emit({ step: "server", state: "ok", text: `Hub is running at ${url}` });

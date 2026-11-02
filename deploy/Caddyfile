@@ -1,5 +1,6 @@
 # Caddy gets and renews a real HTTPS certificate for your domain automatically, and redirects http:// to https://.
-# deploy/setup.sh fills in your domain and email. By hand: point an A record at your box, edit both lines, then
+# deploy/setup.sh fills in your domain and email (the email is optional: Let's Encrypt only uses it to warn
+# you if renewal keeps failing; without one the block below is left out). By hand: point an A record at your box, edit both lines, then
 #   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
 
 {

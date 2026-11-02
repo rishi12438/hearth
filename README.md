@@ -103,7 +103,7 @@ Set up each machine for its role with one setting, the **target**:
 
 | Target | Command | What it does |
 |---|---|---|
-| `lightsail` | `sudo bash deploy/setup.sh lightsail <domain> <email>` | The always-on hub at your domain. Holds memory and reminders, and does the work when no computer is online. Any Ubuntu VPS works. |
+| `lightsail` | `sudo bash deploy/setup.sh lightsail <domain> [email]` | The always-on hub at your domain. Holds memory and reminders, and does the work when no computer is online. Any Ubuntu VPS works. |
 | `mac` | `bash deploy/setup.sh mac https://<domain>` | Links your Mac to that hub. Your primary phone approves it, like a new device. It starts at login and stays awake while plugged in. |
 
 - **Mac on:** teammates run on your Mac, on your own Claude or Codex login and subscription.
@@ -143,7 +143,7 @@ Without an Apple Developer ID the app is signed ad hoc, so the first time, right
 ```bash
 hearth install local  --brains claude,codex
 hearth install remote --brains claude,codex --host 203.0.113.10 --user ubuntu --key ~/.ssh/id_ed25519 \
-                      --domain assistant.example.com --email you@example.com
+                      --domain assistant.example.com [--email you@example.com]
 hearth brains detect | pick claude,codex | usage
 hearth connectors                                   # the grid, as text
 hearth connect serper --key …                       # or deepgram, slack --token …

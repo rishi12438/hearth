@@ -23,6 +23,11 @@
   .form.show { display:block; }
   label { display:block; font-size:13px; color:var(--muted); margin:12px 0 4px; }
   input[type=text], input[type=email], input[type=password] { width:100%; font:inherit; padding:10px 12px; border:1px solid var(--line); border-radius:10px; background:#fff; outline:none; }
+  .keyrow { display:flex; gap:8px; } .keyrow input { flex:1; }
+  button.second { background:#f1eee9; color:var(--ink); padding:10px 14px; border-radius:10px; white-space:nowrap; }
+  .keys { font-size:12px; color:var(--muted); margin-top:6px; display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+  .keychip { background:#f4f2ef; border-radius:99px; padding:2px 9px; cursor:pointer; font-family:ui-monospace,monospace; } .keychip:hover { background:#e9e5df; }
+  .opt-l { color:#b3ada6; } .hint { font-size:12px; color:var(--muted); margin-top:5px; }
   input:focus { border-color:var(--ink); } .row { display:flex; gap:10px; } .row > div { flex:1; }
   .check { display:flex; gap:8px; align-items:center; font-size:13px; color:var(--muted); margin-top:12px; }
   .bar { display:flex; justify-content:space-between; align-items:center; margin-top:26px; }
@@ -57,7 +62,10 @@ const mark = (id) => `<svg viewBox="0 0 24 24" width="22" height="22"><path fill
 const dots = (n) => `<div class="dots">${[0, 1, 2, 3].map((i) => `<i class="${i <= n ? "on" : ""}"></i>`).join("")}</div>`;
 
 async function start() {
-  S.brains = (await api("/brains")).brains;
+  const [b, k] = await Promise.all([api("/brains"), api("/keys")]);
+  S.brains = b.brains; S.keys = k.keys || []; S.canPick = !!k.canPick;
+  // Start with a key that's really there (the usual ~/.ssh/id_ed25519, else the first one found).
+  if (S.keys.length && !S.keys.includes(S.f.key)) S.f.key = S.keys[0];
   for (const b of S.brains) if (b.installed && b.loggedIn) S.picked.add(b.id);
   draw();
 }
@@ -95,8 +103,11 @@ function whereView() {
     <label>Domain</label><input type="text" id="domain" placeholder="assistant.example.com" value="${esc(f.domain)}" autocapitalize="off" spellcheck="false">
     <div class="row"><div><label>Server IP</label><input type="text" id="host" placeholder="203.0.113.10" value="${esc(f.host)}" spellcheck="false"></div>
       <div><label>SSH user</label><input type="text" id="user" value="${esc(f.user)}" spellcheck="false"></div></div>
-    <label>SSH key</label><input type="text" id="key" value="${esc(f.key)}" spellcheck="false">
-    <label>Email (for the HTTPS certificate)</label><input type="email" id="email" placeholder="you@example.com" value="${esc(f.email)}">
+    <label>SSH key</label>
+    <div class="keyrow"><input type="text" id="key" value="${esc(f.key)}" placeholder="~/.ssh/id_ed25519" spellcheck="false">${S.canPick ? `<button class="second" id="pickKey" type="button">Choose…</button>` : ""}</div>
+    ${S.keys.filter((k) => k !== f.key).length ? `<div class="keys">Found on this Mac: ${S.keys.filter((k) => k !== f.key).map((k) => `<span class="keychip" data-key="${esc(k)}" title="${esc(k)}">${esc(k.split("/").pop())}</span>`).join("")}</div>` : ""}
+    <label>Email <span class="opt-l">(optional)</span></label><input type="email" id="email" placeholder="you@example.com" value="${esc(f.email)}">
+    <div class="hint">Only Let's Encrypt sees it, to warn you if your HTTPS certificate ever fails to renew. Leave it empty and everything still works.</div>
     <div class="check"><input type="checkbox" id="skipDns" ${f.skipDns ? "checked" : ""}><span>The domain isn't pointing at the server yet; set up anyway</span></div>
     ${S.picked.has("claude") ? `<div class="warnbox">Claude on the server signs in with a long-lived login made on this Mac (<code>claude setup-token</code>): a browser opens once for you to approve.${S.picked.has("codex") ? " Codex's login is copied from this Mac." : ""}</div>` : S.picked.has("codex") ? `<div class="warnbox">Codex's login is copied from this Mac to the server.</div>` : ""}
   </div>
@@ -133,6 +144,12 @@ function bind() {
   $("#rescan") && ($("#rescan").onclick = start);
   $("#back") && ($("#back").onclick = () => { save(); S.step = Math.max(0, S.step === 2 ? 1 : S.step - 1); draw(); });
   $("#retry") && ($("#retry").onclick = install);
+  $("#pickKey") && ($("#pickKey").onclick = async () => {
+    save();
+    const r = await api("/pick-key", {});
+    if (r.path) { S.f.key = r.path; draw(); }
+  });
+  document.querySelectorAll("[data-key]").forEach((el) => el.onclick = () => { save(); S.f.key = el.dataset.key; draw(); });
   if (S.step === 0 && $("#next")) $("#next").onclick = () => { S.step = 1; draw(); };
   if (S.step === 1 && $("#next")) $("#next").onclick = async () => {
     save();

@@ -16,6 +16,8 @@ import { checkSlackToken } from "../src/connectors/slack.ts";
 import { isAdminRequest } from "../src/admin.ts";
 import { validRemote } from "../src/setup/remote.ts";
 import { pairLink } from "../src/setup/steps.ts";
+import { sshKeys, tightenKey } from "../src/setup/keys.ts";
+import { mkdirSync, writeFileSync, statSync } from "node:fs";
 import type { Approval } from "../src/types.ts";
 
 describe("WhatsApp ignore rules", () => {
@@ -117,6 +119,24 @@ describe("setup", () => {
     expect(validRemote({ ...base, domain: "nope" })).toContain("domain");
     expect(validRemote({ ...base, brains: [] })).toContain("brain");
     expect(validRemote({ ...base, key: "/no/such/key" })).toContain("No SSH key");
+    expect(validRemote({ ...base, email: undefined })).toBeNull(); // the email is optional
+    expect(validRemote({ ...base, email: "nope" })).toContain("email");
     expect(pairLink("open https://assistant.example.com/#pair=ABCD-EFGH now")).toBe("https://assistant.example.com/#pair=ABCD-EFGH");
+  });
+
+  test("finds private keys by their header, and makes a downloaded .pem owner-only", () => {
+    const home = mkdtempSync(join(tmpdir(), "hearth-home-"));
+    mkdirSync(join(home, ".ssh")); mkdirSync(join(home, "Downloads"));
+    const pem = "-----BEGIN RSA PRIVATE KEY-----\nabc\n";
+    writeFileSync(join(home, ".ssh", "id_ed25519"), "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n");
+    writeFileSync(join(home, ".ssh", "id_ed25519.pub"), "ssh-ed25519 AAAA");
+    writeFileSync(join(home, ".ssh", "config"), "Host x");
+    writeFileSync(join(home, "Downloads", "LightsailDefaultKey.pem"), pem, { mode: 0o644 });
+    writeFileSync(join(home, "Downloads", "notes.txt"), pem);
+    expect(sshKeys(home).map((k) => k.split("/").pop()).sort()).toEqual(["LightsailDefaultKey.pem", "id_ed25519"]);
+    const p = join(home, "Downloads", "LightsailDefaultKey.pem");
+    expect(tightenKey(p)).toBe(true);
+    expect(statSync(p).mode & 0o777).toBe(0o600);
+    expect(tightenKey(p)).toBe(false);
   });
 });
