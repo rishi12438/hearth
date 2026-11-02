@@ -16,8 +16,8 @@ import { checkSlackToken } from "../src/connectors/slack.ts";
 import { isAdminRequest } from "../src/admin.ts";
 import { validRemote } from "../src/setup/remote.ts";
 import { pairLink } from "../src/setup/steps.ts";
-import { sshKeys, tightenKey } from "../src/setup/keys.ts";
-import { mkdirSync, writeFileSync, statSync } from "node:fs";
+import { saveKey, tightenKey } from "../src/setup/keys.ts";
+import { writeFileSync, statSync } from "node:fs";
 import type { Approval } from "../src/types.ts";
 
 describe("WhatsApp ignore rules", () => {
@@ -124,19 +124,15 @@ describe("setup", () => {
     expect(pairLink("open https://assistant.example.com/#pair=ABCD-EFGH now")).toBe("https://assistant.example.com/#pair=ABCD-EFGH");
   });
 
-  test("finds private keys by their header, and makes a downloaded .pem owner-only", () => {
-    const home = mkdtempSync(join(tmpdir(), "hearth-home-"));
-    mkdirSync(join(home, ".ssh")); mkdirSync(join(home, "Downloads"));
-    const pem = "-----BEGIN RSA PRIVATE KEY-----\nabc\n";
-    writeFileSync(join(home, ".ssh", "id_ed25519"), "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n");
-    writeFileSync(join(home, ".ssh", "id_ed25519.pub"), "ssh-ed25519 AAAA");
-    writeFileSync(join(home, ".ssh", "config"), "Host x");
-    writeFileSync(join(home, "Downloads", "LightsailDefaultKey.pem"), pem, { mode: 0o644 });
-    writeFileSync(join(home, "Downloads", "notes.txt"), pem);
-    expect(sshKeys(home).map((k) => k.split("/").pop()).sort()).toEqual(["LightsailDefaultKey.pem", "id_ed25519"]);
-    const p = join(home, "Downloads", "LightsailDefaultKey.pem");
-    expect(tightenKey(p)).toBe(true);
-    expect(statSync(p).mode & 0o777).toBe(0o600);
-    expect(tightenKey(p)).toBe(false);
+  test("an uploaded key is kept owner-only; a public key or other file is refused", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hearth-keys-"));
+    const r = saveKey("../Lightsail Default.pem", "-----BEGIN RSA PRIVATE KEY-----\nabc", join(dir, "ssh")) as { path: string };
+    expect(r.path).toBe(join(dir, "ssh", "Lightsail_Default.pem"));
+    expect(statSync(r.path).mode & 0o777).toBe(0o600);
+    expect(saveKey("id.pub", "ssh-ed25519 AAAA me", dir)).toEqual({ error: expect.stringContaining("public key") });
+    expect(saveKey("notes.txt", "hello", dir)).toEqual({ error: expect.stringContaining("isn't an SSH private key") });
+    const loose = join(dir, "loose.pem"); writeFileSync(loose, "x", { mode: 0o644 });
+    expect(tightenKey(loose)).toBe(true);
+    expect(statSync(loose).mode & 0o777).toBe(0o600);
   });
 });

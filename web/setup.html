@@ -23,10 +23,10 @@
   .form.show { display:block; }
   label { display:block; font-size:13px; color:var(--muted); margin:12px 0 4px; }
   input[type=text], input[type=email], input[type=password] { width:100%; font:inherit; padding:10px 12px; border:1px solid var(--line); border-radius:10px; background:#fff; outline:none; }
-  .keyrow { display:flex; gap:8px; } .keyrow input { flex:1; }
-  button.second { background:#f1eee9; color:var(--ink); padding:10px 14px; border-radius:10px; white-space:nowrap; }
-  .keys { font-size:12px; color:var(--muted); margin-top:6px; display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
-  .keychip { background:#f4f2ef; border-radius:99px; padding:2px 9px; cursor:pointer; font-family:ui-monospace,monospace; } .keychip:hover { background:#e9e5df; }
+  label.file { margin:0; font-size:15px; cursor:pointer; } .file { display:flex; align-items:center; gap:12px; border:1px dashed #d6d1ca; border-radius:10px; padding:8px 8px 8px 12px; background:#fff; }
+  .file .fname { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); } .file .fname.set { color:var(--ink); }
+  .file input { display:none; }
+  button.second, span.second { font-weight:600; cursor:pointer; background:#f1eee9; color:var(--ink); padding:8px 14px; border-radius:8px; white-space:nowrap; }
   .opt-l { color:#b3ada6; } .hint { font-size:12px; color:var(--muted); margin-top:5px; }
   input:focus { border-color:var(--ink); } .row { display:flex; gap:10px; } .row > div { flex:1; }
   .check { display:flex; gap:8px; align-items:center; font-size:13px; color:var(--muted); margin-top:12px; }
@@ -51,7 +51,7 @@ const KEY = "__WIZARD_KEY__";
 const api = (p, body) => fetch(p + (p.includes("?") ? "&" : "?") + "k=" + KEY, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}).then((r) => r.json());
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const S = { step: 0, brains: [], picked: new Set(), where: "local", f: { host: "", user: "ubuntu", key: "~/.ssh/id_ed25519", domain: "", email: "", skipDns: false, lan: false }, steps: [], result: null };
+const S = { step: 0, brains: [], picked: new Set(), where: "local", f: { host: "", user: "ubuntu", key: "", keyName: "", domain: "", email: "", skipDns: false, lan: false }, steps: [], result: null };
 const COLORS = { claude: "#d97757", codex: "#000" };
 // Claude and OpenAI marks: Simple Icons (CC0) paths, 24x24.
 const MARKS = {
@@ -62,10 +62,7 @@ const mark = (id) => `<svg viewBox="0 0 24 24" width="22" height="22"><path fill
 const dots = (n) => `<div class="dots">${[0, 1, 2, 3].map((i) => `<i class="${i <= n ? "on" : ""}"></i>`).join("")}</div>`;
 
 async function start() {
-  const [b, k] = await Promise.all([api("/brains"), api("/keys")]);
-  S.brains = b.brains; S.keys = k.keys || []; S.canPick = !!k.canPick;
-  // Start with a key that's really there (the usual ~/.ssh/id_ed25519, else the first one found).
-  if (S.keys.length && !S.keys.includes(S.f.key)) S.f.key = S.keys[0];
+  S.brains = (await api("/brains")).brains;
   for (const b of S.brains) if (b.installed && b.loggedIn) S.picked.add(b.id);
   draw();
 }
@@ -104,8 +101,8 @@ function whereView() {
     <div class="row"><div><label>Server IP</label><input type="text" id="host" placeholder="203.0.113.10" value="${esc(f.host)}" spellcheck="false"></div>
       <div><label>SSH user</label><input type="text" id="user" value="${esc(f.user)}" spellcheck="false"></div></div>
     <label>SSH key</label>
-    <div class="keyrow"><input type="text" id="key" value="${esc(f.key)}" placeholder="~/.ssh/id_ed25519" spellcheck="false">${S.canPick ? `<button class="second" id="pickKey" type="button">Choose…</button>` : ""}</div>
-    ${S.keys.filter((k) => k !== f.key).length ? `<div class="keys">Found on this Mac: ${S.keys.filter((k) => k !== f.key).map((k) => `<span class="keychip" data-key="${esc(k)}" title="${esc(k)}">${esc(k.split("/").pop())}</span>`).join("")}</div>` : ""}
+    <label class="file" for="keyFile"><span class="fname ${f.keyName ? "set" : ""}">${f.keyName ? esc(f.keyName) : "No file chosen (uses your usual SSH keys)"}</span><span class="second button">${f.keyName ? "Change" : "Choose file"}</span><input type="file" id="keyFile"></label>
+    <div class="hint">The private key for the server, like the .pem Lightsail gave you.</div>
     <label>Email <span class="opt-l">(optional)</span></label><input type="email" id="email" placeholder="you@example.com" value="${esc(f.email)}">
     <div class="hint">Only Let's Encrypt sees it, to warn you if your HTTPS certificate ever fails to renew. Leave it empty and everything still works.</div>
     <div class="check"><input type="checkbox" id="skipDns" ${f.skipDns ? "checked" : ""}><span>The domain isn't pointing at the server yet; set up anyway</span></div>
@@ -144,12 +141,13 @@ function bind() {
   $("#rescan") && ($("#rescan").onclick = start);
   $("#back") && ($("#back").onclick = () => { save(); S.step = Math.max(0, S.step === 2 ? 1 : S.step - 1); draw(); });
   $("#retry") && ($("#retry").onclick = install);
-  $("#pickKey") && ($("#pickKey").onclick = async () => {
+  $("#keyFile") && ($("#keyFile").onchange = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
     save();
-    const r = await api("/pick-key", {});
-    if (r.path) { S.f.key = r.path; draw(); }
+    const r = await api("/key", { name: file.name, text: await file.text() });
+    if (r.error) { $("#err").textContent = r.error; return; }
+    S.f.key = r.path; S.f.keyName = file.name; draw();
   });
-  document.querySelectorAll("[data-key]").forEach((el) => el.onclick = () => { save(); S.f.key = el.dataset.key; draw(); });
   if (S.step === 0 && $("#next")) $("#next").onclick = () => { S.step = 1; draw(); };
   if (S.step === 1 && $("#next")) $("#next").onclick = async () => {
     save();
@@ -166,7 +164,7 @@ function bind() {
 }
 
 function save() {
-  for (const k of ["host", "user", "key", "domain", "email"]) { const el = $("#" + k); if (el) S.f[k] = el.value.trim(); }
+  for (const k of ["host", "user", "domain", "email"]) { const el = $("#" + k); if (el) S.f[k] = el.value.trim(); }
   for (const k of ["skipDns", "lan"]) { const el = $("#" + k); if (el) S.f[k] = el.checked; }
 }
 const payload = () => ({ where: S.where, brains: [...S.picked].join(","), ...S.f });

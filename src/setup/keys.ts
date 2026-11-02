@@ -1,44 +1,28 @@
-import { chmodSync, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-// Choosing the SSH key for a server hub: the keys already on this Mac (~/.ssh, and the .pem a cloud console like
-// Lightsail puts in Downloads), a Finder dialog to pick any other file, and tightening a key's permissions so ssh
-// accepts it (a downloaded .pem is readable by everyone, and ssh refuses those).
+// The SSH key for a server hub. In the setup window you pick the key file like any upload; the page sends its text
+// here and it's kept as a private copy in ~/.hearth/ssh (owner-only, which ssh insists on; a .pem downloaded from a
+// cloud console is readable by everyone). Nothing scans your folders.
 
 export const expandHome = (p: string) => p.replace(/^~(?=\/|$)/, homedir());
-const tilde = (p: string) => (p.startsWith(homedir() + "/") ? "~" + p.slice(homedir().length) : p);
+export const keyDir = () => join(homedir(), ".hearth", "ssh");
 
-/** Private keys found in ~/.ssh and ~/Downloads (by their header, not their name). Paths use ~. */
-export function sshKeys(home = homedir()): string[] {
-  const found: string[] = [];
-  for (const dir of [join(home, ".ssh"), join(home, "Downloads")]) {
-    let names: string[] = [];
-    try { names = readdirSync(dir); } catch { continue; }
-    for (const n of names) {
-      if (n.endsWith(".pub") || n.startsWith(".")) continue;
-      if (dir.endsWith("Downloads") && !/\.(pem|key)$/i.test(n)) continue;
-      const p = join(dir, n);
-      try {
-        if (!statSync(p).isFile() || statSync(p).size > 20_000) continue;
-        if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(readFileSync(p, "utf8").slice(0, 200))) found.push(tilde(p));
-      } catch {}
-    }
+/** Keep an uploaded private key. Returns its path, or an error if it isn't a private key. */
+export function saveKey(name: string, text: string, dir = keyDir()): { path: string } | { error: string } {
+  if (text.length > 20_000 || !/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(text)) {
+    return { error: /^ssh-|-----BEGIN [A-Z ]*PUBLIC KEY/.test(text.trim()) ? "That's the public key (.pub). Choose the private one, without .pub." : "That file isn't an SSH private key." };
   }
-  return found;
+  const safe = (name.split(/[\\/]/).pop() || "key").replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "") || "key";
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const path = join(dir, safe);
+  writeFileSync(path, text.endsWith("\n") ? text : text + "\n", { mode: 0o600 });
+  chmodSync(path, 0o600);
+  return { path };
 }
 
-/** A Finder dialog to choose the key file (macOS). Null if cancelled or not on a Mac. */
-export async function pickKeyFile(): Promise<string | null> {
-  if (process.platform !== "darwin") return null;
-  const start = existsSync(join(homedir(), ".ssh")) ? join(homedir(), ".ssh") : homedir();
-  const script = `tell me to activate\nPOSIX path of (choose file with prompt "Choose the SSH key for your server" default location (POSIX file "${start}") with invisibles)`;
-  const p = Bun.spawn(["osascript", "-e", script], { stdout: "pipe", stderr: "pipe" });
-  const out = (await new Response(p.stdout).text()).trim();
-  return (await p.exited) === 0 && out ? tilde(out) : null;
-}
-
-/** ssh refuses a key others can read. Make it owner-only; true if it had to change. */
+/** ssh refuses a key others can read (a path typed into the CLI). Make it owner-only; true if it had to change. */
 export function tightenKey(path: string): boolean {
   const p = expandHome(path);
   try {

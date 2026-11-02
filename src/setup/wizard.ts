@@ -6,7 +6,7 @@ import { detectBrains, isBrainId, type BrainId } from "../brains/logins.ts";
 import { srcDir, type Step } from "./steps.ts";
 import { installLocal } from "./local.ts";
 import { installRemote, validRemote } from "./remote.ts";
-import { pickKeyFile, sshKeys } from "./keys.ts";
+import { saveKey } from "./keys.ts";
 
 const flag = (a: string[], f: string) => { const i = a.indexOf(f); return i >= 0 ? a[i + 1] : undefined; };
 const brainsOf = (v?: string): BrainId[] => (v || "").split(",").map((s) => s.trim()).filter(isBrainId);
@@ -31,8 +31,10 @@ export async function wizard(a: string[]): Promise<number> {
       if (!ok(req, url)) return new Response("Open this from the Hearth app.", { status: 403 });
       if (url.pathname === "/") return new Response(page.replace("__WIZARD_KEY__", key), { headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:" } });
       if (url.pathname === "/brains") return json({ brains: detectBrains() });
-      if (url.pathname === "/keys") return json({ keys: sshKeys(), canPick: process.platform === "darwin" });
-      if (url.pathname === "/pick-key" && req.method === "POST") return json({ path: await pickKeyFile() });
+      if (url.pathname === "/key" && req.method === "POST") {
+        const b = await req.json().catch(() => ({}));
+        return json(saveKey(String(b.name || "key"), String(b.text || "")));
+      }
       if (url.pathname === "/check" && req.method === "POST") {
         const b = await req.json().catch(() => ({}));
         return json({ error: b.where === "remote" ? validRemote({ ...b, brains: brainsOf(b.brains) }) : brainsOf(b.brains).length ? null : "Pick at least one brain." });

@@ -109,6 +109,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         decisionHandler(.allow)
     }
 
+    /// <input type="file"> (the SSH key in setup): the usual Open panel. Picking a file this way is what lets the app
+    /// read it, so macOS doesn't ask for access to the folder it's in. Starts in ~/.ssh, hidden files shown.
+    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        panel.showsHiddenFiles = true
+        let ssh = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".ssh")
+        if FileManager.default.fileExists(atPath: ssh.path) { panel.directoryURL = ssh }
+        panel.beginSheetModal(for: window) { r in completionHandler(r == .OK ? panel.urls : nil) }
+    }
+
     /// target=_blank links open in the browser.
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         if let url = action.request.url { NSWorkspace.shared.open(url) }
