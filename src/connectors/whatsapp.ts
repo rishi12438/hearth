@@ -29,7 +29,7 @@ export type ChatInfo = { jid: string; name: string; group: boolean; archived?: b
 /** "+65 9199 7824" from a WhatsApp number (digits with the country code). */
 export const prettyNumber = (digitsOnly: string) => parsePhoneNumberFromString(`+${digitsOnly}`)?.formatInternational() ?? `+${digitsOnly}`;
 /** Official WhatsApp accounts that aren't in anyone's address book. */
-const KNOWN: Record<string, string> = { "13135550002": "Meta AI" };
+const KNOWN: Record<string, string> = { "0": "WhatsApp", "13135550002": "Meta AI" };
 /** Baileys timestamps are seconds, sometimes as a protobuf Long. */
 const seconds = (t: any) => { const n = typeof t === "object" && t?.toNumber ? t.toNumber() : Number(t); return Number.isFinite(n) && n > 0 ? n : 0; };
 export type WaStatus = { state: "off" | "starting" | "qr" | "connected" | "signed-out" | "error"; qr?: string | null; me?: string | null; detail?: string | null; riskAccepted: boolean };
