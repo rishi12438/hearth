@@ -1,4 +1,5 @@
 import { h, clear, icon, richText, relTime, shortAgo, clockTime, dayLabel, greeting, toast } from "./dom.ts";
+import { initConnectors, loadTiles, grid as connectorGrid } from "./connectors.ts";
 import { activeHub, call, hubs, pair, removeHub, setActive, stream, normalizeUrl, ApiError, authHeaders, passkeysWork, registerPasskey, passkeyProof, unlock, requestAccess, waitForApproval, type HubRef } from "./api.ts";
 
 declare const __BUILD__: string;
@@ -1433,10 +1434,18 @@ function connectorTile(c: Connector, size = 40) {
   return tile;
 }
 
+// The grid's own sheets (brains, keys, WhatsApp, Slack) live in connectors.ts; it reuses these screens.
+initConnectors({
+  openSheet: (t, b, o) => openSheet(t, b, o), closeSheet: () => closeSheet(), confirmSheet: (a, b, c, d) => confirmSheet(a, b, c, d),
+  handleError: (e) => handleError(e), back: () => void openConnections(), openVoice: () => void openVoice(), openGoogle: () => void openGoogleSetup(),
+  openCookies: (id) => { const c = CONNECTORS.find((x) => x.via === id); if (c) void openCookieSetup(c); },
+  logo: (id, size) => { const c = CONNECTORS.find((x) => x.via === id && x.id === id) || (id === "google" ? CONNECTORS[0] : null); return c ? connectorTile(c, size) : null; },
+});
+
 /** Connectors, laid out like an app store: search, Available / Connected, Featured, then groups. */
 async function openConnections(tab: "available" | "connected" = "available") {
-  let g: any, connResp: any;
-  try { [g, connResp] = await Promise.all([call("/api/google"), call("/api/connections")]); } catch (e) { return handleError(e); }
+  let g: any, connResp: any, tiles: any[] = [];
+  try { [g, connResp, tiles] = await Promise.all([call("/api/google"), call("/api/connections"), loadTiles().catch(() => [])]); } catch (e) { return handleError(e); }
   const conns: any[] = connResp.connections || connResp;
   const conn = (c: Connector) => conns.find((x) => x.id === c.via);
   const isOn = (c: Connector) => !!conn(c)?.connected;
@@ -1477,15 +1486,20 @@ async function openConnections(tab: "available" | "connected" = "available") {
     const featured = tab === "available" && !q ? shown.filter((c) => c.group === "Featured") : [];
     const groups = tab === "connected" || q ? [["", shown]] as [string, Connector[]][]
       : (["Social", "Productivity"] as const).map((n) => [n, shown.filter((c) => c.group === n)] as [string, Connector[]]);
+    // Available: the grid of every brain, key and account (connectors.ts). Connected: the list below, as before.
+    const gridIds = new Set(tiles.map((t) => t.id));
+    const rest = shown.filter((c) => !gridIds.has(c.via || "") && !gridIds.has(c.id));
     clear(body,
       h("div", { class: "search" }, icon("search", 18), h("input", { placeholder: "Search connectors", type: "search", value: q,
         on: { input: (e: Event) => { q = (e.target as HTMLInputElement).value.trim().toLowerCase(); draw(); setTimeout(() => (body.querySelector("input") as HTMLInputElement)?.focus(), 0); } } })),
       h("div", { class: "segmented" },
         h("button", { class: tab === "available" ? "on" : "", on: { click: () => { tab = "available"; draw(); } } }, "Available"),
         h("button", { class: tab === "connected" ? "on" : "", on: { click: () => { tab = "connected"; draw(); } } }, "Connected")),
-      featured.length ? [h("h4", null, "Featured"), h("div", { class: "cfeatured" }, featured.map((c) =>
+      tab === "available" && tiles.length ? connectorGrid(tiles, q) : null,
+      tab === "available" && tiles.length && rest.length ? [h("h4", null, "More"), h("div", { class: "list" }, rest.map(row))] : null,
+      featured.length && !tiles.length ? [h("h4", null, "Featured"), h("div", { class: "cfeatured" }, featured.map((c) =>
         h("button", { class: "cfeat", on: { click: () => open(c) } }, h("span", { class: "grow" }, h("b", null, c.name), h("small", null, sub(c))), connectorTile(c, 56))))] : null,
-      groups.filter(([, list]) => list.length || tab === "connected").map(([name, list]) => [
+      groups.filter(([, list]) => (tab === "connected" || !tiles.length) && (list.length || tab === "connected")).map(([name, list]) => [
         name ? h("h4", null, name) : null,
         list.length ? h("div", { class: "list" }, list.map(row))
           : h("p", { class: "empty" }, "Nothing connected yet. Connect Gmail or Calendar and your teammates can watch them for you."),

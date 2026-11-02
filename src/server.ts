@@ -472,6 +472,12 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           try { const rules = await connect.whatsapp.editRule(kind, String(b.value || ""), b.remove === true); hub.emit("connections"); return json({ rules }); }
           catch (e: any) { throw new HttpError(400, e.message); }
         }
+        if (method === "GET" && id === "qr") {
+          // Only ever draws the code WhatsApp gave us right now, never arbitrary text.
+          const st = await connect.whatsapp.status();
+          if (!st.qr || url.searchParams.get("text") !== st.qr) throw new HttpError(404, "No QR code to show.");
+          return json({ dataUrl: await QRCode.toDataURL(st.qr, { margin: 1, width: 320 }) });
+        }
         if (method === "GET" && id === "messages") return json({ messages: await connect.whatsapp.recent(Math.min(Number(url.searchParams.get("limit")) || 50, 200)) });
         break;
       }

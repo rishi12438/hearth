@@ -37,7 +37,7 @@ export async function setupCli(config: Config, argv: string[]): Promise<number |
   const brains = brainsOf(flag(a, "--brains"));
   try {
     if (where === "local") {
-      const r = await installLocal({ brains, lan: a.includes("--lan"), port: Number(flag(a, "--port")) || undefined, service: !a.includes("--no-service") }, emit);
+      const r = await installLocal({ brains, lan: a.includes("--lan"), port: Number(flag(a, "--port")) || undefined, service: !a.includes("--no-service"), dataDir: flag(a, "--data") }, emit);
       await showPair(r.pair);
       return 0;
     }
@@ -52,7 +52,7 @@ export async function setupCli(config: Config, argv: string[]): Promise<number |
     }
   } catch { return 1; }
   console.log(`usage:
-  hearth install local  --brains claude,codex [--lan] [--port 8790] [--no-service] [--json]
+  hearth install local  --brains claude,codex [--lan] [--port 8790] [--data <dir>] [--no-service] [--json]
   hearth install remote --brains claude,codex --host <ip> --user ubuntu --key <ssh key> --domain <domain> --email <email>
                         [--skip-dns-check] [--claude-token-stdin] [--json]`);
   return 2;

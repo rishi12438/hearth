@@ -127,8 +127,21 @@ export function claudeEventWindows(info: any): UsageWindow[] {
   return out;
 }
 
-/** The OAuth token Claude Code is signed in with on this machine, without the Keychain (that prompts on a Mac). */
+/**
+ * The OAuth token Claude Code is signed in with on this machine. On a Mac, Claude keeps it in the Keychain, and reading
+ * that makes macOS ask once, so it's only read when this hub opted in (HEARTH_CLAUDE_USAGE_KEYCHAIN=1, which a hub set
+ * up on this Mac turns on). Without it, Claude's usage comes from the rate_limit_event of its next run.
+ */
 export function claudeToken(env: Record<string, string | undefined> = process.env, home = homedir()): string | null {
+  const t = claudeTokenNoKeychain(env, home);
+  if (t || process.platform !== "darwin" || env.HEARTH_CLAUDE_USAGE_KEYCHAIN !== "1") return t;
+  try {
+    const r = Bun.spawnSync(["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"], { stdout: "pipe", stderr: "ignore", timeout: 30_000 });
+    return r.exitCode === 0 ? JSON.parse(r.stdout.toString())?.claudeAiOauth?.accessToken || null : null;
+  } catch { return null; }
+}
+
+function claudeTokenNoKeychain(env: Record<string, string | undefined>, home: string): string | null {
   if (env.CLAUDE_CODE_OAUTH_TOKEN) return env.CLAUDE_CODE_OAUTH_TOKEN;
   const long = readClaudeToken(home);
   if (long) return long;

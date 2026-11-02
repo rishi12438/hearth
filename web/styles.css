@@ -813,3 +813,33 @@ p.err { color: var(--danger); margin: 6px 2px 0; }
 .auditlog { margin: 6px 0; }
 .auditlog summary { cursor: pointer; padding: 6px 2px; }
 .auditlog .list { margin-top: 6px; }
+
+/* The connector grid (connectors.ts): brains, keys and accounts as tiles you tap to add. */
+.cgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin: 8px 0 14px; }
+.cgtile { position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 14px; min-height: 148px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 16px; text-align: left; box-shadow: var(--shadow); }
+.cgtile:active { transform: scale(.98); }
+.cgtile b { font-weight: 700; margin-top: 4px; }
+.cgtile small { color: var(--muted); font-size: 13px; line-height: 1.3; flex: 1; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.cgstate { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 700; border-radius: 999px; padding: 3px 9px; background: var(--surface); color: var(--ink); }
+.cgstate.connected { background: rgba(47, 158, 107, .12); color: var(--ok); }
+.cgstate.needs-you { background: rgba(217, 138, 28, .14); color: var(--warn); }
+.cgstate.not-installed { color: var(--muted); }
+.cgtile.not-installed { opacity: .6; }
+.cgrisk { position: absolute; top: 12px; right: 12px; width: 18px; height: 18px; border-radius: 50%; background: rgba(217, 138, 28, .16); color: var(--warn);
+  font: 800 12px/18px var(--font); text-align: center; }
+.riskbox { background: rgba(217, 138, 28, .1); border-radius: 14px; padding: 12px 14px; margin: 10px 0; color: #7a5313; }
+.riskbox p { margin: 4px 0 0; font-size: 14px; }
+.ubars { display: flex; flex-direction: column; gap: 12px; margin: 6px 0 10px; }
+.ubar-top { display: flex; justify-content: space-between; font-weight: 600; font-size: 14px; }
+.ubar-track { height: 8px; border-radius: 4px; background: var(--surface); overflow: hidden; margin: 5px 0 3px; }
+.ubar-track i { display: block; height: 100%; border-radius: 4px; background: var(--ok); }
+.ubar-track i.warm { background: var(--warn); } .ubar-track i.hot { background: var(--danger); }
+.waqr { background: #fff; border: 1px solid var(--line); border-radius: 16px; padding: 14px; width: 260px; margin: 8px auto; }
+.waqr img { width: 100%; display: block; image-rendering: pixelated; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.chip { display: inline-flex; align-items: center; gap: 4px; background: var(--surface); border-radius: 999px; padding: 4px 6px 4px 11px; font-size: 13.5px; }
+.chipx { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; color: var(--muted); }
+.toggle-row { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.toggle-row:last-child { border-bottom: 0; }
+.toggle-row input { width: 20px; height: 20px; accent-color: var(--ink); }

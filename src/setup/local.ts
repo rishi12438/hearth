@@ -34,7 +34,9 @@ export async function installLocal(o: LocalOpts, emit: Emit): Promise<{ url: str
 
   emit({ step: "data", state: "start", text: `Hub data in ${dataDir}` });
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  const env: Record<string, string> = { HEARTH_TARGET: "local", HEARTH_DATA: dataDir, HEARTH_PORT: String(port), HEARTH_HOST: o.lan ? "0.0.0.0" : "127.0.0.1" };
+  const env: Record<string, string> = { HEARTH_TARGET: "local", HEARTH_DATA: dataDir, HEARTH_PORT: String(port), HEARTH_HOST: o.lan ? "0.0.0.0" : "127.0.0.1",
+    // Live Claude usage from the Keychain login (macOS asks once; choose Always Allow).
+    ...(o.brains.includes("claude") && platform() === "darwin" ? { HEARTH_CLAUDE_USAGE_KEYCHAIN: "1" } : {}) };
   writeFileSync(join(dataDir, "hub.env"), Object.entries(env).map(([k, v]) => `${k}=${v}`).join("\n") + "\n", { mode: 0o600 });
   emit({ step: "data", state: "ok", text: o.lan ? "Your phone can reach it on this Wi-Fi (plain http: only on a network you trust)." : "Only this Mac can reach it." });
 

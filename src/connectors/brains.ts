@@ -21,6 +21,7 @@ function brain(id: BrainId, blurb: string): Connector {
       const d = detectBrains().find((x) => x.id === id)!;
       const pool = await hub.brainPool();
       const on = pool.includes(id) && availableHarnesses(hub.config).includes(id);
+      if (on) await hub.brain.usage.refresh(id).catch(() => {}); // cached for a few minutes; a fresh read only when stale
       return {
         state: !d.installed ? "not-installed" : !d.loggedIn ? "needs-you" : on ? "connected" : "off",
         detail: !d.installed ? "Not installed on the hub" : !d.loggedIn ? "Not signed in on the hub" : on ? (d.how ?? "Signed in") : "Signed in, not picked",
