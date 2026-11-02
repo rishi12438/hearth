@@ -54,7 +54,7 @@ export async function buildWeb() {
   }
   for (const f of readdirSync(WEB)) {
     const ext = extname(f);
-    if (!TYPES[ext]) continue;
+    if (!TYPES[ext] || f === "setup.html") continue; // the setup window is served by `hearth wizard`, never by a hub
     let body: Buffer | string = readFileSync(join(WEB, f));
     if (ext === ".html") body = body.toString().replaceAll("{{BUILD}}", build);
     assets.set(f === "index.html" ? "/" : `/${f}`, { body, type: TYPES[ext], immutable: false });

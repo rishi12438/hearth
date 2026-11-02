@@ -126,7 +126,37 @@ Set up each machine for its role with one setting, the **target**:
 
 ## Quick start
 
-**Requirements:** [Bun](https://bun.sh) 1.1 or newer. For a real brain, add [Claude Code](https://claude.com/claude-code) or [Codex](https://github.com/openai/codex), logged in on the same machine.
+**The easy way: the Mac app.** Build it once with `bash mac/build.sh` (it makes `mac/build/Hearth.dmg`), open the DMG,
+drag Hearth to Applications and open it. The setup appears:
+
+1. **Who do you want the brain to be?** Hearth finds Claude Code and Codex on your Mac; tick one or both. With both,
+   each job goes to whichever has the most room on its plan right now (it reads each plan's live usage).
+2. **Where should your hub live?** *This Mac* (uses the logins already here), or *My server*: your domain, the
+   server's IP, the SSH user and key. Hearth sets the server up over SSH, installs the brains there and copies
+   long-lived logins up (a `claude setup-token` you approve once in the browser, and Codex's `auth.json`).
+3. **Pair your phone** by scanning the code. Then add connectors from the grid in Settings → Connectors.
+
+Without an Apple Developer ID the app is signed ad hoc, so the first time, right-click it and choose Open.
+
+**Everything the setup does is also a command** (no prompts, `--json` output), so an agent can set Hearth up too:
+
+```bash
+hearth install local  --brains claude,codex
+hearth install remote --brains claude,codex --host 203.0.113.10 --user ubuntu --key ~/.ssh/id_ed25519 \
+                      --domain assistant.example.com --email you@example.com
+hearth brains detect | pick claude,codex | usage
+hearth connectors                                   # the grid, as text
+hearth connect serper --key …                       # or deepgram, slack --token …
+hearth connect whatsapp --accept-risk               # shows the QR code, waits until linked
+hearth connect instagram --stdin --accept-risk < cookies.json
+hearth whatsapp ignore add contact "+1 555 0100"    # or group <id> | keyword OTP
+hearth whatsapp ignore set --all-groups on --muted on
+```
+
+(`hearth` is `bun src/cli.ts`. Commands that change a running hub talk to it on localhost with its admin key, so run
+them on the hub's machine, e.g. over SSH.)
+
+**By hand. Requirements:** [Bun](https://bun.sh) 1.1 or newer. For a real brain, add [Claude Code](https://claude.com/claude-code) or [Codex](https://github.com/openai/codex), logged in on the same machine.
 
 ```bash
 git clone https://github.com/rishi12438/hearth.git
@@ -176,6 +206,10 @@ All settings are environment variables. See [.env.example](.env.example) for the
 ```
 src/          the hub: server, hooks engine, memory, brain runner, auth, scripts, storage backends (src/store),
               computer links (computers.ts on the hub, computer.ts on your Mac)
+src/brains/   detecting Claude Code / Codex, live plan usage (who takes each job), long-lived logins
+src/connectors/  the connector grid: one file per connector (serper.ts, whatsapp.ts, slack.ts…) behind types.ts
+src/setup/    hearth install (local.ts, remote.ts over ssh.ts) and the setup window (wizard.ts + web/setup.html)
+mac/          the Mac app (a Swift window around the setup and the hub) and build.sh for Hearth.dmg
 web/          the phone app: plain TypeScript bundled in memory by Bun, no framework, no build folder
 components/   starter components (itinerary, comparison, checklist, chart, …) teammates reuse with new data
 scripts/      trusted example scripts (weather, page-watch)
@@ -196,6 +230,11 @@ bun run doctor                  # security self-check for a hub on the internet
 **Adding a storage backend:** implement the `Store` interface in [src/store/types.ts](src/store/types.ts) in one file and register its URL scheme in [src/store/index.ts](src/store/index.ts).
 
 **Adding a speech-to-text provider:** implement the interface in [src/voice.ts](src/voice.ts).
+
+**Adding a connector:** write one file in [src/connectors/](src/connectors/) that fills in the `Connector` interface from
+[types.ts](src/connectors/types.ts) (its tile, how to add it, how to remove it), list it in
+[index.ts](src/connectors/index.ts), and it shows up in the app's grid, the API and `hearth connect`. If it brings new
+messages in, add a trigger source next to it (see `whatsapp-source.ts`).
 
 ## Contributing
 

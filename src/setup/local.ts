@@ -50,7 +50,7 @@ export async function installLocal(o: LocalOpts, emit: Emit): Promise<{ url: str
   <key>Label</key><string>${LABEL}</string>
   <key>ProgramArguments</key><array>${cmd.map((c) => `<string>${c.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</string>`).join("")}</array>
   <key>WorkingDirectory</key><string>${srcDir(o.src)}</string>
-  <key>EnvironmentVariables</key><dict>${Object.entries({ ...env, PATH: `${join(homedir(), ".local", "bin")}:${join(homedir(), ".bun", "bin")}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin` }).map(([k, v]) => `<key>${k}</key><string>${v}</string>`).join("")}</dict>
+  <key>EnvironmentVariables</key><dict>${Object.entries({ ...env, PATH: [...new Set([...(process.env.PATH || "").split(":"), join(homedir(), ".local", "bin"), join(homedir(), ".bun", "bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"].filter(Boolean))].join(":") }).map(([k, v]) => `<key>${k}</key><string>${v}</string>`).join("")}</dict>
   <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>${join(dataDir, "hub.log")}</string><key>StandardErrorPath</key><string>${join(dataDir, "hub.log")}</string>
 </dict></plist>

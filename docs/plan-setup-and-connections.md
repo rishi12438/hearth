@@ -1,6 +1,6 @@
 # Plan: setup flow and connections
 
-Status: idea, nothing built yet (noted 2026-11-01).
+Status: built 2026-11-01 on branch feature/setup-connectors (see "What was built" at the end). Not yet tried against a real server or a real WhatsApp/Slack account.
 
 ## What the user wants
 
@@ -65,3 +65,12 @@ One setup flow, so nobody has to edit env vars or run scripts by hand:
 - When an agent connects something that can send messages (WhatsApp, Slack), should it still need the owner's Approve on the phone?
 - Is the setup flow a web wizard served by a local CLI, a screen in the phone app, or both?
 - Should ignored WhatsApp messages be dropped completely, or stored but hidden from teammates?
+
+## What was built (2026-11-01)
+
+- **Brains** (`src/brains/`): detection, live usage (Claude `oauth/usage` + `rate_limit_event`; Codex app-server), routing by most room (90% / 70% thresholds, park when all are full), long-lived logins (setup-token caught from output; Codex auth.json, newest wins).
+- **Connectors** (`src/connectors/`): one module per connector behind `types.ts`; grid in Settings → Connectors (`web/src/connectors.ts`); ban-risk gate; WhatsApp via Baileys (QR, ignore rules, trigger source); Slack (token, DMs/mentions source); Serper (key, `scripts/web-search.ts`); Instagram DMs source; `message.send` with Approve.
+- **Setup** (`src/setup/`): `hearth install local|remote`, `hearth wizard` (web/setup.html), admin key for the CLI (`src/admin.ts`).
+- **Mac app** (`mac/`): Swift WKWebView shell; `bash mac/build.sh` makes `mac/build/Hearth.dmg` (ad-hoc signed unless DEVELOPER_ID is set).
+
+Still open: Codex auth.json sync back from hub to Mac (today the hub keeps the newest of what the Mac sends); Instagram/LinkedIn *sending* DMs; a first real run of `install remote` against a server.
