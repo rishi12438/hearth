@@ -13,8 +13,10 @@ const PAGES: Record<What, Page> = {
     selectors: ["li.msg-conversation-listitem", "[class*='msg-conversation-listitem']", ".msg-conversations-container__conversations-list li"] },
   notifications: { url: "https://www.linkedin.com/notifications/", signedOut: SIGNED_OUT,
     selectors: ["[componentkey^='notification-card']", "article.nt-card", "[class*='nt-card']", "[data-finite-scroll-hotkey-item]"] },
-  invitations: { url: "https://www.linkedin.com/mynetwork/invitation-manager/", signedOut: SIGNED_OUT,
-    selectors: ["li.invitation-card", "[class*='invitation-card']", "[data-view-name*='invitation']", "main section ul > li"] },
+  // Each request is a list item with an "Accept <name>'s invitation" button (2026 layout; class names are hashed).
+  // Not "main section ul > li": that matched the Received / Sent tabs instead of the requests.
+  invitations: { url: "https://www.linkedin.com/mynetwork/invitation-manager/received/", signedOut: SIGNED_OUT,
+    selectors: ["[role='listitem']:has(button[aria-label^='Accept'])", "li:has(button[aria-label^='Accept'])", "li.invitation-card", "[class*='invitation-card']"] },
 };
 
 export const linkedin: Source<Config> = {
