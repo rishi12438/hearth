@@ -101,7 +101,7 @@ export type Job = Doc & {
   status: "queued" | "working" | "waiting" | "blocked" | "done" | "failed";
   /** Set when the job can't go on without you (a login, your laptop, a permission). It parks until you unblock it. */
   /** needs "computer": parked until a linked computer is online, then it resumes on its own. */
-  blocked?: { need: string; why: string; unblock: string; needs?: "computer" };
+  blocked?: { need: string; why: string; unblock: string; needs?: "computer" | "brains"; until?: number | null };
   /** Where the model ran: a linked computer's name, or "cloud" for this hub. */
   ranOn?: string;
   effort: "quick" | "light" | "heavy";
@@ -205,6 +205,8 @@ export type Prefs = {
   lastUserAt?: string;
   placeState: Record<string, boolean>;
   brains?: import("./brain.ts").Brains;
+  /** The brains the user picked in setup (claude, codex). Two or more share the work by live usage. */
+  brainPool?: string[];
   spend?: { date: string; usd: number };
   costCaps?: { rambleUsd: number; dayUsd: number };
   /** "About you": a short profile the assistant keeps (and you can edit). Always in context. */

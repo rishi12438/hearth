@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import { wallParts, zonedToUtc } from "./time.ts";
 import { SOURCES } from "./sources/index.ts";
+import { BrainUsage, isLimitError } from "./brain-usage.ts";
+import { readClaudeToken } from "./brain-logins.ts";
 
 /** Each trigger module's own description of its config, for the hook docs below. */
 const SOURCE_DOCS = SOURCES.map((s) => `        ${s.id}: ${s.doc}`).join("\n");
@@ -321,15 +323,37 @@ export function buildPrompt(b: BrainInput) {
   return parts.join("\n");
 }
 
-function agentEnv() {
+function agentEnv(harness?: string) {
   // Agents need their own login (HOME, PATH) but nothing of the hub's: drop HEARTH_* (DB URL, etc.).
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("HEARTH_")) env[k] = v;
+  // A long-lived Claude login copied up from your Mac (`claude setup-token`) signs Claude in here.
+  if (harness === "claude" && !env.CLAUDE_CODE_OAUTH_TOKEN) {
+    const t = readClaudeToken();
+    if (t) env.CLAUDE_CODE_OAUTH_TOKEN = t;
+  }
   return env;
 }
 
+/** What each brain runs at each tier, when work moves from one brain to another. "" = the brain's own default. */
+const TIER_MODELS: Record<string, Record<string, string>> = {
+  claude: { orchestrator: "claude-opus-5-5", quick: "claude-haiku-5-5", workhorse: "claude-sonnet-5-5", heavy: "claude-opus-5-5" },
+  codex: { orchestrator: "", quick: "", workhorse: "", heavy: "" },
+};
+function tierOf(p: BrainProfile): string {
+  if (p.role) return p.role;
+  if (/haiku/i.test(p.model)) return "quick";
+  if (/sonnet/i.test(p.model)) return "workhorse";
+  if (/opus/i.test(p.model)) return "heavy";
+  return "workhorse";
+}
+/** Brains that can share work by live usage. */
+export const POOL_HARNESSES = ["claude", "codex"] as const;
+
 /** Which harness runs a turn, and with which model. "" model = the harness's default. */
-export type BrainProfile = { harness: string; model: string };
+export type BrainProfile = { harness: string; model: string; role?: "orchestrator" | "quick" | "workhorse" | "heavy" };
+/** Every brain the user picked is near its plan limit. The job parks until the first one resets. */
+export class BrainsFull extends Error { constructor(msg: string, readonly until: number | null) { super(msg); } }
 /** Collects model spend across calls. `unknown` flips when a harness can't report cost. */
 /** Spend for one job; signal stops its model process when the user changes the job mid-run. */
 /** ranOn: set by Brain to the linked computer that ran the call, or "cloud" when this hub ran it while computers are linked. */
@@ -389,6 +413,10 @@ export class Brain {
   private workDir: string;
   /** Linked computers. When one is online with the harness, calls run there, on its own logins. */
   remote: Remote | null = null;
+  /** Live usage of each brain's subscription; work goes to the one with the most room. */
+  usage = new BrainUsage();
+  /** The brains the user picked (Settings → Brains). Two or more share the work by live usage. */
+  pool: () => Promise<string[]> = async () => [];
 
   constructor(private config: Config) {
     this.global = new Semaphore(config.maxParallel);
@@ -419,7 +447,40 @@ export class Brain {
    * cap; the orchestrator skips the queue so a new ramble is always read right away.
    */
   async think(b: BrainInput, profile?: BrainProfile, meter?: Meter): Promise<string> {
-    const p = profile || this.defaults().workhorse;
+    const asked = profile || this.defaults().workhorse;
+    const pool = (await this.pool().catch(() => [])).filter((h) => (POOL_HARNESSES as readonly string[]).includes(h));
+    if (pool.length < 2 || !pool.includes(asked.harness)) return this.thinkOn(b, asked, meter);
+    // Two or more brains: the one with the most room on its live limits takes it; a refusal on a limit moves it on once.
+    const tried = new Set<string>();
+    let preferred: string | undefined = asked.harness;
+    for (;;) {
+      const left = pool.filter((h) => !tried.has(h));
+      const pick = await this.usage.pick(left, preferred);
+      if ("park" in pick) {
+        const when = pick.until ? new Date(pick.until).toISOString().slice(0, 16).replace("T", " ") + " UTC" : "they reset";
+        throw new BrainsFull(`Every brain you picked is near its plan limit. Picking up again at ${when}.`, pick.until);
+      }
+      const p = this.onBrain(asked, pick.harness);
+      tried.add(pick.harness);
+      try {
+        const out = await this.thinkOn(b, p, meter);
+        if (pick.harness === "codex") void this.usage.refresh("codex", true).catch(() => {});
+        return out;
+      } catch (e: any) {
+        if (!isLimitError(String(e?.message || "")) || tried.size >= pool.length) throw e;
+        this.usage.noteRefused(pick.harness);
+        preferred = undefined;
+      }
+    }
+  }
+
+  /** The same tier on another brain. */
+  onBrain(p: BrainProfile, harness: string): BrainProfile {
+    if (p.harness === harness) return p;
+    return { harness, model: TIER_MODELS[harness]?.[tierOf(p)] ?? "", role: p.role };
+  }
+
+  private async thinkOn(b: BrainInput, p: BrainProfile, meter?: Meter): Promise<string> {
     if (b.mode === "orchestrate") return this.dispatch(b, p, meter);
     const cap = this.config.maxParallelPerHarness[p.harness];
     if (cap && !this.perHarness.has(p.harness)) this.perHarness.set(p.harness, new Semaphore(cap));
@@ -481,7 +542,7 @@ export class Brain {
         throw new Error(`Unknown harness: ${harness}`);
     }
     const proc = Bun.spawn(cmd, {
-      cwd: this.workDir, env: agentEnv(),
+      cwd: this.workDir, env: agentEnv(harness),
       stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe",
     });
     let timedOut = false;
@@ -499,6 +560,7 @@ export class Brain {
         let i: number;
         while ((i = buf.indexOf("\n")) >= 0) {
           const line = buf.slice(0, i); buf = buf.slice(i + 1);
+          if (line.includes('"rate_limit_event"')) { try { this.usage.noteClaudeEvent(JSON.parse(line)?.rate_limit_info); } catch {} continue; }
           if (!meter?.onProgress || !line.includes('"tool_use"')) continue;
           try {
             for (const c of JSON.parse(line)?.message?.content || []) {

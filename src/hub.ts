@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store, Collection } from "./store/index.ts";
 import type { Brain, BrainInput, BrainProfile, Brains, Meter } from "./brain.ts";
-import { QUIET, ESCALATE, REDO, HARNESSES, MODEL_RE, availableHarnesses, NeedsComputer } from "./brain.ts";
+import { QUIET, ESCALATE, REDO, HARNESSES, MODEL_RE, availableHarnesses, NeedsComputer, BrainsFull, POOL_HARNESSES } from "./brain.ts";
 import type { Scripts } from "./scripts.ts";
 import type { Push } from "./push.ts";
 import { parseReply } from "./reply.ts";
@@ -118,7 +118,9 @@ export class Hub {
     readonly library: Library = new Library(null),
     readonly files: Files = new Files(store, config.dataDir),
     readonly apps: Apps = new Apps(store),
-  ) {}
+  ) {
+    brain.pool = () => this.brainPool();
+  }
 
   // ---------- plumbing ----------
 
@@ -293,7 +295,33 @@ export class Hub {
 
   async brains(): Promise<Brains> {
     const saved = (await this.prefs()).brains;
-    return { ...this.brain.defaults(), ...(saved || {}) };
+    const b: Brains = { ...this.brain.defaults(), ...(saved || {}) };
+    for (const role of ["orchestrator", "quick", "workhorse", "heavy"] as const) b[role] = { ...b[role], role };
+    return b;
+  }
+
+  /** The brains the user picked. None picked yet: whichever ones the roles already use. */
+  async brainPool(): Promise<string[]> {
+    const saved = (await this.prefs()).brainPool;
+    if (saved?.length) return saved;
+    const b = await this.brains();
+    return [...new Set([b.orchestrator, b.quick, b.workhorse, b.heavy].map((p) => p.harness))];
+  }
+
+  /** Pick the brains (multi-select). The roles move onto a picked brain if theirs was dropped. */
+  async setBrainPool(list: unknown) {
+    const allowed = availableHarnesses(this.config);
+    const pool = [...new Set((Array.isArray(list) ? list : []).map(String))];
+    if (!pool.length) return { error: "Pick at least one brain." };
+    const bad = pool.find((h) => !(POOL_HARNESSES as readonly string[]).includes(h) || !allowed.includes(h));
+    if (bad) return { error: `${bad} isn't installed on this hub.` };
+    const cur = await this.brains();
+    const next: Brains = { ...cur };
+    for (const role of ["orchestrator", "quick", "workhorse", "heavy"] as const)
+      if (!pool.includes(cur[role].harness)) { const { role: _, ...p } = this.brain.onBrain(cur[role], pool[0]); next[role] = p; }
+    await this.setPrefs({ brainPool: pool, brains: next });
+    await this.log("brains", `Brains: ${pool.join(", ")}${pool.length > 1 ? " (the one with the most room on its plan takes each job)" : ""}`);
+    return { value: { pool, brains: next } };
   }
 
   async setBrains(patch: any) {
@@ -672,6 +700,11 @@ export class Hub {
       }
       await finish({ how: failedSkill ? "repaired" : "fresh", tier, escalated, voiced, result: r.text.slice(0, 4000), did: r.did, tiles: r.tiles, fileIds: r.fileIds });
     } catch (err: any) {
+      if (err instanceof BrainsFull) {
+        cur = await this.saveJob({ ...cur, blocked: { need: "Room on a brain", why: err.message, unblock: "It starts again by itself when a plan resets, or tap Try again", needs: "brains", until: err.until } });
+        this.wakeForBrains(err.until);
+        return await finish({ how: "fresh", tier });
+      }
       if (err instanceof NeedsComputer) {
         // Parks instead of failing; resumeForComputer picks it up the moment a computer links in. A cloud sandbox that's
         // allowed to start on its own is woken for it.
@@ -750,6 +783,19 @@ export class Hub {
 
   /** Set by the server: wake a cloud computer when a job is waiting for one. */
   onNeedsComputer: (() => void) | null = null;
+
+  private brainsTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Every brain was full: try the parked jobs again when the first plan resets (and at least every 30 min). */
+  private wakeForBrains(until: number | null) {
+    const wait = Math.min(Math.max((until ?? 0) - Date.now() + 60_000, 60_000), 30 * 60_000);
+    if (this.brainsTimer) clearTimeout(this.brainsTimer);
+    this.brainsTimer = setTimeout(async () => {
+      this.brainsTimer = null;
+      const parked = (await this.store.all<Job>("jobs")).filter((j) => j.status === "blocked" && j.blocked?.needs === "brains");
+      for (const j of parked) await this.retryJob(j.id);
+    }, wait);
+    (this.brainsTimer as any).unref?.();
+  }
 
   /** A linked computer came online: run every job that was parked waiting for one. */
   async resumeForComputer() {
@@ -1960,7 +2006,7 @@ export class Hub {
     await this.tick();
   }
 
-  stop() { if (this.timer) clearInterval(this.timer); }
+  stop() { if (this.timer) clearInterval(this.timer); if (this.brainsTimer) clearTimeout(this.brainsTimer); }
 
   /** Resolves when no job or brain call is running (or after `ms`). Used for graceful shutdown. */
   async idle(ms = 30_000) {
