@@ -14,6 +14,12 @@ export const PRESETS: Record<string, Preset> = {
   amazon: { label: "Amazon", domain: "amazon.com", required: ["at-main"], home: "https://www.amazon.com" },
 };
 
+/** What the Mac app may bring from Chrome: the presets, plus Slack (its own connector, not a cookie site). */
+export const CHROME_SITES: Record<string, Preset> = {
+  ...PRESETS,
+  slack: { label: "Slack", domain: "slack.com", required: ["d"], home: "https://app.slack.com" },
+};
+
 // Back-compat alias (older imports). LinkedIn and X keep dedicated modules; the rest read through the generic site reader.
 export const COOKIE_SITES = PRESETS;
 export type CookieSite = string;

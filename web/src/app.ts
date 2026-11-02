@@ -1625,6 +1625,7 @@ initConnectors({
   openSheet: (t, b, o) => openSheet(t, b, o), closeSheet: () => closeSheet(), confirmSheet: (a, b, c, d) => confirmSheet(a, b, c, d),
   handleError: (e) => handleError(e), back: () => void openConnections(), openVoice: () => void openVoice(), openGoogle: () => void openGoogleSetup(),
   openCookies: (id) => { const c = CONNECTORS.find((x) => x.via === id); if (c) void openCookieSetup(c); },
+  askMac: (type, args, ms) => askMac(type, args, ms),
   logo: (id, size) => { const c = CONNECTORS.find((x) => x.via === id && x.id === id) || (id === "google" ? CONNECTORS[0] : null); return c ? connectorTile(c, size) : null; },
 });
 

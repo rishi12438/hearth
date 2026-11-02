@@ -23,6 +23,8 @@ export type Deps = {
   openVoice(): void;
   openGoogle(): void;
   openCookies(id: string): void;
+  /** Ask the Mac app (it reads Chrome on this Mac). Rejects outside the app. */
+  askMac(type: string, args: Record<string, unknown>, timeoutMs?: number): Promise<any>;
   /** app.ts's own logo for ids it draws (LinkedIn, Instagram, Gmail…), or null. */
   logo(id: string, size: number): HTMLElement | null;
 };
@@ -112,6 +114,7 @@ export function openTile(t: Tile) {
     case "google": return D.openGoogle();
     case "instagram": case "linkedin": return D.openCookies(t.id);
     case "whatsapp": return whatsappSheet();
+    case "slack": return t.state === "connected" ? keySheet(t) : slackSheet(t);
     default: return keySheet(t);
   }
 }
@@ -181,11 +184,11 @@ const KEY_HELP: Record<string, { steps: string[]; placeholder: string; field: "k
   serper: { field: "key", placeholder: "Serper API key", steps: ["Sign up at serper.dev (free searches to start).", "Open API Key and copy it.", "Paste it here: Hearth checks it with one search and keeps it encrypted."] },
   slack: { field: "token", placeholder: "xoxp-… (user) or xoxb-… (bot)", steps: [
     "At api.slack.com/apps, Create New App → From scratch, in your workspace.",
-    "OAuth & Permissions → User Token Scopes: im:history, im:read, users:read, search:read (add chat:write only if teammates may send, after your Approve).",
-    "Install to Workspace, copy the User OAuth Token, and paste it here."] },
+    "Open OAuth & Permissions, scroll to Scopes → User Token Scopes, and add: im:history, im:read, users:read, search:read (and chat:write only if teammates may send, after your Approve).",
+    "Scroll back up and tap Install to Workspace (it only shows once a scope is added). Then the User OAuth Token (xoxp-…) appears on that page: copy it and paste it here. If Slack says “Request to install”, your workspace admin has to approve the app first."] },
 };
 
-function keySheet(t: Tile) {
+function keyForm(t: Tile) {
   const help = KEY_HELP[t.id] ?? { field: "key" as const, placeholder: `${t.label} key`, steps: [] };
   const input = h("input", { class: "field", type: "password", placeholder: help.placeholder, autocomplete: "off", autocapitalize: "off", spellcheck: false }) as HTMLInputElement;
   const err = h("p", { class: "err small", hidden: true });
@@ -195,13 +198,80 @@ function keySheet(t: Tile) {
     try { await call(`/api/connectors/${t.id}`, { method: "PUT", body: { [help.field]: input.value.trim() } }); toast(`${t.label} connected`); D.back(); }
     catch (e: any) { err.textContent = e.message; err.hidden = false; save.disabled = false; save.textContent = "Connect"; }
   } } }, "Connect");
+  return [help.steps.length ? h("ol", { class: "steps" }, help.steps.map((s, i) => h("li", null, i === 0 && t.getFrom ? [h("a", { href: t.getFrom, target: "_blank", rel: "noopener noreferrer" }, t.getFrom.replace(/^https:\/\//, "")), " · ", s] : s))) : null,
+    input, err, save];
+}
+
+function keySheet(t: Tile) {
   D.openSheet(t.label, [
     h("button", { class: "btn ghost", on: { click: D.back } }, icon("back", 16), "All connectors"),
     h("div", { class: "phero" }, logo(t.id, 52), h("b", null, t.state === "connected" ? `${t.label} is connected` : `Connect ${t.label}`), h("small", null, t.state === "connected" ? t.detail || "" : t.blurb)),
     t.state === "connected"
       ? h("button", { class: "btn danger-ghost", on: { click: () => D.confirmSheet(`Disconnect ${t.label}?`, "The key is removed from the hub.", "Disconnect", async () => { await call(`/api/connectors/${t.id}`, { method: "DELETE" }); toast(`${t.label} disconnected`); D.back(); }) } }, `Disconnect ${t.label}`)
-      : [help.steps.length ? h("ol", { class: "steps" }, help.steps.map((s, i) => h("li", null, i === 0 && t.getFrom ? [h("a", { href: t.getFrom, target: "_blank", rel: "noopener noreferrer" }, t.getFrom.replace(/^https:\/\//, "")), " · ", s] : s))) : null,
-        input, err, save],
+      : keyForm(t),
+    h("p", { class: "muted small" }, "Kept encrypted in your hub's vault. It never goes to the model, this app or your exports."),
+  ]);
+}
+
+// ---------- Slack: your Chrome login, or a Slack app's token ----------
+
+function slackSheet(t: Tile) {
+  const inApp = !!(window as any).webkit?.messageHandlers?.hearth;
+  const box = h("div", { class: "stack" });
+  const err = h("p", { class: "err small", hidden: true });
+  const fail = (e: any) => { err.textContent = e.message; err.hidden = false; };
+  const connect = async (r: any, workspace: string, btn: HTMLButtonElement) => {
+    btn.disabled = true; btn.textContent = "Connecting…"; err.hidden = true;
+    try {
+      await call("/api/connectors/slack", { method: "PUT", body: { cookies: JSON.stringify({ cookies: r.cookies }), auth: { fingerprint: r.fingerprint, workspace } } });
+      toast("Slack connected"); D.back();
+    } catch (e) { fail(e); btn.disabled = false; btn.textContent = "Connect"; }
+  };
+  const useChrome = async (btn: HTMLButtonElement, profile: { id: string; label: string }, again: string) => {
+    btn.disabled = true; btn.textContent = "Reading from Chrome…"; err.hidden = true;
+    try {
+      const r = await D.askMac("chrome-cookies", { site: "slack", profile: profile.id });
+      if (r.error) throw new Error(r.error);
+      if (!r.fingerprint) throw new Error("This Hearth for Mac is too old for this. Update it, then try again.");
+      btn.textContent = "Finding your workspaces…";
+      const { workspaces } = await call("/api/connectors/slack/workspaces", { body: { cookies: JSON.stringify({ cookies: r.cookies }), fingerprint: r.fingerprint } });
+      if (!workspaces.length) throw new Error("Chrome's Slack login didn't open any workspace. Open app.slack.com in Chrome, sign in, then check again.");
+      if (workspaces.length === 1) return connect(r, workspaces[0].domain, btn);
+      clear(box, h("p", null, h("b", null, "Which workspace?")),
+        h("div", { class: "wcard" }, workspaces.map((w: any) => {
+          const b = h("button", { class: "wa-btn dark", on: { click: () => connect(r, w.domain, b) } }, "Connect") as HTMLButtonElement;
+          return h("div", { class: "wa-rule" }, h("span", { class: "grow" }, h("b", null, w.team), h("small", null, `${w.domain}${w.user ? ` · ${w.user}` : ""}`)), b);
+        })));
+    } catch (e) { fail(e); btn.disabled = false; btn.textContent = again; }
+  };
+  const check = async () => {
+    clear(box, h("p", { class: "muted small" }, "Checking Chrome on this Mac…"));
+    let r: any;
+    try { r = await D.askMac("chrome-logins", {}, 15_000); } catch (e: any) { r = { error: e.message }; }
+    const found: { id: string; label: string }[] = r?.logins?.slack || [];
+    const again = h("button", { class: "btn ghost", on: { click: () => check() } }, icon("repeat", 16), "Check again");
+    if (r?.error) return clear(box, h("p", { class: "err small" }, r.error), again);
+    if (!r?.chrome) return clear(box, h("p", { class: "muted small" }, "Chrome isn't installed on this Mac. Use a Slack app below instead."), again);
+    if (!found.length) return clear(box,
+      h("p", { class: "muted small" }, "You're not signed in to Slack in Chrome. Open ", h("a", { href: "https://app.slack.com", target: "_blank", rel: "noopener noreferrer" }, "app.slack.com"), " in Chrome, sign in, then check again."), again);
+    clear(box, ...found.map((p) => {
+      const label = found.length === 1 ? "Use my Chrome login" : `Use ${p.label}`;
+      const b = h("button", { class: "btn primary big", on: { click: () => useChrome(b, p, label) } }, label) as HTMLButtonElement;
+      return b;
+    }));
+  };
+  if (inApp) void check();
+  else clear(box, h("p", { class: "muted small" }, "Open the Hearth app on your Mac to use the Slack login in your Chrome."));
+  D.openSheet(t.label, [
+    h("button", { class: "btn ghost", on: { click: D.back } }, icon("back", 16), "All connectors"),
+    h("div", { class: "phero" }, logo(t.id, 52), h("b", null, "Connect Slack"), h("small", null, t.blurb)),
+    h("div", { class: "stack" },
+      h("p", null, h("b", null, "1 · With your Chrome login"), h("small", { class: "sub" }, " · easiest, no app to make")),
+      box, err,
+      h("p", { class: "muted small" }, "Reads Slack as you, the way Slack in your browser does. Slack doesn't officially support this, so it's your choice. The first time, macOS asks to let Hearth use “Chrome Safe Storage”: choose Always Allow.")),
+    h("div", { class: "stack" },
+      h("p", null, h("b", null, "2 · With a Slack app"), h("small", { class: "sub" }, " · official, may need your admin")),
+      ...keyForm(t)),
     h("p", { class: "muted small" }, "Kept encrypted in your hub's vault. It never goes to the model, this app or your exports."),
   ]);
 }

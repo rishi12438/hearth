@@ -30,7 +30,7 @@ const cmd = process.argv[2] || "start";
 //   chrome cookies <site> <profile>   {cookies} or {error}           (macOS asks once for Chrome's key)
 if (cmd === "chrome") {
   const { chromeLogins, browserProfiles, readSiteCookies, chromeFingerprint } = await import("./chrome.ts");
-  const { PRESETS } = await import("./cookie-sites.ts");
+  const { CHROME_SITES: PRESETS } = await import("./cookie-sites.ts");
   const [sub, site, profile] = process.argv.slice(3);
   const out = (o: unknown, code = 0) => { process.stdout.write(JSON.stringify(o)); process.exit(code); };
   if (sub === "logins") out(chromeLogins(Object.entries(PRESETS).map(([id, p]) => ({ id, domain: p.domain, required: p.required }))));
@@ -43,7 +43,9 @@ if (cmd === "chrome") {
     const missing = p!.required.filter((n) => !cookies.some((c) => c.name === n && c.value));
     if (!cookies.length) out({ error: `Couldn't read ${p!.label} from ${prof!.label}. If macOS asked and you clicked Deny, try again and choose Always Allow.` }, 1);
     if (missing.length) out({ error: `${prof!.label} isn't fully logged in to ${p!.label}. Open ${p!.home} in Chrome, sign in, then try again.` }, 1);
-    out({ cookies, profile: prof!.label, fingerprint: chromeFingerprint(undefined, prof!.profile) });
+    // Slack needs only its login cookie (d); don't send the rest of slack.com's cookies along.
+    const keep = site === "slack" ? cookies.filter((c) => p!.required.includes(c.name)) : cookies;
+    out({ cookies: keep, profile: prof!.label, fingerprint: chromeFingerprint(undefined, prof!.profile) });
   }
   out({ error: "usage: hearth chrome logins | chrome cookies <site> <profile>" }, 1);
 }
