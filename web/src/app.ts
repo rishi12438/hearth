@@ -1772,14 +1772,16 @@ async function openCookieSetup(c: Connector | { via: string; name: string; blurb
     clear(chromeBox,
       h("p", null, icon("check", 16), h("b", null, ` ${c.name} is logged in on Chrome`), one ? h("small", { class: "sub" }, ` · ${found[0].label.replace(/^Chrome · /, "")}` ) : null),
       ...found.map((p) => {
-        const label = one ? (st?.connected ? "Use my Chrome login again" : "Use my Chrome login") : `Use ${p.label}`;
+        const label = one ? (st?.problem ? "Reconnect with my Chrome login" : "Use my Chrome login") : `Use ${p.label}`;
         const b = h("button", { class: "btn primary big", on: { click: () => useChrome(b, p, label) } }, label) as HTMLButtonElement;
         return b;
       }),
       out0,
       h("p", { class: "muted small" }, "The first time, macOS asks to let Hearth use “Chrome Safe Storage”. Choose Always Allow. Only these cookies go to your hub, kept encrypted, never shown."));
   };
-  if (inApp) void checkChrome();
+  // Connected and working: nothing to bring over, so no Chrome button or paste box (they come back if it needs reconnecting).
+  const settled = !!st?.connected && !st?.problem;
+  if (inApp && !settled) void checkChrome();
   // A hub running on this Mac can also read its own Chrome (opened in a browser rather than the app).
   const importRow = inApp ? chromeBox : (browsers as any[]).length ? h("div", { class: "stack" },
     h("p", null, icon("check", 16), h("b", null, ` ${c.name} is logged in on Chrome`)),
@@ -1811,9 +1813,9 @@ async function openCookieSetup(c: Connector | { via: string; name: string; blurb
       h("button", { class: "btn ghost", on: { click: async (e: Event) => { const b = e.currentTarget as HTMLButtonElement; b.disabled = true; show(await call(`/api/connections/${c.via}/test`, { body: {} }).catch((x: any) => ({ ok: false, error: x.message }))); b.disabled = false; } } }, icon("play", 16), "Test now")) : null,
     out,
     accessLog(auditAll as any[], st?.domain || c.via!),
-    importRow,
+    settled ? null : importRow,
     // Pasting is the fallback: folded away when the app can read Chrome, open when it can't.
-    h("details", { class: "stack", open: !inApp && !(browsers as any[]).length },
+    settled ? null : h("details", { class: "stack", open: !inApp && !(browsers as any[]).length },
       h("summary", { class: "muted small" }, "Or paste cookies instead"),
       h("ol", { class: "steps" },
         h("li", null, "On your computer, open ", h("a", { href: help.site, target: "_blank", rel: "noopener noreferrer" }, help.site.replace("https://", "")), " in Chrome, logged in."),
