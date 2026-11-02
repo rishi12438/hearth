@@ -3,7 +3,7 @@ import { createDecipheriv, pbkdf2Sync } from "node:crypto";
 import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir, platform, tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Cookie } from "./browser.ts";
+import type { Cookie, Fingerprint } from "./browser.ts";
 
 // Chrome only for now (not Brave, Edge, Safari or Firefox), so the app can say plainly "logged in on Chrome".
 // Read the user's own browser login so a connector (LinkedIn, X) works without pasting cookies by hand, the way
@@ -149,4 +149,36 @@ export function canReadBrowser(env: Record<string, string | undefined> = process
   if (platform() !== "darwin") return false;
   const helper = env.HEARTH_KEYCHAIN_HELPER || join(homedir(), ".enkidu/bin/enkidu-chrome-key-extractor");
   return existsSync(helper) || !!Bun.which("security");
+}
+
+/**
+ * This Mac's Chrome as a site sees it: user agent, client hints, languages, time zone. Sent to the hub with the
+ * cookies, so the hub reads as this same browser (a different one makes LinkedIn end the session; see Fingerprint).
+ */
+export function chromeFingerprint(home = homedir(), profile = "Default"): Fingerprint | null {
+  if (platform() !== "darwin") return null;
+  const run = (cmd: string[]) => { try { const p = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "ignore" }); return p.success ? new TextDecoder().decode(p.stdout).trim() : ""; } catch { return ""; } };
+  const full = run(["defaults", "read", "/Applications/Google Chrome.app/Contents/Info", "CFBundleShortVersionString"]);
+  if (!/^\d+\.\d+\.\d+\.\d+$/.test(full)) return null;
+  const major = full.split(".")[0];
+  const mac = run(["sw_vers", "-productVersion"]) || "14.0";
+  const arm = run(["uname", "-m"]) === "arm64";
+  let langs = "en-US,en";
+  try {
+    const prefs = JSON.parse(readFileSync(join(supportDir(home), "Google/Chrome", profile, "Preferences"), "utf8"));
+    langs = String(prefs?.intl?.selected_languages || prefs?.intl?.accept_languages || langs);
+  } catch {}
+  // Chrome's Accept-Language: the first as is, then q=0.9, 0.8… ("en-GB,en-US;q=0.9,en;q=0.8").
+  const acceptLanguage = langs.split(",").map((l) => l.trim()).filter(Boolean).slice(0, 8).map((l, i) => (i ? `${l};q=${Math.max(0.1, 1 - i / 10).toFixed(1)}` : l)).join(",");
+  let timezone: string | undefined;
+  try { timezone = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch {}
+  const brands = [{ brand: "Google Chrome", version: major }, { brand: "Chromium", version: major }, { brand: "Not_A Brand", version: "24" }];
+  const [mj, mn = "0", pt = "0"] = mac.split(".");
+  return {
+    // Chrome freezes the macOS part of its user agent at 10_15_7 and the version at MAJOR.0.0.0.
+    userAgent: `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`,
+    acceptLanguage, platform: "MacIntel", timezone,
+    metadata: { brands, fullVersionList: brands.map((b) => ({ brand: b.brand, version: b.brand === "Not_A Brand" ? "24.0.0.0" : full })), fullVersion: full,
+      platform: "macOS", platformVersion: `${mj}.${mn}.${pt}`, architecture: arm ? "arm" : "x86", model: "", mobile: false, bitness: "64", wow64: false },
+  };
 }

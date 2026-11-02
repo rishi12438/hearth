@@ -1,3 +1,4 @@
+import { sendInPage } from "../browser.ts";
 import { webSender } from "./web-senders.ts";
 import type { Hub } from "../hub.ts";
 import type { Vault } from "../vault.ts";
@@ -42,7 +43,8 @@ export class Connect {
     hub.senders.whatsapp = { connected: () => this.whatsapp.connected(), send: (to, text) => this.whatsapp.send(to, text) };
     hub.senders.slack = { connected: () => this.slack.connected(), send: (to, text) => this.slack.send(to, text) };
     hub.senders.gmail = { connected: () => hub.google.canSend(), send: (to, text, x) => hub.google.sendMail(to, x?.subject || "(no subject)", text, x?.threadId) };
-    for (const ch of ["instagram", "linkedin", "x"] as const) hub.senders[ch] = webSender(ch, (d) => hub.connections.cookies(d));
+    for (const ch of ["instagram", "linkedin", "x"] as const)
+      hub.senders[ch] = webSender(ch, (d) => hub.connections.cookies(d), (url, text, o) => sendInPage(url, text, { fingerprint: hub.connections.fingerprintFor(url), ...o }));
     hub.connections.extra = { whatsapp: () => this.whatsapp.connected() || this.whatsapp.linked(), slack: () => this.slack.connected() };
     hub.scripts.keys = (name) => (name === "serper" ? serperKey(vault) : null);
     registerSource(slackSource(() => this.slack));

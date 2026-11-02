@@ -664,7 +664,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           ownerOnly();
           const b = await body(req);
           const fromChrome = b.source === "chrome";
-          const r = hub.connections.saveCookies(id, String(b.cookies || ""), fromChrome ? "chrome" : "paste");
+          const r = hub.connections.saveCookies(id, String(b.cookies || ""), fromChrome ? "chrome" : "paste", fromChrome ? b.fingerprint : undefined);
           if (r.error) throw new HttpError(400, r.error);
           await hub.log("connection.saved", `${labelFor(id)} ${fromChrome ? "login brought from Chrome on your Mac" : "cookies saved"}`);
           await hub.audit(fromChrome ? "import" : "paste", hub.connections.domainFor(id) || id, "you", { ok: true, detail: fromChrome ? "from Chrome on your Mac" : undefined });

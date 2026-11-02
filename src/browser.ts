@@ -8,6 +8,36 @@ import { join } from "node:path";
 
 export type Cookie = { name: string; value: string; domain: string; path?: string; secure?: boolean; httpOnly?: boolean; expires?: number };
 
+/**
+ * The browser a login was made in (your Mac's Chrome), so headless Chrome presents as that same browser. LinkedIn ends a
+ * session the moment it turns up from a different browser (a "Linux" Chrome on your Mac's login), signing you out
+ * everywhere; with the same browser it doesn't. Cookies from Chrome on your Mac bring one along; pasted ones don't.
+ */
+export type Fingerprint = {
+  userAgent: string; acceptLanguage: string; platform: string; timezone?: string;
+  /** User-Agent Client Hints (Sec-CH-UA-*), so the headers tell the same story as the user agent. */
+  metadata?: { brands: { brand: string; version: string }[]; fullVersionList?: { brand: string; version: string }[]; fullVersion?: string;
+    platform: string; platformVersion: string; architecture: string; model: string; mobile: boolean; bitness?: string; wow64?: boolean };
+};
+
+const str = (v: unknown, max = 300) => (typeof v === "string" && v.length <= max ? v : null);
+/** A fingerprint from outside (the Mac app, the vault), checked field by field; anything off and it's dropped. */
+export function cleanFingerprint(f: any): Fingerprint | null {
+  if (!f || typeof f !== "object") return null;
+  const userAgent = str(f.userAgent), acceptLanguage = str(f.acceptLanguage, 100), platform = str(f.platform, 40);
+  if (!userAgent || !/^Mozilla\/5\.0 /.test(userAgent) || !acceptLanguage || !platform) return null;
+  const out: Fingerprint = { userAgent, acceptLanguage, platform };
+  if (str(f.timezone, 60) && /^[A-Za-z_]+(\/[A-Za-z0-9_+-]+)*$/.test(f.timezone)) out.timezone = f.timezone;
+  const m = f.metadata;
+  const brands = (x: any) => (Array.isArray(x) ? x.slice(0, 6).filter((b) => str(b?.brand, 60) && str(b?.version, 40)).map((b) => ({ brand: b.brand, version: b.version })) : undefined);
+  if (m && typeof m === "object" && brands(m.brands)?.length && str(m.platform, 40) && str(m.platformVersion, 40) && str(m.architecture, 20)) {
+    out.metadata = { brands: brands(m.brands)!, fullVersionList: brands(m.fullVersionList), fullVersion: str(m.fullVersion, 40) || undefined,
+      platform: m.platform, platformVersion: m.platformVersion, architecture: m.architecture, model: str(m.model, 60) ?? "", mobile: !!m.mobile,
+      bitness: str(m.bitness, 4) || undefined, wow64: !!m.wow64 };
+  }
+  return out;
+}
+
 const CANDIDATES = [
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "/Applications/Chromium.app/Contents/MacOS/Chromium",
@@ -39,7 +69,7 @@ export function parseCookies(raw: string, domain: string): Cookie[] {
 }
 
 type ReadOpts = {
-  cookies?: Cookie[]; waitMs?: number; timeoutMs?: number; chrome?: string | null;
+  cookies?: Cookie[]; waitMs?: number; timeoutMs?: number; chrome?: string | null; fingerprint?: Fingerprint | null;
   /** CSS selector to wait for (the app has rendered); reading starts as soon as it shows up, or after waitMs. */
   waitFor?: string;
   /** A JavaScript expression run in the page; its JSON-able result comes back as "data". */
@@ -49,7 +79,7 @@ type ReadOpts = {
 type Cdp = (method: string, params?: object) => Promise<any>;
 
 /** Starts a throwaway headless Chrome with your cookies, opens `url`, hands `fn` a DevTools line to it, then cleans up. */
-async function withPage<T>(url: string, opts: { cookies?: Cookie[]; timeoutMs?: number; chrome?: string | null }, fn: (send: Cdp, deadline: number) => Promise<T>): Promise<T> {
+async function withPage<T>(url: string, opts: { cookies?: Cookie[]; timeoutMs?: number; chrome?: string | null; fingerprint?: Fingerprint | null }, fn: (send: Cdp, deadline: number) => Promise<T>): Promise<T> {
   const exe = opts.chrome ?? chromePath();
   if (!exe) throw new Error("No Chrome on this machine. Install Google Chrome or Chromium, or set HEARTH_CHROME.");
   const profile = mkdtempSync(join(tmpdir(), "hearth-chrome-"));
@@ -87,9 +117,16 @@ async function withPage<T>(url: string, opts: { cookies?: Cookie[]; timeoutMs?: 
       setTimeout(() => { if (waiting.delete(id)) bad(new Error(`Chrome timed out on ${method}.`)); }, Math.max(1000, deadline - Date.now()));
     });
     await send("Network.enable");
-    // Sites turn away "HeadlessChrome"; present the same browser without the word.
-    const v = await send("Browser.getVersion");
-    await send("Network.setUserAgentOverride", { userAgent: String(v.userAgent).replace("HeadlessChrome", "Chrome"), acceptLanguage: "en-US,en" });
+    const fp = opts.fingerprint;
+    if (fp) {
+      // Present as the browser the login came from (see Fingerprint): same user agent, client hints, language, time zone.
+      await send("Network.setUserAgentOverride", { userAgent: fp.userAgent, acceptLanguage: fp.acceptLanguage, platform: fp.platform, ...(fp.metadata ? { userAgentMetadata: fp.metadata } : {}) });
+      if (fp.timezone) await send("Emulation.setTimezoneOverride", { timezoneId: fp.timezone }).catch(() => {});
+    } else {
+      // Sites turn away "HeadlessChrome"; present the same browser without the word.
+      const v = await send("Browser.getVersion");
+      await send("Network.setUserAgentOverride", { userAgent: String(v.userAgent).replace("HeadlessChrome", "Chrome"), acceptLanguage: "en-US,en" });
+    }
     if (opts.cookies?.length) await send("Network.setCookies", { cookies: opts.cookies.map((c) => ({ ...c, url: undefined, path: c.path || "/" })) });
     await send("Page.navigate", { url });
     return await fn(send, deadline);
@@ -126,6 +163,7 @@ export type SendIn = {
   sendButton?: string[];
   signedOut: RegExp;
   chrome?: string | null;
+  fingerprint?: Fingerprint | null;
   timeoutMs?: number;
 };
 
@@ -134,7 +172,7 @@ export type SendIn = {
  * box, type, press Send. Then checks the words show up in the chat. Only called after you tapped Approve.
  */
 export async function sendInPage(url: string, text: string, o: SendIn): Promise<void> {
-  await withPage(url, { cookies: o.cookies, chrome: o.chrome, timeoutMs: o.timeoutMs ?? 60_000 }, async (send, deadline) => {
+  await withPage(url, { cookies: o.cookies, chrome: o.chrome, fingerprint: o.fingerprint, timeoutMs: o.timeoutMs ?? 60_000 }, async (send, deadline) => {
     const box = JSON.stringify(o.composer.join(", "));
     let found = false;
     while (!found && Date.now() < deadline - 8000) {

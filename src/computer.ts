@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { sha256 } from "./auth.ts";
 import { Brain, availableHarnesses, type BrainProfile } from "./brain.ts";
 import { ALIVE_EVERY_MS, COPY_ITEMS, isCopyItem, type CopyItem } from "./computers.ts";
-import { readSiteCookiesAnywhere, canReadBrowser } from "./chrome.ts";
+import { readSiteCookiesAnywhere, canReadBrowser, chromeFingerprint } from "./chrome.ts";
 import { requiredFor, labelFor, isValidDomain } from "./cookie-sites.ts";
 import type { Config } from "./config.ts";
 import { TOKEN_RE } from "./tokenmint.ts";
@@ -181,7 +181,7 @@ export function connect(opts: Opts) {
     for (const domain of cookieWant.sites) {
       const found = readSiteCookiesAnywhere(domain, requiredFor(domain));
       if (!found) continue;
-      const data = JSON.stringify({ cookies: found.cookies });
+      const data = JSON.stringify({ cookies: found.cookies, fingerprint: chromeFingerprint() });
       const hash = sha256(data);
       if (cookieWant.have[domain] === hash) continue;
       send({ t: "cookies", site: domain, data, hash });

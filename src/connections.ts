@@ -1,7 +1,7 @@
-import { parseCookies, type Cookie } from "./browser.ts";
+import { parseCookies, cleanFingerprint, type Cookie, type Fingerprint } from "./browser.ts";
 import { PRESETS, cleanDomain, isValidDomain, labelFor, requiredFor, presetFor } from "./cookie-sites.ts";
 import { sha256 } from "./auth.ts";
-import { browserProfiles, profileHasSite, readSiteCookies, canReadBrowser } from "./chrome.ts";
+import { browserProfiles, profileHasSite, readSiteCookies, canReadBrowser, chromeFingerprint } from "./chrome.ts";
 import type { Google } from "./google.ts";
 import type { Vault } from "./vault.ts";
 
@@ -11,7 +11,9 @@ import type { Vault } from "./vault.ts";
 
 export { COOKIE_SITES, isCookieSite, type CookieSite } from "./cookie-sites.ts";
 
-type Saved = { cookies: Cookie[]; savedAt: string; source?: "paste" | "browser" | "mac" | "chrome"; hash?: string; expiresAt?: number };
+type Saved = { cookies: Cookie[]; savedAt: string; source?: "paste" | "browser" | "mac" | "chrome"; hash?: string; expiresAt?: number;
+  /** The browser the login came from; the hub reads as that browser (see Fingerprint in browser.ts). */
+  fingerprint?: Fingerprint };
 
 /** Earliest real (non-session) expiry among the cookies, in unix seconds, or undefined if all are session cookies. */
 function earliestExpiry(cookies: Cookie[], required: string[]): number | undefined {
@@ -44,8 +46,19 @@ export class Connections {
   }
   cookies(id: string): Cookie[] { const d = this.key(id); return (d && this.saved(d)?.cookies) || []; }
 
-  private store(domain: string, cookies: Cookie[], source: Saved["source"], hash?: string) {
-    this.vault!.set(`cookies:${domain}`, JSON.stringify({ cookies, savedAt: new Date().toISOString(), source, hash, expiresAt: earliestExpiry(cookies, requiredFor(domain)) } satisfies Saved));
+  /** The browser to read a page as: the fingerprint saved with the login for that page's site, if any. */
+  fingerprintFor(url: string): Fingerprint | null {
+    let host: string;
+    try { host = new URL(url).hostname.toLowerCase(); } catch { return null; }
+    for (let d = host; d.includes("."); d = d.slice(d.indexOf(".") + 1)) {
+      const s = this.saved(d);
+      if (s) return cleanFingerprint(s.fingerprint);
+    }
+    return null;
+  }
+
+  private store(domain: string, cookies: Cookie[], source: Saved["source"], hash?: string, fingerprint?: Fingerprint | null) {
+    this.vault!.set(`cookies:${domain}`, JSON.stringify({ cookies, savedAt: new Date().toISOString(), source, hash, expiresAt: earliestExpiry(cookies, requiredFor(domain)), fingerprint: fingerprint || undefined } satisfies Saved));
     this.problems.delete(domain);
   }
 
@@ -73,15 +86,16 @@ export class Connections {
   receiveFromMac(domain: string, data: string) {
     if (!this.vault || !isValidDomain(domain)) return;
     let cookies: Cookie[];
-    try { const j = JSON.parse(data); cookies = Array.isArray(j.cookies) ? j.cookies : []; } catch { return; }
+    let fingerprint: Fingerprint | null = null;
+    try { const j = JSON.parse(data); cookies = Array.isArray(j.cookies) ? j.cookies : []; fingerprint = cleanFingerprint(j.fingerprint); } catch { return; }
     cookies = cookies.filter((c) => c && typeof c.name === "string" && typeof c.value === "string" && String(c.domain || "").replace(/^\./, "").endsWith(domain));
     const required = requiredFor(domain);
     if (required.length ? !required.every((n) => cookies.some((c) => c.name === n && c.value)) : !cookies.length) return;
-    this.store(domain, cookies, "mac", sha256(data));
+    this.store(domain, cookies, "mac", sha256(data), fingerprint);
   }
 
   /** A Cookie header or a cookie-extension JSON export. Keeps only this domain's cookies. */
-  saveCookies(id: string, raw: string, source: "paste" | "chrome" = "paste") {
+  saveCookies(id: string, raw: string, source: "paste" | "chrome" = "paste", fingerprint?: unknown) {
     if (!this.vault) return { error: "This hub has no key vault." };
     const domain = this.key(id);
     if (!domain) return { error: "That isn't a valid site. Use a domain like example.com." };
@@ -90,7 +104,7 @@ export class Connections {
     const missing = required.filter((n) => !cookies.some((c) => c.name === n && c.value));
     if (missing.length) return { error: `Those cookies are missing ${missing.join(" and ")}. Copy them while you're logged in to ${labelFor(domain)}.` };
     if (!cookies.length) return { error: `No ${domain} cookies in what you pasted.` };
-    this.store(domain, cookies, source);
+    this.store(domain, cookies, source, undefined, cleanFingerprint(fingerprint));
     return { value: this.status() };
   }
 
@@ -115,7 +129,7 @@ export class Connections {
     if (!cookies.length) return { error: `No ${labelFor(domain)} cookies in ${prof.label}${canReadBrowser() ? ". If macOS asked and you clicked Deny, try again and Allow." : ""}.` };
     const missing = requiredFor(domain).filter((n) => !cookies.some((c) => c.name === n && c.value));
     if (missing.length) return { error: `${prof.label} is missing ${missing.join(" and ")} for ${labelFor(domain)}. Open ${labelFor(domain)} in it and sign in.` };
-    this.store(domain, cookies, "browser");
+    this.store(domain, cookies, "browser", undefined, chromeFingerprint(undefined, prof.profile));
     return { value: this.status() };
   }
 
