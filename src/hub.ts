@@ -103,7 +103,10 @@ export class Hub {
   readPage = readPage;
   /** Linked computers (your Mac), set by the server. A Mac can copy browser logins up and be re-asked when one dies. */
   computers: { refreshCookies(site?: string): void; canCopyCookies(): boolean } | null = null;
-  private sourceCtx = async () => ({ google: this.google, cookies: (domain: string) => this.connections.cookies(domain), readPage: this.readPage, now: this.clock(), tz: (await this.prefs()).tz });
+  /** Every logged-in read goes out as the browser its login came from (see Fingerprint), unless the caller set one. */
+  private sourceCtx = async () => ({ google: this.google, cookies: (domain: string) => this.connections.cookies(domain),
+    readPage: ((url, o = {}) => this.readPage(url, { fingerprint: this.connections.fingerprintFor(url), ...o })) as typeof readPage,
+    now: this.clock(), tz: (await this.prefs()).tz });
   /** Webhook calls that arrived while their hook was still busy with the last one; handled together right after. */
   private webhookQueue = new Map<string, string[]>();
   private timer: ReturnType<typeof setInterval> | null = null;

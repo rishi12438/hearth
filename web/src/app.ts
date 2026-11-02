@@ -1749,7 +1749,9 @@ async function openCookieSetup(c: Connector | { via: string; name: string; blurb
     try {
       const r = await askMac("chrome-cookies", { site: c.via, profile: profile.id });
       if (r.error) throw new Error(r.error);
-      const saved = await call(`/api/connections/${c.via}`, { method: "PUT", body: { cookies: JSON.stringify({ cookies: r.cookies }), source: "chrome" } });
+      // Without Chrome's fingerprint the hub would read as a different browser, and LinkedIn signs you out for that.
+      if (!r.fingerprint) throw new Error("This Hearth for Mac is too old to bring your login over safely. Update it, then try again.");
+      const saved = await call(`/api/connections/${c.via}`, { method: "PUT", body: { cookies: JSON.stringify({ cookies: r.cookies }), source: "chrome", fingerprint: r.fingerprint } });
       showResult(saved.test);
       if (saved.test?.ok) { setTimeout(() => openCookieSetup(c), 1400); return; }
     } catch (err: any) { showResult({ ok: false, error: err.message }); }

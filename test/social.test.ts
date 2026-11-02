@@ -19,7 +19,7 @@ import type { Hook, Message } from "../src/types.ts";
 
 let dir: string, store: Store, hub: Hub;
 let page: { url: string; data: unknown } = { url: "", data: null };
-let reads: { url: string; cookies: string[] }[] = [];
+let reads: { url: string; cookies: string[]; ua?: string }[] = [];
 
 beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), "hearth-social-"));
@@ -33,7 +33,7 @@ beforeEach(async () => {
   await hub.setPrefs({ tz: "America/Los_Angeles" });
   page = { url: "", data: null };
   reads = [];
-  hub.readPage = (async (url: string, opts: any) => { reads.push({ url, cookies: (opts.cookies || []).map((c: any) => c.name) }); return { url: page.url || url, text: "", data: page.data }; }) as any;
+  hub.readPage = (async (url: string, opts: any) => { reads.push({ url, cookies: (opts.cookies || []).map((c: any) => c.name), ua: opts.fingerprint?.userAgent }); return { url: page.url || url, text: "", data: page.data }; }) as any;
   await hub.ensureTeammates();
 });
 
@@ -225,4 +225,20 @@ test("every access to a connected account is audited: who, which site, when", as
   expect(reads.every((e) => typeof e.createdAt === "string" && e.ok === true)).toBe(true);
   // The paste that connected it is in the trail too (who = you).
   hub.connections.saveCookies("x", "auth_token=a; ct0=b"); // directly, not audited here (server audits paste); fine
+});
+
+test("a login from Chrome on your Mac is read as that same browser; a pasted one isn't given a made-up one", async () => {
+  const mac = { userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+    acceptLanguage: "en-GB,en-US;q=0.9", platform: "MacIntel", timezone: "America/Los_Angeles",
+    metadata: { brands: [{ brand: "Google Chrome", version: "156" }], platform: "macOS", platformVersion: "14.5.0", architecture: "arm", model: "", mobile: false } };
+  const c = hub.connections;
+  expect(c.saveCookies("linkedin", "li_at=A; JSESSIONID=B", "chrome", mac).value).toBeTruthy();
+  expect(c.fingerprintFor("https://www.linkedin.com/messaging/")?.metadata?.platform).toBe("macOS");
+  expect(c.fingerprintFor("https://x.com/home")).toBeNull();
+  expect(c.saveCookies("x", "auth_token=A; ct0=B", "chrome", { userAgent: "curl/8", acceptLanguage: "en", platform: "x" }).value).toBeTruthy();
+  expect(c.fingerprintFor("https://x.com/home")).toBeNull(); // not a browser user agent: dropped
+  page = { url: "https://www.linkedin.com/messaging/", data: [conv("Ada", "hi")] };
+  await hub.testConnection("linkedin");
+  expect(reads.at(-1)?.ua).toBe(mac.userAgent);
+  expect(JSON.stringify(c.status())).not.toContain("Macintosh"); // never shown to the app
 });
