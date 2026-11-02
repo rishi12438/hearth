@@ -662,10 +662,12 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         }
         if (method === "PUT" && !seg[3]) {
           ownerOnly();
-          const r = hub.connections.saveCookies(id, String((await body(req)).cookies || ""));
+          const b = await body(req);
+          const fromChrome = b.source === "chrome";
+          const r = hub.connections.saveCookies(id, String(b.cookies || ""), fromChrome ? "chrome" : "paste");
           if (r.error) throw new HttpError(400, r.error);
-          await hub.log("connection.saved", `${labelFor(id)} cookies saved`);
-          await hub.audit("paste", hub.connections.domainFor(id) || id, "you", { ok: true });
+          await hub.log("connection.saved", `${labelFor(id)} ${fromChrome ? "login brought from Chrome on your Mac" : "cookies saved"}`);
+          await hub.audit(fromChrome ? "import" : "paste", hub.connections.domainFor(id) || id, "you", { ok: true, detail: fromChrome ? "from Chrome on your Mac" : undefined });
           hub.emit("connections");
           return json({ status: r.value, test: await hub.testConnection(id) });
         }

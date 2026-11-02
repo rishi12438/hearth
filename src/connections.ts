@@ -11,7 +11,7 @@ import type { Vault } from "./vault.ts";
 
 export { COOKIE_SITES, isCookieSite, type CookieSite } from "./cookie-sites.ts";
 
-type Saved = { cookies: Cookie[]; savedAt: string; source?: "paste" | "browser" | "mac"; hash?: string; expiresAt?: number };
+type Saved = { cookies: Cookie[]; savedAt: string; source?: "paste" | "browser" | "mac" | "chrome"; hash?: string; expiresAt?: number };
 
 /** Earliest real (non-session) expiry among the cookies, in unix seconds, or undefined if all are session cookies. */
 function earliestExpiry(cookies: Cookie[], required: string[]): number | undefined {
@@ -81,7 +81,7 @@ export class Connections {
   }
 
   /** A Cookie header or a cookie-extension JSON export. Keeps only this domain's cookies. */
-  saveCookies(id: string, raw: string) {
+  saveCookies(id: string, raw: string, source: "paste" | "chrome" = "paste") {
     if (!this.vault) return { error: "This hub has no key vault." };
     const domain = this.key(id);
     if (!domain) return { error: "That isn't a valid site. Use a domain like example.com." };
@@ -90,7 +90,7 @@ export class Connections {
     const missing = required.filter((n) => !cookies.some((c) => c.name === n && c.value));
     if (missing.length) return { error: `Those cookies are missing ${missing.join(" and ")}. Copy them while you're logged in to ${labelFor(domain)}.` };
     if (!cookies.length) return { error: `No ${domain} cookies in what you pasted.` };
-    this.store(domain, cookies, "paste");
+    this.store(domain, cookies, source);
     return { value: this.status() };
   }
 
@@ -150,7 +150,7 @@ export class Connections {
   private row(id: string, domain: string, label: string) {
     const s = this.saved(domain);
     const fromMac = this.macSites().includes(domain);
-    const how = s?.source === "mac" ? "from your Mac" : s?.source === "browser" ? "from your browser" : s ? "pasted" : null;
+    const how = s?.source === "chrome" ? "from Chrome on your Mac" : s?.source === "mac" ? "from your Mac" : s?.source === "browser" ? "from Chrome" : s ? "pasted" : null;
     const days = this.expiresInDays(s);
     return {
       id, domain, label,

@@ -23,6 +23,30 @@ import { DockerSandbox, E2bSandbox, type Sandbox, type SandboxKind } from "./san
 import type { Device, Hook, Share, Teammate } from "./types.ts";
 
 const cmd = process.argv[2] || "start";
+
+// The Mac app asks this (never the hub): which Chrome profiles are logged in to LinkedIn, Instagram…, and, when you
+// tap "Use my Chrome login", that site's cookies. Only the preset sites. Runs before config so it touches no data.
+//   chrome logins             {chrome, logins: {linkedin: [{id, label}]}}   (cookie names only: macOS doesn't ask)
+//   chrome cookies <site> <profile>   {cookies} or {error}           (macOS asks once for Chrome's key)
+if (cmd === "chrome") {
+  const { chromeLogins, browserProfiles, readSiteCookies } = await import("./chrome.ts");
+  const { PRESETS } = await import("./cookie-sites.ts");
+  const [sub, site, profile] = process.argv.slice(3);
+  const out = (o: unknown, code = 0) => { process.stdout.write(JSON.stringify(o)); process.exit(code); };
+  if (sub === "logins") out(chromeLogins(Object.entries(PRESETS).map(([id, p]) => ({ id, domain: p.domain, required: p.required }))));
+  if (sub === "cookies") {
+    const p = PRESETS[site || ""];
+    if (!p) out({ error: "That isn't a site Hearth reads." }, 1);
+    const prof = browserProfiles().find((x) => x.profile === profile);
+    if (!prof) out({ error: "That Chrome profile isn't on this Mac anymore." }, 1);
+    const cookies = readSiteCookies(prof!, p!.domain);
+    const missing = p!.required.filter((n) => !cookies.some((c) => c.name === n && c.value));
+    if (!cookies.length) out({ error: `Couldn't read ${p!.label} from ${prof!.label}. If macOS asked and you clicked Deny, try again and choose Always Allow.` }, 1);
+    if (missing.length) out({ error: `${prof!.label} isn't fully logged in to ${p!.label}. Open ${p!.home} in Chrome, sign in, then try again.` }, 1);
+    out({ cookies, profile: prof!.label });
+  }
+  out({ error: "usage: hearth chrome logins | chrome cookies <site> <profile>" }, 1);
+}
 // A hub the setup made on this Mac keeps its settings in ~/Library/Application Support/Hearth/hub.env; use them unless
 // this is a checkout with its own .env or data folder.
 if (!process.env.HEARTH_DATA && !existsSync(".env") && !existsSync("data")) loadLocalEnv();

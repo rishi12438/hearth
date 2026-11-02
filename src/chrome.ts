@@ -1,10 +1,11 @@
 import { Database } from "bun:sqlite";
 import { createDecipheriv, pbkdf2Sync } from "node:crypto";
-import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir, platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Cookie } from "./browser.ts";
 
+// Chrome only for now (not Brave, Edge, Safari or Firefox), so the app can say plainly "logged in on Chrome".
 // Read the user's own browser login so a connector (LinkedIn, X) works without pasting cookies by hand, the way
 // Enkidu does: the one secret that needs the OS is the "Safe Storage" key in the login Keychain, read by a small
 // signed helper (macOS shows one "Always Allow" prompt). With that key, the browser's own Cookies file is decrypted
@@ -15,8 +16,6 @@ import type { Cookie } from "./browser.ts";
 type Browser = { name: string; dir: string; keychain: string; account: string };
 const BROWSERS: Browser[] = [
   { name: "Chrome", dir: "Google/Chrome", keychain: "Chrome Safe Storage", account: "Chrome" },
-  { name: "Brave", dir: "BraveSoftware/Brave-Browser", keychain: "Brave Safe Storage", account: "Brave" },
-  { name: "Edge", dir: "Microsoft Edge", keychain: "Microsoft Edge Safe Storage", account: "Microsoft Edge" },
 ];
 
 export type BrowserProfile = { browser: string; profile: string; label: string; cookiesDb: string };
@@ -25,19 +24,44 @@ const supportDir = (home: string) => join(home, "Library", "Application Support"
 const cookiesPath = (profileDir: string) =>
   [join(profileDir, "Network", "Cookies"), join(profileDir, "Cookies")].find((p) => existsSync(p)) || null;
 
-/** Every browser profile on this Mac that has a cookie store. macOS only; elsewhere, paste cookies instead. */
+/** The names you gave your Chrome profiles ("Work", "Personal"), from Chrome's Local State. */
+function profileNames(root: string): Record<string, string> {
+  try {
+    const cache = JSON.parse(readFileSync(join(root, "Local State"), "utf8"))?.profile?.info_cache || {};
+    // "Person 1 (you@gmail.com)" when Chrome knows the Google account, so a generic name still says whose it is.
+    return Object.fromEntries(Object.entries(cache).map(([dir, v]: [string, any]) => {
+      const name = String(v?.name || "").trim(), user = String(v?.user_name || "").trim();
+      return [dir, name && user && name !== user ? `${name} (${user})` : name || user];
+    }).filter(([, n]) => n));
+  } catch { return {}; }
+}
+
+/** Every Chrome profile on this Mac that has a cookie store. macOS only; elsewhere, paste cookies instead. */
 export function browserProfiles(home = homedir()): BrowserProfile[] {
   if (platform() !== "darwin") return [];
   const out: BrowserProfile[] = [];
   for (const b of BROWSERS) {
     const root = join(supportDir(home), b.dir);
     if (!existsSync(root)) continue;
-    for (const name of ["Default", ...readdirSync(root).filter((d) => /^Profile \d+$/.test(d))]) {
+    const names = profileNames(root);
+    const dirs = ["Default", ...readdirSync(root).filter((d) => /^Profile \d+$/.test(d))];
+    for (const name of dirs) {
       const db = cookiesPath(join(root, name));
-      if (db) out.push({ browser: b.name, profile: name, label: name === "Default" ? b.name : `${b.name} · ${name}`, cookiesDb: db });
+      if (!db) continue;
+      // One profile: just "Chrome". Several: "Chrome · Work" (the name you gave it), so you can tell them apart.
+      const label = dirs.length === 1 ? b.name : `${b.name} · ${names[name] || name}`;
+      out.push({ browser: b.name, profile: name, label, cookiesDb: db });
     }
   }
   return out;
+}
+
+/** Which Chrome profiles are logged in to each site. Reads cookie names only, never values, so macOS doesn't ask. */
+export function chromeLogins(sites: { id: string; domain: string; required: string[] }[], home = homedir()) {
+  const profiles = browserProfiles(home);
+  const logins: Record<string, { id: string; label: string }[]> = {};
+  for (const s of sites) logins[s.id] = profiles.filter((p) => profileHasSite(p.cookiesDb, s.domain, s.required)).map((p) => ({ id: p.profile, label: p.label }));
+  return { chrome: profiles.length > 0, logins };
 }
 
 /** The host names a profile is logged into for this site (plaintext in the DB; values stay encrypted). */
@@ -45,9 +69,11 @@ export function profileHasSite(cookiesDb: string, domain: string, required: stri
   const tmp = copyToTemp(cookiesDb);
   try {
     const db = new Database(tmp, { readonly: true });
-    const q = db.query(`SELECT name FROM cookies WHERE host_key LIKE ? AND name IN (${required.map(() => "?").join(",")})`).all(`%${domain}`, ...required) as { name: string }[];
+    const q = (required.length
+      ? db.query(`SELECT name FROM cookies WHERE host_key LIKE ? AND name IN (${required.map(() => "?").join(",")})`).all(`%${domain}`, ...required)
+      : db.query("SELECT name FROM cookies WHERE host_key LIKE ? LIMIT 1").all(`%${domain}`)) as { name: string }[];
     db.close();
-    return required.every((n) => q.some((r) => r.name === n));
+    return required.length ? required.every((n) => q.some((r) => r.name === n)) : q.length > 0;
   } catch { return false; } finally { rmSync(tmp, { force: true }); }
 }
 
