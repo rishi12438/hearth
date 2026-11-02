@@ -202,3 +202,46 @@ describe("WhatsApp link", () => {
     wa.stop();
   });
 });
+
+describe("WhatsApp names and calls", () => {
+  const setup = async () => {
+    const { WhatsApp } = await import("../src/connectors/whatsapp.ts");
+    let sock: any;
+    const fake = {
+      default: () => {
+        const handlers: Record<string, ((u: any) => void)[]> = {};
+        sock = { ev: { on: (e: string, f: any) => (handlers[e] ||= []).push(f) }, emit: (e: string, u: any) => (handlers[e] || []).forEach((f) => f(u)), end() {}, user: { id: "1:1@s.whatsapp.net" } };
+        return sock;
+      },
+      useMultiFileAuthState: async () => ({ state: {}, saveCreds: () => {} }),
+      fetchLatestBaileysVersion: async () => ({ version: [2, 3000, 1] }),
+      DisconnectReason: { loggedOut: 401 },
+    };
+    const store = { get: async () => null, put: async () => {}, all: async () => [], clear: async () => {}, remove: async () => {} } as any;
+    const wa = new WhatsApp(mkdtempSync(join(tmpdir(), "hearth-wa-")), store, () => true, async () => fake);
+    await wa.start();
+    return { wa, sock };
+  };
+
+  test("address-book names go on phone and @lid chats, and beat their own WhatsApp name", async () => {
+    const { wa, sock } = await setup();
+    sock.emit("messaging-history.set", { chats: [{ id: "555@lid", conversationTimestamp: 100 }], contacts: [], messages: [] });
+    sock.emit("contacts.update", [{ id: "15550100@s.whatsapp.net", notify: "Their name" }]);
+    sock.emit("contacts.upsert", [{ id: "15550100@s.whatsapp.net", name: "Mom", lid: "555@lid" }]);
+    sock.emit("contacts.update", [{ id: "15550100@s.whatsapp.net", notify: "Their new name" }]);
+    const byJid = Object.fromEntries(wa.chatList().map((c) => [c.jid, c.name]));
+    expect(byJid["555@lid"]).toBe("Mom");
+    expect(byJid["15550100@s.whatsapp.net"]).toBe("Mom");
+    wa.stop();
+  });
+
+  test("a call makes the caller recent", async () => {
+    const { wa, sock } = await setup();
+    const at = new Date("2026-11-02T10:00:00Z");
+    sock.emit("call", [{ chatId: "15550100@s.whatsapp.net", from: "15550100@s.whatsapp.net", date: at, status: "offer" }]);
+    const c = wa.chatList().find((x) => x.jid === "15550100@s.whatsapp.net")!;
+    expect(c.lastAt).toBe(at.getTime());
+    expect(c.lastCallAt).toBe(at.getTime());
+    wa.stop();
+  });
+});

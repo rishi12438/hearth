@@ -24,7 +24,7 @@ export type IgnoreRules = {
 export const NO_RULES: IgnoreRules = { contacts: [], groups: [], allGroups: false, keywords: [], archived: false, muted: false };
 
 export type WaMessage = { id: string; createdAt: string; jid: string; chat: string; from: string; fromMe: boolean; group: boolean; text: string; at: string };
-export type ChatInfo = { jid: string; name: string; group: boolean; archived?: boolean; mutedUntil?: number; /** ms of the latest message */ lastAt?: number };
+export type ChatInfo = { jid: string; name: string; group: boolean; archived?: boolean; mutedUntil?: number; /** ms of the latest message */ lastAt?: number; /** name came from your address book (beats their own WhatsApp name) */ saved?: boolean; /** ms of the latest call seen (WhatsApp doesn't share past call logs, so from linking on) */ lastCallAt?: number };
 /** Baileys timestamps are seconds, sometimes as a protobuf Long. */
 const seconds = (t: any) => { const n = typeof t === "object" && t?.toNumber ? t.toNumber() : Number(t); return Number.isFinite(n) && n > 0 ? n : 0; };
 export type WaStatus = { state: "off" | "starting" | "qr" | "connected" | "signed-out" | "error"; qr?: string | null; me?: string | null; detail?: string | null; riskAccepted: boolean };
@@ -176,6 +176,7 @@ export class WhatsApp {
         this.me = String(sock.user?.id || "").split(":")[0].split("@")[0] || null;
         this.set("connected");
         sock.groupFetchAllParticipating?.().then((gs: any) => { for (const g of Object.values(gs || {}) as any[]) this.chat(g.id, g.subject); }).catch(() => {});
+        this.syncNames(sock, B);
       }
       if (u.connection === "close") {
         if (this.sock && this.sock !== sock) return; // an old socket closing after a relink: not ours to handle
@@ -192,16 +193,52 @@ export class WhatsApp {
     const chatUpdate = (cs: any[]) => { for (const c of cs || []) this.chat(c.id, c.name, c); };
     sock.ev.on("chats.upsert", chatUpdate);
     sock.ev.on("chats.update", chatUpdate);
-    sock.ev.on("contacts.upsert", (cs: any[]) => { for (const c of cs || []) this.chat(c.id, c.name || c.notify); });
+    sock.ev.on("contacts.upsert", (cs: any[]) => { for (const c of cs || []) this.contact(c); });
+    sock.ev.on("contacts.update", (cs: any[]) => { for (const c of cs || []) this.contact(c); });
     // The recent-chats list WhatsApp sends right after linking (and on reconnect): names, and when each was last active.
     sock.ev.on("messaging-history.set", ({ chats, contacts, messages }: any) => {
-      for (const c of contacts || []) this.chat(c.id, c.name || c.notify);
+      for (const c of contacts || []) this.contact(c);
       for (const c of chats || []) this.chat(c.id, c.name, c);
       // Only the time of each recent message (to order the list like your phone does); history text isn't kept.
       for (const m of messages || []) if (m?.key?.remoteJid && m.messageTimestamp) this.chat(m.key.remoteJid, undefined, { conversationTimestamp: m.messageTimestamp });
     });
+    // Calls: someone you're talking to by phone is as recent as a message. Only metadata (who, when) is kept.
+    sock.ev.on("call", (calls: any[]) => {
+      for (const c of calls || []) {
+        const jid = c?.groupJid || c?.chatId || c?.from;
+        const at = c?.date ? new Date(c.date).getTime() : Date.now();
+        if (!jid || !Number.isFinite(at)) continue;
+        this.chat(jid, undefined, { conversationTimestamp: Math.floor(at / 1000) });
+        const cur = this.chats.get(jid)!; cur.lastCallAt = Math.max(cur.lastCallAt || 0, at);
+      }
+    });
     sock.ev.on("groups.update", (gs: any[]) => { for (const g of gs || []) this.chat(g.id, g.subject); });
     sock.ev.on("messages.upsert", ({ messages, type }: any) => { if (type === "notify") for (const m of messages || []) void this.take(m); });
+  }
+
+  /** Your address book's names (and people's own WhatsApp names, which never replace a saved one) live in WhatsApp's
+   * settings sync. Baileys runs that sync the moment history lands, often before its keys arrive, and doesn't retry, so
+   * run it ourselves once the link is open (and again later if that fails). It's a snapshot, so a relink isn't needed. */
+  private syncNames(sock: Sock, B: any, wait = 8000, triesLeft = 2) {
+    setTimeout(async () => {
+      if (this.sock !== sock || !(sock as any).resyncAppState) return;
+      try { await (sock as any).resyncAppState(B.ALL_WA_PATCH_NAMES ?? ["critical_block", "critical_unblock_low", "regular_high", "regular_low", "regular"], true); }
+      catch { if (triesLeft > 1) this.syncNames(sock, B, 30_000, triesLeft - 1); }
+    }, wait).unref?.();
+  }
+
+  /** A contact from the address book sync or someone's own WhatsApp name. Chats can be keyed by phone number or by
+   * WhatsApp's private @lid id, so a name goes on both. */
+  private contact(c: any) {
+    const saved = c?.name ? String(c.name) : "";
+    const theirs = c?.notify || c?.verifiedName ? String(c.notify || c.verifiedName) : "";
+    for (const jid of [c?.id, c?.lid, c?.jid]) {
+      if (!jid || typeof jid !== "string") continue;
+      const cur = this.chats.get(jid);
+      if (saved) { this.chat(jid, saved); this.chats.get(jid)!.saved = true; }
+      else if (theirs && !cur?.saved) this.chat(jid, theirs);
+      else if (!cur && jid === c.id) this.chat(jid);
+    }
   }
 
   private chat(jid: string | undefined, name?: string, c?: any) {
