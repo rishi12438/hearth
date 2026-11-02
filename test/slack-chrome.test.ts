@@ -56,3 +56,20 @@ test("connects one workspace, calls the API with token + cookie, and re-mints a 
   expect((await slack.call("conversations.list")).ok).toBe(true);
   expect(JSON.parse(vault.get("slack")!).token).toBe("xoxc-3-beta");
 });
+
+test("probe proves read access: identity, DM count, people", async () => {
+  const f = (async (url: string, init: any = {}) => {
+    const tok = String(init.headers?.Authorization || "").replace("Bearer ", "");
+    if (tok !== "xoxc-tok") return Response.json({ ok: false, error: "invalid_auth" });
+    if (url.includes("auth.test")) return Response.json({ ok: true, team: "Acme", user: "rishi" });
+    if (url.includes("conversations.list")) return Response.json({ ok: true, channels: [{ id: "D1", user: "U1" }, { id: "D2", user: "U2" }] });
+    if (url.includes("users.info")) return Response.json({ ok: true, user: { real_name: url.includes("U1") ? "Alice" : "Bob" } });
+    if (url.includes("conversations.history")) return Response.json({ ok: true, messages: [] });
+    return Response.json({ ok: true });
+  }) as unknown as typeof fetch;
+  const vault = new Vault(mkdtempSync(join(tmpdir(), "hearth-pb-")), { masterKey: randomBytes(32) });
+  const slack = new Slack(vault, f);
+  slack.save("xoxc-tok", "Acme", "rishi", { cookie: "xoxd-x", domain: "acme.slack.com", fingerprint: null });
+  const r = await slack.probe();
+  expect(r).toMatchObject({ ok: true, team: "Acme", user: "rishi", dmCount: 2, people: ["Alice", "Bob"] });
+});

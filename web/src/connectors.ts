@@ -114,7 +114,7 @@ export function openTile(t: Tile) {
     case "google": return D.openGoogle();
     case "instagram": case "linkedin": return D.openCookies(t.id);
     case "whatsapp": return whatsappSheet();
-    case "slack": return t.state === "connected" ? keySheet(t) : slackSheet(t);
+    case "slack": return slackSheet(t);
     default: return keySheet(t);
   }
 }
@@ -262,6 +262,7 @@ function slackSheet(t: Tile) {
   };
   if (inApp) void check();
   else clear(box, h("p", { class: "muted small" }, "Open the Hearth app on your Mac to use the Slack login in your Chrome."));
+  if (t.state === "connected") return slackConnected(t);
   D.openSheet(t.label, [
     h("button", { class: "btn ghost", on: { click: D.back } }, icon("back", 16), "All connectors"),
     h("div", { class: "phero" }, logo(t.id, 52), h("b", null, "Connect Slack"), h("small", null, t.blurb)),
@@ -272,6 +273,37 @@ function slackSheet(t: Tile) {
     h("div", { class: "stack" },
       h("p", null, h("b", null, "2 · With a Slack app"), h("small", { class: "sub" }, " · official, may need your admin")),
       ...keyForm(t)),
+    h("p", { class: "muted small" }, "Kept encrypted in your hub's vault. It never goes to the model, this app or your exports."),
+  ]);
+}
+
+// Connected: show it works by reading a few of your own DMs (and mentions) right now.
+function slackConnected(t: Tile) {
+  const out = h("div", { class: "ctest" });
+  const show = (r: any) => {
+    if (!r.ok) return clear(out, h("p", { class: "err small" }, r.error || "Couldn't read Slack."));
+    const who = r.user ? `Signed in as ${r.user}${r.team ? ` in ${r.team}` : ""}.` : "Connected.";
+    clear(out,
+      h("p", { class: "okline" }, icon("check", 16), ` ${who}`),
+      typeof r.dmCount === "number" ? h("p", { class: "muted small" }, `Can read ${r.dmCount} direct-message ${r.dmCount === 1 ? "conversation" : "conversations"}${r.people?.length ? `, incl. ${r.people.slice(0, 5).join(", ")}` : ""}.`) : null,
+      r.recent?.length ? h("div", { class: "stack" }, h("small", { class: "sub" }, "Most recent:"), h("div", { class: "list" }, r.recent.map((line: string) => h("div", { class: "item" }, h("small", null, line)))))
+        : h("p", { class: "muted small" }, "No recent DMs to show right now — but the read above works."));
+  };
+  const check = async (e: Event) => {
+    const b = e.currentTarget as HTMLButtonElement; b.disabled = true; b.textContent = "Checking…"; clear(out);
+    try { show(await call(`/api/connectors/slack/test`, { body: {} })); }
+    catch (x: any) { show({ ok: false, error: x.message }); }
+    b.disabled = false; b.textContent = "Check messages again";
+  };
+  const check0 = h("button", { class: "btn primary big", on: { click: check } }, "Check messages");
+  // Read straight away so the proof is there without a tap.
+  void (async () => { check0.disabled = true; check0.textContent = "Checking…"; try { show(await call(`/api/connectors/slack/test`, { body: {} })); } catch (x: any) { show({ ok: false, error: x.message }); } check0.disabled = false; check0.textContent = "Check messages again"; })();
+  D.openSheet(t.label, [
+    h("button", { class: "btn ghost", on: { click: D.back } }, icon("back", 16), "All connectors"),
+    h("div", { class: "phero" }, logo(t.id, 52), h("b", null, "Slack is connected"), h("small", null, t.detail || "")),
+    h("div", { class: "stack" }, check0, out),
+    h("p", { class: "muted small" }, "Teammates read your DMs and mentions through this, read-only, at most every 15 min. It never sends anything without your Approve."),
+    h("button", { class: "btn danger-ghost", on: { click: () => D.confirmSheet("Disconnect Slack?", "The login is removed from the hub. Triggers on Slack stop until you connect again.", "Disconnect", async () => { await call(`/api/connectors/slack`, { method: "DELETE" }); toast("Slack disconnected"); D.back(); }) } }, "Disconnect Slack"),
     h("p", { class: "muted small" }, "Kept encrypted in your hub's vault. It never goes to the model, this app or your exports."),
   ]);
 }

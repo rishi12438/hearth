@@ -71,6 +71,22 @@ export class Slack {
       text: m.text, at: new Date(Number(m.ts) * 1000).toISOString(), url: m.permalink }));
   }
 
+  /** Proof the login reads your Slack: who you are, your DM conversations, and a couple of recent messages. */
+  async probe(): Promise<{ ok: true; team: string; user: string; dmCount: number; people: string[]; recent: string[] } | { ok: false; error: string }> {
+    try {
+      const me = await this.call("auth.test");
+      const ims = (await this.call("conversations.list", { types: "im", limit: "100" })).channels || [];
+      const open = ims.filter((im: any) => !im.is_user_deleted).slice(0, 8);
+      const names: string[] = [];
+      for (const im of open) {
+        const n = await this.call("users.info", { user: im.user }).then((u) => u.user?.real_name || u.user?.name).catch(() => null);
+        if (n) names.push(n);
+      }
+      const recent = (await this.dms(3)).map((i) => `${i.title}: ${String(i.text).replace(/\s+/g, " ").slice(0, 80)}`);
+      return { ok: true, team: String(me.team || ""), user: String(me.user || ""), dmCount: ims.length, people: names, recent };
+    } catch (e: any) { return { ok: false, error: String(e.message) }; }
+  }
+
   /** Only after the owner tapped Approve. */
   async send(channel: string, text: string) {
     const j = await this.call("chat.postMessage", { channel, text: text.slice(0, 4000) }, true);
