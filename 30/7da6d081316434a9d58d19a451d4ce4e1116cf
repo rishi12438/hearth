@@ -1,0 +1,33 @@
+mac/Hearth/main.swift
+  s_1aab76a3d1fac5::t_2afff46bc80f2f 47,179-188,193-229
+test/chrome.test.ts
+  s_1aab76a3d1fac5::t_590ddbf7ec6938 3-17,19-22,25-34,37-38
+src/cli.ts
+  s_1aab76a3d1fac5::t_0252eaa84b5753 26-49
+src/server.ts
+  s_1aab76a3d1fac5::t_be38481ab634a9 665-667,669-670
+web/src/app.ts
+  s_1aab76a3d1fac5::t_b253ad11ff812f 1721-1734,1745-1785,1787,1789-1790,1792-1793,1815-1822
+src/connections.ts
+  s_1aab76a3d1fac5::t_be38481ab634a9 14,84,93,153
+src/chrome.ts
+  s_1aab76a3d1fac5::t_8e3645b4dc73ac 3,8,27-30,36-39,46-48,50-53,59-66
+  s_1aab76a3d1fac5::t_3613de36f3aae9 31-35
+  s_1aab76a3d1fac5::t_0252eaa84b5753 72-74,76
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "307da6d081316434a9d58d19a451d4ce4e1116cf",
+  "prompts": {},
+  "sessions": {
+    "s_1aab76a3d1fac5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb7cc8d8-5489-44a2-a021-60a0f58f1629",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
