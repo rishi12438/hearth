@@ -1,11 +1,12 @@
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import { wallParts, zonedToUtc } from "./time.ts";
 import { SOURCES } from "./sources/index.ts";
 import { BrainUsage, isLimitError } from "./brains/usage.ts";
 import { readClaudeToken } from "./brains/logins.ts";
+import { browserTool, describeBrowserStep, findBrowserTool } from "./brains/browser.ts";
 
 /** Each trigger module's own description of its config, for the hook docs below. */
 /** Each trigger module's own description, read when a prompt is built (the hub adds WhatsApp and Slack at start). */
@@ -340,6 +341,9 @@ function agentEnv(harness?: string) {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("HEARTH_")) env[k] = v;
   // A long-lived Claude login copied up from your Mac (`claude setup-token`) signs Claude in here.
+  // The hub's browser tool runs by its bare name (that's what its Bash rule matches).
+  const browser = harness === "claude" ? findBrowserTool() : null;
+  if (browser) env.PATH = `${dirname(browser)}:${env.PATH || "/usr/bin:/bin"}`;
   if (harness === "claude" && !env.CLAUDE_CODE_OAUTH_TOKEN) {
     const t = readClaudeToken();
     if (t) env.CLAUDE_CODE_OAUTH_TOKEN = t;
@@ -383,6 +387,8 @@ export class ComputerGone extends Error {}
 export function describeStep(name: string, input: any): string | null {
   const q = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 70);
   if (name === "WebSearch") return `Searching: ${q(input?.query)}`;
+  if (name === "Bash") return describeBrowserStep(input?.command);
+  if (name === "Read" && /\.png$/i.test(String(input?.file_path ?? ""))) return "Looking at the page";
   if (name === "WebFetch") { try { return `Reading ${new URL(String(input?.url)).hostname.replace(/^www\./, "")}`; } catch { return "Reading a page"; } }
   return null;
 }
@@ -537,9 +543,13 @@ export class Brain {
         // Slim: our own short system prompt instead of Claude Code's, only the tools this call needs, none of the machine's
         // MCP servers, settings or hooks. Cuts ~22k tokens of overhead from every call (~$0.06 on Sonnet, ~5x that on Opus).
         const web = !NO_TOOLS.has(b.mode);
+        // With the hub's browser installed, web calls also get its skill, Bash for `enkidu-browser` only, and Read for its screenshots.
+        const browser = web ? browserTool() : null;
+        const tools = web ? ["WebSearch", "WebFetch", ...(browser ? ["Bash", "Read"] : [])] : [];
+        const allowed = web ? ["WebSearch", "WebFetch", ...(browser ? ["Bash(enkidu-browser:*)", `Read(/${browser.evidence}/**)`] : [])] : [];
         cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence", ...(model ? ["--model", model] : []),
-          "--system-prompt", SYSTEM_PROMPT, "--strict-mcp-config", "--setting-sources", "project",
-          "--tools", web ? "WebSearch,WebFetch" : "", ...(web ? ["--allowedTools", "WebSearch", "WebFetch"] : [])];
+          "--system-prompt", browser ? `${SYSTEM_PROMPT}\n${browser.skill}` : SYSTEM_PROMPT, "--strict-mcp-config", "--setting-sources", "project",
+          "--tools", tools.join(","), ...(allowed.length ? ["--allowedTools", ...allowed] : [])];
         break;
       }
       case "codex":
