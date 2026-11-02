@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { sha256 } from "./auth.ts";
+import { lastRefresh } from "./brains/logins.ts";
 import { ComputerGone, MODEL_RE, type BrainInput, type BrainProfile, type Meter, type Remote, type RemoteRunner } from "./brain.ts";
 
 // Computers linked to this hub (a Mac at home, say). The hub has a public address and the computer doesn't, so the
@@ -256,6 +257,8 @@ export class Computers implements Remote {
     if (!data || data.length > MAX_COPY) return;
     try { JSON.parse(data); } catch { return; }
     const path = join(this.opts.homeDir, COPY_ITEMS[item].path);
+    // Codex renews its own login and rotates the refresh token: never replace a newer one with an older copy.
+    if (item === "codex" && existsSync(path)) { try { if (lastRefresh(readFileSync(path, "utf8")) > lastRefresh(data)) return; } catch {} }
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     writeFileSync(path, data, { mode: 0o600 });
     chmodSync(path, 0o600);
