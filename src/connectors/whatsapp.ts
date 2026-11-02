@@ -25,6 +25,8 @@ export const NO_RULES: IgnoreRules = { contacts: [], groups: [], allGroups: fals
 
 export type WaMessage = { id: string; createdAt: string; jid: string; chat: string; from: string; fromMe: boolean; group: boolean; text: string; at: string };
 export type ChatInfo = { jid: string; name: string; group: boolean; archived?: boolean; mutedUntil?: number; /** ms of the latest message */ lastAt?: number; /** name came from your address book (beats their own WhatsApp name) */ saved?: boolean; /** ms of the latest call seen (WhatsApp doesn't share past call logs, so from linking on) */ lastCallAt?: number };
+/** Official WhatsApp accounts that aren't in anyone's address book. */
+const KNOWN: Record<string, string> = { "13135550002": "Meta AI" };
 /** Baileys timestamps are seconds, sometimes as a protobuf Long. */
 const seconds = (t: any) => { const n = typeof t === "object" && t?.toNumber ? t.toNumber() : Number(t); return Number.isFinite(n) && n > 0 ? n : 0; };
 export type WaStatus = { state: "off" | "starting" | "qr" | "connected" | "signed-out" | "error"; qr?: string | null; me?: string | null; detail?: string | null; riskAccepted: boolean };
@@ -75,6 +77,10 @@ export class WhatsApp {
   private me: string | null = null;
   private detail: string | null = null;
   private chats = new Map<string, ChatInfo>();
+  /** Names by id, apart from chats: your address book has far more people than you talk to. */
+  private names = new Map<string, { name: string; saved: boolean }>();
+  /** WhatsApp addresses one person by phone number (…@s.whatsapp.net) or by a private id (…@lid); each maps to the other. */
+  private alias = new Map<string, string>();
   private stopping = false;
   private retries = 0;
   private booting = false;
@@ -111,8 +117,35 @@ export class WhatsApp {
     return this.setRules({ [key]: list });
   }
 
-  /** Chats this link knows, for picking what to ignore. */
-  chatList(): ChatInfo[] { return [...this.chats.values()].sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0) || a.name.localeCompare(b.name)).slice(0, 1000); }
+  /** Chats this link knows, for picking what to ignore: one row per person (a phone-number chat and its @lid twin are
+   * merged), named from your address book, then their own WhatsApp name, then their number. */
+  chatList(): ChatInfo[] {
+    const out = new Map<string, ChatInfo>();
+    for (const raw of this.chats.values()) {
+      const twin = raw.group ? undefined : this.alias.get(raw.jid);
+      // Prefer the phone-number form as the row's id when both exist.
+      const key = twin && raw.jid.endsWith("@lid") && this.chats.has(twin) ? twin : raw.jid;
+      const prev = out.get(key);
+      const row: ChatInfo = { ...(prev ?? this.chats.get(key) ?? raw), jid: key };
+      row.lastAt = Math.max(prev?.lastAt || 0, raw.lastAt || 0, this.chats.get(key)?.lastAt || 0) || undefined;
+      row.lastCallAt = Math.max(prev?.lastCallAt || 0, raw.lastCallAt || 0, this.chats.get(key)?.lastCallAt || 0) || undefined;
+      if (!row.group) { const n = this.displayName(key); row.name = n.name; row.saved = n.saved || undefined; }
+      out.set(key, row);
+    }
+    return [...out.values()].sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0) || a.name.localeCompare(b.name)).slice(0, 1000);
+  }
+
+  /** The name to show for a 1:1 chat. */
+  private displayName(jid: string): { name: string; saved: boolean } {
+    const twin = this.alias.get(jid);
+    const a = this.names.get(jid), b = twin ? this.names.get(twin) : undefined;
+    const best = a?.saved ? a : b?.saved ? b : a ?? b;
+    if (best) return best;
+    const pn = jid.endsWith("@s.whatsapp.net") ? jid : twin?.endsWith("@s.whatsapp.net") ? twin : null;
+    if (pn && KNOWN[pn.split("@")[0]]) return { name: KNOWN[pn.split("@")[0]], saved: false };
+    if (pn) return { name: `+${pn.split("@")[0]}`, saved: false };
+    return { name: "Unknown contact", saved: false };
+  }
 
   /** Recent messages that got through the ignore list, newest first. */
   async recent(limit = 50, jid?: string): Promise<WaMessage[]> {
@@ -127,14 +160,24 @@ export class WhatsApp {
     if (this.keepTimer) return;
     this.keepTimer = setTimeout(() => {
       this.keepTimer = null;
-      void this.store.put("settings", { id: "whatsapp-chats", createdAt: "1970-01-01T00:00:00.000Z", chats: this.chatList() }).catch(() => {});
+      void this.store.put("settings", { id: "whatsapp-chats", createdAt: "1970-01-01T00:00:00.000Z", chats: [...this.chats.values()],
+        names: [...this.names].slice(0, 5000), alias: [...this.alias].slice(0, 10000) }).catch(() => {});
     }, 3000);
     (this.keepTimer as any).unref?.();
   }
   private async loadChats() {
     if (this.chats.size) return;
     const kept = await this.store.get<any>("settings", "whatsapp-chats").catch(() => null);
-    for (const c of kept?.chats || []) if (c?.jid && !this.chats.has(c.jid)) this.chats.set(c.jid, c);
+    for (const [k, v] of kept?.names || []) if (typeof k === "string" && v?.name) this.names.set(k, { name: String(v.name), saved: !!v.saved });
+    for (const [k, v] of kept?.alias || []) if (typeof k === "string" && typeof v === "string") this.alias.set(k, v);
+    for (const c of kept?.chats || []) {
+      if (!c?.jid || this.chats.has(c.jid)) continue;
+      // Older versions saved every address-book contact as a chat and kept names on chats: keep only real
+      // conversations, and move a saved name into the name book.
+      if (!c.group && c.saved && c.name && !this.names.get(c.jid)?.saved) this.names.set(c.jid, { name: c.name, saved: true });
+      if (!c.group && !c.lastAt) continue;
+      this.chats.set(c.jid, c);
+    }
   }
 
   async start() {
@@ -198,11 +241,15 @@ export class WhatsApp {
     // The recent-chats list WhatsApp sends right after linking (and on reconnect): names, and when each was last active.
     sock.ev.on("messaging-history.set", ({ chats, contacts, messages }: any) => {
       for (const c of contacts || []) this.contact(c);
-      for (const c of chats || []) this.chat(c.id, c.name, c);
+      for (const c of chats || []) {
+        this.link(c.id, c.lidJid || c.pnJid);
+        if (isGroupJid(c.id)) this.chat(c.id, c.name, c);
+        else { if (c.name) this.contact({ id: c.id, name: c.name }); if (c.conversationTimestamp) this.chat(c.id, undefined, c); }
+      }
       // Only the time of each recent message (to order the list like your phone does); history text isn't kept.
       for (const m of messages || []) {
         if (m?.key?.remoteJid && m.messageTimestamp) this.chat(m.key.remoteJid, undefined, { conversationTimestamp: m.messageTimestamp });
-        this.pushName(m);
+        this.learn(m);
       }
     });
     // Calls: someone you're talking to by phone is as recent as a message. Only metadata (who, when) is kept.
@@ -216,7 +263,7 @@ export class WhatsApp {
       }
     });
     sock.ev.on("groups.update", (gs: any[]) => { for (const g of gs || []) this.chat(g.id, g.subject); });
-    sock.ev.on("messages.upsert", ({ messages, type }: any) => { for (const m of messages || []) { this.pushName(m); if (type === "notify") void this.take(m); } });
+    sock.ev.on("messages.upsert", ({ messages, type }: any) => { for (const m of messages || []) { this.learn(m); if (type === "notify") void this.take(m); } });
   }
 
   /** Your address book's names (and people's own WhatsApp names, which never replace a saved one) live in WhatsApp's
@@ -230,26 +277,39 @@ export class WhatsApp {
     }, wait).unref?.();
   }
 
-  /** A contact from the address book sync or someone's own WhatsApp name. Chats can be keyed by phone number or by
-   * WhatsApp's private @lid id, so a name goes on both. */
+  /** A contact from the address book sync (a saved name) or someone's own WhatsApp name (never replaces a saved one).
+   * Goes in the name book, not the chat list; its phone-number and @lid ids are linked. */
   private contact(c: any) {
-    const saved = c?.name ? String(c.name) : "";
-    const theirs = c?.notify || c?.verifiedName ? String(c.notify || c.verifiedName) : "";
-    for (const jid of [c?.id, c?.lid, c?.jid]) {
-      if (!jid || typeof jid !== "string") continue;
-      const cur = this.chats.get(jid);
-      if (saved) { this.chat(jid, saved); this.chats.get(jid)!.saved = true; }
-      else if (theirs && !cur?.saved) this.chat(jid, theirs);
-      else if (!cur && jid === c.id) this.chat(jid);
+    const saved = c?.name ? String(c.name).slice(0, 100) : "";
+    const theirs = c?.notify || c?.verifiedName ? String(c.notify || c.verifiedName).slice(0, 100) : "";
+    const ids = [c?.id, c?.lid, c?.jid].filter((j): j is string => typeof j === "string" && !!j && !isGroupJid(j));
+    for (let i = 1; i < ids.length; i++) this.link(ids[0], ids[i]);
+    for (const jid of ids) {
+      if (saved) this.names.set(jid, { name: saved, saved: true });
+      else if (theirs && !this.names.get(jid)?.saved) this.names.set(jid, { name: theirs, saved: false });
     }
+    if (saved || theirs) this.keepChats();
   }
 
-  /** Someone not in your address book: the name they set for themselves rides on each message they send (your phone
-   * shows it as "~Name"). Only for 1:1 chats Hearth already has, and never over a saved name. */
-  private pushName(m: any) {
-    const jid = m?.key?.remoteJid;
-    if (!jid || m.key.fromMe || !m.pushName || isGroupJid(jid) || !this.chats.has(jid)) return;
-    this.contact({ id: jid, notify: m.pushName });
+  /** Tie a phone-number id to its @lid twin. */
+  private link(a?: string, b?: string) {
+    if (!a || !b || a === b) return;
+    const lid = [a, b].find((j) => j.endsWith("@lid")), pn = [a, b].find((j) => j.endsWith("@s.whatsapp.net"));
+    if (!lid || !pn || this.alias.get(lid) === pn) return;
+    this.alias.set(lid, pn); this.alias.set(pn, lid);
+    this.keepChats();
+  }
+
+  /** What every message says about who sent it: their phone number next to a private @lid id, and the name they set
+   * for themselves (your phone shows it as "~Name"). */
+  private learn(m: any) {
+    const k = m?.key;
+    if (!k?.remoteJid) return;
+    const group = isGroupJid(k.remoteJid);
+    const sender = group ? k.participant : k.remoteJid;
+    if (group) { this.link(k.participant, k.participantPn); this.link(k.participant, k.participantLid); }
+    else { this.link(k.remoteJid, k.senderPn); this.link(k.remoteJid, k.senderLid); }
+    if (!k.fromMe && m.pushName && sender) this.contact({ id: sender, notify: m.pushName });
   }
 
   private chat(jid: string | undefined, name?: string, c?: any) {
@@ -270,14 +330,16 @@ export class WhatsApp {
     if (!jid || jid === "status@broadcast" || jid.endsWith("@newsletter") || !text) return null;
     const group = isGroupJid(jid);
     const from = String(group ? raw.key.participant || "" : jid);
-    if (raw.pushName && !group) this.chat(jid, raw.pushName);
     // When it was last active, even if it's ignored (only the time: the text of an ignored chat is never kept).
     this.chat(jid, undefined, { conversationTimestamp: raw.messageTimestamp || Math.floor(Date.now() / 1000) });
     const m = { jid, from, text, group };
-    if (ignoredBecause(m, await this.rules(), this.chats.get(jid))) return null;
+    // Rules may name either id for the same person, so check the message under its twin ids too.
+    const rules = await this.rules(), chatInfo = this.chats.get(jid) ?? this.chats.get(this.alias.get(jid) || "");
+    const twin = (j: string) => this.alias.get(j) || j;
+    if (ignoredBecause(m, rules, chatInfo) || ignoredBecause({ ...m, jid: group ? jid : twin(jid), from: twin(from) }, rules, chatInfo)) return null;
     const at = new Date(Number(raw.messageTimestamp || 0) * 1000 || Date.now()).toISOString();
     const msg: WaMessage = { id: `wa-${String(raw.key.id || crypto.randomUUID()).slice(0, 80)}`, createdAt: at, jid, from, fromMe: !!raw.key.fromMe, group,
-      chat: this.chats.get(jid)?.name || jid.split("@")[0], text: text.slice(0, 4000), at };
+      chat: group ? this.chats.get(jid)?.name || jid.split("@")[0] : this.displayName(jid).name, text: text.slice(0, 4000), at };
     await this.store.put("whatsapp", msg);
     const all = await this.store.all<WaMessage>("whatsapp");
     if (all.length > KEEP) for (const old of all.sort((a, b) => a.at.localeCompare(b.at)).slice(0, all.length - KEEP)) await this.store.remove("whatsapp", old.id);

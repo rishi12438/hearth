@@ -231,7 +231,27 @@ describe("WhatsApp names and calls", () => {
     sock.emit("contacts.update", [{ id: "15550100@s.whatsapp.net", notify: "Their new name" }]);
     const byJid = Object.fromEntries(wa.chatList().map((c) => [c.jid, c.name]));
     expect(byJid["555@lid"]).toBe("Mom");
-    expect(byJid["15550100@s.whatsapp.net"]).toBe("Mom");
+    // An address-book contact you've never talked to isn't a chat.
+    expect(byJid["15550100@s.whatsapp.net"]).toBeUndefined();
+    wa.stop();
+  });
+
+  test("one row per person when WhatsApp uses both their number and their private id", async () => {
+    const { wa, sock } = await setup();
+    sock.emit("messaging-history.set", { chats: [{ id: "15550100@s.whatsapp.net", conversationTimestamp: 100 }, { id: "999@lid", conversationTimestamp: 200 }], contacts: [], messages: [] });
+    expect(wa.chatList().map((c) => c.name).sort()).toEqual(["+15550100", "Unknown contact"]);
+    // A message on the private id carries the phone number: now they're one row, named from the address book.
+    sock.emit("messages.upsert", { type: "append", messages: [{ key: { remoteJid: "999@lid", senderPn: "15550100@s.whatsapp.net", fromMe: false }, message: {} }] });
+    sock.emit("contacts.upsert", [{ id: "15550100@s.whatsapp.net", name: "Mom" }]);
+    const rows = wa.chatList();
+    expect(rows.map((c) => [c.jid, c.name, c.lastAt])).toEqual([["15550100@s.whatsapp.net", "Mom", 200_000]]);
+    wa.stop();
+  });
+
+  test("Meta AI is named", async () => {
+    const { wa, sock } = await setup();
+    sock.emit("messaging-history.set", { chats: [{ id: "13135550002@s.whatsapp.net", conversationTimestamp: 1 }], contacts: [], messages: [] });
+    expect(wa.chatList()[0].name).toBe("Meta AI");
     wa.stop();
   });
 
