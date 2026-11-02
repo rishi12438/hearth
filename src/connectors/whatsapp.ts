@@ -158,9 +158,10 @@ export class WhatsApp {
     // WhatsApp closes the socket on an old client version, so ask for the current one (fall back to the built-in).
     const version = await B.fetchLatestBaileysVersion?.().then((v: any) => v?.version).catch(() => undefined);
     const silent: any = { level: "silent", child: () => silent, trace() {}, debug() {}, info() {}, warn() {}, error() {}, fatal() {} };
-    const sock: Sock = makeWASocket({ ...(version ? { version } : {}), auth: state, printQRInTerminal: false, logger: silent, // WhatsApp refuses to link a browser it doesn't recognise ("can't link new devices"), so present as Chrome on a Mac,
-      // the same identity web.whatsapp.com uses. Linked devices lists it as "Chrome (Mac OS)".
-      browser: B.Browsers?.macOS?.("Chrome") ?? ["Mac OS", "Chrome", "14.4.1"],
+    const sock: Sock = makeWASocket({ ...(version ? { version } : {}), auth: state, printQRInTerminal: false, logger: silent,
+      // [label, platform, version]. The platform must be one WhatsApp knows (Chrome, like web.whatsapp.com): a made-up
+      // one was refused ("can't link new devices"). The label is free text, so Linked devices shows "Chrome (Hearth)".
+      browser: ["Hearth", "Chrome", "14.4.1"],
       markOnlineOnConnect: false, syncFullHistory: false });
     this.sock = sock;
     sock.ev.on("creds.update", saveCreds);
