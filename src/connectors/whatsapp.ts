@@ -200,7 +200,10 @@ export class WhatsApp {
       for (const c of contacts || []) this.contact(c);
       for (const c of chats || []) this.chat(c.id, c.name, c);
       // Only the time of each recent message (to order the list like your phone does); history text isn't kept.
-      for (const m of messages || []) if (m?.key?.remoteJid && m.messageTimestamp) this.chat(m.key.remoteJid, undefined, { conversationTimestamp: m.messageTimestamp });
+      for (const m of messages || []) {
+        if (m?.key?.remoteJid && m.messageTimestamp) this.chat(m.key.remoteJid, undefined, { conversationTimestamp: m.messageTimestamp });
+        this.pushName(m);
+      }
     });
     // Calls: someone you're talking to by phone is as recent as a message. Only metadata (who, when) is kept.
     sock.ev.on("call", (calls: any[]) => {
@@ -213,7 +216,7 @@ export class WhatsApp {
       }
     });
     sock.ev.on("groups.update", (gs: any[]) => { for (const g of gs || []) this.chat(g.id, g.subject); });
-    sock.ev.on("messages.upsert", ({ messages, type }: any) => { if (type === "notify") for (const m of messages || []) void this.take(m); });
+    sock.ev.on("messages.upsert", ({ messages, type }: any) => { for (const m of messages || []) { this.pushName(m); if (type === "notify") void this.take(m); } });
   }
 
   /** Your address book's names (and people's own WhatsApp names, which never replace a saved one) live in WhatsApp's
@@ -239,6 +242,14 @@ export class WhatsApp {
       else if (theirs && !cur?.saved) this.chat(jid, theirs);
       else if (!cur && jid === c.id) this.chat(jid);
     }
+  }
+
+  /** Someone not in your address book: the name they set for themselves rides on each message they send (your phone
+   * shows it as "~Name"). Only for 1:1 chats Hearth already has, and never over a saved name. */
+  private pushName(m: any) {
+    const jid = m?.key?.remoteJid;
+    if (!jid || m.key.fromMe || !m.pushName || isGroupJid(jid) || !this.chats.has(jid)) return;
+    this.contact({ id: jid, notify: m.pushName });
   }
 
   private chat(jid: string | undefined, name?: string, c?: any) {

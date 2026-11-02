@@ -235,6 +235,20 @@ describe("WhatsApp names and calls", () => {
     wa.stop();
   });
 
+  test("someone not saved gets the name on their messages, never over a saved name", async () => {
+    const { wa, sock } = await setup();
+    sock.emit("messaging-history.set", { chats: [{ id: "777@lid", conversationTimestamp: 1 }, { id: "888@lid", conversationTimestamp: 1 }], contacts: [], messages: [] });
+    sock.emit("contacts.upsert", [{ id: "888@lid", name: "Saved Sam" }]);
+    sock.emit("messages.upsert", { type: "notify", messages: [
+      { key: { remoteJid: "777@lid", fromMe: false }, pushName: "Priya", message: {} },
+      { key: { remoteJid: "888@lid", fromMe: false }, pushName: "Sammy", message: {} },
+    ] });
+    const byJid = Object.fromEntries(wa.chatList().map((c) => [c.jid, c.name]));
+    expect(byJid["777@lid"]).toBe("Priya");
+    expect(byJid["888@lid"]).toBe("Saved Sam");
+    wa.stop();
+  });
+
   test("a call makes the caller recent", async () => {
     const { wa, sock } = await setup();
     const at = new Date("2026-11-02T10:00:00Z");
