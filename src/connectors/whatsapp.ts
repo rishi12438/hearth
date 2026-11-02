@@ -150,8 +150,9 @@ export class WhatsApp {
     // WhatsApp closes the socket on an old client version, so ask for the current one (fall back to the built-in).
     const version = await B.fetchLatestBaileysVersion?.().then((v: any) => v?.version).catch(() => undefined);
     const silent: any = { level: "silent", child: () => silent, trace() {}, debug() {}, info() {}, warn() {}, error() {}, fatal() {} };
-    const sock: Sock = makeWASocket({ ...(version ? { version } : {}), auth: state, printQRInTerminal: false, logger: silent, // WhatsApp → Linked devices shows the first part as the device's name: just "Hearth".
-      browser: ["Hearth", "Desktop", "1.0"],
+    const sock: Sock = makeWASocket({ ...(version ? { version } : {}), auth: state, printQRInTerminal: false, logger: silent, // WhatsApp refuses to link a browser it doesn't recognise ("can't link new devices"), so present as Chrome on a Mac,
+      // the same identity web.whatsapp.com uses. Linked devices lists it as "Chrome (Mac OS)".
+      browser: B.Browsers?.macOS?.("Chrome") ?? ["Mac OS", "Chrome", "14.4.1"],
       markOnlineOnConnect: false, syncFullHistory: false });
     this.sock = sock;
     sock.ev.on("creds.update", saveCreds);
@@ -164,6 +165,7 @@ export class WhatsApp {
         sock.groupFetchAllParticipating?.().then((gs: any) => { for (const g of Object.values(gs || {}) as any[]) this.chat(g.id, g.subject); }).catch(() => {});
       }
       if (u.connection === "close") {
+        if (this.sock && this.sock !== sock) return; // an old socket closing after a relink: not ours to handle
         this.sock = null;
         const code = u.lastDisconnect?.error?.output?.statusCode;
         if (code === B.DisconnectReason?.loggedOut) { this.detail = "WhatsApp signed this link out. Link it again."; this.set("signed-out"); rmSync(this.dir, { recursive: true, force: true }); return; }
@@ -231,6 +233,15 @@ export class WhatsApp {
   }
 
   stop() { this.stopping = true; try { this.sock?.end?.(undefined); } catch {} this.sock = null; this.set("off"); }
+
+  /** A fresh code: drop the half-made link (new keys) and ask WhatsApp for a new QR. Never touches a working link. */
+  async relink() {
+    if (this.st === "connected") return;
+    this.stop();
+    rmSync(this.dir, { recursive: true, force: true });
+    this.qr = null; this.detail = null; this.retries = 0;
+    await this.start();
+  }
 
   /** Unlink: sign out on WhatsApp's side, drop the keys and the stored messages. */
   async logout() {

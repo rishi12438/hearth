@@ -527,6 +527,12 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           try { const rules = await connect.whatsapp.editRule(kind, String(b.value || ""), b.remove === true); hub.emit("connections"); return json({ rules }); }
           catch (e: any) { throw new HttpError(400, e.message); }
         }
+        if (method === "POST" && id === "relink") {
+          if (!voiceLimiter.allow("connect:whatsapp")) throw new HttpError(429, "Too many tries. Wait a few minutes.");
+          try { await connect.whatsapp.relink(); } catch (e: any) { throw new HttpError(400, e.message); }
+          hub.emit("connections");
+          return json(await connect.whatsapp.status());
+        }
         if (method === "GET" && id === "qr") {
           // Only ever draws the code WhatsApp gave us right now, never arbitrary text.
           const st = await connect.whatsapp.status();
