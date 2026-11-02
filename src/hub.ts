@@ -74,7 +74,9 @@ class Lock {
 
 export type HubEvent = { type: string; data?: unknown };
 
-const HIDDEN_LABEL = /^(open the options list|status is|active now|press return to go to|view .*'s profile|you're now connected|sponsored$|·$)/i;
+// Screen-reader text LinkedIn puts in each conversation row: ". Active conversation", ". Press return to go to
+// conversation details", "Open the options list in your conversation with …", "Status is online".
+const HIDDEN_LABEL = /^(\.\s|open the options list|status is|active now|press return to go to|·$)/i;
 
 export class Hub {
   clock = () => new Date();
@@ -2444,7 +2446,7 @@ export class Hub {
       // LinkedIn puts screen-reader labels in each row ("Open the options list in your conversation with …",
       // "Status is online"); they're not the message, so they never become the preview.
       const lines = i.text.split("\n").map((l) => l.trim()).filter((l) => l && !HIDDEN_LABEL.test(l)).slice(0, 6).map((l) => l.slice(0, 200));
-      return { name: i.title.replace(/^● /, "").slice(0, 120), preview: (lines.at(-1) || "").slice(0, 160), lines, when: i.when || "", unread: !!i.unread, url: i.url || "" };
+      return { name: i.title.replace(/^● /, "").slice(0, 120), preview: (lines[0] || "").slice(0, 160), lines, when: i.when || "", unread: !!i.unread, url: i.url || "" };
     });
     this.vault.set(kind === "messages" ? `recent:${id}` : `recent:${id}:${kind}`, JSON.stringify({ items: list, readAt: new Date().toISOString() }));
   }
