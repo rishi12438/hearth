@@ -1831,57 +1831,33 @@ async function openCookieSetup(c: Connector | { via: string; name: string; blurb
   ]);
 }
 
-/**
- * Connected LinkedIn or Instagram, like the WhatsApp list: your recent messages and, on LinkedIn, connection requests and
- * notifications in their own tabs. Each tab is read when you open it (then kept up to 15 minutes); tap a row to open it.
- */
+/** Connected LinkedIn or Instagram: who you've been talking to lately, newest first. Tap a name to open it. */
 function conversationsSheet(c: any, st: any, auditAll: any[]) {
-  const tabsFor: [string, string][] = c.via === "linkedin" ? [["messages", "Messages"], ["invitations", "Invitations"], ["notifications", "Notifications"]] : [["messages", "Messages"]];
-  let tab = "messages";
-  const got: Record<string, any> = {};
-  const list = h("div", { class: "wa-list" });
-  const foot = h("p", { class: "wa-note" });
-  const tabs = h("div", { class: "wa-tabs" });
-  const avatar = (name: string) => h("span", { class: "wa-av" }, (name.replace(/[^\p{L}\p{N}]/gu, "").slice(0, 1) || "#").toUpperCase());
-  const junk = /^(accept|ignore|message|follow|connect|wants to connect|view|reply|·)$/i;
-  const row = (x: any) => {
-    const rest: string[] = (x.lines || []).filter((l: string) => !junk.test(l));
-    // Messages: who, when, last message. Invitations: who, their headline, mutual connections. Notifications: the line.
-    const top = tab === "notifications" ? null : h("span", { class: "wa-top" }, h("b", null, x.name), h("time", null, x.when || ""));
-    const sub = tab === "notifications" ? h("span", { class: "wa-text" }, x.name)
-      : tab === "invitations" ? [h("small", null, rest[0] || ""), rest[1] ? h("small", null, rest[1]) : null]
-      : h("small", null, x.preview || "");
-    return h("a", { class: `wa-row ${x.unread ? "unread" : ""}`, href: x.url || undefined, target: "_blank", rel: "noopener noreferrer" },
-      avatar(x.name), h("span", { class: "grow" }, top, sub), x.unread ? h("span", { class: "wa-dot" }) : null);
-  };
-  const empty: Record<string, string> = { messages: "No conversations yet.", invitations: "No connection requests right now.", notifications: "No notifications." };
-  const draw = () => {
-    clear(tabs, tabsFor.length > 1 ? tabsFor.map(([k, label]) => {
-      const n = k === "invitations" && got[k]?.items?.length ? ` ${got[k].items.length}` : "";
-      return h("button", { class: `wa-tab ${tab === k ? "on" : ""}`, on: { click: () => { tab = k; draw(); if (!got[k]) void load(); } } }, label + n);
-    }) : null);
-    const r = got[tab];
-    if (!r) return clear(list, h("p", { class: "wa-empty" }, "Loading…"));
-    const items: any[] = r.items || [];
-    clear(list, items.length ? items.map(row) : h("p", { class: "wa-empty" }, r.error || empty[tab]));
-    clear(foot, r.error && items.length ? h("span", { class: "err" }, `${r.error} `) : null, r.readAt ? `Updated ${relTime(r.readAt)} · ` : "",
-      h("button", { class: "wa-link", on: { click: () => load(true) } }, "Refresh"));
-  };
+  const hidden = /^(open the options list|status is|active now)/i; // lists kept before the hub dropped these
+  const list = h("div", { class: "list" }, h("p", { class: "muted small" }, "Loading…"));
+  const foot = h("p", { class: "muted small" });
   const load = async (fresh = false) => {
-    const k = tab;
     if (fresh) clear(foot, `Reading ${c.name}…`);
-    try { got[k] = await call(`/api/connections/${c.via}/recent?what=${k}${fresh ? "&fresh=1" : ""}`); } catch (e: any) { got[k] = { items: got[k]?.items || [], readAt: got[k]?.readAt || null, error: e.message }; }
-    draw();
-    if (got[k].error && /signed hearth out/i.test(got[k].error)) setTimeout(() => openCookieSetup(c), 1500); // back to Reconnect
+    let r: any;
+    try { r = await call(`/api/connections/${c.via}/recent${fresh ? "?fresh=1" : ""}`); } catch (e: any) { r = { items: [], readAt: null, error: e.message }; }
+    const items: any[] = (r.items || []).slice(0, 8);
+    clear(list, items.length ? items.map((x) => {
+      const last = [...(x.lines || [])].reverse().find((l: string) => !hidden.test(l) && l !== x.when) || "";
+      return h("a", { class: "item", href: x.url || undefined, target: "_blank", rel: "noopener noreferrer" },
+        h("span", { class: "grow" }, h("b", { class: "light" }, x.name), h("small", { class: "sub" }, [x.when, last].filter(Boolean).join(" · "))));
+    }) : h("p", { class: "muted small" }, r.error || "No conversations yet."));
+    clear(foot, r.readAt ? `Updated ${relTime(r.readAt)} · ` : "", h("button", { class: "wa-link", on: { click: () => load(true) } }, "Refresh"));
+    if (r.error && /signed hearth out/i.test(r.error)) setTimeout(() => openCookieSetup(c), 1500); // back to Reconnect
   };
-  draw(); void load();
+  void load();
   openSheet(c.name, [
     h("button", { class: "btn ghost", on: { click: () => openConnections() } }, icon("back", 16), "All connectors"),
-    h("div", { class: "wa-head" }, connectorTile({ id: c.via, name: c.name, blurb: c.blurb, group: "Social", via: c.via, bg: c.bg, shapes: c.shapes } as Connector, 40),
-      h("span", { class: "grow" }, h("b", null, `${c.name} is connected`), h("small", null, `${st.detail || "Connected"} · read-only`))),
-    tabs, list, foot,
+    h("div", { class: "phero" }, connectorTile({ id: c.via, name: c.name, blurb: c.blurb, group: "Social", via: c.via, bg: c.bg, shapes: c.shapes } as Connector, 52),
+      h("b", null, `${c.name} is connected`), h("small", null, `${st.detail || "Connected"} · read-only`)),
+    h("p", { class: "muted small" }, "Recently contacted"),
+    list, foot,
     accessLog(auditAll, st.domain || c.via),
-    h("button", { class: "wa-unlink", on: { click: () => confirmSheet(`Disconnect ${c.name}?`, "Your login is deleted from the hub. Triggers on it stop until you connect again.", "Disconnect", async () => { await call(`/api/connections/${c.via}`, { method: "DELETE" }); toast(`${c.name} disconnected`); openConnections(); }) } }, `Disconnect ${c.name}`),
+    h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet(`Disconnect ${c.name}?`, "Your login is deleted from the hub. Triggers on it stop until you connect again.", "Disconnect", async () => { await call(`/api/connections/${c.via}`, { method: "DELETE" }); toast(`${c.name} disconnected`); openConnections(); }) } }, `Disconnect ${c.name}`),
   ]);
 }
 
