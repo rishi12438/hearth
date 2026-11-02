@@ -213,6 +213,12 @@ async function whatsappSheet() {
   let timer: ReturnType<typeof setInterval> | null = null;
   const stop = () => { if (timer) clearInterval(timer); timer = null; };
   let last = "";
+  // A new code with fresh keys, for when the phone won't take this one (or it's gone stale).
+  const refresh = h("button", { class: "btn ghost", on: { click: async (e: Event) => {
+    const b = e.currentTarget as HTMLButtonElement; b.disabled = true;
+    try { await call("/api/whatsapp/relink", { body: {} }); toast("Getting a new code…"); } catch (x) { D.handleError(x); }
+    b.disabled = false; void draw(true);
+  } } }, icon("refresh", 16), "Get a new code");
   const draw = async (force = false) => {
     let s: any;
     try { s = await call("/api/whatsapp"); } catch (e) { stop(); return D.handleError(e); }
@@ -226,6 +232,7 @@ async function whatsappSheet() {
       s.state === "qr" && s.qr ? [
         h("ol", { class: "steps" }, h("li", null, "On your phone, open WhatsApp → Settings → Linked devices."), h("li", null, "Tap Link a device and scan this code.")),
         qrImage(s.qr),
+        refresh,
       ] : s.state === "off" || s.state === "signed-out" || s.state === "error" ? [
         s.detail ? h("p", { class: "err small" }, s.detail) : null,
         h("button", { class: "btn primary big", on: { click: async (e: Event) => {
@@ -233,7 +240,8 @@ async function whatsappSheet() {
           try { await call("/api/connectors/whatsapp", { method: "PUT", body: {} }); } catch (x) { D.handleError(x); }
           void draw(true);
         } } }, "Show the QR code"),
-      ] : h("p", { class: "muted" }, "Connecting to WhatsApp…"),
+        s.state === "off" ? null : refresh,
+      ] : [h("p", { class: "muted" }, "Connecting to WhatsApp…"), refresh],
     );
   };
   D.openSheet("WhatsApp", [h("button", { class: "btn ghost", on: { click: () => { stop(); D.back(); } } }, icon("back", 16), "All connectors"), body], { onClose: stop });
