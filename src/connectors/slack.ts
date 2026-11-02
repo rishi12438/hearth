@@ -29,6 +29,26 @@ function scopeFix(j: any): string | null {
   return `Your Slack app is missing ${list}. In your app at api.slack.com/apps → OAuth & Permissions, add those under User Token Scopes, tap Reinstall to Workspace, copy the new token and connect again. Or just use your Chrome login, which needs no setup.`;
 }
 
+/** Slack mrkdwn + entities → plain readable text: <@U|name>→@name, <#C|chan>→#chan, <url|text>→text, drop * _ ~ `. */
+export function cleanSlackText(raw: string): string {
+  return String(raw ?? "")
+    .replace(/<@[^>|]+\|([^>]+)>/g, "@$1").replace(/<@[^>]+>/g, "@someone")
+    .replace(/<#[^>|]+\|([^>]+)>/g, "#$1").replace(/<#[^>]+>/g, "#channel")
+    .replace(/<!(here|channel|everyone)>/g, "@$1")
+    .replace(/<([^>|]+)\|([^>]+)>/g, "$2").replace(/<([^>]+)>/g, "$1")
+    .replace(/[*_~`]/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/\s+/g, " ").trim();
+}
+/** A one-line preview: cleaned, cut at a word boundary with an ellipsis. */
+export function snippet(raw: string, max = 90): string {
+  const t = cleanSlackText(raw);
+  if (t.length <= max) return t;
+  const cut = t.slice(0, max), sp = cut.lastIndexOf(" ");
+  return (sp > max * 0.6 ? cut.slice(0, sp) : cut).replace(/[\s.,:;]+$/, "") + "…";
+}
+/** Channel-join / add / leave notices match a user mention but aren't real mentions — don't treat them as messages. */
+const NOTICE = /\b(has joined the channel|was added to this channel|has left the channel|set the channel|pinned a message|renamed the channel)\b/i;
+
 type Saved = { token: string; team: string; user: string; savedAt: string;
   /** Chrome login: the `d` cookie, the workspace's host ("acme.slack.com") and the Mac Chrome it came from. */
   cookie?: string; domain?: string; fingerprint?: Fingerprint | null };
@@ -84,9 +104,12 @@ export class Slack {
   /** Messages that mention you (user tokens only: Slack's search). */
   async mentions(limit = 15): Promise<Item[]> {
     const s = this.saved();
-    const j = await this.call("search.messages", { query: `<@${s?.user}>`, sort: "timestamp", count: String(limit) });
-    return (j.messages?.matches || []).map((m: any) => ({ id: `slack-${m.channel?.id}-${m.ts}`, title: `${m.username || "Someone"} in #${m.channel?.name || "a channel"}`,
-      text: m.text, at: new Date(Number(m.ts) * 1000).toISOString(), url: m.permalink }));
+    const j = await this.call("search.messages", { query: `<@${s?.user}>`, sort: "timestamp", count: String(limit * 3) });
+    return (j.messages?.matches || [])
+      .filter((m: any) => m.text && !m.subtype && !NOTICE.test(m.text))
+      .slice(0, limit)
+      .map((m: any) => ({ id: `slack-${m.channel?.id}-${m.ts}`, title: `${m.username || "Someone"} in #${m.channel?.name || "a channel"}`,
+        text: m.text, at: new Date(Number(m.ts) * 1000).toISOString(), url: m.permalink }));
   }
 
   /** Proof the login reads your Slack. Degrades: always shows who you are; reads DMs if it can, else mentions; and
@@ -107,14 +130,14 @@ export class Slack {
         if (n) names.push(n);
       }
       res.people = names;
-      res.recent = (await this.dms(3)).map((i) => `${i.title}: ${String(i.text).replace(/\s+/g, " ").slice(0, 80)}`);
+      res.recent = (await this.dms(3)).map((i) => `${i.title}: ${snippet(i.text)}`);
     } catch (e: any) {
       if (e instanceof MissingScope && e.slackError === "missing_scope") res.note = e.message;
       else throw_unless_scope(e, res);
     }
     // Mentions (needs search:read) — a nice fallback proof when DMs are empty or blocked.
     if (!res.recent.length) {
-      try { res.recent = (await this.mentions(3)).map((i) => `${i.title}: ${String(i.text).replace(/\s+/g, " ").slice(0, 80)}`); } catch {}
+      try { res.recent = (await this.mentions(3)).map((i) => `${i.title}: ${snippet(i.text)}`); } catch {}
     }
     return res;
   }
