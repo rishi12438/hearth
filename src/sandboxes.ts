@@ -38,6 +38,8 @@ export async function ping(url: string | null, secret: string, ms = 2500) {
 }
 
 const sh = (cmd: string[], opts: { stdin?: string } = {}) => {
+  // A machine without the tool (no Docker on the server) is "not available", never a crash at startup.
+  if (!Bun.which(cmd[0])) return { ok: false, out: "", err: `${cmd[0]} isn't installed` };
   const r = Bun.spawnSync(cmd, { stdin: opts.stdin ? new TextEncoder().encode(opts.stdin) : undefined, env: { PATH: process.env.PATH || "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin", HOME: process.env.HOME || "/tmp", DOCKER_HOST: process.env.DOCKER_HOST || "" } });
   return { ok: r.exitCode === 0, out: r.stdout.toString().trim(), err: r.stderr.toString().trim() };
 };
