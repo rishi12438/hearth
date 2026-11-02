@@ -96,6 +96,8 @@ export class WhatsApp {
   private names = new Map<string, { name: string; saved: boolean }>();
   /** WhatsApp addresses one person by phone number (…@s.whatsapp.net) or by a private id (…@lid); each maps to the other. */
   private alias = new Map<string, string>();
+  /** The linked device the chat list was built from: a new link (new device) starts a fresh list. */
+  private device: string | null = null;
   private stopping = false;
   private retries = 0;
   private booting = false;
@@ -179,13 +181,14 @@ export class WhatsApp {
     this.keepTimer = setTimeout(() => {
       this.keepTimer = null;
       void this.store.put("settings", { id: "whatsapp-chats", createdAt: "1970-01-01T00:00:00.000Z", chats: [...this.chats.values()],
-        names: [...this.names].slice(0, 5000), alias: [...this.alias].slice(0, 10000) }).catch(() => {});
+        device: this.device, names: [...this.names].slice(0, 5000), alias: [...this.alias].slice(0, 10000) }).catch(() => {});
     }, 3000);
     (this.keepTimer as any).unref?.();
   }
   private async loadChats() {
     if (this.chats.size) return;
     const kept = await this.store.get<any>("settings", "whatsapp-chats").catch(() => null);
+    this.device = typeof kept?.device === "string" ? kept.device : null;
     for (const [k, v] of kept?.names || []) if (typeof k === "string" && v?.name) this.names.set(k, { name: String(v.name), saved: !!v.saved });
     for (const [k, v] of kept?.alias || []) if (typeof k === "string" && typeof v === "string") this.alias.set(k, v);
     for (const c of kept?.chats || []) {
@@ -235,6 +238,9 @@ export class WhatsApp {
       if (u.connection === "open") {
         this.retries = 0; this.qr = null;
         this.me = String(sock.user?.id || "").split(":")[0].split("@")[0] || null;
+        // A new link: drop the old list so its dates and names can't mix with what this link's history brings.
+        const device = String(sock.user?.id || "") || null;
+        if (device && device !== this.device) { this.chats.clear(); this.names.clear(); this.alias.clear(); this.device = device; this.keepChats(); }
         this.set("connected");
         sock.groupFetchAllParticipating?.().then((gs: any) => { for (const g of Object.values(gs || {}) as any[]) this.chat(g.id, g.subject); }).catch(() => {});
         this.syncNames(sock, B);
@@ -262,7 +268,12 @@ export class WhatsApp {
       for (const c of chats || []) {
         this.link(c.id, c.lidJid || c.pnJid);
         if (isGroupJid(c.id)) this.chat(c.id, c.name, c);
-        else { if (c.name) this.contact({ id: c.id, name: c.name }); this.chat(c.id, undefined, c); }
+        else {
+          if (c.name) this.contact({ id: c.id, name: c.name });
+          // The name WhatsApp shows for someone not saved (their own name, or their username): helps hidden numbers.
+          else if (c.displayName || c.username) this.contact({ id: c.id, notify: c.displayName || c.username });
+          this.chat(c.id, undefined, c);
+        }
       }
       // Only the time of each recent real message (to order the list like your phone does); history text isn't kept.
       for (const m of messages || []) {
@@ -421,7 +432,7 @@ export class WhatsApp {
     this.sock = null;
     rmSync(this.dir, { recursive: true, force: true });
     await this.store.clear("whatsapp");
-    this.chats.clear(); this.names.clear(); this.alias.clear();
+    this.chats.clear(); this.names.clear(); this.alias.clear(); this.device = null;
     await this.store.remove("settings", "whatsapp-chats").catch(() => {});
     this.me = null; this.qr = null;
     this.set("off");

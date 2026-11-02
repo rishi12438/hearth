@@ -272,6 +272,26 @@ describe("WhatsApp names and calls", () => {
     wa.stop();
   });
 
+  test("a new link starts a fresh list; a reconnect of the same link keeps it", async () => {
+    const { wa, sock } = await setup();
+    sock.user = { id: "1:5@s.whatsapp.net" };
+    sock.emit("connection.update", { connection: "open" });
+    sock.emit("messaging-history.set", { chats: [], contacts: [], messages: [said("42@g.us", 100)] });
+    sock.emit("connection.update", { connection: "open" });
+    expect(wa.chatList().length).toBe(1);
+    sock.user = { id: "1:6@s.whatsapp.net" };
+    sock.emit("connection.update", { connection: "open" });
+    expect(wa.chatList().length).toBe(0);
+    wa.stop();
+  });
+
+  test("a hidden-number chat takes the name WhatsApp shows for it", async () => {
+    const { wa, sock } = await setup();
+    sock.emit("messaging-history.set", { chats: [{ id: "321@lid", displayName: "Priya" }], contacts: [], messages: [said("321@lid", 5)] });
+    expect(wa.chatList()[0].name).toBe("Priya");
+    wa.stop();
+  });
+
   test("Meta AI is named", async () => {
     const { wa, sock } = await setup();
     sock.emit("messaging-history.set", { chats: [{ id: "13135550002@s.whatsapp.net" }], contacts: [], messages: [said("13135550002@s.whatsapp.net", 1)] });
