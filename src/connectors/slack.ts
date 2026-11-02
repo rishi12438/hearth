@@ -11,6 +11,24 @@ import { cleanFingerprint, type Fingerprint } from "../browser.ts";
 //    Scopes: im:history, im:read, users:read, search:read (user tokens, for mentions), chat:write (only to send, after Approve).
 // Either way it stays in the vault.
 
+/** A Slack API error. For a scope error it carries the fix (which scopes to add). */
+export class MissingScope extends Error {
+  constructor(public slackError: string, fix: string | null, override?: string | null) {
+    super(override || fix || `Slack said: ${slackError}`);
+  }
+}
+/** Turn Slack's missing_scope reply into plain advice naming the scopes to add. */
+/** Keep a read failure from sinking the whole proof: only a scope note is worth surfacing here. */
+function throw_unless_scope(_e: unknown, _res: { note?: string }) { /* non-scope read errors: identity proof still stands */ }
+
+function scopeFix(j: any): string | null {
+  if (j.error !== "missing_scope") return null;
+  // Slack lists the alternatives it would accept; for DMs that's the im:* scopes.
+  const need = String(j.needed || "").split(",").filter((x: string) => /^im:/.test(x));
+  const list = need.length ? need.join(" and ") : String(j.needed || "more permissions");
+  return `Your Slack app is missing ${list}. In your app at api.slack.com/apps → OAuth & Permissions, add those under User Token Scopes, tap Reinstall to Workspace, copy the new token and connect again. Or just use your Chrome login, which needs no setup.`;
+}
+
 type Saved = { token: string; team: string; user: string; savedAt: string;
   /** Chrome login: the `d` cookie, the workspace's host ("acme.slack.com") and the Mac Chrome it came from. */
   cookie?: string; domain?: string; fingerprint?: Fingerprint | null };
@@ -43,7 +61,7 @@ export class Slack {
       const fresh = await workspaceToken(s.domain, s.cookie, s.fingerprint ?? null, this.fetcher).catch(() => null);
       if (fresh && fresh !== s.token) { this.vault!.set("slack", JSON.stringify({ ...s, token: fresh })); return this.call(method, params, post, true); }
     }
-    if (!j.ok) throw new Error(signedOut ? (s.cookie ? "Slack signed this login out. Sign in to Slack in Chrome, then connect again." : "Slack signed this token out. Connect Slack again.") : `Slack said: ${j.error}`);
+    if (!j.ok) throw new MissingScope(j.error, scopeFix(j), signedOut ? (s.cookie ? "Slack signed this login out. Sign in to Slack in Chrome, then connect again." : "Slack signed this token out. Connect Slack again.") : null);
     return j;
   }
 
@@ -71,20 +89,34 @@ export class Slack {
       text: m.text, at: new Date(Number(m.ts) * 1000).toISOString(), url: m.permalink }));
   }
 
-  /** Proof the login reads your Slack: who you are, your DM conversations, and a couple of recent messages. */
-  async probe(): Promise<{ ok: true; team: string; user: string; dmCount: number; people: string[]; recent: string[] } | { ok: false; error: string }> {
+  /** Proof the login reads your Slack. Degrades: always shows who you are; reads DMs if it can, else mentions; and
+   *  names any missing scope so a half-set-up Slack app is easy to fix. */
+  async probe(): Promise<{ ok: boolean; team?: string; user?: string; dmCount?: number; people?: string[]; recent?: string[]; note?: string; error?: string }> {
+    let me: any;
+    try { me = await this.call("auth.test"); }
+    catch (e: any) { return { ok: false, error: String(e.message) }; } // can't even say who you are: a dead token
+    const res: { ok: true; team: string; user: string; dmCount?: number; people?: string[]; recent: string[]; note?: string } =
+      { ok: true, team: String(me.team || ""), user: String(me.user || ""), recent: [] };
+    // DMs (needs im:read + im:history). If the app lacks them, keep the scope advice and fall back to mentions.
     try {
-      const me = await this.call("auth.test");
       const ims = (await this.call("conversations.list", { types: "im", limit: "100" })).channels || [];
-      const open = ims.filter((im: any) => !im.is_user_deleted).slice(0, 8);
+      res.dmCount = ims.length;
       const names: string[] = [];
-      for (const im of open) {
+      for (const im of ims.filter((x: any) => !x.is_user_deleted).slice(0, 8)) {
         const n = await this.call("users.info", { user: im.user }).then((u) => u.user?.real_name || u.user?.name).catch(() => null);
         if (n) names.push(n);
       }
-      const recent = (await this.dms(3)).map((i) => `${i.title}: ${String(i.text).replace(/\s+/g, " ").slice(0, 80)}`);
-      return { ok: true, team: String(me.team || ""), user: String(me.user || ""), dmCount: ims.length, people: names, recent };
-    } catch (e: any) { return { ok: false, error: String(e.message) }; }
+      res.people = names;
+      res.recent = (await this.dms(3)).map((i) => `${i.title}: ${String(i.text).replace(/\s+/g, " ").slice(0, 80)}`);
+    } catch (e: any) {
+      if (e instanceof MissingScope && e.slackError === "missing_scope") res.note = e.message;
+      else throw_unless_scope(e, res);
+    }
+    // Mentions (needs search:read) — a nice fallback proof when DMs are empty or blocked.
+    if (!res.recent.length) {
+      try { res.recent = (await this.mentions(3)).map((i) => `${i.title}: ${String(i.text).replace(/\s+/g, " ").slice(0, 80)}`); } catch {}
+    }
+    return res;
   }
 
   /** Only after the owner tapped Approve. */
