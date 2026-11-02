@@ -75,7 +75,6 @@ code { font-family: var(--mono); font-size: .86em; background: var(--surface); p
 .status.live { background: var(--ok); }
 .status.connecting { background: var(--warn); animation: pulse 1.4s infinite; }
 .status.offline { background: var(--danger); }
-.status.signedout { background: var(--danger); }
 @keyframes pulse { 50% { opacity: .35; } }
 
 /* big title variant (Home, DMs, Activity) */
@@ -931,6 +930,14 @@ a.item { color: inherit; text-decoration: none; }
 .sbrand { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px 12px; text-align: left; border-radius: 10px; }
 .sbrand b { display: block; font-size: 16px; font-weight: 750; } .sbrand small { display: block; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sbrand .status { margin: 0 4px 0 0; }
+.sbrains { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 10px 12px; margin-top: -6px; }
+.sbrain { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 999px; font-size: 12px; color: var(--ink-2); background: color-mix(in oklab, var(--ink) 5%, transparent); }
+.sbrain .bdot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+.sbrain.ok .bdot { background: var(--ok); }
+.sbrain.unknown .bdot { animation: pulse 1.4s infinite; }
+.sbrain.bad { color: var(--danger); background: color-mix(in oklab, var(--danger) 10%, transparent); }
+.sbrain.bad .bdot { background: var(--danger); }
+.sbrain em { font-style: normal; font-weight: 650; }
 .ssearch { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px; margin-bottom: 8px; border-radius: 10px; background: var(--card); box-shadow: 0 0 0 1px var(--line); color: var(--muted); font-size: 14px; text-align: left; }
 .ssearch kbd { font: 11px var(--font); color: var(--muted); background: var(--surface); padding: 1px 6px; border-radius: 5px; }
 .sgroup { display: flex; flex-direction: column; gap: 1px; }

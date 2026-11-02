@@ -471,8 +471,8 @@ function drawSide() {
   const host = (activeHub()?.url || location.origin).replace(/^https?:\/\//, "");
   clear(el,
     h("button", { class: "sbrand", on: { click: openHubs } },
-      h("span", { class: "grow" }, h("b", null, S.state?.hub?.name || "Hearth"), h("small", null, (S.state?.brainProblems || []).length ? `${S.state.brainProblems[0].label} signed out` : host)),
-      h("i", { class: `status ${S.conn === "live" && (S.state?.brainProblems || []).length ? "signedout" : S.conn}`, title: (S.state?.brainProblems || []).map((b: any) => `${b.label} is signed out`).join(", ") || undefined })),
+      h("span", { class: "grow" }, h("b", null, S.state?.hub?.name || "Hearth"), h("small", null, host)), h("i", { class: `status ${S.conn}` })),
+    brainDots(),
     h("button", { class: "ssearch", on: { click: openJump } }, icon("search", 16), h("span", { class: "grow" }, "Search"), h("kbd", null, "⌘K")),
     h("nav", { class: "sgroup" },
       nav("home", "Home", r.view === "home", () => { location.hash = ""; }),
@@ -3203,6 +3203,17 @@ function brainStrip() {
     h("span", { class: "lsicon" }, icon("brain", 18)),
     h("span", { class: "grow" }, h("b", null, `${b.label} is signed out`), " · it can't think for the team until you reconnect it"),
     h("span", { class: "btn small primary" }, "Reconnect")));
+}
+
+/** Under the hub's name: each brain you picked, green when it's answering, red when it's signed out. Tap to reconnect. */
+function brainDots() {
+  const list: { id: string; label: string; ok: boolean | null; message: string | null }[] = S.state?.brains || [];
+  if (!list.length) return null;
+  return h("div", { class: "sbrains" }, list.map((b) => h("button", {
+    class: `sbrain ${b.ok === false ? "bad" : b.ok ? "ok" : "unknown"}`,
+    title: b.ok === false ? `${b.label} is signed out: ${b.message}. Tap to reconnect.` : b.ok ? `${b.label} is signed in and working` : `${b.label}: checking…`,
+    on: { click: () => openBrain(b.id) },
+  }, h("i", { class: "bdot" }), h("span", null, b.label), b.ok === false ? h("em", null, "Reconnect") : null)));
 }
 
 /** Connectors → this brain's sheet (sign in again, check again). */

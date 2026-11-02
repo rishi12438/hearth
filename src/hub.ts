@@ -136,6 +136,7 @@ export class Hub {
   ) {
     brain.pool = () => this.brainPool();
     brain.health.onChange = (st) => { void this.brainHealthChanged(st.harness, st.ok, st.message).catch(() => {}); };
+    brain.health.onSeen = () => this.emit("brains");
     // Every phone notification also goes out on the live stream, so the Mac app can show it as a Mac notification.
     if (push) push.onSend = (payload, only) => this.emit("notify", { ...payload, only: only ?? null });
   }
@@ -2203,6 +2204,14 @@ export class Hub {
     });
   }
 
+  /** Every brain you picked and whether it's working: the sidebar's dots. ok null = not checked yet. */
+  async brainStatus(): Promise<{ id: string; label: string; ok: boolean | null; message: string | null }[]> {
+    const pool = await this.brainPool().catch(() => [] as string[]);
+    return pool.filter((id) => id === "claude" || id === "codex").map((id) => ({
+      id, label: id === "claude" ? "Claude Code" : "Codex", ok: this.brain.health.ok(id), message: this.brain.health.problem(id),
+    }));
+  }
+
   /** One tiny real call per picked brain, soon after start and every 6 hours, so a bad login shows before a job hits it. */
   checkBrainsSoon(firstMs = 20_000, everyMs = 6 * 3600_000) {
     if (this.healthTimer) clearTimeout(this.healthTimer);
@@ -2219,7 +2228,6 @@ export class Hub {
   /** A brain was signed out (tell you once, with a way to reconnect) or works again. */
   private async brainHealthChanged(id: string, ok: boolean, message: string | null) {
     const label = id === "claude" ? "Claude Code" : "Codex";
-    this.emit("brains");
     if (ok) { await this.log("brains.health", `${label} is signed in again`); return; }
     await this.log("brains.health", `${label} is signed out: ${message}`);
     const text = `${label} is signed out on this hub, so it can't think for the team (it said: “${message}”). `

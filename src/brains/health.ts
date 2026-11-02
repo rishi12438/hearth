@@ -29,13 +29,15 @@ export class BrainHealth {
   private states = new Map<string, BrainHealthState>();
   /** Called when a brain goes from fine to signed out, or back. */
   onChange: (s: BrainHealthState) => void = () => {};
+  /** Called whenever what the app shows changes, including a brain's first answer (for the sidebar's dots). */
+  onSeen: (s: BrainHealthState) => void = () => {};
   constructor(private clock: () => number = Date.now) {}
 
   signedOut(harness: string, message: string) {
     const was = this.states.get(harness);
     const s = { harness, ok: false, message, at: this.clock() };
     this.states.set(harness, s);
-    if (!was || was.ok) this.onChange(s);
+    if (!was || was.ok) { this.onChange(s); this.onSeen(s); }
   }
 
   fine(harness: string) {
@@ -43,6 +45,7 @@ export class BrainHealth {
     const s = { harness, ok: true, message: null, at: this.clock() };
     this.states.set(harness, s);
     if (was && !was.ok) this.onChange(s);
+    if (!was || !was.ok) this.onSeen(s);
   }
 
   /** The sign-in problem with this brain right now, or null. */
@@ -52,4 +55,6 @@ export class BrainHealth {
   }
 
   view(): BrainHealthState[] { return [...this.states.values()]; }
+  /** true = answered last time, false = signed out, null = hasn't been checked yet. */
+  ok(harness: string): boolean | null { const s = this.states.get(harness); return s ? s.ok : null; }
 }

@@ -323,6 +323,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           voice: voice?.current?.name ?? null,
           computers: await computerSummary(),
           brainProblems: await hub.brainProblems(),
+          brains: await hub.brainStatus(),
           tileKey,
         });
       }
