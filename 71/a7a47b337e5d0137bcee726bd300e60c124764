@@ -1,0 +1,28 @@
+src/setup/wizard.ts
+  s_c3abf54b0d0d60::t_cd1d13169155a8 9,34-37
+src/setup/keys.ts
+  s_c3abf54b0d0d60::t_1231354498d92c 1,5-7,10,12-15,17-22,25
+web/setup.html
+  s_c3abf54b0d0d60::t_cd1d13169155a8 27-28,54,65,104-105,144-145,147-149,167
+  s_c3abf54b0d0d60::t_e56e8831f07cbe 26,29
+mac/Hearth/main.swift
+  s_c3abf54b0d0d60::t_0821ddc4ae6fdb 112-124
+test/connectors.test.ts
+  s_c3abf54b0d0d60::t_6c414f88e6d38b 19-20,127-136
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "71a7a47b337e5d0137bcee726bd300e60c124764",
+  "prompts": {},
+  "sessions": {
+    "s_c3abf54b0d0d60": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5d7396f8-5253-434f-b3b7-b8db95db4fed",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
