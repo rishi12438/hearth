@@ -11,6 +11,8 @@ import { Computers, COPY_ITEMS, isCopyItem } from "./computers.ts";
 import { Machines, realE2b, realSsh, type E2b, type Ssh } from "./machines.ts";
 import { Vault } from "./vault.ts";
 import { Connect } from "./connectors/index.ts";
+import { chromeWorkspaces, slackCookie } from "./connectors/slack.ts";
+import { cleanFingerprint } from "./browser.ts";
 import { adminToken, isAdminRequest } from "./admin.ts";
 import { detectBrains } from "./brains/logins.ts";
 import { hasLogin, readLogin } from "./computer.ts";
@@ -507,6 +509,16 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (method === "GET" && !id) return json({ connectors: await connect.tiles() });
         ownerOnly();
         if (method === "POST" && id && seg[3] === "risk") { const r = await connect.acceptRisk(id, device.name); if (r.error) throw new HttpError(400, r.error); return json({ connectors: await connect.tiles() }); }
+        // Slack from your Chrome login: which workspaces it opens, so you can pick one (tokens stay on the hub).
+        if (method === "POST" && id === "slack" && seg[3] === "workspaces") {
+          if (!voiceLimiter.allow("slack-workspaces")) throw new HttpError(429, "Too many tries. Wait a few minutes.");
+          const b = await body(req);
+          const d = slackCookie(b.cookies);
+          if (!d) throw new HttpError(400, "That isn't a Slack login. Sign in to Slack in Chrome, then try again.");
+          const all = await chromeWorkspaces(d, cleanFingerprint(b.fingerprint)).catch(() => null);
+          if (!all) throw new HttpError(502, "Couldn't reach Slack.");
+          return json({ workspaces: all.map(({ domain, team, user }) => ({ domain, team, user })) });
+        }
         if (method === "PUT" && id) {
           if (!voiceLimiter.allow(`connect:${id}`)) throw new HttpError(429, "Too many tries. Wait a few minutes.");
           const r = await connect.add(id, await body(req), device.name);
