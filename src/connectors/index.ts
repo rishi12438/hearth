@@ -1,3 +1,4 @@
+import { webSender } from "./web-senders.ts";
 import type { Hub } from "../hub.ts";
 import type { Vault } from "../vault.ts";
 import type { VoiceSettings } from "../voice.ts";
@@ -40,6 +41,8 @@ export class Connect {
     // the Serper key for scripts that ask for it, and WhatsApp and Slack as trigger sources.
     hub.senders.whatsapp = { connected: () => this.whatsapp.connected(), send: (to, text) => this.whatsapp.send(to, text) };
     hub.senders.slack = { connected: () => this.slack.connected(), send: (to, text) => this.slack.send(to, text) };
+    hub.senders.gmail = { connected: () => hub.google.canSend(), send: (to, text, x) => hub.google.sendMail(to, x?.subject || "(no subject)", text, x?.threadId) };
+    for (const ch of ["instagram", "linkedin", "x"] as const) hub.senders[ch] = webSender(ch, (d) => hub.connections.cookies(d));
     hub.connections.extra = { whatsapp: () => this.whatsapp.connected() || this.whatsapp.linked(), slack: () => this.slack.connected() };
     hub.scripts.keys = (name) => (name === "serper" ? serperKey(vault) : null);
     registerSource(slackSource(() => this.slack));
@@ -105,6 +108,12 @@ export class Connect {
     return { value: true };
   }
 
-  async whatsappView() { return { ...(await this.whatsapp.status()), rules: await this.whatsapp.rules(), chats: this.whatsapp.chatList() }; }
+  async whatsappView() {
+    // Each chat with a one-line preview of its latest message Hearth kept (ignored chats have none: nothing is kept).
+    const last = new Map<string, string>();
+    for (const m of await this.whatsapp.recent(400)) if (!last.has(m.jid)) last.set(m.jid, `${m.fromMe ? "You: " : ""}${m.text}`.slice(0, 120));
+    const chats = this.whatsapp.chatList().map((c) => ({ ...c, last: last.get(c.jid) ?? null }));
+    return { ...(await this.whatsapp.status()), rules: await this.whatsapp.rules(), chats };
+  }
   setIgnore(patch: Partial<IgnoreRules>) { return this.whatsapp.setRules(patch); }
 }

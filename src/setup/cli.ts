@@ -19,7 +19,7 @@ const flag = (a: string[], f: string) => { const i = a.indexOf(f); return i >= 0
 const brainsOf = (v?: string): BrainId[] => (v || "").split(",").map((s) => s.trim()).filter(isBrainId);
 
 function printer(json: boolean) {
-  const icon: Record<Step["state"], string> = { start: "→", ok: "✓", warn: "!", fail: "✗", log: " ", done: "★" };
+  const icon: Record<Step["state"], string> = { start: "→", wait: "…", ok: "✓", warn: "!", fail: "✗", log: " ", done: "★" };
   return (s: Step) => {
     if (json) { console.log(JSON.stringify(s)); return; }
     console.log(s.state === "log" ? `      ${s.text}` : `  ${icon[s.state]} ${s.text}`);

@@ -24,7 +24,9 @@ export type IgnoreRules = {
 export const NO_RULES: IgnoreRules = { contacts: [], groups: [], allGroups: false, keywords: [], archived: false, muted: false };
 
 export type WaMessage = { id: string; createdAt: string; jid: string; chat: string; from: string; fromMe: boolean; group: boolean; text: string; at: string };
-export type ChatInfo = { jid: string; name: string; group: boolean; archived?: boolean; mutedUntil?: number };
+export type ChatInfo = { jid: string; name: string; group: boolean; archived?: boolean; mutedUntil?: number; /** ms of the latest message */ lastAt?: number };
+/** Baileys timestamps are seconds, sometimes as a protobuf Long. */
+const seconds = (t: any) => { const n = typeof t === "object" && t?.toNumber ? t.toNumber() : Number(t); return Number.isFinite(n) && n > 0 ? n : 0; };
 export type WaStatus = { state: "off" | "starting" | "qr" | "connected" | "signed-out" | "error"; qr?: string | null; me?: string | null; detail?: string | null; riskAccepted: boolean };
 
 const digits = (s: string) => s.replace(/\D/g, "");
@@ -109,7 +111,7 @@ export class WhatsApp {
   }
 
   /** Chats this link knows, for picking what to ignore. */
-  chatList(): ChatInfo[] { return [...this.chats.values()].sort((a, b) => Number(b.group) - Number(a.group) || a.name.localeCompare(b.name)).slice(0, 1000); }
+  chatList(): ChatInfo[] { return [...this.chats.values()].sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0) || a.name.localeCompare(b.name)).slice(0, 1000); }
 
   /** Recent messages that got through the ignore list, newest first. */
   async recent(limit = 50, jid?: string): Promise<WaMessage[]> {
@@ -118,7 +120,24 @@ export class WhatsApp {
   }
 
   /** Start (or resume) the link. The first time, this shows a QR code to scan. */
+  // The chat list (names, groups, last-active times; no message text) is kept on the hub, so it's there after a restart.
+  private keepTimer: ReturnType<typeof setTimeout> | null = null;
+  private keepChats() {
+    if (this.keepTimer) return;
+    this.keepTimer = setTimeout(() => {
+      this.keepTimer = null;
+      void this.store.put("settings", { id: "whatsapp-chats", createdAt: "1970-01-01T00:00:00.000Z", chats: this.chatList() }).catch(() => {});
+    }, 3000);
+    (this.keepTimer as any).unref?.();
+  }
+  private async loadChats() {
+    if (this.chats.size) return;
+    const kept = await this.store.get<any>("settings", "whatsapp-chats").catch(() => null);
+    for (const c of kept?.chats || []) if (c?.jid && !this.chats.has(c.jid)) this.chats.set(c.jid, c);
+  }
+
   async start() {
+    await this.loadChats();
     if (!(await this.riskAccepted())) throw new Error("Accept the WhatsApp ban-risk warning first.");
     if (this.sock || this.st === "starting") return;
     this.stopping = false;
@@ -131,7 +150,8 @@ export class WhatsApp {
     // WhatsApp closes the socket on an old client version, so ask for the current one (fall back to the built-in).
     const version = await B.fetchLatestBaileysVersion?.().then((v: any) => v?.version).catch(() => undefined);
     const silent: any = { level: "silent", child: () => silent, trace() {}, debug() {}, info() {}, warn() {}, error() {}, fatal() {} };
-    const sock: Sock = makeWASocket({ ...(version ? { version } : {}), auth: state, printQRInTerminal: false, logger: silent, browser: B.Browsers?.macOS?.("Hearth") ?? ["Hearth", "Desktop", "1.0"],
+    const sock: Sock = makeWASocket({ ...(version ? { version } : {}), auth: state, printQRInTerminal: false, logger: silent, // WhatsApp → Linked devices shows the first part as the device's name: just "Hearth".
+      browser: ["Hearth", "Desktop", "1.0"],
       markOnlineOnConnect: false, syncFullHistory: false });
     this.sock = sock;
     sock.ev.on("creds.update", saveCreds);
@@ -158,6 +178,13 @@ export class WhatsApp {
     sock.ev.on("chats.upsert", chatUpdate);
     sock.ev.on("chats.update", chatUpdate);
     sock.ev.on("contacts.upsert", (cs: any[]) => { for (const c of cs || []) this.chat(c.id, c.name || c.notify); });
+    // The recent-chats list WhatsApp sends right after linking (and on reconnect): names, and when each was last active.
+    sock.ev.on("messaging-history.set", ({ chats, contacts, messages }: any) => {
+      for (const c of contacts || []) this.chat(c.id, c.name || c.notify);
+      for (const c of chats || []) this.chat(c.id, c.name, c);
+      // Only the time of each recent message (to order the list like your phone does); history text isn't kept.
+      for (const m of messages || []) if (m?.key?.remoteJid && m.messageTimestamp) this.chat(m.key.remoteJid, undefined, { conversationTimestamp: m.messageTimestamp });
+    });
     sock.ev.on("groups.update", (gs: any[]) => { for (const g of gs || []) this.chat(g.id, g.subject); });
     sock.ev.on("messages.upsert", ({ messages, type }: any) => { if (type === "notify") for (const m of messages || []) void this.take(m); });
   }
@@ -168,7 +195,9 @@ export class WhatsApp {
     if (name) cur.name = String(name).slice(0, 100);
     if (c && "archived" in c) cur.archived = !!c.archived;
     if (c && "muteEndTime" in c) cur.mutedUntil = Number(c.muteEndTime) || 0;
+    if (c?.conversationTimestamp) cur.lastAt = Math.max(cur.lastAt || 0, seconds(c.conversationTimestamp) * 1000);
     this.chats.set(jid, cur);
+    this.keepChats();
   }
 
   /** One incoming message: ignore list first, then stored. */
@@ -179,6 +208,8 @@ export class WhatsApp {
     const group = isGroupJid(jid);
     const from = String(group ? raw.key.participant || "" : jid);
     if (raw.pushName && !group) this.chat(jid, raw.pushName);
+    // When it was last active, even if it's ignored (only the time: the text of an ignored chat is never kept).
+    this.chat(jid, undefined, { conversationTimestamp: raw.messageTimestamp || Math.floor(Date.now() / 1000) });
     const m = { jid, from, text, group };
     if (ignoredBecause(m, await this.rules(), this.chats.get(jid))) return null;
     const at = new Date(Number(raw.messageTimestamp || 0) * 1000 || Date.now()).toISOString();
@@ -208,6 +239,8 @@ export class WhatsApp {
     this.sock = null;
     rmSync(this.dir, { recursive: true, force: true });
     await this.store.clear("whatsapp");
+    this.chats.clear();
+    await this.store.remove("settings", "whatsapp-chats").catch(() => {});
     this.me = null; this.qr = null;
     this.set("off");
   }

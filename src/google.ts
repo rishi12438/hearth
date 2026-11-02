@@ -4,11 +4,13 @@ import type { Vault } from "./vault.ts";
 // Your Google account, connected with your own OAuth client (no Hearth app, no middleman): you make a client in
 // Google Cloud, paste its ID and secret, tap Connect, and Google hands this hub a refresh token. The client secret and
 // the token live in the hub's encrypted vault (vault.ts) with every other key, and never reach the model, the app or
-// an export. Read-only: Gmail and Calendar.
+// an export. Gmail (read, and send after your Approve) and Calendar (read).
 
 export const GOOGLE_SCOPES = [
   "openid", "email",
   "https://www.googleapis.com/auth/gmail.readonly",
+  // Sending only ever happens after you tap Approve on the exact email (hub.requestMessage).
+  "https://www.googleapis.com/auth/gmail.send",
   "https://www.googleapis.com/auth/calendar.readonly",
 ];
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -137,6 +139,23 @@ export class Google {
     if (res.status === 401) this.access = null;
     if (!res.ok) throw new Error(`Google answered ${res.status}: ${(await res.text()).slice(0, 200)}`);
     return res.json();
+  }
+
+  /** Connected with permission to send (connections made before sending existed need a reconnect). */
+  canSend() { return this.connected && (this.saved().scopes || []).some((x) => x.endsWith("/gmail.send")); }
+
+  /** Send a plain-text email from your account. `threadId` keeps a reply in its conversation. */
+  async sendMail(to: string, subject: string, text: string, threadId?: string) {
+    const enc = (v: string) => /[^\x20-\x7e]/.test(v) ? `=?UTF-8?B?${Buffer.from(v).toString("base64")}?=` : v;
+    const raw = [`To: ${to}`, `Subject: ${enc(subject)}`, "MIME-Version: 1.0", "Content-Type: text/plain; charset=UTF-8", "Content-Transfer-Encoding: 8bit", "", text].join("\r\n");
+    const res = await this.fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
+      method: "POST", headers: { Authorization: `Bearer ${await this.token()}`, "Content-Type": "application/json" }, signal: AbortSignal.timeout(20_000),
+      body: JSON.stringify({ raw: Buffer.from(raw).toString("base64url"), ...(threadId ? { threadId } : {}) }),
+    });
+    if (res.status === 401) this.access = null;
+    if (res.status === 403) throw new Error("Google didn't allow sending. Reconnect Google (Connectors → Google) and allow sending email.");
+    if (!res.ok) throw new Error(`Gmail answered ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    return String((await res.json()).id || "");
   }
 
   /** Newest first. query is Gmail search syntax (from:school.org newer_than:2d…). */

@@ -94,6 +94,9 @@ ${sourceDocs()}
 - memory.update {id, fact, importance?}   when a fact changed (the old one is kept as history)
 - memory.merge {ids, fact, notebook, importance}   combine duplicates
 - memory.forget {id}
+  PROJECTS: when CONTEXT.project is set, this ramble is part of that project (a folder of rambles). Its notebook's facts
+    come first in CONTEXT.memory; save anything learned about the project with notebook = CONTEXT.project.notebook, so the
+    next ramble in it knows it too.
 - memory.used {ids}   the memory ids you relied on for this reply (always include when you used any)
 - notebook.summary {name, summary}   1-2 sentence "where it stands" for a topic
 - place.add {name, here:true} or {name, lat, lon, radiusM?}   save a place for place hooks
@@ -116,8 +119,14 @@ ${sourceDocs()}
 - approval.request {summary, details, script, args}   ANYTHING that sends, posts, pays, books, deletes or changes something
     outside the hub goes through this: the user sees an Approve card and the hub runs it only after their tap.
     Scripts that do such things refuse to run any other way. Write summary as what will happen ("Email Sam: Tuesday works").
-- message.send {channel:"whatsapp"|"slack", to, text, summary}   draft a WhatsApp or Slack message (to = a WhatsApp chat id
-    or phone number, or a Slack channel/user id from what you read). It's only sent after the user taps Approve.
+- message.send {channel, to, text, summary}   draft a message for the user to approve; it's only sent after they tap Approve
+    (or right away for a chat they marked "Always allow"). channel and "to":
+      whatsapp   a WhatsApp chat id or phone number          slack   a Slack channel or user id from what you read
+      gmail      an email address; also subject, and threadId (from a mail you read) to reply in that conversation
+      instagram | linkedin | x   the conversation's link from reading that inbox (source.read), e.g.
+                 https://www.instagram.com/direct/t/…, https://www.linkedin.com/messaging/thread/…, https://x.com/messages/…
+                 Only replies in existing conversations; you can't start a new one on these.
+    If it says the app isn't connected (or Google can't send yet), tell the user what to connect instead of retrying.
 - skill.save {name, description, inputs:[{name,description}], kind, ...}   save how you did this so nobody works it out again:
     kind "recipe": steps:[...] in plain language, uses:[approved script names it needs]  (a recipe can't use anything else)
     kind "script": script:"<approved or just-proposed script name>"  (runs directly, no model, inputs become args in order)

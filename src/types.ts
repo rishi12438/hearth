@@ -89,7 +89,13 @@ export type Thread = Doc & { title: string; updatedAt: string; preview?: string;
   /** The channel name ("japan-trip"): from the plan, or set by you. Falls back to ramble-N. */
   channel?: string;
   /** Who named it: you (then it's never renamed for you) or Hearth. */
-  channelBy?: "you" | "hearth" };
+  channelBy?: "you" | "hearth";
+  /** The project this ramble is filed under, if any. */
+  projectId?: string };
+
+/** A folder of rambles ("Wedding", "Move to SF") with its own memory: teammates working in its rambles read and save
+ *  facts in its notebook, so what's learned in one ramble is there in the next. */
+export type Project = Doc & { name: string; emoji?: string; notebook: string; about?: string };
 
 export type Job = Doc & {
   threadId: string;
@@ -303,10 +309,12 @@ export type Approval = Doc & {
   jobId?: string;
   summary: string;
   details?: string;
-  action: { type: "script"; script: string; args: string[] } | { type: "message"; channel: "whatsapp" | "slack"; to: string; text: string };
+  action: { type: "script"; script: string; args: string[] } | { type: "message"; channel: Channel; to: string; text: string; subject?: string; threadId?: string };
   status: "pending" | "approved" | "rejected" | "done" | "failed";
   result?: string;
   decidedAt?: string;
+  /** Sent without asking, because you'd said "Always allow" for that chat. */
+  auto?: boolean;
 };
 
 /** A file on the hub: one you attached, or one a teammate or script made. Bytes live in <data>/files/<id>. */
@@ -364,3 +372,8 @@ export type Component = Doc & {
 
 /** What an app saved for itself (flashcard progress, ticked boxes). */
 export type AppState = Doc & { state: unknown };
+
+/** Where a teammate can send a message (each one only after your Approve, or a chat you said "Always allow" for). */
+export type Channel = "whatsapp" | "slack" | "gmail" | "instagram" | "linkedin" | "x";
+export const CHANNELS: Channel[] = ["whatsapp", "slack", "gmail", "instagram", "linkedin", "x"];
+export const CHANNEL_LABEL: Record<Channel, string> = { whatsapp: "WhatsApp", slack: "Slack", gmail: "Gmail", instagram: "Instagram", linkedin: "LinkedIn", x: "X" };

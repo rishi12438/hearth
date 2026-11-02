@@ -41,6 +41,17 @@
   .log { font:12px/1.5 var(--mono); color:var(--muted); background:#f4f2ef; border-radius:10px; padding:10px 12px; max-height:150px; overflow:auto; margin-top:14px; white-space:pre-wrap; display:none; }
   .qr { background:#fff; border:1px solid var(--line); border-radius:16px; padding:18px; width:240px; margin:8px auto 14px; } .qr svg { width:100%; height:auto; display:block; }
   .center { text-align:center; } .link { font:12px var(--mono); color:var(--muted); word-break:break-all; }
+  .steps .wait .i::after { content:""; display:inline-block; width:12px; height:12px; border:2px solid #f0d9b0; border-top-color:var(--warn); border-radius:50%; animation:spin 1.2s linear infinite; }
+  .guide { background:#fbf3e6; border-radius:12px; padding:14px 16px; margin-top:12px; color:#5c4210; font-size:14px; }
+  .guide b { display:block; font-size:15px; margin-bottom:4px; color:var(--ink); } .guide ol { margin:10px 0 10px; padding-left:20px; } .guide li { padding:2px 0; border:0; display:list-item; }
+  .guide .row { gap:10px; margin-top:12px; } .guide .small { font-size:12px; color:#8a6a2c; margin-top:8px; }
+  .guide button { padding:9px 16px; border-radius:10px; font-size:14px; } .guide button.second { padding:9px 16px; }
+  .steps .todo { color:var(--muted); } .steps .todo .i::after { content:"·"; }
+  .rec { width:100%; table-layout:fixed; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; margin:14px 0 4px; font-size:14px; }
+  .rec th { text-align:left; font-weight:500; color:var(--muted); width:110px; padding:9px 14px; border-bottom:1px solid var(--line); }
+  .rec td { font:14px var(--mono); padding:9px 14px; border-bottom:1px solid var(--line); } .rec tr:last-child th, .rec tr:last-child td { border-bottom:0; }
+  .rec td button { font:600 12px var(--font); padding:4px 10px; border-radius:7px; background:#f1eee9; color:var(--ink); float:right; }
+  .bar .r { display:flex; gap:10px; } .bar button.second { padding:12px 20px; border-radius:12px; }
   .warnbox { background:#fbf3e6; border-radius:12px; padding:12px 14px; font-size:13px; color:#7a5313; margin-top:12px; }
 </style>
 </head>
@@ -61,13 +72,33 @@ const MARKS = {
 const mark = (id) => `<svg viewBox="0 0 24 24" width="22" height="22"><path fill="#fff" d="${MARKS[id]}"/></svg>`;
 const dots = (n) => `<div class="dots">${[0, 1, 2, 3].map((i) => `<i class="${i <= n ? "on" : ""}"></i>`).join("")}</div>`;
 
+let restored = false;
 async function start() {
-  S.brains = (await api("/brains")).brains;
-  for (const b of S.brains) if (b.installed && b.loggedIn) S.picked.add(b.id);
+  // Setup already finished on this Mac: go to the hub (signing this Mac in if it isn't yet), not back through setup.
+  if (!restored) {
+    const { finished } = await api("/finished").catch(() => ({}));
+    if (finished?.url) { restored = true; S.where = "remote"; return openHub(finished); }
+  }
+  const [{ brains }, { draft }] = await Promise.all([api("/brains"), restored ? { draft: null } : api("/draft")]);
+  S.brains = brains;
+  const usable = new Set(S.brains.filter((b) => b.installed).map((b) => b.id));
+  if (draft) {
+    // Pick up where you left off: the same brains, hub and form, back on the screen you were on.
+    S.picked = new Set((draft.picked || []).filter((id) => usable.has(id)));
+    S.where = draft.where || S.where; Object.assign(S.f, draft.f || {}); S.step = draft.step || 0;
+  }
+  if (!restored && !S.picked.size) for (const b of S.brains) if (b.installed && b.loggedIn) S.picked.add(b.id);
+  restored = true;
+  const { id } = await api("/current").catch(() => ({}));
+  if (id) { draw(); follow(id); return; }
   draw();
 }
 
-function draw() { $("#app").innerHTML = [brainsView, whereView, runView, doneView][S.step](); bind(); }
+// Remembered on the Mac (not in the page: the window's address changes every time it opens).
+let saveTimer;
+const persist = () => { clearTimeout(saveTimer); saveTimer = setTimeout(() => api("/draft", { step: Math.min(S.step, 1), where: S.where, picked: [...S.picked], f: S.f }), 250); };
+
+function draw() { $("#app").innerHTML = [brainsView, whereView, runView, doneView][S.step](); bind(); if (S.step < 3) persist(); }
 
 function brainsView() {
   return `${dots(0)}<h1>Who do you want the brain to be?</h1>
@@ -112,24 +143,45 @@ function whereView() {
   <div class="bar"><button class="ghost" id="back">Back</button><button id="next">Set up</button></div>`;
 }
 
+// Everything a server setup does, so you can see what's still coming (including the Claude/Codex sign-ins).
+function plan() {
+  if (S.where !== "remote") return [];
+  return [["ssh", "Log in to the server"], ["dns", `Check ${S.f.domain} points at the server`], ["upload", "Send Hearth to the server"],
+    ["server", "Set up HTTPS, firewall and the hub"], ["reach", "Check the hub is reachable over HTTPS"],
+    ...(S.picked.has("claude") ? [["login-claude", "Sign Claude Code in on the hub (a browser opens once for you to approve)"]] : []),
+    ...(S.picked.has("codex") ? [["login-codex", "Copy Codex's login from this Mac to the hub"]] : []),
+    ["brains", "Pick the brains"], ["pair", "Get this Mac ready to pair as your main device"]];
+}
+
 function runView() {
   const main = S.steps.filter((s) => s.state !== "log" && s.step !== "end");
   const byStep = new Map(); for (const s of main) byStep.set(s.step, s);
   const logs = S.steps.filter((s) => s.state === "log" && s.text).slice(-60).map((s) => esc(s.text)).join("\n");
-  const failed = main.some((s) => s.state === "fail");
+  const failed = main.find((s) => s.state === "fail");
+  const rec = failed?.step === "dns" && failed.data?.record;
+  const todo = plan().filter(([id]) => !byStep.has(id)).map(([, text]) => ({ state: "todo", text }));
+  const row = (k, v, copy) => `<tr><th>${k}</th><td>${esc(v)}${copy ? `<button data-copy="${esc(v)}">Copy</button>` : ""}</td></tr>`;
+  const waiting = main.filter((s) => byStep.get(s.step) === s && s.state === "wait").pop();
+  const g = waiting?.data?.guide;
+  const guideBox = g ? `<div class="guide"><b>${esc(g.title)}</b>${esc(g.why)}
+    <ol>${g.steps.map((t) => `<li>${esc(t)}</li>`).join("")}</ol>
+    <div class="row"><button class="second" id="skipWait" data-step="${esc(waiting.step)}">Skip for now</button></div>
+    <div class="small">${esc(g.other)}</div></div>` : "";
+  const recBox = rec ? `<table class="rec">${row("Type", rec.type)}${row("Host", rec.host, 1)}${row("Value", rec.value, 1)}${row("TTL", rec.ttl)}</table>
+    <div class="hint">Some registrars call Value "IP Address" or "Points to". ${rec.host === "@" ? "Host @ means the domain itself." : `Host is just "${esc(rec.host)}", not the whole domain.`} It usually takes a few minutes to show up.
+    Or continue now: everything else gets set up, and HTTPS starts working on its own once the record is in.</div>` : "";
   return `${dots(2)}<h1>${failed ? "Setup stopped" : "Setting up…"}</h1><p class="sub">${S.where === "remote" ? esc(S.f.domain) : "This Mac"}</p>
-  <ul class="steps">${[...byStep.values()].map((s) => `<li class="${s.state}"><span class="i">${{ ok: "✓", warn: "!", fail: "✗", done: "★", start: "" }[s.state] ?? ""}</span><span>${esc(s.text)}</span></li>`).join("")}</ul>
+  <ul class="steps">${[...byStep.values(), ...todo].map((s) => `<li class="${s.state}"><span class="i">${{ ok: "✓", warn: "!", fail: "✗", done: "★", start: "", wait: "" }[s.state] ?? ""}</span><span class="grow">${esc(s.text)}${s === failed ? recBox : ""}${s === waiting ? guideBox : ""}</span></li>`).join("")}</ul>
   <div class="log" id="log" style="${logs ? "display:block" : ""}">${logs}</div>
-  ${failed ? `<div class="bar"><button class="ghost" id="back">Back</button><button id="retry">Try again</button></div>` : ""}`;
+  ${failed ? `<div class="bar"><button class="ghost" id="back">Back</button><span class="r">${rec ? `<button class="second" id="anyway">Continue anyway</button><button id="retry">Check again</button>` : `<button id="retry">Try again</button>`}</span></div>` : ""}`;
 }
 
 function doneView() {
   const r = S.result || {};
+  const host = String(r.url || "").replace(/^https?:\/\//, "").replace(/\/$/, "");
   return `${dots(3)}<h1>Hearth is ready</h1>
-  <p class="sub">${r.pair ? "Scan this with your phone's camera. That phone becomes your primary device: it approves every other device, like a router's admin." : "Your hub is running."}</p>
-  ${r.pair ? `<div class="qr" id="qr"></div><div class="center link">${esc(r.pair)}</div>` : ""}
-  <p class="sub" style="margin-top:22px">Next, add your connectors (Serper, Deepgram, WhatsApp, Slack, Instagram, LinkedIn) from the grid in Settings → Connectors.</p>
-  <div class="bar"><span></span><button id="open">${r.pair && S.where === "local" ? "Use Hearth on this Mac" : "Open Hearth"}</button></div>`;
+  <p class="sub">${r.pair ? `Your hub is live at <b>${esc(host || "your hub")}</b>. Next: this Mac signs in as your main device, then you add your phone and connect your accounts.` : `Your hub is live at <b>${esc(host)}</b>. It already has a main device, so sign in from there.`}</p>
+  <div class="bar"><span></span><button id="open">${r.pair ? "Continue" : `Open ${esc(host)}`}</button></div>`;
 }
 
 function bind() {
@@ -141,6 +193,9 @@ function bind() {
   $("#rescan") && ($("#rescan").onclick = start);
   $("#back") && ($("#back").onclick = () => { save(); S.step = Math.max(0, S.step === 2 ? 1 : S.step - 1); draw(); });
   $("#retry") && ($("#retry").onclick = install);
+  $("#skipWait") && ($("#skipWait").onclick = (e) => { e.target.disabled = true; e.target.textContent = "Skipping…"; api(`/install/${S.run}/skip`, { step: e.target.dataset.step }); });
+  $("#anyway") && ($("#anyway").onclick = () => { S.f.skipDns = true; install(); });
+  document.querySelectorAll("[data-copy]").forEach((el) => el.onclick = () => { navigator.clipboard?.writeText(el.dataset.copy); el.textContent = "Copied"; setTimeout(() => { el.textContent = "Copy"; }, 1200); });
   $("#keyFile") && ($("#keyFile").onchange = async (e) => {
     const file = e.target.files[0]; if (!file) return;
     save();
@@ -157,14 +212,25 @@ function bind() {
   };
   if (S.step === 3) {
     const r = S.result || {};
-    if (r.pair) api("/qr?text=" + encodeURIComponent(r.pair)).then((q) => { $("#qr").innerHTML = q.svg; });
-    $("#open").onclick = () => { location.href = (S.where === "local" && r.pair) ? r.pair : r.url; };
+    $("#open").onclick = () => openHub(r);
   }
+  document.querySelectorAll("input").forEach((el) => el.addEventListener("input", () => { save(); persist(); }));
+  for (const k of ["domain", "host"]) { const el = $("#" + k); if (el) el.addEventListener("blur", () => { save(); el.value = S.f[k]; }); }
   const log = $("#log"); if (log) log.scrollTop = log.scrollHeight;
+}
+
+async function openHub(r) {
+  if (!r.pair) { location.href = r.url; return; }
+  $("#app").innerHTML = `${dots(3)}<h1>Opening your hub…</h1><p class="sub">${esc(String(r.url || "").replace(/^https?:\/\//, ""))}</p>`;
+  const { name } = await api("/whoami").catch(() => ({}));
+  location.href = `${r.pair}&auto=1&name=${encodeURIComponent(name || "Mac")}`;
 }
 
 function save() {
   for (const k of ["host", "user", "domain", "email"]) { const el = $("#" + k); if (el) S.f[k] = el.value.trim(); }
+  // Pasted a link? Keep just the name: https://assistant.example.com/ → assistant.example.com (and ubuntu@1.2.3.4 → 1.2.3.4).
+  S.f.domain = S.f.domain.toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\//, "").split(/[\/?#:]/)[0].replace(/\.$/, "");
+  S.f.host = S.f.host.replace(/^[a-z]+:\/\//i, "").replace(/^[^@]*@/, "").replace(/\/.*$/, "").replace(/:\d+$/, "");
   for (const k of ["skipDns", "lan"]) { const el = $("#" + k); if (el) S.f[k] = el.checked; }
 }
 const payload = () => ({ where: S.where, brains: [...S.picked].join(","), ...S.f });
@@ -172,14 +238,40 @@ const payload = () => ({ where: S.where, brains: [...S.picked].join(","), ...S.f
 async function install() {
   S.step = 2; S.steps = []; draw();
   const { id } = await api("/install", payload());
-  const es = new EventSource(`/install/${id}/events?k=${KEY}`);
-  es.onmessage = (e) => {
-    const s = JSON.parse(e.data);
-    if (s.step === "end") { es.close(); return; }
-    S.steps.push(s);
-    if (s.state === "done") { S.result = s.data; S.step = 3; es.close(); }
-    draw();
+  follow(id);
+}
+
+// Follow a run's progress. The hub replays every step on each connect, so a dropped line just reconnects and catches
+// up; only if setup on this Mac is really gone (several tries fail) does the window say so.
+function follow(id) {
+  S.run = id; S.step = 2;
+  let misses = 0;
+  const open = () => {
+    const es = new EventSource(`/install/${id}/events?k=${KEY}`);
+    let fresh = true;
+    es.onmessage = (e) => {
+      if (fresh) { S.steps = []; fresh = false; }
+      misses = 0;
+      const s = JSON.parse(e.data);
+      if (s.step === "end") { es.close(); return; }
+      S.steps.push(s);
+      if (s.state === "done") {
+        S.result = s.data; es.close();
+        // Straight to the hub's own website, signed in as this Mac, on "Finish setting up" (devices, connectors).
+        if (s.data?.pair) { openHub(s.data); return; }
+        S.step = 3;
+      }
+      draw();
+    };
+    es.onerror = () => {
+      es.close();
+      if (S.step !== 2 || S.steps.some((s) => s.state === "fail" || s.state === "done")) return;
+      if (++misses < 6) { setTimeout(open, 2000); return; }
+      S.steps.push({ step: "lost", state: "fail", text: "Lost contact with setup on this Mac. Your server keeps setting itself up; Try again picks it back up." });
+      draw();
+    };
   };
+  open();
 }
 
 start();

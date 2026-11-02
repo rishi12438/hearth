@@ -97,6 +97,34 @@ describe("the grid", () => {
     expect((await hub.requestMessage({ channel: "slack", to: "C1", text: "x" }, {})).error).toContain("isn't connected");
   });
 
+  test("\"Always allow\" on one chat sends its next messages without asking; other chats still ask", async () => {
+    const out: string[] = [];
+    hub.senders.whatsapp = { connected: () => true, send: async (to, text) => { out.push(`${to}: ${text}`); return "id"; } };
+    const first = (await hub.requestMessage({ channel: "whatsapp", to: "15550111", text: "On my way" }, {})).value!;
+    await hub.decideApproval(first.id, true, true);
+    expect(await hub.alwaysAllowed()).toContain("whatsapp:15550111");
+    const next = (await hub.requestMessage({ channel: "whatsapp", to: "15550111", text: "Here" }, {})).value!;
+    expect(next).toMatchObject({ status: "done", auto: true });
+    expect(out).toEqual(["15550111: On my way", "15550111: Here"]);
+    const other = (await hub.requestMessage({ channel: "whatsapp", to: "15550222", text: "Hi" }, {})).value!;
+    expect(other.status).toBe("pending");
+    await hub.setAlwaysAllowed([]);
+    expect((await hub.requestMessage({ channel: "whatsapp", to: "15550111", text: "Again" }, {})).value!.status).toBe("pending");
+  });
+
+  test("Gmail sends to an email address after Approve, with its subject; a reply stays in its thread", async () => {
+    const out: any[] = [];
+    hub.senders.gmail = { connected: () => true, send: async (to, text, x) => { out.push({ to, text, ...x }); return "id"; } };
+    expect((await hub.requestMessage({ channel: "gmail", to: "Sam", text: "hi" }, {})).error).toContain("email address");
+    const ap = (await hub.requestMessage({ channel: "gmail", to: "sam@example.com", subject: "Tuesday", text: "Tuesday works.", threadId: "t1" }, {})).value!;
+    expect(ap.status).toBe("pending");
+    await hub.decideApproval(ap.id, true);
+    expect(out).toEqual([{ to: "sam@example.com", text: "Tuesday works.", subject: "Tuesday", threadId: "t1" }]);
+    hub.senders.gmail = { connected: () => false, send: async () => "" };
+    expect((await hub.requestMessage({ channel: "gmail", to: "sam@example.com", text: "x" }, {})).error).toBeTruthy();
+    expect((await hub.requestMessage({ channel: "fax", to: "1", text: "x" }, {})).error).toContain("channel is one of");
+  });
+
   test("picking brains moves every role onto a picked one", async () => {
     await hub.setPrefs({ brainPool: ["echo"] as any });
     expect((await hub.setBrainPool(["nope"])).error).toBeTruthy();

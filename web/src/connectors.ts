@@ -40,7 +40,7 @@ const LOGOS: Record<string, { bg: string; shapes: Shape[] }> = {
   claude: { bg: "#D97757", shapes: [["path", { d: CLAUDE_MARK, fill: "#fff" }]] },
   codex: { bg: "#000", shapes: [["path", { d: OPENAI_MARK, fill: "#fff" }]] },
   serper: { bg: "#1A73E8", shapes: [["circle", { cx: 10.5, cy: 10.5, r: 5, fill: "none", stroke: "#fff", "stroke-width": 2.2 }], ["path", { d: "M14.5 14.5 19 19", stroke: "#fff", "stroke-width": 2.4, "stroke-linecap": "round" }]] },
-  deepgram: { bg: "#13EF93", shapes: [["path", { d: "M6 10v4M9 7v10M12 9v6M15 5v14M18 10v4", stroke: "#0b2a1c", "stroke-width": 2, "stroke-linecap": "round" }]] },
+  deepgram: { bg: "#101012", shapes: [["path", { d: "M6 10v4M9 7v10M12 9v6M15 5v14M18 10v4", stroke: "#13EF93", "stroke-width": 2, "stroke-linecap": "round" }]] },
   whatsapp: { bg: "#25D366", shapes: [["path", { d: "M12 4.5a7.5 7.5 0 0 0-6.4 11.4L4.5 19.5l3.7-1.1A7.5 7.5 0 1 0 12 4.5z", fill: "none", stroke: "#fff", "stroke-width": 1.8, "stroke-linejoin": "round" }],
     ["path", { d: "M9.3 9.2c.3 2.6 2.4 4.8 5.2 5.4", fill: "none", stroke: "#fff", "stroke-width": 1.8, "stroke-linecap": "round" }]] },
   slack: { bg: "#4A154B", shapes: [["path", { d: "M10 4.5v6M14 13.5v6M4.5 14h6M13.5 10h6", stroke: "#fff", "stroke-width": 2.6, "stroke-linecap": "round" }]] },
@@ -66,6 +66,23 @@ const GROUPS: [string, (t: Tile) => boolean][] = [
   ["Messaging & social", (t) => t.kind === "account"],
 ];
 const STATE_LABEL: Record<Tile["state"], string> = { connected: "Connected", off: "Add", "needs-you": "Needs you", "not-installed": "Not installed" };
+
+/** The same connectors as quiet rows (logo, name, one line, status), grouped: for the "Finish setting up" screen. */
+export function rows(tiles: Tile[]): HTMLElement[] {
+  return GROUPS.flatMap(([name, pick]) => {
+    const list = tiles.filter(pick);
+    if (!list.length) return [];
+    return [h("div", { class: "wsec" }, name), h("div", { class: "wcard" }, list.map((t) =>
+      h("button", { class: "wrow", on: { click: () => openTile(t) } },
+        logo(t.id, 34),
+        h("span", { class: "grow" }, h("b", null, t.label),
+          h("small", null, t.kind === "brain" && t.usage && t.state === "connected" ? usageLine(t.usage) : t.blurb)),
+        t.state === "connected" ? h("span", { class: "wst on" }, "Connected")
+          : t.state === "needs-you" ? h("span", { class: "wst warn" }, "Needs you")
+          : t.state === "not-installed" ? h("span", { class: "wst" }, "Not installed")
+          : h("span", { class: "wadd" }, "Connect"))))];
+  });
+}
 
 export async function loadTiles(): Promise<Tile[]> { return (await call("/api/connectors")).connectors; }
 
@@ -231,34 +248,79 @@ function qrImage(text: string) {
   return wrap;
 }
 
+// Linked: your chats, like WhatsApp Web's list, each with Ignore. Rules that aren't one chat (all groups, archived,
+// muted, words) sit under "More". Typing in search or switching tabs redraws only the list, so focus stays put.
 function linked(s: any): any[] {
   const r = s.rules;
   const chats: any[] = s.chats || [];
-  const nameOf = (id: string) => chats.find((c) => c.jid === id)?.name || id.replace(/@.*/, "");
-  const save = async (patch: any) => { try { await call("/api/whatsapp/ignore", { method: "PUT", body: patch }); void whatsappSheet(); } catch (e) { D.handleError(e); } };
-  const edit = async (kind: string, value: string, remove = false) => { try { await call("/api/whatsapp/ignore", { body: { kind, value, remove } }); void whatsappSheet(); } catch (e) { D.handleError(e); } };
-  const chip = (label: string, onX: () => void) => h("span", { class: "chip" }, label, h("button", { class: "chipx", title: "Stop ignoring", on: { click: onX } }, icon("x", 12)));
-  const toggle = (label: string, on: boolean, key: string) => h("label", { class: "toggle-row" }, h("span", { class: "grow" }, label),
-    h("input", { type: "checkbox", checked: on, on: { change: (e: Event) => save({ [key]: (e.target as HTMLInputElement).checked }) } }));
-  const pick = h("select", { class: "field" }, h("option", { value: "" }, "Ignore a chat…"),
-    chats.filter((c) => !r.contacts.includes(c.jid) && !r.groups.includes(c.jid)).map((c) => h("option", { value: c.jid }, `${c.group ? "Group · " : ""}${c.name}`))) as HTMLSelectElement;
-  pick.onchange = () => { const c = chats.find((x) => x.jid === pick.value); if (c) void edit(c.group ? "group" : "contact", c.jid); };
-  const num = h("input", { class: "field", placeholder: "Or a phone number, like +1 555 0100", inputmode: "tel" }) as HTMLInputElement;
-  const word = h("input", { class: "field", placeholder: "A word or phrase, like OTP" }) as HTMLInputElement;
+  // Ignoring a chat or flipping a rule updates the list in place, so your search, tab and scroll stay where they were.
+  const edit = async (kind: string, value: string, remove = false) => {
+    try { const res = await call("/api/whatsapp/ignore", { body: { kind, value, remove } }); Object.assign(r, res.rules); if (kind === "keyword") return void whatsappSheet(); drawTabs(); drawList(); }
+    catch (e) { D.handleError(e); }
+  };
+  const save = async (patch: any) => { try { const res = await call("/api/whatsapp/ignore", { method: "PUT", body: patch }); Object.assign(r, res.rules); drawTabs(); drawList(); } catch (e) { D.handleError(e); } };
+  const isIgnored = (c: any) => r.contacts.includes(c.jid) || r.groups.includes(c.jid) || (c.group && r.allGroups);
+  const byRule = (c: any) => !r.contacts.includes(c.jid) && !r.groups.includes(c.jid);
+  let q = "", tab: "all" | "groups" | "ignored" = "all";
+  const list = h("div", { class: "wa-list" });
+  const time = (ms?: number) => {
+    if (!ms) return "";
+    const d = new Date(ms), now = new Date();
+    if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const days = (now.getTime() - ms) / 864e5;
+    return days < 7 ? d.toLocaleDateString([], { weekday: "short" }) : d.toLocaleDateString([], { day: "numeric", month: "short" });
+  };
+  const avatar = (c: any) => h("span", { class: `wa-av ${c.group ? "g" : ""}` }, c.group ? icon("users", 18) : (c.name.replace(/[^\p{L}\p{N}]/gu, "").slice(0, 1) || "#").toUpperCase());
+  // Like your phone: chats with recent activity, newest first. Everything else (old groups, unnamed ones) is found
+  // by searching, so thousands of groups don't bury the ones you actually use.
+  const named = (c: any) => !/^\d{6,}$/.test(c.name);
+  const drawList = () => {
+    const inTab = (c: any) => tab === "all" ? !!c.lastAt : tab === "groups" ? c.group && !!c.lastAt : isIgnored(c);
+    const shown = chats.filter((c) => q ? c.name.toLowerCase().includes(q) && (named(c) || c.name.includes(q)) && (tab !== "ignored" || isIgnored(c)) && (tab !== "groups" || c.group) : inTab(c));
+    clear(list, shown.length ? shown.slice(0, 300).map((c) => {
+      const off = isIgnored(c);
+      return h("div", { class: `wa-row ${off ? "off" : ""}` },
+        avatar(c),
+        h("span", { class: "grow" },
+          h("span", { class: "wa-top" }, h("b", null, c.name), h("time", null, time(c.lastAt))),
+          h("small", null, off ? (c.group && r.allGroups && byRule(c) ? "Ignored · all groups are ignored" : "Ignored · Hearth never sees it") : c.last || (c.group ? "Group" : "Chat"))),
+        c.group && r.allGroups && byRule(c) ? null
+          : h("button", { class: `wa-btn ${off ? "on" : ""}`, on: { click: () => edit(c.group ? "group" : "contact", c.jid, off) } }, off ? "Ignored" : "Ignore"));
+    }) : h("p", { class: "wa-empty" }, q ? "No chats match." : tab === "ignored" ? "Nothing ignored yet. Tap Ignore on any chat."
+      : "Your recent chats show up here as messages come in. Search to find any chat or group."));
+  };
+  const tabs = h("div", { class: "wa-tabs" });
+  const drawTabs = () => {
+    const n = chats.filter(isIgnored).length;
+    clear(tabs, ([["all", "All"], ["groups", "Groups"], ["ignored", n ? `Ignored ${n}` : "Ignored"]] as const).map(([k, label]) =>
+      h("button", { class: `wa-tab ${tab === k ? "on" : ""}`, on: { click: () => { tab = k; drawTabs(); drawList(); } } }, label)));
+  };
+  const search = h("input", { class: "wa-search", placeholder: `Search all ${chats.length > 50 ? chats.length + " " : ""}chats and groups`, type: "search", on: { input: (e: Event) => { q = (e.target as HTMLInputElement).value.trim().toLowerCase(); drawList(); } } });
+  drawTabs(); drawList();
+  const sw = (label: string, sub: string, on: boolean, key: string) => h("label", { class: "wa-rule" }, h("span", { class: "grow" }, h("b", null, label), h("small", null, sub)),
+    h("input", { type: "checkbox", class: "wa-switch", checked: on, on: { change: (e: Event) => save({ [key]: (e.target as HTMLInputElement).checked }) } }));
+  const word = h("input", { class: "wa-search", placeholder: "Ignore messages containing… (like OTP)" }) as HTMLInputElement;
+  const phone = s.me ? `+${s.me}` : "";
   return [
-    h("div", { class: "phero" }, logo("whatsapp", 52), h("b", null, "WhatsApp is linked"), h("small", null, s.me ? `+${s.me} · teammates read new messages, and only send after your Approve` : "Linked")),
-    h("h4", null, "Ignore"),
-    h("p", { class: "muted small" }, "Messages from these never reach Hearth: they aren't stored, and no model sees them."),
-    h("div", { class: "list pad" },
-      toggle("All groups", r.allGroups, "allGroups"),
-      toggle("Archived chats", r.archived, "archived"),
-      toggle("Muted chats", r.muted, "muted")),
-    h("div", { class: "chips" }, [...r.contacts.map((c: string) => chip(nameOf(c), () => edit("contact", c, true))),
-      ...(r.allGroups ? [] : r.groups.map((g: string) => chip(`Group · ${nameOf(g)}`, () => edit("group", g, true)))),
-      ...r.keywords.map((k: string) => chip(`“${k}”`, () => edit("keyword", k, true)))]),
-    chats.length ? pick : null,
-    h("div", { class: "row2" }, num, h("button", { class: "btn ghost", on: { click: () => num.value.trim() && edit("contact", num.value.trim()) } }, "Ignore")),
-    h("div", { class: "row2" }, word, h("button", { class: "btn ghost", on: { click: () => word.value.trim() && edit("keyword", word.value.trim()) } }, "Ignore")),
-    h("button", { class: "btn danger-ghost", on: { click: () => D.confirmSheet("Unlink WhatsApp?", "Hearth signs out of WhatsApp and deletes the messages it kept.", "Unlink", async () => { await call("/api/connectors/whatsapp", { method: "DELETE" }); toast("WhatsApp unlinked"); D.back(); }) } }, "Unlink WhatsApp"),
+    h("div", { class: "wa-head" }, logo("whatsapp", 40), h("span", { class: "grow" }, h("b", null, "WhatsApp is linked"), h("small", null, `${phone ? phone + " · " : ""}Teammates read new messages and only send after you Approve`))),
+    h("p", { class: "wa-note" }, "Ignore a chat and its messages never reach Hearth: not stored, never shown to a model."),
+    // Linked before Hearth kept track of recent chats: WhatsApp only sends that list while linking, so offer a relink.
+    chats.filter((c) => c.lastAt).length < 5 ? h("div", { class: "wa-relink" },
+      h("span", { class: "grow" }, h("b", null, "Load your recent chats"),
+        h("small", null, "WhatsApp sends your recent chats only while linking. Relink once (scan the QR again, about 20 seconds) and this list matches your phone. Messages Hearth kept so far are cleared; ignore settings stay.")),
+      h("button", { class: "wa-btn dark", on: { click: async (e: Event) => {
+        (e.currentTarget as HTMLButtonElement).disabled = true;
+        try { await call("/api/connectors/whatsapp", { method: "DELETE" }); await call("/api/connectors/whatsapp", { method: "PUT", body: {} }); } catch (x) { D.handleError(x); }
+        void whatsappSheet();
+      } } }, "Relink")) : null,
+    search, tabs, list,
+    h("details", { class: "wa-more" }, h("summary", null, "More ways to ignore"),
+      h("div", { class: "wcard" },
+        sw("All groups", "Every group chat, now and later", r.allGroups, "allGroups"),
+        sw("Archived chats", "Whatever you've archived in WhatsApp", r.archived, "archived"),
+        sw("Muted chats", "Whatever you've muted in WhatsApp", r.muted, "muted")),
+      h("div", { class: "wa-words" }, word, h("button", { class: "wa-btn", on: { click: () => word.value.trim() && edit("keyword", word.value.trim()) } }, "Add")),
+      r.keywords.length ? h("div", { class: "chips" }, r.keywords.map((k: string) => h("span", { class: "chip" }, `“${k}”`, h("button", { class: "chipx", title: "Stop ignoring", on: { click: () => edit("keyword", k, true) } }, icon("x", 12))))) : null),
+    h("button", { class: "wa-unlink", on: { click: () => D.confirmSheet("Unlink WhatsApp?", "Hearth signs out of WhatsApp and deletes the messages it kept.", "Unlink", async () => { await call("/api/connectors/whatsapp", { method: "DELETE" }); toast("WhatsApp unlinked"); D.back(); }) } }, "Unlink WhatsApp"),
   ];
 }

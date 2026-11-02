@@ -83,7 +83,7 @@ async function connect(g: Google = hub.google) {
   return g.finish("good", url.searchParams.get("state")!);
 }
 
-test("connecting: your client, Google's consent with read-only scopes, a refresh token kept privately", async () => {
+test("connecting: your client, Google's consent (read, and send after Approve), a refresh token kept privately", async () => {
   const g = hub.google;
   expect(g.setClient("not-a-client", "x").error).toContain("client ID");
   expect(g.authUrl("https://x/cb").error).toContain("client ID");
@@ -92,7 +92,9 @@ test("connecting: your client, Google's consent with read-only scopes, a refresh
   expect(url.host).toBe("accounts.google.com");
   expect(url.searchParams.get("access_type")).toBe("offline");
   expect(url.searchParams.get("scope")).toContain("gmail.readonly");
-  expect(url.searchParams.get("scope")).not.toContain("gmail.send");
+  // Sending is asked for (it only happens after an Approve); nothing that changes or deletes mail is.
+  expect(url.searchParams.get("scope")).toContain("gmail.send");
+  expect(url.searchParams.get("scope")).not.toMatch(/gmail\.modify|mail\.google\.com|gmail\.compose/);
   expect((await g.finish("good", "made-up-state")).error).toContain("expired");
   const r = await g.finish("good", url.searchParams.get("state")!);
   expect(r.value).toMatchObject({ connected: true, email: "rishi@example.com" });

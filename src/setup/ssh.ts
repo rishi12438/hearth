@@ -11,7 +11,7 @@ export const remoteHearth = (args: string) => `sudo -iu hearth bash -lc 'cd ${AP
 export const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
 export function sshArgs(o: SshTarget) {
-  return ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=20",
+  return ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
     ...(o.key ? ["-i", o.key.replace(/^~(?=\/)/, homedir())] : []), ...(o.port ? ["-p", String(o.port)] : []), `${o.user}@${o.host}`];
 }
 
@@ -37,7 +37,7 @@ export async function ssh(o: SshTarget, cmd: string, opts: { stdin?: string | Ui
 
 /** Hearth's own files as a .tar.gz (no node_modules, data or .env). */
 export async function tarball(src: string): Promise<Uint8Array> {
-  const p = Bun.spawn(["tar", "czf", "-", "--exclude", "../node_modules", "--exclude", "../data", "--exclude", "../.env", "--exclude", "../.git", "--exclude", "../mac/build", "."],
+  const p = Bun.spawn(["tar", "czf", "-", "--exclude", "./node_modules", "--exclude", "./data", "--exclude", "./.env", "--exclude", "./.git", "--exclude", "./mac/build", "."],
     { cwd: src, stdout: "pipe", stderr: "pipe", env: { ...process.env, COPYFILE_DISABLE: "1" } });
   const buf = new Uint8Array(await new Response(p.stdout).arrayBuffer());
   if ((await p.exited) !== 0) throw new Error(`Couldn't pack Hearth's files: ${await new Response(p.stderr).text()}`);

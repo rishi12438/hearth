@@ -18,6 +18,9 @@ import type { Vault } from "./vault.ts";
 import { SOURCES, sourceById, formatItems, needOf } from "./sources/index.ts";
 import { recall, isActive, validateFact } from "./memory.ts";
 import { describeLocal, inQuietHours, quietEndsAt, localDate, distanceMeters } from "./time.ts";
+import { CHANNELS, CHANNEL_LABEL, type Channel } from "./types.ts";
+import { badChatLink } from "./connectors/web-senders.ts";
+import type { Project } from "./types.ts";
 import type { ConnAudit, TriggerRecipe, Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
 import { Library, validateSkill, validateWorkflow, validateTriggerRecipe, fillDeep, fill, type LibraryItem } from "./library.ts";
 import { cleanTile, cleanOptions, extractTiles, type Tile } from "./tiles.ts";
@@ -112,6 +115,7 @@ export class Hub {
   private memoryLock = new Lock();
   private started = new Set<string>();   // job ids already handed to runJob
   private stops = new Map<string, AbortController>(); // running jobs, so a new message can restart one
+  private cancelled = new Set<string>();              // running jobs you tapped Stop on
   private additions = new Map<string, string[]>();    // what the user added to a running job, applied when it restarts
   private inflight = 0;                   // orchestrations, splits and retries still running
   private rambleSpend = new Map<string, number>(); // message id -> USD
@@ -124,6 +128,8 @@ export class Hub {
     readonly apps: Apps = new Apps(store),
   ) {
     brain.pool = () => this.brainPool();
+    // Every phone notification also goes out on the live stream, so the Mac app can show it as a Mac notification.
+    if (push) push.onSend = (payload, only) => this.emit("notify", { ...payload, only: only ?? null });
   }
 
   // ---------- plumbing ----------
@@ -190,7 +196,7 @@ export class Hub {
 
   // ---------- context for the brain ----------
 
-  async context(query: string, mode: BrainInput["mode"], teammate?: Teammate | null) {
+  async context(query: string, mode: BrainInput["mode"], teammate?: Teammate | null, threadId?: string) {
     const now = this.clock();
     const prefs = await this.prefs();
     // The voice pass only writes the answer from the legwork notes: who it is, who the user is, the time. Nothing else.
@@ -203,7 +209,11 @@ export class Hub {
       };
     }
     const facts = await this.store.all<Fact>("memory");
-    const memory = mode === "review" ? facts.filter((f) => isActive(f, now)) : recall(facts, query, 40, now);
+    // In a project's ramble: everything in its notebook comes first, then what's relevant from the rest.
+    const project = await this.projectOf(threadId);
+    const own = project ? facts.filter((f) => f.notebook === project.notebook && isActive(f, now)).slice(-30) : [];
+    const memory = mode === "review" ? facts.filter((f) => isActive(f, now))
+      : [...own, ...recall(facts.filter((f) => !own.includes(f)), query, 40 - own.length, now)];
     const hooks = (await this.store.all<Hook>("hooks")).filter((h) => h.status !== "done" && h.source !== "system");
     const places = await this.store.all<Place>("places");
     const fix = (await this.store.recent<LocationFix>("locations", 1))[0];
@@ -231,6 +241,8 @@ export class Hub {
       location,
       places: places.map((p) => ({ name: p.name, radiusM: p.radiusM })),
       sources: SOURCES.map((s) => ({ id: s.id, label: s.label, connected: typeof s.needs === "function" ? undefined : this.connections.connected(s.needs) })),
+      ...(project ? { project: { name: project.name, notebook: project.notebook, about: project.about || undefined,
+        rambles: (await this.store.all<Thread>("threads")).filter((t) => t.projectId === project.id).map((t) => channelOf(t)).slice(0, 20) } } : {}),
       memory: memory.map((f) => ({ id: f.id, fact: f.fact, notebook: f.notebook, importance: f.importance, ...(f.expiresAt ? { expiresAt: f.expiresAt } : {}) })),
       notebooks: (await this.store.all<Notebook>("notebooks")).map((n) => ({ name: n.name, summary: n.summary })),
       // Every plan while there are few; with many, the ones that match this request plus the newest (search finds the rest).
@@ -254,7 +266,7 @@ export class Hub {
     const { teammate, extra } = opts;
     const profile = opts.profile || (await this.brains()).workhorse;
     const where = { teammateId: teammate?.id, threadId: opts.threadId, jobId: opts.jobId, recipe: opts.allowedScripts };
-    const ctx = await this.context(input, mode, teammate);
+    const ctx = await this.context(input, mode, teammate, opts.threadId);
     const first = parseReply(await this.brain.think({ mode, context: ctx, input, toolResults: extra }, profile, opts.meter));
     if (first.text.includes(ESCALATE)) return { text: ESCALATE, did: [] as Done[], used: [] as string[] };
     const applied = await this.applyActions(first.actions, evidence, where);
@@ -287,7 +299,7 @@ export class Hub {
       scriptTiles.push(...ex.tiles);
       results.push(`## ${r.name}\n${ex.text}${ex.tiles.length ? `\n(${ex.tiles.length} tile(s) already shown to the user)` : ""}`);
     }
-    const ctx2 = await this.context(input, mode, teammate);
+    const ctx2 = await this.context(input, mode, teammate, opts.threadId);
     const second = parseReply(await this.brain.think({ mode, context: ctx2, input, toolResults: [extra, ...results].filter(Boolean).join("\n\n") }, profile, opts.meter));
     const applied2 = await this.applyActions(second.actions.filter((a: any) => a?.type !== "script.run"), evidence, where);
     const tiles = [...applied.tiles, ...applied2.tiles, ...scriptTiles].slice(0, 4);
@@ -379,6 +391,74 @@ export class Hub {
   }
 
   /** Name a ramble's channel ("japan-trip"). Names are lowercase words and dashes, unique among rambles. */
+  // ---------- projects: folders of rambles, each with its own memory notebook ----------
+
+  async projectOf(threadId?: string): Promise<Project | null> {
+    if (!threadId) return null;
+    const t = await this.store.get<Thread>("threads", threadId);
+    return t?.projectId ? await this.store.get<Project>("projects", t.projectId) : null;
+  }
+
+  async listProjects() {
+    const threads = (await this.store.all<Thread>("threads")).filter((t) => t.projectId);
+    return (await this.store.all<Project>("projects")).sort((a, b) => a.name.localeCompare(b.name))
+      .map((p) => ({ ...p, rambles: threads.filter((t) => t.projectId === p.id).length }));
+  }
+
+  async createProject(name: string, emoji?: string) {
+    const n = name.trim().slice(0, 60);
+    if (!n) return { error: "Give the project a name." };
+    if ((await this.store.all<Project>("projects")).some((p) => p.name.toLowerCase() === n.toLowerCase())) return { error: `There's already a project called ${n}.` };
+    const p = await this.store.put<Project>("projects", { ...this.doc({}), name: n, emoji: emoji?.slice(0, 8) || undefined, notebook: `project-${(slugOf(n) || "project").slice(0, 31)}` } as Project);
+    await this.log("project.created", n);
+    this.emit("projects");
+    return { value: p };
+  }
+
+  async updateProject(id: string, patch: { name?: string; emoji?: string; about?: string }) {
+    const p = await this.store.get<Project>("projects", id);
+    if (!p) return { error: "No such project." };
+    const next = { ...p, ...(patch.name?.trim() ? { name: patch.name.trim().slice(0, 60) } : {}), ...(patch.emoji !== undefined ? { emoji: patch.emoji.slice(0, 8) || undefined } : {}),
+      ...(patch.about !== undefined ? { about: patch.about.slice(0, 1000) || undefined } : {}), updatedAt: this.clock().toISOString() };
+    await this.store.put("projects", next);
+    this.emit("projects");
+    return { value: next };
+  }
+
+  /** Delete a project: its rambles stay (just not filed), and its memory stays in your memory. */
+  async removeProject(id: string) {
+    const p = await this.store.get<Project>("projects", id);
+    if (!p) return false;
+    for (const t of (await this.store.all<Thread>("threads")).filter((t) => t.projectId === id)) await this.store.put("threads", { ...t, projectId: undefined });
+    await this.store.remove("projects", id);
+    await this.log("project.removed", p.name);
+    this.emit("projects"); this.emit("threads");
+    return true;
+  }
+
+  /** File a ramble under a project (or take it out with null). */
+  async fileThread(threadId: string, projectId: string | null) {
+    const t = await this.store.get<Thread>("threads", threadId);
+    if (!t || t.id.startsWith("tm-") || t.id === "main") return { error: "No such ramble." };
+    if (projectId && !(await this.store.get<Project>("projects", projectId))) return { error: "No such project." };
+    const saved = await this.store.put<Thread>("threads", { ...t, projectId: projectId || undefined });
+    this.emit("threads"); this.emit("projects");
+    return { value: saved };
+  }
+
+  /** A project's page: its rambles, what's in its memory, and files from its rambles. */
+  async projectDetail(id: string) {
+    const p = await this.store.get<Project>("projects", id);
+    if (!p) return null;
+    const rambles = (await this.listThreads()).filter((t: any) => t.projectId === id);
+    const ids = new Set(rambles.map((t: any) => t.id));
+    return {
+      project: p, rambles,
+      memory: (await this.store.all<Fact>("memory")).filter((f) => f.notebook === p.notebook && isActive(f, this.clock())).map((f) => ({ id: f.id, fact: f.fact, createdAt: f.createdAt })),
+      files: (await this.store.all<StoredFile>("files")).filter((f) => f.threadId && ids.has(f.threadId)).reverse().slice(0, 50),
+    };
+  }
+
   async renameThread(id: string, name: string, byUser = true) {
     const t = await this.store.get<Thread>("threads", id);
     if (!t || t.id.startsWith("tm-")) return { error: "No such ramble." };
@@ -601,6 +681,12 @@ export class Hub {
     let cur: Job = await this.saveJob({ ...job, status: "working", startedAt: this.clock().toISOString() });
     const finish = async (patch: Partial<Job>) => {
       this.stops.delete(job.id);
+      if (stop.signal.aborted && this.cancelled.delete(job.id)) {
+        this.additions.delete(job.id); this.additions.delete(`${job.id}:label`);
+        await this.addSpend(job.messageId, meter.costUsd);
+        cur = await this.saveJob({ ...cur, status: "failed", result: "Stopped by you.", durationMs: Date.now() - started, finishedAt: this.clock().toISOString() });
+        return;
+      }
       if (stop.signal.aborted) {
         // Stopped for a restart: back in the queue with what the user added; pump picks it up again.
         const more = this.additions.get(job.id) || [];
@@ -809,6 +895,17 @@ export class Hub {
   }
 
   /** You unblocked it (opened the laptop, logged in, tapped Allow): run the job again from the top. */
+  /** Stop button: a running job is cut off where it is; a queued one never starts. */
+  async stopJob(id: string) {
+    const j = await this.store.get<Job>("jobs", id);
+    if (!j || !["queued", "working"].includes(j.status)) return { error: "That isn't running." };
+    const stop = this.stops.get(id);
+    if (stop) { this.cancelled.add(id); stop.abort(); }
+    else await this.saveJob({ ...j, status: "failed", result: "Stopped by you.", finishedAt: this.clock().toISOString() });
+    await this.log("job.stopped", (j.label || j.task).slice(0, 80));
+    return { value: { ok: true } };
+  }
+
   async retryJob(id: string) {
     const job = await this.store.get<Job>("jobs", id);
     if (!job || !["blocked", "failed"].includes(job.status)) return { error: "Only blocked or failed jobs can be retried." };
@@ -1128,21 +1225,39 @@ export class Hub {
   /** Every connector (set by the server). */
   connect: import("./connectors/index.ts").Connect | null = null;
   /** Senders for message.send, set at start (WhatsApp, Slack). */
-  senders: Partial<Record<"whatsapp" | "slack", { connected(): boolean; send(to: string, text: string): Promise<string> }>> = {};
+  senders: Partial<Record<Channel, { connected(): boolean; send(to: string, text: string, extra?: { subject?: string; threadId?: string }): Promise<string> }>> = {};
 
   /** A WhatsApp or Slack message a teammate drafted: an Approve card, sent only after the tap. */
   async requestMessage(a: any, where: { threadId?: string; jobId?: string }) {
-    const channel = a?.channel === "slack" ? "slack" : a?.channel === "whatsapp" ? "whatsapp" : null;
-    const to = String(a?.to || "").trim().slice(0, 120);
-    const text = String(a?.text || "").trim().slice(0, 4000);
-    if (!channel) return { error: "channel is whatsapp or slack." };
-    if (!this.senders[channel]?.connected()) return { error: `${channel === "slack" ? "Slack" : "WhatsApp"} isn't connected.` };
+    const channel = (CHANNELS as string[]).includes(String(a?.channel)) ? (a.channel as Channel) : null;
+    const to = String(a?.to || "").trim().slice(0, 300);
+    const text = String(a?.text || "").trim().slice(0, channel === "gmail" ? 20_000 : 4000);
+    const subject = channel === "gmail" ? String(a?.subject || "").trim().slice(0, 200) || "(no subject)" : undefined;
+    const threadId = channel === "gmail" && a?.threadId ? String(a.threadId).slice(0, 100) : undefined;
+    if (!channel) return { error: `channel is one of ${CHANNELS.join(", ")}.` };
+    const label = CHANNEL_LABEL[channel];
+    if (!this.senders[channel]?.connected()) return { error: channel === "gmail" && this.google.connected ? "Google is connected without permission to send. Ask the user to reconnect Google in Connectors and allow sending." : `${label} isn't connected.` };
     if (!to || !text) return { error: "Say who it's to and what it says." };
-    const label = channel === "slack" ? "Slack" : "WhatsApp";
+    if (channel === "gmail" && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to.replace(/^.*<|>$/g, ""))) return { error: "For Gmail, \"to\" is an email address." };
+    if (channel === "instagram" || channel === "linkedin" || channel === "x") { const bad = badChatLink(channel, to); if (bad) return { error: bad }; }
+    const action = { type: "message" as const, channel, to, text, ...(subject ? { subject } : {}), ...(threadId ? { threadId } : {}) };
+    const sendNow = () => this.senders[channel]!.send(to, text, { subject, threadId });
+    // You said "Always allow" for this chat before: send now, and leave a note in Activity instead of asking.
+    if ((await this.alwaysAllowed()).includes(allowKey(channel, to))) {
+      const out = await sendNow().then(() => ({ ok: true, output: "Sent (always allowed)." }), (e: any) => ({ ok: false, output: String(e?.message || e) }));
+      const ap = await this.store.put<Approval>("approvals", {
+        ...this.doc({}), threadId: where.threadId, jobId: where.jobId,
+        summary: String(a.summary || `${label} to ${to}: ${subject ? subject + " · " : ""}${text.slice(0, 80)}`).slice(0, 200), details: text,
+        action, status: out.ok ? "done" : "failed", result: out.output, decidedAt: this.clock().toISOString(), auto: true,
+      } as Approval);
+      await this.log(out.ok ? "message.sent" : "message.failed", `${ap.summary} (always allowed)`);
+      this.emit("approval", ap);
+      return out.ok ? { value: ap } : { error: `Couldn't send: ${out.output}` };
+    }
     const ap = await this.store.put<Approval>("approvals", {
       ...this.doc({}), threadId: where.threadId, jobId: where.jobId,
-      summary: String(a.summary || `${label} to ${to}: ${text.slice(0, 80)}`).slice(0, 200), details: text,
-      action: { type: "message", channel, to, text }, status: "pending",
+      summary: String(a.summary || `${label} to ${to}: ${subject ? subject + " · " : ""}${text.slice(0, 80)}`).slice(0, 200), details: text,
+      action, status: "pending",
     } as Approval);
     if (where.jobId) {
       const job = await this.store.get<Job>("jobs", where.jobId);
@@ -1154,15 +1269,26 @@ export class Hub {
     return { value: ap };
   }
 
-  async decideApproval(id: string, yes: boolean) {
+  /** Chats you've said "Always allow" for: a teammate's message there sends without asking ("whatsapp:<to>"). */
+  async alwaysAllowed(): Promise<string[]> { return ((await this.store.get<any>("settings", "always-allow"))?.keys as string[]) || []; }
+  async setAlwaysAllowed(keys: string[]) {
+    await this.store.put("settings", { id: "always-allow", createdAt: "1970-01-01T00:00:00.000Z", keys: [...new Set(keys)].slice(0, 500) });
+    this.emit("prefs");
+  }
+
+  async decideApproval(id: string, yes: boolean, always = false) {
     const ap = await this.store.get<Approval>("approvals", id);
     if (!ap || ap.status !== "pending") return { error: "Already decided." };
+    if (yes && always && ap.action.type === "message") {
+      await this.setAlwaysAllowed([...(await this.alwaysAllowed()), allowKey(ap.action.channel, ap.action.to)]);
+      await this.log("approval.always", `Always allow ${CHANNEL_LABEL[ap.action.channel]} messages to ${ap.action.to}`);
+    }
     let next: Approval = { ...ap, status: yes ? "approved" : "rejected", decidedAt: this.clock().toISOString() };
     await this.store.put("approvals", next);
     if (yes) {
       const act = ap.action;
       const out = act.type === "message"
-        ? await (this.senders[act.channel]?.send(act.to, act.text).then(() => ({ ok: true, output: "Sent." }), (e: any) => ({ ok: false, output: String(e?.message || e) }))
+        ? await (this.senders[act.channel]?.send(act.to, act.text, { subject: act.subject, threadId: act.threadId }).then(() => ({ ok: true, output: "Sent." }), (e: any) => ({ ok: false, output: String(e?.message || e) }))
           ?? { ok: false, output: `${act.channel} isn't connected.` })
         : await this.scripts.run(act.script, act.args, { approvedRun: true });
       next = { ...next, status: out.ok ? "done" : "failed", result: out.output.slice(0, 2000) };
@@ -1706,8 +1832,12 @@ export class Hub {
     for (const j of jobs.filter((x) => (x.status === "done" || x.status === "failed") && x.finishedAt).sort((a, b) => b.finishedAt!.localeCompare(a.finishedAt!)).slice(0, 25)) {
       items.push({ kind: j.status === "failed" ? "failed" : "done", at: j.finishedAt, id: j.id, summary: j.task, result: (j.result || "").split("\n").find((l) => l.trim()) || "", teammateId: j.teammateId, threadId: j.threadId, jobId: rootOf(j) });
     }
-    const urgent = (k: string) => (k === "approval" || k === "blocked" ? 0 : 1);
-    return items.sort((a, b) => urgent(a.kind) - urgent(b.kind) || String(b.at).localeCompare(String(a.at))).slice(0, 60);
+    // Everyone working right now, and what's waiting its turn.
+    for (const j of jobs.filter((x) => x.status === "working" || x.status === "queued")) {
+      items.push({ kind: j.status === "working" ? "running" : "queued", at: j.startedAt || j.createdAt, startedAt: j.startedAt, id: j.id, summary: j.label || shortLabel(undefined, j.task), teammateId: j.teammateId, threadId: j.threadId, jobId: rootOf(j) });
+    }
+    const urgent = (k: string) => (k === "running" || k === "queued" ? 0 : k === "approval" || k === "blocked" ? 1 : 2);
+    return items.sort((a, b) => urgent(a.kind) - urgent(b.kind) || String(b.at).localeCompare(String(a.at))).slice(0, 80);
   }
 
   /** Everything one teammate has done, across chats, plus its routines and direct messages. */
@@ -2446,3 +2576,6 @@ const slugOf = (name: string) => String(name).toLowerCase().replace(/^#/, "").re
 /** A short channel name from a title: its first three words that carry meaning ("Lisbon trip and Portuguese" -> lisbon-trip-portuguese). */
 const FILLER = new Set(["a", "an", "the", "and", "or", "in", "on", "at", "to", "for", "of", "with", "before", "after", "from", "my", "your", "about", "this", "that"]);
 const nameFrom = (title: string) => title.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w && !FILLER.has(w)).slice(0, 3).join(" ");
+
+/** The key an "Always allow" is saved under: one chat on one app. */
+export const allowKey = (channel: string, to: string) => `${channel}:${to.trim().toLowerCase()}`;

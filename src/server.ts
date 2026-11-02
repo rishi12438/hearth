@@ -325,7 +325,16 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           return json(r.value);
         }
         if (method === "DELETE" && id) return json({ ok: await hub.removeThread(id) });
+        if (method === "POST" && id && seg[3] === "project") { const r = await hub.fileThread(id, (await body(req)).projectId || null); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "PATCH" && id) { const r = await hub.renameThread(id, String((await body(req)).channel || "")); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        break;
+      }
+      case "projects": {
+        if (method === "GET" && !id) return json(await hub.listProjects());
+        if (method === "GET" && id) { const d = await hub.projectDetail(id); if (!d) break; return json(d); }
+        if (method === "POST" && !id) { const b = await body(req); const r = await hub.createProject(String(b.name || ""), b.emoji ? String(b.emoji) : undefined); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "PATCH" && id) { const r = await hub.updateProject(id, await body(req)); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "DELETE" && id) return json({ ok: await hub.removeProject(id) });
         break;
       }
       case "files": {
@@ -389,10 +398,17 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (method === "DELETE" && id) { const ok = await store.remove("workflows", id); hub.emit("skills"); return json({ ok }); }
         break;
       }
+      case "always-allow": {
+        // The chats teammates may message without asking. You can only remove from here; adding is "Always allow" on a card.
+        if (method === "GET") return json({ keys: await hub.alwaysAllowed() });
+        ownerOnly();
+        if (method === "DELETE") { const k = String(url.searchParams.get("key") || ""); await hub.setAlwaysAllowed((await hub.alwaysAllowed()).filter((x) => x !== k)); return json({ keys: await hub.alwaysAllowed() }); }
+        break;
+      }
       case "approvals": {
         if (method === "GET") return json((await store.all<Approval>("approvals")).filter((a) => !url.searchParams.get("thread") || a.threadId === url.searchParams.get("thread")));
         if (method === "POST" && (seg[3] === "approve" || seg[3] === "reject")) {
-          const r = await hub.decideApproval(id, seg[3] === "approve");
+          const r = await hub.decideApproval(id, seg[3] === "approve", (await body(req).catch(() => ({}))).always === true);
           if (r.error) throw new HttpError(409, r.error);
           return json(r.value);
         }
@@ -421,6 +437,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       }
       case "jobs": {
         if (method === "POST" && seg[3] === "reply") { const r = await hub.replyToJob(id, String((await body(req)).text || "")); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "POST" && seg[3] === "stop") { const r = await hub.stopJob(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "POST" && seg[3] === "retry") { const r = await hub.retryJob(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "POST" && seg[3] === "save-skill") { const r = await hub.saveJobAsSkill(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         break;

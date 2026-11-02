@@ -40,6 +40,16 @@ say "Installing Caddy, firewall, fail2ban and automatic security updates"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
 apt-get install -yq caddy ufw fail2ban unattended-upgrades git unzip curl rsync
+# Headless Chrome: teammates read (and, after your Approve, reply on) sites with no API (Instagram, LinkedIn, X) through it.
+if ! command -v google-chrome >/dev/null && ! command -v chromium >/dev/null; then
+  if [ "$(uname -m)" = "x86_64" ]; then
+    curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+    apt-get update -q && apt-get install -yq google-chrome-stable >/dev/null && echo "   Chrome $(google-chrome --version 2>/dev/null)"
+  else
+    echo "   No Chrome for $(uname -m) from Google; Instagram, LinkedIn and X need Chromium installed by hand."
+  fi
+fi
 printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' > /etc/apt/apt.conf.d/20auto-upgrades
 systemctl enable --now fail2ban
 

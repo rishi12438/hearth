@@ -44,7 +44,11 @@ export class Push {
     return (await this.store.all<PushSub>("pushSubs")).some((s) => s.deviceId === deviceId);
   }
 
+  /** Also told about every notification (the hub passes it to open apps, e.g. the Mac app shows it natively). */
+  onSend: ((payload: { title: string; body: string; tag?: string; url?: string }, onlyDevices?: string[]) => void) | null = null;
+
   async send(payload: { title: string; body: string; tag?: string; url?: string }, onlyDevices?: string[]) {
+    try { this.onSend?.(payload, onlyDevices); } catch {}
     const subs = (await this.store.all<PushSub>("pushSubs")).filter((s) => !onlyDevices || onlyDevices.includes(s.deviceId));
     await Promise.all(subs.map(async (s) => {
       try {

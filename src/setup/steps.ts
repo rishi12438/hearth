@@ -8,7 +8,7 @@ import { join, resolve } from "node:path";
 //           made here, and Codex's auth.json), pick the brains, and hand back the phone's pairing link.
 
 /** One line of progress: `hearth install` prints it, the setup window draws it, --json sends it as is. */
-export type Step = { step: string; state: "start" | "ok" | "warn" | "fail" | "log" | "done"; text: string; data?: Record<string, unknown> };
+export type Step = { step: string; state: "start" | "wait" | "ok" | "warn" | "fail" | "log" | "done"; text: string; data?: Record<string, unknown> };
 export type Emit = (s: Step) => void;
 
 /** Where Hearth's own files are (this checkout, or the copy inside the Mac app via HEARTH_SRC). */
