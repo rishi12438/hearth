@@ -989,7 +989,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         // A cloud computer being set up downloads Hearth from its own hub, so the two always run the same code.
         if (url.pathname === "/computer/bundle") {
           const root = resolve(import.meta.dir, "..");
-          const tar = Bun.spawn(["tar", "-czf", "-", "-C", root, "src", "scripts", "package.json", "bun.lock", "tsconfig.json"], { stdout: "pipe", stderr: "ignore" });
+          const tar = Bun.spawn(["tar", "-czf", "-", "-C", root, "src", "scripts", "patches", "package.json", "bun.lock", "tsconfig.json"], { stdout: "pipe", stderr: "ignore" });
           return new Response(tar.stdout, { headers: { "Content-Type": "application/gzip", "Cache-Control": "no-store" } });
         }
         await store.put<Device>("devices", { ...d, lastSeenAt: new Date().toISOString() });

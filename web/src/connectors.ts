@@ -222,11 +222,15 @@ async function whatsappSheet() {
   const draw = async (force = false) => {
     let s: any;
     try { s = await call("/api/whatsapp"); } catch (e) { stop(); return D.handleError(e); }
-    // Only redraw when something changed, so a button isn't swapped out under your finger.
-    const key = `${s.state}|${s.qr || ""}|${s.detail || ""}`;
+    // Only redraw when something changed, so a button isn't swapped out under your finger. Once linked, WhatsApp's
+    // recent-chats sync keeps landing for a while, so the chat counts are part of the key too.
+    const chats: any[] = s.chats || [];
+    const key = `${s.state}|${s.qr || ""}|${s.detail || ""}|${chats.length}|${chats.filter((c) => c.lastAt).length}`;
     if (!force && key === last) return;
+    // Don't redraw the list under someone typing a search or keyword.
+    if (!force && s.state === "connected" && last.startsWith("connected|") && body.contains(document.activeElement) && document.activeElement?.tagName === "INPUT") return;
     last = key;
-    if (s.state === "connected") { stop(); return clear(body, ...linked(s)); }
+    if (s.state === "connected") return clear(body, ...linked(s));
     clear(body,
       h("div", { class: "phero" }, logo("whatsapp", 52), h("b", null, "Link WhatsApp"), h("small", null, "Like WhatsApp Web: your number stays on your phone.")),
       s.state === "qr" && s.qr ? [
@@ -291,7 +295,7 @@ function linked(s: any): any[] {
         avatar(c),
         h("span", { class: "grow" },
           h("span", { class: "wa-top" }, h("b", null, c.name), h("time", null, time(c.lastAt))),
-          h("small", null, off ? (c.group && r.allGroups && byRule(c) ? "Ignored · all groups are ignored" : "Ignored · Hearth never sees it") : c.last || (c.group ? "Group" : "Chat"))),
+          h("small", null, off ? (c.group && r.allGroups && byRule(c) ? "Ignored · all groups are ignored" : "Ignored · Hearth never sees it") : c.lastCallAt && c.lastCallAt >= (c.lastAt || 0) ? (c.group ? "Group call" : "Call") : c.last || (c.group ? "Group" : "Chat"))),
         c.group && r.allGroups && byRule(c) ? null
           : h("button", { class: `wa-btn ${off ? "on" : ""}`, on: { click: () => edit(c.group ? "group" : "contact", c.jid, off) } }, off ? "Ignored" : "Ignore"));
     }) : h("p", { class: "wa-empty" }, q ? "No chats match." : tab === "ignored" ? "Nothing ignored yet. Tap Ignore on any chat."

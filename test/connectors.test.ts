@@ -164,3 +164,138 @@ describe("setup", () => {
     expect(statSync(loose).mode & 0o777).toBe(0o600);
   });
 });
+
+describe("WhatsApp link", () => {
+  test("reconnects after WhatsApp drops the socket right after a QR scan", async () => {
+    const { WhatsApp } = await import("../src/connectors/whatsapp.ts");
+    const socks: any[] = [];
+    const configs: any[] = [];
+    const fake = {
+      default: (cfg: any) => {
+        configs.push(cfg);
+        const handlers: Record<string, ((u: any) => void)[]> = {};
+        const sock = { ev: { on: (e: string, f: any) => (handlers[e] ||= []).push(f) }, emit: (e: string, u: any) => (handlers[e] || []).forEach((f) => f(u)), end() {}, user: { id: "15550100:1@s.whatsapp.net" } };
+        socks.push(sock);
+        return sock;
+      },
+      useMultiFileAuthState: async () => ({ state: {}, saveCreds: () => {} }),
+      fetchLatestBaileysVersion: async () => ({ version: [2, 3000, 1] }),
+      Browsers: { macOS: (b: string) => ["Mac OS", b, "14.4.1"] },
+      DisconnectReason: { loggedOut: 401, restartRequired: 515 },
+      proto: { Message: { HistorySyncNotification: { HistorySyncType: { INITIAL_BOOTSTRAP: 0, FULL: 2, RECENT: 3 } } } },
+    };
+    const store = { get: async () => null, put: async () => {}, all: async () => [], clear: async () => {}, remove: async () => {} } as any;
+    const wa = new WhatsApp(mkdtempSync(join(tmpdir(), "hearth-wa-")), store, () => true, async () => fake);
+    await wa.start();
+    expect(socks.length).toBe(1);
+    // The recent-chats sync WhatsApp sends at link time is taken; the full archive isn't.
+    expect(configs[0].shouldSyncHistoryMessage({ syncType: 0 })).toBe(true);
+    expect(configs[0].shouldSyncHistoryMessage({ syncType: 3 })).toBe(true);
+    expect(configs[0].shouldSyncHistoryMessage({ syncType: 2 })).toBe(false);
+    socks[0].emit("connection.update", { qr: "code" });
+    // The scan pairs, then WhatsApp closes and asks for a restart.
+    socks[0].emit("connection.update", { connection: "close", lastDisconnect: { error: { output: { statusCode: 515 } } } });
+    await Bun.sleep(1300);
+    expect(socks.length).toBe(2);
+    socks[1].emit("connection.update", { connection: "open" });
+    expect(wa.connected()).toBe(true);
+    wa.stop();
+  });
+});
+
+describe("WhatsApp names and calls", () => {
+  const setup = async () => {
+    const { WhatsApp } = await import("../src/connectors/whatsapp.ts");
+    let sock: any;
+    const fake = {
+      default: () => {
+        const handlers: Record<string, ((u: any) => void)[]> = {};
+        sock = { ev: { on: (e: string, f: any) => (handlers[e] ||= []).push(f) }, emit: (e: string, u: any) => (handlers[e] || []).forEach((f) => f(u)), end() {}, user: { id: "1:1@s.whatsapp.net" } };
+        return sock;
+      },
+      useMultiFileAuthState: async () => ({ state: {}, saveCreds: () => {} }),
+      fetchLatestBaileysVersion: async () => ({ version: [2, 3000, 1] }),
+      DisconnectReason: { loggedOut: 401 },
+    };
+    const store = { get: async () => null, put: async () => {}, all: async () => [], clear: async () => {}, remove: async () => {} } as any;
+    const wa = new WhatsApp(mkdtempSync(join(tmpdir(), "hearth-wa-")), store, () => true, async () => fake);
+    await wa.start();
+    return { wa, sock };
+  };
+
+  test("address-book names go on phone and @lid chats, and beat their own WhatsApp name", async () => {
+    const { wa, sock } = await setup();
+    sock.emit("messaging-history.set", { chats: [{ id: "555@lid", conversationTimestamp: 100 }], contacts: [], messages: [] });
+    sock.emit("contacts.update", [{ id: "15550100@s.whatsapp.net", notify: "Their name" }]);
+    sock.emit("contacts.upsert", [{ id: "15550100@s.whatsapp.net", name: "Mom", lid: "555@lid" }]);
+    sock.emit("contacts.update", [{ id: "15550100@s.whatsapp.net", notify: "Their new name" }]);
+    const byJid = Object.fromEntries(wa.chatList().map((c) => [c.jid, c.name]));
+    expect(byJid["555@lid"]).toBe("Mom");
+    // An address-book contact you've never talked to isn't a chat.
+    expect(byJid["15550100@s.whatsapp.net"]).toBeUndefined();
+    wa.stop();
+  });
+
+  test("one row per person when WhatsApp uses both their number and their private id", async () => {
+    const { wa, sock } = await setup();
+    sock.emit("messaging-history.set", { chats: [{ id: "15550100@s.whatsapp.net", conversationTimestamp: 100 }, { id: "999@lid", conversationTimestamp: 200 }], contacts: [], messages: [] });
+    expect(wa.chatList().map((c) => c.name).sort()).toEqual(["+1 5550100", "Hidden number"]);
+    // A message on the private id carries the phone number: now they're one row, named from the address book.
+    sock.emit("messages.upsert", { type: "append", messages: [{ key: { remoteJid: "999@lid", senderPn: "15550100@s.whatsapp.net", fromMe: false }, message: {} }] });
+    sock.emit("contacts.upsert", [{ id: "15550100@s.whatsapp.net", name: "Mom" }]);
+    const rows = wa.chatList();
+    expect(rows.map((c) => [c.jid, c.name, c.lastAt])).toEqual([["15550100@s.whatsapp.net", "Mom", 200_000]]);
+    wa.stop();
+  });
+
+  test("numbers show with their country code", async () => {
+    const { prettyNumber } = await import("../src/connectors/whatsapp.ts");
+    expect(prettyNumber("6591997824")).toBe("+65 9199 7824");
+    expect(prettyNumber("16024132657")).toBe("+1 602 413 2657");
+  });
+
+  test("Meta AI is named", async () => {
+    const { wa, sock } = await setup();
+    sock.emit("messaging-history.set", { chats: [{ id: "13135550002@s.whatsapp.net", conversationTimestamp: 1 }], contacts: [], messages: [] });
+    expect(wa.chatList()[0].name).toBe("Meta AI");
+    wa.stop();
+  });
+
+  test("someone not saved gets the name on their messages, never over a saved name", async () => {
+    const { wa, sock } = await setup();
+    sock.emit("messaging-history.set", { chats: [{ id: "777@lid", conversationTimestamp: 1 }, { id: "888@lid", conversationTimestamp: 1 }], contacts: [], messages: [] });
+    sock.emit("contacts.upsert", [{ id: "888@lid", name: "Saved Sam" }]);
+    sock.emit("messages.upsert", { type: "notify", messages: [
+      { key: { remoteJid: "777@lid", fromMe: false }, pushName: "Priya", message: {} },
+      { key: { remoteJid: "888@lid", fromMe: false }, pushName: "Sammy", message: {} },
+    ] });
+    const byJid = Object.fromEntries(wa.chatList().map((c) => [c.jid, c.name]));
+    expect(byJid["777@lid"]).toBe("Priya");
+    expect(byJid["888@lid"]).toBe("Saved Sam");
+    wa.stop();
+  });
+
+  test("the call log brings in people you called, not just people who called you", async () => {
+    const { wa, sock } = await setup();
+    sock.emit("connection.update", { connection: "open" });
+    sock.emit("call-log.set", { records: [
+      { isIncoming: false, callCreatorJid: "1@s.whatsapp.net", startTime: 1793600000, participants: [{ userJid: "1@s.whatsapp.net" }, { userJid: "15550123@s.whatsapp.net" }] },
+      { isIncoming: true, callCreatorJid: "15550456@s.whatsapp.net", startTime: 1793500000, participants: [{ userJid: "1@s.whatsapp.net" }] },
+    ] });
+    const rows = Object.fromEntries(wa.chatList().map((c) => [c.jid, c.lastCallAt]));
+    expect(rows["15550123@s.whatsapp.net"]).toBe(1793600000_000);
+    expect(rows["15550456@s.whatsapp.net"]).toBe(1793500000_000);
+    expect(rows["1@s.whatsapp.net"]).toBeUndefined();
+    wa.stop();
+  });
+
+  test("a call makes the caller recent", async () => {
+    const { wa, sock } = await setup();
+    const at = new Date("2026-11-02T10:00:00Z");
+    sock.emit("call", [{ chatId: "15550100@s.whatsapp.net", from: "15550100@s.whatsapp.net", date: at, status: "offer" }]);
+    const c = wa.chatList().find((x) => x.jid === "15550100@s.whatsapp.net")!;
+    expect(c.lastAt).toBe(at.getTime());
+    expect(c.lastCallAt).toBe(at.getTime());
+    wa.stop();
+  });
+});

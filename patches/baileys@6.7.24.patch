@@ -1,0 +1,55 @@
+diff --git a/lib/Utils/chat-utils.js b/lib/Utils/chat-utils.js
+index 31615b9d2df86841619903cd64b9687eddb6e67a..729bb1b9f83986ba2c9c39bb0fba92797293e9d9 100644
+--- a/lib/Utils/chat-utils.js
++++ b/lib/Utils/chat-utils.js
+@@ -657,6 +657,10 @@ export const processSyncAction = (syncAction, ev, me, initialSyncOpts, logger) =
+             }
+         ]);
+     }
++    else if (action?.callLogAction?.callLogRecord) {
++        // hearth patch: a call made or received on another device
++        ev.emit('call-log.set', { records: [action.callLogAction.callLogRecord] });
++    }
+     else if (action?.pushNameSetting) {
+         const name = action?.pushNameSetting?.name;
+         if (name && me?.name !== name) {
+diff --git a/lib/Utils/history.js b/lib/Utils/history.js
+index def974244282d3c62714e7229d4437b611730347..e8bb7fe473308cde9e5e979e059cf56596a37db2 100644
+--- a/lib/Utils/history.js
++++ b/lib/Utils/history.js
+@@ -69,6 +69,7 @@ export const processHistoryMessage = (item) => {
+         chats,
+         contacts,
+         messages,
++        callLogRecords: item.callLogRecords || [],
+         syncType: item.syncType,
+         progress: item.progress
+     };
+diff --git a/lib/Utils/process-message.js b/lib/Utils/process-message.js
+index f94b53a17b39d1adafffa3c567d2a3445b162e76..72040d69db0c506946da77daaeaec1e086a0b10f 100644
+--- a/lib/Utils/process-message.js
++++ b/lib/Utils/process-message.js
+@@ -165,6 +165,10 @@ const processMessage = async (message, { shouldProcessHistoryMsg, placeholderRes
+                         });
+                     }
+                     const data = await downloadAndProcessHistorySyncNotification(histNotification, options);
++                    // hearth patch: call logs ride along with history; the buffered history event drops extra fields
++                    if (data.callLogRecords?.length) {
++                        ev.emit('call-log.set', { records: data.callLogRecords });
++                    }
+                     ev.emit('messaging-history.set', {
+                         ...data,
+                         isLatest: histNotification.syncType !== proto.HistorySync.HistorySyncType.ON_DEMAND ? isLatest : undefined,
+diff --git a/lib/Utils/validate-connection.js b/lib/Utils/validate-connection.js
+index ba7f9b476bd2f84352bf4c2bbd7a8864cc34e03e..82ff77a0a3c6dec51c4b7f65d5b8e49cd96e305b 100644
+--- a/lib/Utils/validate-connection.js
++++ b/lib/Utils/validate-connection.js
+@@ -74,7 +74,7 @@ export const generateRegistrationNode = ({ registrationId, signedPreKey, signedI
+             storageQuotaMb: 10240,
+             inlineInitialPayloadInE2EeMsg: true,
+             recentSyncDaysLimit: undefined,
+-            supportCallLogHistory: false,
++            supportCallLogHistory: true,
+             supportBotUserAgentChatHistory: true,
+             supportCagReactionsAndPolls: true,
+             supportBizHostedMsg: true,
