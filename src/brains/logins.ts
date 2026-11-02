@@ -72,11 +72,25 @@ const ANSI_RE = /\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07]*\x07|\r/g;
 
 /** Replace every Claude token in some text with [redacted]. */
 export function redactTokens(text: string) { return text.replace(/sk-ant-[A-Za-z0-9_-]{8,}/g, "[redacted]"); }
-/** The last Claude OAuth token in a terminal transcript, ignoring colours and line wraps. */
+/**
+ * The last Claude OAuth token in a terminal transcript, ignoring colours and line wraps. Escape codes become line breaks,
+ * not nothing: `claude setup-token` moves the cursor to its next line ("Store this token securely") with an escape code
+ * rather than a newline, and deleting it glued "Store" onto the token, which the API then turns away (401).
+ */
 export function tokenInTranscript(text: string): string | null {
-  const clean = text.replace(ANSI_RE, "");
+  const clean = text.replace(ANSI_RE, "\n");
   const all = clean.match(TOKEN_RE) || clean.replace(/\n/g, "").match(TOKEN_RE) || [];
-  return all.at(-1) ?? null;
+  const t = all.at(-1);
+  return t ? cleanClaudeToken(t) : null;
+}
+
+/**
+ * A setup-token is sk-ant-oat01- and 95 more characters ending in "AA". One caught with the next word glued on
+ * ("…AAStore", from older Hearth) loses the word, so hubs set up before the fix heal without signing in again.
+ */
+export function cleanClaudeToken(token: string): string {
+  const t = token.trim();
+  return t.match(/^(sk-ant-oat01-[A-Za-z0-9_-]{93}AA)[A-Z][a-z]{1,15}$/)?.[1] ?? t;
 }
 export const looksLikeClaudeToken = (t: string) => /^sk-ant-oat\d*-[A-Za-z0-9_-]{20,}$/.test(t.trim());
 
@@ -108,12 +122,12 @@ export async function mintClaudeToken(show: (text: string) => void = (t) => proc
 
 /** Put a long-lived Claude token where this hub's brain runs find it. */
 export function saveClaudeToken(token: string, home = homedir()) {
-  const t = token.trim();
+  const t = cleanClaudeToken(token);
   if (!looksLikeClaudeToken(t)) throw new Error("That isn't a Claude token (it starts with sk-ant-oat). Run `claude setup-token` to make one.");
   writePrivate(claudeTokenFile(home), JSON.stringify({ token: t, savedAt: new Date().toISOString() }));
 }
 export function readClaudeToken(home = homedir()): string | null {
-  try { const t = JSON.parse(readFileSync(claudeTokenFile(home), "utf8"))?.token; return typeof t === "string" && t ? t : null; } catch { return null; }
+  try { const t = JSON.parse(readFileSync(claudeTokenFile(home), "utf8"))?.token; return typeof t === "string" && t ? cleanClaudeToken(t) : null; } catch { return null; }
 }
 
 // ---------- Codex: auth.json, newest wins ----------

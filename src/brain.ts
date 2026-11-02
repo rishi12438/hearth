@@ -8,6 +8,7 @@ import { SOURCES } from "./sources/index.ts";
 import { BrainUsage, isLimitError } from "./brains/usage.ts";
 import { readClaudeToken } from "./brains/logins.ts";
 import { describeSkillStep, hubSkills, installCodexRules, installSkills, skillCatalog, skillFlags, type Skill } from "./brains/skills.ts";
+import { BrainHealth, signInProblem } from "./brains/health.ts";
 
 /** Each trigger module's own description of its config, for the hook docs below. */
 /** Each trigger module's own description, read when a prompt is built (the hub adds WhatsApp and Slack at start). */
@@ -380,6 +381,8 @@ export type RemoteRunner = { name: string; run(b: BrainInput, p: BrainProfile, m
 export type Remote = { pick(p: BrainProfile): RemoteRunner | null; linked(): boolean };
 /** No linked computer is online for this harness, and this hub can't run it itself. The job parks until one is. */
 export class NeedsComputer extends Error {}
+/** A brain turned the call away because it isn't signed in (a bad, expired or revoked login). Reconnect it. */
+export class SignedOut extends Error { constructor(msg: string, readonly harness: string) { super(msg); } }
 /** The computer running a call dropped off mid-way. */
 export class ComputerGone extends Error {}
 
@@ -442,6 +445,8 @@ export class Brain {
   remote: Remote | null = null;
   /** Live usage of each brain's subscription; work goes to the one with the most room. */
   usage = new BrainUsage();
+  /** Whether each brain is really signed in, from every call it answers (see brains/health.ts). */
+  health = new BrainHealth();
   /** The brains the user picked (Settings → Brains). Two or more share the work by live usage. */
   pool: () => Promise<string[]> = async () => [];
 
@@ -472,6 +477,16 @@ export class Brain {
     return this.skillState;
   }
 
+  /** One tiny real call to see whether a brain is signed in right now (Connectors' "Check again", and at start). */
+  async check(harness: "claude" | "codex"): Promise<{ ok: boolean; message: string | null }> {
+    try {
+      await this.run({ mode: "clean", context: {}, input: "ok" }, { harness, model: harness === "claude" ? TIER_MODELS.claude.quick : "" });
+      return { ok: true, message: null };
+    } catch (e: any) {
+      return { ok: false, message: this.health.problem(harness) ?? String(e?.message || e).slice(0, 200) };
+    }
+  }
+
   /** Defaults from .env; the app can change them (see Hub.brains). */
   defaults(): Brains {
     const env = process.env;
@@ -496,7 +511,11 @@ export class Brain {
    */
   async think(b: BrainInput, profile?: BrainProfile, meter?: Meter): Promise<string> {
     const asked = profile || this.defaults().workhorse;
-    const pool = (await this.pool().catch(() => [])).filter((h) => (POOL_HARNESSES as readonly string[]).includes(h));
+    const picked = (await this.pool().catch(() => [])).filter((h) => (POOL_HARNESSES as readonly string[]).includes(h));
+    // A brain that's signed out sits out while another can do the work (it's tried again once you reconnect it).
+    const healthy = picked.filter((h) => !this.health.problem(h));
+    const pool = healthy.length ? healthy : picked;
+    if (pool.length === 1 && pool[0] !== asked.harness && picked.includes(asked.harness)) return this.thinkOn(b, this.onBrain(asked, pool[0]), meter);
     if (pool.length < 2 || !pool.includes(asked.harness)) return this.thinkOn(b, asked, meter);
     // Two or more brains: the one with the most room on its live limits takes it; a refusal on a limit moves it on once.
     const tried = new Set<string>();
@@ -515,7 +534,9 @@ export class Brain {
         if (pick.harness === "codex") void this.usage.refresh("codex", true).catch(() => {});
         return out;
       } catch (e: any) {
-        if (!isLimitError(String(e?.message || "")) || tried.size >= pool.length) throw e;
+        if (tried.size >= pool.length) throw e;
+        if (e instanceof SignedOut) { preferred = undefined; continue; }
+        if (!isLimitError(String(e?.message || ""))) throw e;
         this.usage.noteRefused(pick.harness);
         preferred = undefined;
       }
@@ -634,16 +655,27 @@ export class Brain {
     if (meter?.signal?.aborted) throw new Error("Restarted with your new message.");
     if (timedOut) throw new Error(`${name} took longer than ${this.config.agentTimeoutMs / 1000}s.`);
     let reply = out;
+    let failed = code !== 0;
     if (harness === "claude") {
       try {
         // stream-json: the last "result" event has the answer and the cost.
         const j = JSON.parse(out.trim().split("\n").reverse().find((l) => l.includes('"type":"result"')) || out);
         reply = String(j.result ?? "");
+        if (j.is_error) failed = true;
         if (meter && typeof j.total_cost_usd === "number") meter.costUsd += j.total_cost_usd;
         else if (meter) meter.unknown = true;
       } catch { if (meter) meter.unknown = true; }
     } else if (meter) meter.unknown = true;
     if (outFile) { try { reply = readFileSync(outFile, "utf8"); } catch {} rmSync(outFile, { force: true }); }
+    // Signed out: say so plainly (never hand "Failed to authenticate" back as the answer) and flag it for Home/Connectors.
+    if (harness === "claude" || harness === "codex") {
+      const problem = failed ? signInProblem(`${reply}\n${err}`) : null;
+      if (problem) {
+        this.health.signedOut(harness, problem);
+        throw new SignedOut(`${harness === "claude" ? "Claude Code" : "Codex"} is signed out on this hub (${problem}). Reconnect it in Connectors.`, harness);
+      }
+      if (!failed) this.health.fine(harness);
+    }
     if (code !== 0 && !reply.trim()) throw new Error(`${name} exited with ${code}: ${err.trim().slice(-300)}`);
     return reply.trim();
   }

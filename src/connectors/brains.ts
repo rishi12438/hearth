@@ -22,15 +22,23 @@ function brain(id: BrainId, blurb: string): Connector {
       const pool = await hub.brainPool();
       const on = pool.includes(id) && availableHarnesses(hub.config).includes(id);
       if (on) await hub.brain.usage.refresh(id).catch(() => {}); // cached for a few minutes; a fresh read only when stale
+      // A login file that the brain turns away is as good as none: "Needs you", with what it said.
+      const problem = d.installed && d.loggedIn ? hub.brain.health.problem(id) : null;
       return {
-        state: !d.installed ? "not-installed" : !d.loggedIn ? "needs-you" : on ? "connected" : "off",
-        detail: !d.installed ? "Not installed on the hub" : !d.loggedIn ? "Not signed in on the hub" : on ? (d.how ?? "Signed in") : "Signed in, not picked",
+        state: !d.installed ? "not-installed" : !d.loggedIn || problem ? "needs-you" : on ? "connected" : "off",
+        detail: !d.installed ? "Not installed on the hub" : !d.loggedIn ? "Not signed in on the hub" : problem ? `Signed out: ${problem}` : on ? (d.how ?? "Signed in") : "Signed in, not picked",
+        signedOut: !!problem,
         usage: hub.brain.usage.view([id])[0] ?? null,
       };
     },
     async add({ hub }, input) {
       const bad = takeLogin(id, input);
       if (bad) return bad;
+      // A new login: check it for real now, so a bad one says so here instead of on the next job.
+      if ((input.token || input.auth) && availableHarnesses(hub.config).includes(id)) {
+        const r = await hub.brain.check(id);
+        if (!r.ok) return `Saved, but ${BRAIN_LABELS[id]} still won't sign in: ${r.message}`;
+      }
       const pool = await hub.brainPool();
       if (pool.includes(id)) return null;
       const r = await hub.setBrainPool([...pool.filter((h) => availableHarnesses(hub.config).includes(h)), id]);

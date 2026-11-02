@@ -7,6 +7,7 @@ import { flag, has, io, positional, stdin } from "../cli-common.ts";
 //   hearth brains pick claude,codex            the brains the hub uses (two or more share work by live usage)
 //   hearth brains usage [--fresh]              each picked brain's live plan usage
 //   hearth brains token claude                 make a long-lived Claude login (claude setup-token) and print it once
+//   hearth brains export codex                 print this computer's Codex login (auth.json) once, for a hub to take
 //   hearth brains login claude --stdin         put a Claude setup-token on this hub (from stdin)
 //   hearth brains login codex [--stdin]        put Codex's auth.json on this hub (stdin, or ~/.codex/auth.json here)
 //   hearth brains logout claude|codex          take a copied login off this hub
@@ -39,6 +40,13 @@ export async function brainsCli(config: Config, args: string[]): Promise<number>
       const t = await mintClaudeToken((s) => process.stderr.write(s)).catch((e) => { fail(e.message); return null; });
       if (!t) return fail("Couldn't catch a token from `claude setup-token`. Run it yourself and paste the token into `hearth brains login claude --stdin`.");
       console.log(json ? JSON.stringify({ token: t }) : t);
+      return 0;
+    }
+    if (sub === "export") {
+      if (rest[0] !== "codex") return fail("usage: hearth brains export codex   (Claude uses `hearth brains token claude`)", 2);
+      const data = readCodexAuth();
+      if (!data) return fail("Codex isn't signed in on this computer. Run `codex login` first.");
+      console.log(json ? JSON.stringify({ auth: data }) : data);
       return 0;
     }
     if (sub === "login") {

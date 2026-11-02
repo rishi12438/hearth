@@ -135,6 +135,7 @@ export class Hub {
     readonly apps: Apps = new Apps(store),
   ) {
     brain.pool = () => this.brainPool();
+    brain.health.onChange = (st) => { void this.brainHealthChanged(st.harness, st.ok, st.message).catch(() => {}); };
     // Every phone notification also goes out on the live stream, so the Mac app can show it as a Mac notification.
     if (push) push.onSend = (payload, only) => this.emit("notify", { ...payload, only: only ?? null });
   }
@@ -2183,10 +2184,50 @@ export class Hub {
     // Rambles from before they had names: name them from their titles (Hearth refines it on the next message).
     for (const t of await this.store.all<Thread>("threads")) if (t.num && !t.channel && t.title) await this.renameThread(t.id, nameFrom(t.title), false);
     this.timer = setInterval(() => this.tick().catch((e) => console.error("tick failed", e)), intervalMs);
+    if (this.config.agent !== "echo") this.checkBrainsSoon();
     await this.tick();
   }
 
-  stop() { if (this.timer) clearInterval(this.timer); if (this.brainsTimer) clearTimeout(this.brainsTimer); }
+  stop() { if (this.timer) clearInterval(this.timer); if (this.brainsTimer) clearTimeout(this.brainsTimer); if (this.healthTimer) clearTimeout(this.healthTimer); }
+
+  // ---------- are the brains signed in? ----------
+
+  private healthTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Your picked brains that are signed out right now (Home's banner, Connectors' "Needs you"). */
+  async brainProblems(): Promise<{ id: string; label: string; message: string }[]> {
+    const pool = await this.brainPool().catch(() => [] as string[]);
+    return pool.flatMap((id) => {
+      const message = this.brain.health.problem(id);
+      return message ? [{ id, label: id === "claude" ? "Claude Code" : "Codex", message }] : [];
+    });
+  }
+
+  /** One tiny real call per picked brain, soon after start and every 6 hours, so a bad login shows before a job hits it. */
+  checkBrainsSoon(firstMs = 20_000, everyMs = 6 * 3600_000) {
+    if (this.healthTimer) clearTimeout(this.healthTimer);
+    this.healthTimer = setTimeout(async () => {
+      this.healthTimer = null;
+      const pool = await this.brainPool().catch(() => [] as string[]);
+      const here = availableHarnesses(this.config);
+      for (const h of pool) if ((h === "claude" || h === "codex") && here.includes(h)) await this.brain.check(h).catch(() => {});
+      this.checkBrainsSoon(everyMs, everyMs);
+    }, firstMs);
+    (this.healthTimer as any).unref?.();
+  }
+
+  /** A brain was signed out (tell you once, with a way to reconnect) or works again. */
+  private async brainHealthChanged(id: string, ok: boolean, message: string | null) {
+    const label = id === "claude" ? "Claude Code" : "Codex";
+    this.emit("brains");
+    if (ok) { await this.log("brains.health", `${label} is signed in again`); return; }
+    await this.log("brains.health", `${label} is signed out: ${message}`);
+    const text = `${label} is signed out on this hub, so it can't think for the team (it said: “${message}”). `
+      + `Reconnect it in Connectors → ${label}.${(await this.brainPool().catch(() => [])).length > 1 ? " Your other brain is doing the work meanwhile." : ""}`;
+    const msg = await this.addMessage({ role: "assistant", threadId: await this.updatesThread(), text });
+    await this.push?.send({ title: `${label} needs reconnecting`, body: text.slice(0, 180), tag: `brain-signedout-${id}`, url: "/" });
+    void msg;
+  }
 
   /** Resolves when no job or brain call is running (or after `ms`). Used for graceful shutdown. */
   async idle(ms = 30_000) {

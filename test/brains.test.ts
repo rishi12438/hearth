@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, statSync, writeFileSync, mkdirSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BrainUsage, claudeEventWindows, parseClaudeUsage, parseCodexRateLimits, pickBrain, score, type Reading } from "../src/brains/usage.ts";
-import { detectBrains, lastRefresh, readClaudeToken, redactTokens, saveClaudeToken, saveCodexAuth, tokenInTranscript } from "../src/brains/logins.ts";
+import { cleanClaudeToken, detectBrains, lastRefresh, readClaudeToken, redactTokens, saveClaudeToken, saveCodexAuth, tokenInTranscript } from "../src/brains/logins.ts";
 
 const NOW = Date.parse("2026-11-01T12:00:00Z");
 const ok = (harness: string, ...pcts: [number, number | null][]): Reading =>
@@ -83,6 +83,21 @@ describe("brain logins", () => {
     expect(readClaudeToken(h)).toBe(tok);
     expect(statSync(join(h, ".hearth", "claude-token.json")).mode & 0o777).toBe(0o600);
     expect(() => saveClaudeToken("not-a-token", h)).toThrow();
+  });
+
+  test("a token followed by a cursor move isn't glued to the next word, and one saved glued heals", () => {
+    const tok = "sk-ant-oat01-" + "Ab3_-x9Z".repeat(11) + "Q4mxyAA"; // 13 + 95, ends in AA like the real ones
+    expect(tok).toHaveLength(108);
+    const out = `Your OAuth token (valid for 1 year):\x1b[2B\x1b[G${tok}\x1b[2B\x1b[GStore this token securely.`;
+    expect(tokenInTranscript(out)).toBe(tok);
+    const h = home();
+    mkdirSync(join(h, ".hearth"), { recursive: true });
+    writeFileSync(join(h, ".hearth", "claude-token.json"), JSON.stringify({ token: tok + "Store" }));
+    expect(readClaudeToken(h)).toBe(tok);
+    saveClaudeToken(tok + "Store", h);
+    expect(JSON.parse(readFileSync(join(h, ".hearth", "claude-token.json"), "utf8")).token).toBe(tok);
+    expect(cleanClaudeToken(tok)).toBe(tok);
+    expect(cleanClaudeToken("sk-ant-oat01-short")).toBe("sk-ant-oat01-short");
   });
 
   test("Codex auth.json: the newest renewal wins", () => {

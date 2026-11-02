@@ -75,6 +75,7 @@ code { font-family: var(--mono); font-size: .86em; background: var(--surface); p
 .status.live { background: var(--ok); }
 .status.connecting { background: var(--warn); animation: pulse 1.4s infinite; }
 .status.offline { background: var(--danger); }
+.status.signedout { background: var(--danger); }
 @keyframes pulse { 50% { opacity: .35; } }
 
 /* big title variant (Home, DMs, Activity) */
@@ -757,6 +758,9 @@ p.err { color: var(--danger); margin: 6px 2px 0; }
 .linkstrip.online .lsicon { background: color-mix(in oklab, var(--ok) 14%, transparent); color: var(--ok); }
 .linkstrip.asleep .lsicon, .linkstrip.offline .lsicon { background: var(--surface); color: var(--muted); }
 .linkstrip > svg:last-child { color: var(--muted); flex: none; }
+.linkstrip.signedout { box-shadow: var(--shadow), inset 0 0 0 1.5px color-mix(in oklab, var(--danger) 45%, transparent); }
+.linkstrip.signedout .lsicon { background: color-mix(in oklab, var(--danger) 14%, transparent); color: var(--danger); }
+.linkstrip.signedout .btn { flex: none; pointer-events: none; }
 .ccard { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 14px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 10px; }
 .cchead { display: flex; align-items: center; gap: 12px; }
 .cchead .grow { display: flex; flex-direction: column; gap: 1px; }

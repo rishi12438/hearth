@@ -1,5 +1,5 @@
 import { h, clear, icon, richText, relTime, shortAgo, clockTime, dayLabel, greeting, toast } from "./dom.ts";
-import { initConnectors, loadTiles, grid as connectorGrid, rows as connectorRows } from "./connectors.ts";
+import { initConnectors, loadTiles, openTile, grid as connectorGrid, rows as connectorRows } from "./connectors.ts";
 import { activeHub, call, hubs, pair, removeHub, setActive, stream, normalizeUrl, ApiError, authHeaders, passkeysWork, registerPasskey, passkeyProof, unlock, requestAccess, waitForApproval, type HubRef } from "./api.ts";
 
 declare const __BUILD__: string;
@@ -231,6 +231,7 @@ function onEvent(e: { type: string; data?: any }) {
     }
     case "people": if (S.panel === "people") openPeople(); return;
     case "ideas": loadIdeas().then(() => { if (route().view === "home") drawHome(); }); return;
+    case "brains": refreshState().then(() => { if (route().view === "home") drawHome(); drawSide(); }); return;
     case "about": if (S.panel === "memory") loadAbout(); return;
     case "apps": loadApps().then(() => { const r2 = route(); if (r2.view === "app") { toast("Updated"); renderApp(r2.id); } else if (r2.view === "home") { drawPins(); drawHome(); } else if (r2.view === "chat") drawChat(false); else if (r2.view === "dm") drawDm(false); }); return;
     case "files": loadFiles().then(() => { const r2 = route(); if (r2.view === "chat") drawChat(false); else if (r2.view === "dm") drawDm(false); }); return;
@@ -470,7 +471,8 @@ function drawSide() {
   const host = (activeHub()?.url || location.origin).replace(/^https?:\/\//, "");
   clear(el,
     h("button", { class: "sbrand", on: { click: openHubs } },
-      h("span", { class: "grow" }, h("b", null, S.state?.hub?.name || "Hearth"), h("small", null, host)), h("i", { class: `status ${S.conn}` })),
+      h("span", { class: "grow" }, h("b", null, S.state?.hub?.name || "Hearth"), h("small", null, (S.state?.brainProblems || []).length ? `${S.state.brainProblems[0].label} signed out` : host)),
+      h("i", { class: `status ${S.conn === "live" && (S.state?.brainProblems || []).length ? "signedout" : S.conn}`, title: (S.state?.brainProblems || []).map((b: any) => `${b.label} is signed out`).join(", ") || undefined })),
     h("button", { class: "ssearch", on: { click: openJump } }, icon("search", 16), h("span", { class: "grow" }, "Search"), h("kbd", null, "⌘K")),
     h("nav", { class: "sgroup" },
       nav("home", "Home", r.view === "home", () => { location.hash = ""; }),
@@ -827,6 +829,7 @@ function drawHome() {
     h("span", { class: "hicon" }, "#"), h("span", { class: "grow" }, channelName(t)),
     t.needsYou ? h("em", { class: "badge" }, String(t.needsYou)) : t.working ? h("i", { class: "spin" }) : fresh(t) ? h("i", { class: "udot", "aria-label": "New" }) : null);
   clear(top,
+    brainStrip(),
     linkStrip(),
     S.ideas.length ? h("section", { class: "ideas" }, h("h2", { class: "bigtitle" }, "Ideas"), S.ideas.map(ideaRow)) : null,
     h("div", { class: "tiles" }, tiles.map(([ic, title, sub, fn, hot]) =>
@@ -3192,6 +3195,22 @@ const STATE_LABEL: Record<string, string> = { online: "Online", asleep: "Not ans
 const shortName = (n: string) => n.replace(/ \((Mac)\)$/, "");
 
 /** Home: one line saying where work runs right now. Only shows once a computer is linked. */
+/** A brain you picked is signed out on the hub: say so on Home, with Reconnect right there. */
+function brainStrip() {
+  const bad: { id: string; label: string; message: string }[] = S.state?.brainProblems || [];
+  if (!bad.length) return null;
+  return bad.map((b) => h("button", { class: "linkstrip signedout", on: { click: () => openBrain(b.id) } },
+    h("span", { class: "lsicon" }, icon("brain", 18)),
+    h("span", { class: "grow" }, h("b", null, `${b.label} is signed out`), " · it can't think for the team until you reconnect it"),
+    h("span", { class: "btn small primary" }, "Reconnect")));
+}
+
+/** Connectors → this brain's sheet (sign in again, check again). */
+async function openBrain(id: string) {
+  try { const t = (await loadTiles()).find((x) => x.id === id); if (t) openTile(t); else openConnections(); }
+  catch (e) { handleError(e); }
+}
+
 function linkStrip() {
   const c = S.state?.computers;
   if (!c?.linked) return null;
