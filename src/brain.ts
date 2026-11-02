@@ -1,4 +1,5 @@
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
@@ -6,7 +7,7 @@ import { wallParts, zonedToUtc } from "./time.ts";
 import { SOURCES } from "./sources/index.ts";
 import { BrainUsage, isLimitError } from "./brains/usage.ts";
 import { readClaudeToken } from "./brains/logins.ts";
-import { browserTool, describeBrowserStep, findBrowserTool } from "./brains/browser.ts";
+import { describeSkillStep, hubSkills, installSkills, skillCatalog, skillFlags, type Skill } from "./brains/skills.ts";
 
 /** Each trigger module's own description of its config, for the hook docs below. */
 /** Each trigger module's own description, read when a prompt is built (the hub adds WhatsApp and Slack at start). */
@@ -336,14 +337,13 @@ export function buildPrompt(b: BrainInput) {
   return parts.join("\n");
 }
 
-function agentEnv(harness?: string) {
+function agentEnv(harness?: string, paths: string[] = []) {
   // Agents need their own login (HOME, PATH) but nothing of the hub's: drop HEARTH_* (DB URL, etc.).
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("HEARTH_")) env[k] = v;
   // A long-lived Claude login copied up from your Mac (`claude setup-token`) signs Claude in here.
-  // The hub's browser tool runs by its bare name (that's what its Bash rule matches).
-  const browser = harness === "claude" ? findBrowserTool() : null;
-  if (browser) env.PATH = `${dirname(browser)}:${env.PATH || "/usr/bin:/bin"}`;
+  // Skill commands run by their bare names (that's what their Bash rules match).
+  if (paths.length) env.PATH = [...paths, env.PATH || "/usr/bin:/bin"].join(":");
   if (harness === "claude" && !env.CLAUDE_CODE_OAUTH_TOKEN) {
     const t = readClaudeToken();
     if (t) env.CLAUDE_CODE_OAUTH_TOKEN = t;
@@ -383,11 +383,20 @@ export class NeedsComputer extends Error {}
 /** The computer running a call dropped off mid-way. */
 export class ComputerGone extends Error {}
 
+/** The folder a skill's command lives in (~/.enkidu/bin for Enkidu's tools), for PATH. */
+function findCommandDir(cmd: string): string | null {
+  const own = join(homedir(), ".enkidu", "bin", cmd);
+  if (existsSync(own)) return dirname(own);
+  const w = Bun.which(cmd);
+  return w ? dirname(w) : null;
+}
+
 /** One line on what the model is doing right now, from a streamed tool call ("Searching: pottery gifts"). */
 export function describeStep(name: string, input: any): string | null {
   const q = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 70);
   if (name === "WebSearch") return `Searching: ${q(input?.query)}`;
-  if (name === "Bash") return describeBrowserStep(input?.command);
+  if (name === "Bash") return describeSkillStep(input?.command);
+  if (name === "Skill") return `Reading the ${String(input?.skill ?? input?.name ?? "").slice(0, 40)} skill`;
   if (name === "Read" && /\.png$/i.test(String(input?.file_path ?? ""))) return "Looking at the page";
   if (name === "WebFetch") { try { return `Reading ${new URL(String(input?.url)).hostname.replace(/^www\./, "")}`; } catch { return "Reading a page"; } }
   return null;
@@ -440,6 +449,22 @@ export class Brain {
     this.global = new Semaphore(config.maxParallel);
     this.workDir = join(config.dataDir, "brain");
     mkdirSync(this.workDir, { recursive: true, mode: 0o700 });
+  }
+
+  private skillState: { at: number; key: string; skills: Skill[]; paths: string[] } | null = null;
+  /** The hub's skills, re-scanned at most every 5 minutes (a tool installed later shows up without a restart). */
+  skills(): { skills: Skill[]; paths: string[] } {
+    if (this.skillState && Date.now() - this.skillState.at < 300_000) return this.skillState;
+    const skills = hubSkills(this.config.dataDir);
+    const key = JSON.stringify(skills);
+    if (this.skillState?.key === key) { this.skillState.at = Date.now(); return this.skillState; }
+    let paths: string[] = [];
+    try {
+      const bin = installSkills(this.workDir, skills);
+      paths = [...new Set([bin, ...skills.flatMap((s) => s.commands.map((c) => findCommandDir(c)).filter(Boolean) as string[])])];
+    } catch { return { skills: [], paths: [] }; }
+    this.skillState = { at: Date.now(), key, skills, paths };
+    return this.skillState;
   }
 
   /** Defaults from .env; the app can change them (see Hub.brains). */
@@ -543,12 +568,13 @@ export class Brain {
         // Slim: our own short system prompt instead of Claude Code's, only the tools this call needs, none of the machine's
         // MCP servers, settings or hooks. Cuts ~22k tokens of overhead from every call (~$0.06 on Sonnet, ~5x that on Opus).
         const web = !NO_TOOLS.has(b.mode);
-        // With the hub's browser installed, web calls also get its skill, Bash for `enkidu-browser` only, and Read for its screenshots.
-        const browser = web ? browserTool() : null;
-        const tools = web ? ["WebSearch", "WebFetch", ...(browser ? ["Bash", "Read"] : [])] : [];
-        const allowed = web ? ["WebSearch", "WebFetch", ...(browser ? ["Bash(enkidu-browser:*)", `Read(/${browser.evidence}/**)`] : [])] : [];
+        // Web calls also get the hub's skills: a catalog to search, and Bash/Read only for what those skills need.
+        const { skills } = web ? this.skills() : { skills: [] };
+        const sf = skillFlags(skills);
+        const tools = web ? ["WebSearch", "WebFetch", ...sf.tools] : [];
+        const allowed = web ? ["WebSearch", "WebFetch", ...sf.allowed] : [];
         cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence", ...(model ? ["--model", model] : []),
-          "--system-prompt", browser ? `${SYSTEM_PROMPT}\n${browser.skill}` : SYSTEM_PROMPT, "--strict-mcp-config", "--setting-sources", "project",
+          "--system-prompt", SYSTEM_PROMPT + skillCatalog(skills), "--strict-mcp-config", "--setting-sources", "project",
           "--tools", tools.join(","), ...(allowed.length ? ["--allowedTools", ...allowed] : [])];
         break;
       }
@@ -564,7 +590,7 @@ export class Brain {
         throw new Error(`Unknown harness: ${harness}`);
     }
     const proc = Bun.spawn(cmd, {
-      cwd: this.workDir, env: agentEnv(harness),
+      cwd: this.workDir, env: agentEnv(harness, harness === "claude" ? this.skills().paths : []),
       stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe",
     });
     let timedOut = false;

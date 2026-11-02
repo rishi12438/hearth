@@ -68,10 +68,10 @@ id hearth >/dev/null 2>&1 || adduser --disabled-password --gecos "" hearth >/dev
 [ -x /home/hearth/.bun/bin/bun ] || sudo -iu hearth bash -c 'curl -fsSL https://bun.sh/install | bash' >/dev/null
 mkdir -p /home/hearth/.claude /home/hearth/.codex && chown hearth: /home/hearth/.claude /home/hearth/.codex
 
-say "Browser: Chrome, fonts and the Enkidu browser tool"
+say "Tools for the brain: Chrome, a virtual screen, enkidu-browser and enkidu-cua"
 # Teammates read (and, after your Approve, reply on) sites with no API (Instagram, LinkedIn, X) through headless Chrome;
-# agents on the hub drive it with enkidu-browser. A failure here doesn't stop setup: the rest of the hub works without it.
-bash "$SRC/deploy/install-browser.sh" || echo "   Browser setup didn't finish; run it again later: sudo bash $APP/deploy/install-browser.sh"
+# the brain finds enkidu-browser and enkidu-cua as skills. A failure here doesn't stop setup: the rest of the hub works.
+bash "$SRC/deploy/install-tools.sh" || echo "   Not every tool installed; run it again later: sudo bash $APP/deploy/install-tools.sh"
 
 if [ -n "$BRAINS" ]; then
   say "Brains: $BRAINS"
