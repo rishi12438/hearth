@@ -13,6 +13,7 @@ import { Vault } from "./vault.ts";
 import { Connect } from "./connectors/index.ts";
 import { sourceById } from "./sources/index.ts";
 import { chromeWorkspaces, slackCookie } from "./connectors/slack.ts";
+import { webhookOk } from "./connectors/plaid.ts";
 import { cleanFingerprint } from "./browser.ts";
 import { adminToken, isAdminRequest } from "./admin.ts";
 import { detectBrains } from "./brains/logins.ts";
@@ -74,6 +75,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   drivers: { e2b?: E2b; ssh?: Ssh; readLogin?: typeof readLogin; allowLocalHub?: boolean; vault?: Vault; shares?: Shares | null } = {}) {
   const shares = drivers.shares ?? null;
   const voiceLimiter = new RateLimiter(5, 10 * 60_000);
+  const plaidLimiter = new RateLimiter(20, 60_000);
   const liveTickets = new Map<string, number>();
   const tileKey = randomBytes(12).toString("base64url");
   const tileLimiter = new RateLimiter(600, 60_000);
@@ -267,6 +269,29 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       if (!(await hub.webhook(seg[2], text))) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(404, "No webhook here."); }
       return json({ ok: true }, 202);
     }
+    // The agent's hearth-plaid command (from this machine, with the hub's agent key): read-only bank questions.
+    if (path === "/api/agent/plaid" && method === "GET") {
+      if (!connect.isAgentKey(req.headers.get("x-hearth-agent"))) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not the agent's key."); }
+      const argv = url.searchParams.getAll("a").slice(0, 20).map((a) => a.slice(0, 200));
+      try {
+        const r = await connect.plaid.agent(argv);
+        await hub.log("plaid.agent", `hearth-plaid ${argv.join(" ").slice(0, 120)}`);
+        return new Response(JSON.stringify(r, null, 1), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+      } catch (e: any) { throw new HttpError(400, e.message); }
+    }
+    // Plaid says a bank has news (new transactions, signed out). Only a body Plaid signed counts; answer fast, work after.
+    if (path === "/api/plaid/webhook") {
+      if (method !== "POST") throw new HttpError(405, "POST to this address.");
+      if (!webhookLimiter.allow("plaid")) throw new HttpError(429, "Too many calls. Wait a minute.");
+      if (Number(req.headers.get("content-length") || 0) > 64_000) throw new HttpError(413, "Too large.");
+      const raw = (await req.text()).slice(0, 64_000);
+      if (!(await connect.plaid.verify(raw, req.headers.get("plaid-verification")))) throw new HttpError(401, "Not signed by Plaid.");
+      let b: any = null;
+      try { b = JSON.parse(raw); } catch { throw new HttpError(400, "Not JSON."); }
+      const what = connect.plaid.handle(b);
+      await hub.log("plaid.webhook", `${b.webhook_type || "?"} ${b.webhook_code || "?"}: ${what}`);
+      return json({ ok: true });
+    }
     // Google sends the browser back here after you approve (no device key on a redirect; the state ties it to your Connect).
     if (path === "/api/google/callback" && method === "GET") {
       const err = url.searchParams.get("error");
@@ -274,8 +299,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         : await hub.google.finish(url.searchParams.get("code") || "", url.searchParams.get("state") || "");
       if (r.error && badToken.blocked(ip)) throw banned();
       if (r.error) badToken.allow(ip);
-      else { await hub.log("google.connected", `Google connected (${hub.google.status().email || "account"})`); hub.emit("connections"); }
-      const to = `/#connections=${r.error ? `error:${encodeURIComponent(r.error)}` : "google"}`;
+      else { await hub.log("google.connected", `Google connected (${(r as any).value?.added || "account"})`); hub.emit("connections"); }
+      const to = `/#connections=${r.error ? `error:${encodeURIComponent(r.error)}` : `google:${encodeURIComponent((r as any).value?.added || "")}`}`;
       return new Response(null, { status: 302, headers: { Location: to, "Cache-Control": "no-store" } });
     }
     if (path === "/api/pair" && method === "POST") {
@@ -528,8 +553,42 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           if (!all) throw new HttpError(502, "Couldn't reach Slack.");
           return json({ workspaces: all.map(({ domain, team, user }) => ({ domain, team, user })) });
         }
+        // Plaid: add a bank through a Plaid-hosted page (or sign one in again), then pick up the result; remove one bank.
+        if (id === "plaid" && seg[3] === "link" && method === "POST") {
+          const b = await body(req);
+          // Checking is polled every few seconds while the page is open; starting a link is the thing to limit.
+          if (!(typeof b.check === "string" ? tileLimiter.allow("plaid-check") : voiceLimiter.allow("plaid-link"))) throw new HttpError(429, "Too many tries. Wait a few minutes.");
+          try {
+            if (typeof b.check === "string") {
+              const r = await connect.plaid.finishLink(b.check);
+              if (r.added.length) { await hub.log("connector.added", `Plaid: ${r.added.map((a) => a.institution).join(", ")} added by ${device.name}`); hub.emit("connections"); }
+              else if (r.done) hub.emit("connections");
+              return json(r);
+            }
+            // Plaid tells this address about new transactions: the hub's own address, as your browser sees it.
+            const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || url.host;
+            const proto = config.behindProxy ? (req.headers.get("x-forwarded-proto") || "https") : url.protocol.replace(":", "");
+            const hook = `${proto}://${host}/api/plaid/webhook`;
+            const ok = webhookOk(hook) ? hook : null;
+            if (ok) void connect.plaid.ensureWebhook(ok);
+            return json({ ...(await connect.plaid.startLink(typeof b.update === "string" ? b.update : null, ok, b.kind === "investments" ? "investments" : "bank")), webhook: !!ok });
+          } catch (e: any) { throw new HttpError(400, e.message); }
+        }
+        if (id === "plaid" && seg[3] === "items" && seg[4] && method === "DELETE") {
+          const name = connect.plaid.items().find((i) => i.itemId === seg[4])?.institution.name;
+          try { await connect.plaid.removeItem(seg[4]); } catch (e: any) { throw new HttpError(400, e.message); }
+          await hub.log("connector.removed", `Plaid: ${name ?? "a bank"} removed by ${device.name}`);
+          hub.emit("connections");
+          return json({ connectors: await connect.tiles() });
+        }
         // Proof it's reading: run the connector's source once and show what came back (Slack DMs, etc.).
         if (method === "POST" && id && seg[3] === "test") {
+          // Plaid's screen reads your banks each time it opens: allow that often (Plaid's own limits are far higher),
+          // and don't count it when there's no bank to read.
+          if (id === "plaid") {
+            if (connect.plaid.items().length && !plaidLimiter.allow("test")) throw new HttpError(429, "Give it a few seconds, then try again.");
+            return json(await connect.plaid.probe());
+          }
           if (!voiceLimiter.allow(`test:${id}`)) throw new HttpError(429, "Give it a moment, then try again.");
           if (id === "slack") return json(await connect.slack.probe());
           if (!sourceById(id)) throw new HttpError(400, `${id} can't be tested.`);
@@ -669,11 +728,22 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         }
         if (method === "POST" && id === "connect") {
           ownerOnly();
-          const r = hub.google.authUrl(redirectUri);
+          const b = await body(req).catch(() => ({}));
+          // {account} reconnects that one (Google preselects it); without it, Google asks which, so it can add another.
+          const r = hub.google.authUrl(redirectUri, typeof b?.account === "string" ? b.account.trim().slice(0, 200) || undefined : undefined);
           if (r.error) throw new HttpError(400, r.error);
           return json({ url: r.value });
         }
-        if (method === "DELETE" && !id) { ownerOnly(); const st = await hub.google.disconnect(); await hub.log("google.disconnected", "Google disconnected"); hub.emit("connections"); return json({ ...st, redirectUri }); }
+        // DELETE /api/google signs out of every account; ?account=me@x.com just that one.
+        if (method === "DELETE" && !id) {
+          ownerOnly();
+          const account = url.searchParams.get("account")?.trim() || undefined;
+          if (account && !hub.google.accounts().some((a) => a.email.toLowerCase() === account.toLowerCase())) throw new HttpError(404, `No Google account ${account} is connected.`);
+          const st = await hub.google.disconnect(account);
+          await hub.log("google.disconnected", account ? `Google disconnected (${account})` : "Google disconnected");
+          hub.emit("connections");
+          return json({ ...st, redirectUri });
+        }
         break;
       }
       case "connections": {

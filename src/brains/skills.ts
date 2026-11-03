@@ -22,7 +22,15 @@ export type Skill = {
   commands: string[];
   /** Folders it writes screenshots and recordings to, which Read may open. */
   reads: string[];
+  /** Commands this skill brings with it (name → script), written into the brain's bin folder. */
+  scripts?: Record<string, string>;
+  /** Listed by name in the prompt's catalog (not only found by search). */
+  common?: boolean;
 };
+
+/** Skills a connector adds while it's connected (Plaid's hearth-plaid). Registered once by the hub. */
+const EXTRA: (() => Skill[])[] = [];
+export function registerSkills(fn: () => Skill[]) { EXTRA.push(fn); }
 
 type Tool = { name: string; off: string; description: string; rules: string; commands?: string[] };
 
@@ -98,6 +106,7 @@ export function hubSkills(dataDir: string, env: Record<string, string | undefine
     if (!text) continue;
     out.push({ name: t.name, description: t.description, body: `${t.rules}\n\n${text}`, commands: [t.name, ...(t.commands || [])], reads: [join(home, ".enkidu", "evidence")] });
   }
+  for (const fn of EXTRA) { try { out.push(...fn()); } catch {} }
   const taken = new Set(out.map((s) => s.name));
   for (const s of ownSkills(dataDir)) if (!taken.has(s.name)) out.push(s);
   return out;
@@ -106,7 +115,7 @@ export function hubSkills(dataDir: string, env: Record<string, string | undefine
 /** The catalog for the system prompt: one line per skill, so the brain knows what to reach for. */
 export function skillCatalog(skills: Skill[], harness: "claude" | "codex" = "claude"): string {
   if (!skills.length) return "";
-  const common = skills.filter((s) => TOOLS.some((t) => t.name === s.name));
+  const common = skills.filter((s) => s.common || TOOLS.some((t) => t.name === s.name));
   return ["", "SKILLS on this hub. Before a task that needs more than writing an answer, find the skill for it, read it, then follow it.",
     "- Search: `hearth-skill search <a few words>` (e.g. `hearth-skill search chrome`, `hearth-skill search record screen`).",
     `- Read one: \`hearth-skill show <name>\`${harness === "claude" ? " (or the Skill tool)" : ""}. Do what it says; don't guess a tool's commands.`,
@@ -130,6 +139,12 @@ export function installSkills(workDir: string, skills: Skill[]): string {
   for (const [name, text] of [["hearth-open", HEARTH_OPEN], ["hearth-skill", HEARTH_SKILL.replace("__ROOT__", root)]]) {
     writeFileSync(join(bin, name), text);
     chmodSync(join(bin, name), 0o755);
+  }
+  // A skill's own commands (they may carry the hub's local address and a key: owner-only).
+  for (const s of skills) for (const [name, text] of Object.entries(s.scripts || {})) {
+    if (!NAME_RE.test(name)) continue;
+    writeFileSync(join(bin, name), text, { mode: 0o700 });
+    chmodSync(join(bin, name), 0o700);
   }
   return bin;
 }
@@ -171,6 +186,8 @@ export function skillFlags(skills: Skill[]): { tools: string[]; allowed: string[
 export function describeSkillStep(command: unknown): string | null {
   const c = String(command ?? "");
   if (/(^|[\s;&|/])hearth-open\s/.test(c)) return "Opening an app";
+  const bank = c.match(/(?:^|[\s;&|/])hearth-plaid\s+(\w+)/)?.[1];
+  if (bank) return bank === "refresh" ? "Asking your bank for fresh data" : `Checking your bank${bank === "balances" ? " balances" : bank === "cards" ? " cards" : bank === "spending" ? ": spending" : bank === "holdings" || bank === "investments" ? ": investments" : ""}`;
   const find = c.match(/(?:^|[\s;&|/])hearth-skill\s+(search|show)\s+(.+)/);
   if (find) return find[1] === "search" ? `Looking for a skill: ${find[2].replace(/["']/g, "").trim().slice(0, 50)}` : `Reading the ${find[2].replace(/["']/g, "").trim().slice(0, 40)} skill`;
   const tool = c.match(/(?:^|[\s;&|/])(enkidu-browser|enkidu-cua)\s/)?.[1];

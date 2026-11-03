@@ -178,7 +178,7 @@ export class Connections {
   status() {
     const g = this.google.status();
     return [
-      { id: "google", domain: "google", label: "Google", connected: g.connected, detail: g.email, fromMac: false, expiresInDays: null, problem: this.problems.get("google") ?? null },
+      { id: "google", domain: "google", label: "Google", connected: g.connected, detail: g.accounts.map((a) => a.email).join(", ") || null, fromMac: false, expiresInDays: null, problem: this.problems.get("google") ?? null },
       ...Object.entries(PRESETS).map(([id, p]) => this.row(id, p.domain, p.label)),
       ...this.extraDomains().map((d) => this.row(d, d, d)),
     ];

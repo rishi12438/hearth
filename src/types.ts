@@ -309,7 +309,7 @@ export type Approval = Doc & {
   jobId?: string;
   summary: string;
   details?: string;
-  action: { type: "script"; script: string; args: string[] } | { type: "message"; channel: Channel; to: string; text: string; subject?: string; threadId?: string };
+  action: { type: "script"; script: string; args: string[] } | { type: "message"; channel: Channel; to: string; text: string; subject?: string; threadId?: string; from?: string };
   status: "pending" | "approved" | "rejected" | "done" | "failed";
   result?: string;
   decidedAt?: string;

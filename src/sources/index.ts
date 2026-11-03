@@ -3,6 +3,7 @@ import type { Cookie, readPage } from "../browser.ts";
 // (connection ids are plain strings now: a preset id, a domain, or "google")
 import { gmail } from "./gmail.ts";
 import { calendar } from "./calendar.ts";
+import { drive } from "./drive.ts";
 import { linkedin } from "./linkedin.ts";
 import { x } from "./x.ts";
 import { site } from "./site.ts";
@@ -41,7 +42,7 @@ export interface Source<C = Record<string, unknown>> {
   items(config: C, ctx: SourceCtx): Promise<Item[]>;
 }
 
-export const SOURCES: Source<any>[] = [gmail, calendar, linkedin, x, instagram, site];
+export const SOURCES: Source<any>[] = [gmail, calendar, drive, linkedin, x, instagram, site];
 
 /** Sources the hub adds at start (WhatsApp, Slack: they read through objects the hub owns). Replaces one with the same id. */
 export function registerSource(s: Source<any>) {
