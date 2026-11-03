@@ -256,6 +256,17 @@ code { font-family: var(--mono); font-size: .86em; background: var(--surface); p
 .dropsep { height: 1px; background: var(--line); margin: 5px 4px; }
 .projbtn .projname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 600px) { .projbtn { width: 48px; padding: 0; justify-content: center; } .projbtn .projname { display: none; } }
+/* Home: question + box in the middle, a few one-line suggestions under it */
+#home { min-height: 100%; display: flex; }
+.hero { flex: 1; width: 100%; max-width: 680px; margin: 0 auto; padding: 0 16px 6vh; display: flex; flex-direction: column; justify-content: center; }
+.hero h2 { text-align: center; font-size: 26px; font-weight: var(--fw-medium); letter-spacing: -.01em; margin-bottom: 20px; }
+.hero .composer-wrap { margin-bottom: 14px; }
+.suggs { display: flex; flex-direction: column; gap: 2px; }
+.sugg { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 14px; border-radius: 12px; text-align: left; font-size: 15px; color: var(--ink-2); outline: none; transition: background .12s, color .12s; }
+.sugg:hover, .sugg:focus-visible { background: rgba(30, 25, 20, .05); color: var(--ink); }
+.sugg .grow { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sugg small { flex: none; font-size: 13px; color: var(--muted); }
+.suggic { flex: none; width: 18px; display: grid; place-items: center; color: var(--muted); font-weight: var(--fw-medium); }
 .starters { display: flex; flex-direction: column; gap: 8px; }
 .starters button { text-align: left; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); color: var(--ink-2); font-size: 16px; }
 .dmhero { display: flex; flex-direction: column; align-items: flex-start; padding: 18px 16px 14px; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
