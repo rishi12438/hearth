@@ -45,10 +45,11 @@ const S = {
 
 let live: ReturnType<typeof stream> | null = null;
 const app = document.getElementById("app")!;
-type Route = { view: "home" } | { view: "dms" } | { view: "activity" } | { view: "board"; id?: string } | { view: "chat"; id: string; job?: string } | { view: "dm"; id: string } | { view: "app"; id: string } | { view: "project"; id: string };
+type Route = { view: "home" } | { view: "dms" } | { view: "activity" } | { view: "connectors" } | { view: "board"; id?: string } | { view: "chat"; id: string; job?: string } | { view: "dm"; id: string } | { view: "app"; id: string } | { view: "project"; id: string };
 const route = (): Route => {
   if (location.hash === "#dms") return { view: "dms" };
   if (location.hash === "#activity") return { view: "activity" };
+  if (location.hash === "#connectors") return { view: "connectors" };
   let m = location.hash.match(/^#c\/([\w-]+)(?:\/([\w-]+))?/);
   if (m) return { view: "chat", id: m[1], job: m[2] };
   m = location.hash.match(/^#a\/([\w-]+)/);
@@ -150,6 +151,7 @@ function show() {
     if (r.view === "home") renderHome();
     else if (r.view === "dms") renderDms();
     else if (r.view === "activity") renderActivity();
+    else if (r.view === "connectors") renderConnectors();
     else if (r.view === "dm") renderDm();
     else if (r.view === "app") renderApp(r.id);
     else if (r.view === "board") renderBoard(r.id);
@@ -503,8 +505,7 @@ function drawSide() {
       nav("home", "Home", r.view === "home", () => { location.hash = ""; }),
       nav("dms", "DMs", tab === "dms", () => { location.hash = "#dms"; }),
       nav("bell", "Activity", tab === "activity", () => { location.hash = "#activity"; }, needsYouCount()),
-      nav("sparkle", "Ideas", false, lookForIdeas),
-      nav("plug", "Connectors", false, () => openConnections())),
+      nav("plug", "Connectors", r.view === "connectors", () => { location.hash = "#connectors"; })),
     h("div", { class: "slabel" }, "Projects", h("button", { class: "sadd", "aria-label": "New project", on: { click: newProject } }, icon("plus", 14))),
     h("nav", { class: "sgroup" }, S.projects.length ? S.projects.map((p: any) => [
       h("button", { class: `snav ${r.view === "project" && r.id === p.id ? "on" : ""}`, on: { click: () => { location.hash = `#p/${p.id}`; }, ...dropTo(p.id) } },
@@ -753,7 +754,7 @@ function drawHeader() {
   if (!top) return;
   // A project's page has its own title; just a way back on phones.
   if (r.view === "project") { clear(top, wide() ? h("div") : h("div", { class: "toprow" }, h("button", { class: "circle glass", "aria-label": "Back", on: { click: () => { location.hash = ""; } } }, icon("back", 22)))); return; }
-  if (r.view === "home" || r.view === "dms" || r.view === "activity") {
+  if (r.view === "home" || r.view === "dms" || r.view === "activity" || r.view === "connectors") {
     const left = h("button", { class: "circle glass", "aria-label": "Menu", on: { click: openMenu } }, icon("filter", 22), (S.state?.pendingScripts || 0) ? h("i", { class: "dot" }) : null);
     const right = h("div", { class: "pillgroup glass" },
       S.updateReady ? h("button", { class: "pillbtn", on: { click: () => location.reload() } }, "Update") : null,
@@ -764,7 +765,7 @@ function drawHeader() {
         stage("home", hearth, S.planning ? "thinking" : hearth.state || "idle", S.state?.hub?.name || "Hearth", null, openHubs, true), right));
       return;
     }
-    clear(top, h("div", { class: "toprow big" }, left, h("h1", null, r.view === "dms" ? "DMs" : "Activity"), right));
+    clear(top, h("div", { class: "toprow big" }, left, h("h1", null, r.view === "dms" ? "DMs" : r.view === "connectors" ? "Connectors" : "Activity"), right));
     return;
   }
   const back = h("button", { class: "circle glass", "aria-label": "Back", on: { click: () => { history.length > 1 ? history.back() : (location.hash = ""); } } }, icon("back", 24));
@@ -949,12 +950,6 @@ function ideaCard(i: any) {
   // "I can check your fares" → "Check your fares": the card is already Hearth offering, so the lead-in is noise. The detail is on hover.
   const short = String(i.title || "").replace(/^i can\s+/i, "").replace(/^./, (c) => c.toUpperCase());
   return h("div", { class: "ideacard", title: i.body || "" }, h("b", null, short), no, go);
-}
-
-async function lookForIdeas() {
-  toast("Looking for things I can do for you…");
-  try { S.ideas = await call("/api/ideas", { body: {} }); drawHome(); if (!S.ideas.length) toast("Nothing worth suggesting right now."); }
-  catch (err) { handleError(err); }
 }
 
 let homeNow: HTMLElement | null = null;
@@ -1759,8 +1754,24 @@ initConnectors({
   logo: (id, size) => { const c = CONNECTORS.find((x) => x.via === id && x.id === id) || (id === "google" ? CONNECTORS[0] : null); return c ? connectorTile(c, size) : null; },
 });
 
+/** Connectors is a page (#connectors), not a sheet. Its setup screens still open as sheets on top and come back here. */
+let connTab: "available" | "connected" = "available";
+function openConnections(tab: "available" | "connected" = "available") {
+  connTab = tab;
+  if (route().view !== "connectors") { location.hash = "#connectors"; return; }
+  closeSheet();
+  void drawConnectors();
+}
+
+function renderConnectors() {
+  frame({ header: h("div"), body: h("div", { id: "connectorspage", class: "connectors cpage" }) });
+  drawHeader();
+  void drawConnectors();
+}
+
 /** Connectors, laid out like an app store: search, Available / Connected, Featured, then groups. */
-async function openConnections(tab: "available" | "connected" = "available") {
+async function drawConnectors() {
+  let tab = connTab;
   let g: any, connResp: any, tiles: any[] = [];
   try { [g, connResp, tiles] = await Promise.all([call("/api/google"), call("/api/connections"), loadTiles().catch(() => [])]); } catch (e) { return handleError(e); }
   const conns: any[] = connResp.connections || connResp;
@@ -1768,7 +1779,8 @@ async function openConnections(tab: "available" | "connected" = "available") {
   const isOn = (c: Connector) => !!conn(c)?.connected;
   const open = (c: Connector) => (c.via === "google" ? openGoogleSetup() : openCookieSetup(c));
   const sub = (c: Connector) => conn(c)?.problem ? `Needs reconnecting` : isOn(c) ? `Connected · ${c.via === "google" ? googleWho(g) : conn(c).detail}` : c.blurb;
-  const body = h("div", { class: "connectors" });
+  const body = document.getElementById("connectorspage");
+  if (!body) return;
   let q = "";
   const action = (c: Connector) => !c.via ? h("span", { class: "csoon" }, "Soon")
     : h("button", { class: "clink", on: { click: () => open(c) } }, isOn(c) ? "Manage" : "Connect");
@@ -1810,8 +1822,8 @@ async function openConnections(tab: "available" | "connected" = "available") {
       h("div", { class: "search" }, icon("search", 18), h("input", { placeholder: "Search connectors", type: "search", value: q,
         on: { input: (e: Event) => { q = (e.target as HTMLInputElement).value.trim().toLowerCase(); draw(); setTimeout(() => (body.querySelector("input") as HTMLInputElement)?.focus(), 0); } } })),
       h("div", { class: "segmented" },
-        h("button", { class: tab === "available" ? "on" : "", on: { click: () => { tab = "available"; draw(); } } }, "Available"),
-        h("button", { class: tab === "connected" ? "on" : "", on: { click: () => { tab = "connected"; draw(); } } }, "Connected")),
+        h("button", { class: tab === "available" ? "on" : "", on: { click: () => { tab = connTab = "available"; draw(); } } }, "Available"),
+        h("button", { class: tab === "connected" ? "on" : "", on: { click: () => { tab = connTab = "connected"; draw(); } } }, "Connected")),
       tab === "available" && tiles.length ? connectorGrid(tiles, q) : null,
       tab === "available" && tiles.length && rest.length ? [h("h4", null, "More"), h("div", { class: "list" }, rest.map(row))] : null,
       featured.length && !tiles.length ? [h("h4", null, "Featured"), h("div", { class: "cfeatured" }, featured.map((c) =>
@@ -1826,7 +1838,6 @@ async function openConnections(tab: "available" | "connected" = "available") {
       h("p", { class: "muted small" }, "Everything you connect stays on your hub. Sign-ins never go to the model, this app or your exports."));
   };
   draw();
-  openSheet("Connectors", body);
 }
 
 /**
