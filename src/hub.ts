@@ -1857,6 +1857,21 @@ export class Hub {
     return items.sort((a, b) => urgent(a.kind) - urgent(b.kind) || String(b.at).localeCompare(String(a.at))).slice(0, 80);
   }
 
+  /** When you last looked at Activity (any device). Results after this count as new, like unread notifications. */
+  async inboxSeen(): Promise<string> {
+    return (await this.store.get<{ id: string; createdAt: string; at: string }>("settings", "inboxSeen"))?.at || "";
+  }
+
+  /** Mark Activity as seen up to now. Only moves forward, so a slow device can't bring old results back. */
+  async markInboxSeen(): Promise<string> {
+    const cur = await this.inboxSeen();
+    const at = new Date().toISOString();
+    if (at <= cur) return cur;
+    await this.store.put("settings", { id: "inboxSeen", createdAt: "1970-01-01T00:00:00.000Z", at });
+    this.emit("inbox");
+    return at;
+  }
+
   /** Everything one teammate has done, across chats, plus its routines and direct messages. */
   async teammateDetail(id: string) {
     const teammate = await this.teammate(id);

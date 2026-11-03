@@ -169,6 +169,7 @@ function refresh() {
   else if (r.view === "dm") loadDm(r.id);
   else if (r.view === "activity") renderActivity();
   else if (r.view === "board") loadBoard();
+  if (r.view !== "activity") { actVisit = null; loadInbox(); }
 }
 
 function connect() {
@@ -181,7 +182,7 @@ function soon() {
   if (rosterTimer) return;
   rosterTimer = setTimeout(() => {
     rosterTimer = null; loadRoster(); loadThreads();
-    if (route().view === "activity") call("/api/inbox").then((x: any[]) => { S.inbox = x; drawActivity(); }).catch(() => {});
+    loadInbox();
   }, 250);
 }
 
@@ -258,6 +259,7 @@ function onEvent(e: { type: string; data?: any }) {
       if (S.panel === "shares") openShares(); else if (S.panel?.startsWith("share:")) openShare(S.panel.slice(6));
       return;
     case "scripts": refreshState(); return;
+    case "inbox": if (r.view !== "activity") loadInbox(); return; // seen on another device: clear the badge here too
     case "reset": refresh(); return;
   }
 }
@@ -454,7 +456,7 @@ function frame(opts: { header: Node; body: Node; composer?: boolean; fab?: boole
     h("div", { class: "tabs glass" },
       ([["home", "Home", "home", ""], ["dms", "DMs", "dms", "#dms"], ["activity", "Activity", "bell", "#activity"]] as const).map(([id, label, ic, hash]) =>
         h("button", { class: `tab ${tab === id ? "on" : ""}`, on: { click: () => { location.hash = hash; } } },
-          h("span", { class: "tabicon" }, icon(ic, 24), id === "activity" && needsYouCount() ? h("i", { class: "dot" }) : null), h("span", null, label)))),
+          h("span", { class: "tabicon" }, icon(ic, 24), id === "activity" ? h("i", { class: "dot", id: "actdot", hidden: !activityBadge() }) : null), h("span", null, label)))),
     h("button", { class: "searchbtn glass", "aria-label": "Search (⌘K)", on: { click: openJump } }, icon("search", 24)));
   // Wide windows (the Mac app, a desktop browser): a sidebar beside the screen instead of the phone's tab bar.
   app.classList.toggle("desk", wide());
@@ -504,7 +506,7 @@ function drawSide() {
     h("nav", { class: "sgroup" },
       nav("home", "Home", r.view === "home", () => { location.hash = ""; }),
       nav("dms", "DMs", tab === "dms", () => { location.hash = "#dms"; }),
-      nav("bell", "Activity", tab === "activity", () => { location.hash = "#activity"; }, needsYouCount()),
+      nav("bell", "Activity", tab === "activity", () => { location.hash = "#activity"; }, activityBadge()),
       nav("plug", "Connectors", r.view === "connectors", () => { location.hash = "#connectors"; })),
     h("div", { class: "slabel" }, "Projects", h("button", { class: "sadd", "aria-label": "New project", on: { click: newProject } }, icon("plus", 14))),
     h("nav", { class: "sgroup" }, S.projects.length ? S.projects.map((p: any) => [
@@ -740,6 +742,34 @@ function moveToProject(t: any) {
 
 function needsYouCount() {
   return S.roster.reduce((n, t) => n + (t.needsYou || 0), 0);
+}
+
+// Activity works like notifications: a result counts as new until you open Activity (on any device; the hub keeps the mark), or the chat it landed in.
+let actSeen = "";
+let actVisit: string | null = null; // what was already seen when you opened Activity this time, so new rows stay marked while you look
+const isFresh = (it: any, since = actSeen) => (it.kind === "done" || it.kind === "failed" || it.kind === "proactive") &&
+  String(it.at) > since && String(it.at) > (seen[it.threadId?.startsWith("tm-") ? it.threadId.slice(3) : it.threadId] || "");
+const unseenCount = () => (S.inbox || []).filter((it: any) => isFresh(it)).length;
+const activityBadge = () => needsYouCount() + (route().view === "activity" ? 0 : unseenCount());
+function markActivitySeen() {
+  // Only tell the hub when there's something new to clear, so redraws don't keep pinging it.
+  if (!(S.inbox || []).some((it: any) => String(it.at) > actSeen)) return;
+  actSeen = new Date().toISOString();
+  call("/api/inbox/seen", { body: {} }).then((x: any) => { if (x?.at > actSeen) actSeen = x.at; }).catch(() => {});
+}
+function drawActivityBadge() {
+  const d = document.getElementById("actdot");
+  if (d) d.hidden = !activityBadge();
+  drawSide();
+}
+async function loadInbox() {
+  try {
+    const [items, mark] = await Promise.all([call("/api/inbox"), call("/api/inbox/seen")]);
+    S.inbox = items;
+    if (mark?.at > actSeen) actSeen = mark.at;
+  } catch { return; }
+  if (route().view === "activity") drawActivity();
+  drawActivityBadge();
 }
 
 function userAvatar(size = 40) {
@@ -1024,7 +1054,11 @@ function drawDms() {
 async function renderActivity() {
   frame({ header: h("div"), body: h("div", { id: "activity" }) });
   drawHeader();
-  try { S.inbox = await call("/api/inbox"); } catch (e) { handleError(e); }
+  try {
+    const [items, mark] = await Promise.all([call("/api/inbox"), call("/api/inbox/seen")]);
+    S.inbox = items;
+    if (actVisit === null && mark?.at > actSeen) actSeen = mark.at;
+  } catch (e) { handleError(e); }
   drawActivity();
 }
 
@@ -1060,12 +1094,18 @@ function drawActivity() {
   };
   const of = (...k: string[]) => items.filter((it: any) => k.includes(it.kind));
   const running = [...of("running"), ...of("queued")];
-  const sec = (title: string, list: any[], draw: (it: any) => Node) => list.length ? h("section", { class: "actsec" }, h("h4", null, title, h("em", null, String(list.length))), list.map(draw)) : null;
+  const sec = (title: string, list: any[], draw: (it: any) => Node, count = true) => list.length ? h("section", { class: "actsec" }, h("h4", null, title, count ? h("em", null, String(list.length)) : null), list.map(draw)) : null;
+  if (actVisit === null) actVisit = actSeen;
+  const past = of("proactive", "done", "failed");
+  const fresh = past.filter((it: any) => isFresh(it, actVisit!));
+  markActivitySeen();
   clear(el, [
     sec("Working now", running, runRow),
     sec("Needs you", of("approval", "blocked"), row),
-    sec("Earlier", of("proactive", "done", "failed"), row),
+    sec("New", fresh, row),
+    sec("Earlier", past.filter((it: any) => !fresh.includes(it)), row, false),
   ].filter(Boolean) as Node[]);
+  drawActivityBadge();
 }
 
 // ---------------- jump to (⌘K) ----------------
