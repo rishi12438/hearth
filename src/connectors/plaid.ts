@@ -168,15 +168,21 @@ export class Plaid {
   }
 
   /** Recent transactions across every bank, newest first. Positive amount = money out (Plaid's convention). */
-  async transactions(days = 30, limit = 50) {
+  async transactions(days = 30, limit = 50, only?: (i: SavedItem) => boolean) {
     const end = new Date(), start = new Date(Date.now() - days * 864e5);
     const all = await this.perItem(async (item) => {
-      const j = await this.call("/transactions/get", { access_token: item.accessToken, start_date: day(start), end_date: day(end), options: { count: Math.min(limit, 500) } });
+      if (only && !only(item)) return [];
+      // Plaid pages at 500; a long window (spending over 90 days) can need a few pages. Capped at 2,000 per bank.
+      let j: any = null, got: any[] = [];
+      do {
+        j = await this.call("/transactions/get", { access_token: item.accessToken, start_date: day(start), end_date: day(end), options: { count: Math.min(limit, 500), offset: got.length } });
+        got = got.concat(j.transactions || []);
+      } while (got.length < Math.min(limit, 2000) && got.length < Number(j.total_transactions || 0) && (j.transactions || []).length);
       const names = new Map<string, string>((j.accounts || []).map((a: any) => [String(a.account_id), `${a.name || "Account"}${a.mask ? ` ••${a.mask}` : ""}`]));
-      return (j.transactions || []).map((t: any) => ({
+      return got.map((t: any) => ({
         id: String(t.transaction_id), date: String(t.date), amount: Number(t.amount), currency: t.iso_currency_code || "USD",
         merchant: String(t.merchant_name || t.name || "Unknown"), pending: !!t.pending, category: t.personal_finance_category?.primary ?? null,
-        account: `${item.institution.name} · ${names.get(String(t.account_id)) || "account"}`,
+        account: `${item.institution.name} · ${names.get(String(t.account_id)) || "account"}`, bank: item.institution.name,
       }));
     });
     const list = all.flatMap((r) => r.value || []).sort((a, b) => b.date.localeCompare(a.date)).slice(0, limit);
@@ -219,6 +225,66 @@ export class Plaid {
       cards: cards.map((c: any) => ({ ...c, text: `${c.account}: ${money(c.balance)} owed${c.statement != null ? ` · statement ${money(c.statement)}` : ""}${c.minimum != null ? ` · min ${money(c.minimum)}` : ""}${c.due ? ` due ${c.due}` : ""}${c.apr != null ? ` · ${c.apr}% APR` : ""}` })),
       txNote: tx.errors.some((e) => e.code === "PRODUCT_NOT_READY") ? "Plaid is still pulling transactions for a new bank. They show up within a few minutes." : null,
     };
+  }
+
+  // ---------- for the agent (hearth-plaid) ----------
+
+  /** What `hearth-plaid <command> [flags]` asks. Read-only, JSON out; nothing here can move money. */
+  async agent(argv: string[]): Promise<unknown> {
+    if (!this.connected()) throw new PlaidError("NOT_CONNECTED", "No bank is connected. The owner adds one in Hearth: Connectors → Banks (Plaid).");
+    const [cmd, ...rest] = argv;
+    const flag = (f: string) => { const i = rest.indexOf(f); return i >= 0 ? rest[i + 1] : undefined; };
+    const num = (f: string, def: number, max: number) => Math.min(max, Math.max(1, Math.floor(Number(flag(f) ?? def)) || def));
+    const bank = flag("--bank")?.toLowerCase();
+    const onBank = (i: SavedItem) => !bank || i.institution.name.toLowerCase().includes(bank);
+    if (bank && !this.items().some(onBank)) throw new PlaidError("NO_BANK", `No connected bank matches "${bank}". Connected: ${this.items().map((i) => i.institution.name).join(", ")}.`);
+    const problems = (rs: { item: SavedItem; error?: PlaidError }[]) => rs.filter((r) => r.error && r.error.code !== "PRODUCT_NOT_READY").map((r) => ({
+      bank: r.item.institution.name, problem: RELOGIN.has(r.error!.code) ? "The bank signed Hearth out: the owner reconnects it in Hearth (Connectors → Banks)." : r.error!.message }));
+    switch (cmd) {
+      case "balances": {
+        const rs = (await this.accounts()).filter((r) => onBank(r.item));
+        return { accounts: rs.flatMap((r) => (r.value || []).map((a: any) => ({ bank: r.item.institution.name, account: `${a.name}${a.mask ? ` ••${a.mask}` : ""}`, type: a.subtype || a.type,
+          balance: a.current, available: a.available, limit: a.limit, currency: a.currency,
+          ...(a.type === "credit" ? { note: "credit: balance is what's owed" } : {}) }))), problems: problems(rs),
+          asOf: "Plaid's last pull from the bank (1–4 times a day); run `hearth-plaid refresh` for newer." };
+      }
+      case "transactions": {
+        const days = num("--days", 30, 730), limit = num("--limit", 50, 500), min = Number(flag("--min") ?? 0) || 0;
+        const q = flag("--search")?.toLowerCase(), acct = flag("--account")?.toLowerCase();
+        const { list, errors } = await this.transactions(days, 2000, onBank);
+        const hits = list.filter((t) => Math.abs(t.amount) >= min && (!q || `${t.merchant} ${t.category ?? ""}`.toLowerCase().includes(q)) && (!acct || t.account.toLowerCase().includes(acct)));
+        return { days, count: hits.length, shown: Math.min(limit, hits.length),
+          transactions: hits.slice(0, limit).map((t) => ({ date: t.date, amount: t.amount, currency: t.currency, merchant: t.merchant, category: t.category, account: t.account, pending: t.pending })),
+          sign: "amount > 0 is money out (a purchase); < 0 is money in (a deposit, refund or card payment)",
+          problems: errors.filter((e) => e.code !== "PRODUCT_NOT_READY").map((e) => ({ bank: e.institution, problem: e.message })) };
+      }
+      case "cards": return { cards: (await this.cards()).filter((c: any) => !bank || c.account.toLowerCase().startsWith(bank) || c.account.toLowerCase().includes(bank)) };
+      case "spending": {
+        const days = num("--days", 30, 730);
+        const { list } = await this.transactions(days, 2000, onBank);
+        const NOT_SPEND = new Set(["TRANSFER_IN", "TRANSFER_OUT", "LOAN_PAYMENTS", "INCOME"]);
+        const by = new Map<string, { total: number; count: number }>();
+        let spent = 0, income = 0;
+        for (const t of list) {
+          if (t.pending) continue;
+          if (t.category === "INCOME" || (t.amount < 0 && t.category === "TRANSFER_IN")) { income += -t.amount; continue; }
+          if (NOT_SPEND.has(t.category ?? "") || t.amount <= 0) continue;
+          const k = t.category || "OTHER", v = by.get(k) || { total: 0, count: 0 };
+          v.total += t.amount; v.count++; by.set(k, v); spent += t.amount;
+        }
+        const r2 = (n: number) => Math.round(n * 100) / 100;
+        return { days, spent: r2(spent), income: r2(income),
+          byCategory: [...by].sort((a, b) => b[1].total - a[1].total).map(([category, v]) => ({ category, total: r2(v.total), count: v.count })),
+          note: "Posted transactions only. Card payments and transfers between your own accounts aren't counted as spending." };
+      }
+      case "refresh": {
+        const rs = await this.perItem(async (i) => { if (onBank(i)) await this.call("/transactions/refresh", { access_token: i.accessToken }); return onBank(i); });
+        return { asked: rs.filter((r) => r.value).map((r) => r.item.institution.name), problems: problems(rs),
+          note: "Plaid is pulling from the bank now; new transactions arrive within a few minutes (the webhook checks triggers)." };
+      }
+      default:
+        throw new PlaidError("USAGE", "usage: hearth-plaid balances | transactions [--days N] [--bank B] [--min N] [--search W] [--account A] [--limit N] | cards | spending [--days N] [--bank B] | refresh [--bank B]");
+    }
   }
 
   // ---------- webhooks ----------
@@ -305,7 +371,7 @@ export const line = (t: Tx) => `${t.date} · ${t.amount >= 0 ? `${money(t.amount
 export function plaidSource(plaid: () => Plaid): Source<{ minAmount: number }> {
   return {
     id: "plaid", label: "Bank (Plaid)", needs: "plaid",
-    doc: `New posted transactions on the owner's connected bank accounts and credit cards (Plaid). Each item says only which account (no amount or merchant, on purpose); tell the owner to open Banks (Plaid) in Hearth to see it. Checked as soon as Plaid's webhook says there's news, and on the timer as a fallback. config {"minAmount":0} — only amounts at least this big (either direction). Minutes >= 60, default 240 (banks update a few times a day).`,
+    doc: `New posted transactions on the owner's connected bank accounts and credit cards (Plaid). Each item says only which account (no amount or merchant, on purpose); look it up with \`hearth-plaid transactions\` if you have that skill, else tell the owner to open Banks (Plaid) in Hearth. Checked as soon as Plaid's webhook says there's news, and on the timer as a fallback. config {"minAmount":0} — only amounts at least this big (either direction). Minutes >= 60, default 240 (banks update a few times a day).`,
     validate: (c) => ({ minAmount: Math.max(0, Number(c?.minAmount) || 0) }),
     minutes: () => ({ min: 60, default: 240 }),
     describe: (c) => (c.minAmount ? `new bank transactions of ${money(c.minAmount)} or more` : "new bank transactions"),
@@ -356,3 +422,36 @@ export const plaid: Connector = {
   },
   async remove({ plaid }) { return plaid.removeAll(); },
 };
+
+/** The agent's skill for this: one command, `hearth-plaid`, that asks this hub (on its own machine) with a key that
+ *  only opens these read-only questions. Only present while a bank is connected. */
+export function plaidSkill(hubUrl: string, key: string) {
+  const script = `#!/usr/bin/env bash
+# hearth-plaid <command> [flags]: the owner's bank accounts and cards, read-only (Hearth asks Plaid). JSON out.
+set -uo pipefail
+args=(); for a in "$@"; do args+=(--data-urlencode "a=$a"); done
+exec curl -sS -m 90 -G -H "X-Hearth-Agent: ${key}" "${hubUrl}/api/agent/plaid" "\${args[@]}"
+`;
+  return {
+    name: "hearth-plaid", common: true, commands: ["hearth-plaid"], reads: [], scripts: { "hearth-plaid": script },
+    description: "The owner's money: bank and card balances, transactions, spending by category, card due dates and APR (Chase, Discover… via Plaid). Read-only.",
+    body: `# Your owner's bank accounts and credit cards (read-only)
+
+Run \`hearth-plaid <command>\`. It prints JSON. Nothing here can move money, pay a bill or change anything.
+
+| Command | What it gives |
+|---|---|
+| \`hearth-plaid balances [--bank chase]\` | Every account: balance, available, limit. For a credit card, balance = what's owed. |
+| \`hearth-plaid transactions [--days 30] [--bank discover] [--min 50] [--search uber] [--account sapphire] [--limit 50]\` | Recent transactions, newest first. amount > 0 = money out, < 0 = money in. |
+| \`hearth-plaid cards [--bank chase]\` | Each card: owed, statement balance, minimum due, due date, purchase APR, overdue. |
+| \`hearth-plaid spending [--days 30] [--bank chase]\` | Total spent and income, by category (card payments and own-account transfers left out). |
+| \`hearth-plaid refresh [--bank chase]\` | Ask the bank for fresh data now. Only when the owner wants up-to-the-minute numbers: banks update 1–4 times a day by themselves. |
+
+- Pick the smallest command that answers the question (spending for "how much did I spend", not every transaction).
+- Numbers are as of Plaid's last pull from the bank. Say so if it matters ("as of this morning").
+- A \`problems\` entry means a bank needs the owner: tell them to reconnect it in Hearth → Connectors → Banks (Plaid).
+- A "New charge on …" alert from the Plaid trigger has no amount on purpose: look it up with \`hearth-plaid transactions --days 3 --account <name>\`.
+- Money is private: give the owner what they asked for; don't repeat full account lists or numbers in places other people see.
+- Moving money, paying a card, disputing a charge: not possible here. Say what the owner would do in their bank's app.`,
+  };
+}

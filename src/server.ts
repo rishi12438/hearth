@@ -268,6 +268,16 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       if (!(await hub.webhook(seg[2], text))) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(404, "No webhook here."); }
       return json({ ok: true }, 202);
     }
+    // The agent's hearth-plaid command (from this machine, with the hub's agent key): read-only bank questions.
+    if (path === "/api/agent/plaid" && method === "GET") {
+      if (!connect.isAgentKey(req.headers.get("x-hearth-agent"))) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not the agent's key."); }
+      const argv = url.searchParams.getAll("a").slice(0, 20).map((a) => a.slice(0, 200));
+      try {
+        const r = await connect.plaid.agent(argv);
+        await hub.log("plaid.agent", `hearth-plaid ${argv.join(" ").slice(0, 120)}`);
+        return new Response(JSON.stringify(r, null, 1), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+      } catch (e: any) { throw new HttpError(400, e.message); }
+    }
     // Plaid says a bank has news (new transactions, signed out). Only a body Plaid signed counts; answer fast, work after.
     if (path === "/api/plaid/webhook") {
       if (method !== "POST") throw new HttpError(405, "POST to this address.");

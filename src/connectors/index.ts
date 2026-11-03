@@ -6,7 +6,9 @@ import type { VoiceSettings } from "../voice.ts";
 import type { Connector, Ctx, Tile, AddInput } from "./types.ts";
 import { WhatsApp, whatsapp, type IgnoreRules } from "./whatsapp.ts";
 import { Slack, slack, slackSource } from "./slack.ts";
-import { Plaid, plaid, plaidSource } from "./plaid.ts";
+import { Plaid, plaid, plaidSource, plaidSkill } from "./plaid.ts";
+import { registerSkills } from "../brains/skills.ts";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { serper, serperKey } from "./serper.ts";
 import { deepgram } from "./deepgram.ts";
 import { instagram, linkedin } from "./cookies.ts";
@@ -56,6 +58,17 @@ export class Connect {
     // A Plaid webhook: check the Plaid triggers now rather than at their next timer; a bank's state changed: redraw.
     this.plaid.onNews = (bank) => { void hub.pollNow("plaid", `${bank} has new transactions`).catch(() => {}); };
     this.plaid.onChange = () => hub.emit("connections");
+    // The agent's hearth-plaid command asks this hub on its own machine with a key made fresh each start, which opens
+    // only the read-only Plaid questions. The skill is there only while a bank is connected.
+    const h = hub.config.host, local = !h || h === "0.0.0.0" || h === "::" ? "127.0.0.1" : h.includes(":") ? `[${h}]` : h;
+    registerSkills(() => (this.plaid.connected() ? [plaidSkill(`http://${local}:${hub.config.port}`, this.agentKey)] : []));
+  }
+
+  /** The key hearth-plaid sends. */
+  private readonly agentKey = randomBytes(24).toString("hex");
+  isAgentKey(k: string | null) {
+    const a = Buffer.from(String(k || "")), b = Buffer.from(this.agentKey);
+    return a.length === b.length && timingSafeEqual(a, b);
   }
 
   /** Let each connector pick up where it left off (WhatsApp keeps its link across restarts). */

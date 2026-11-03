@@ -35,11 +35,12 @@ function fakePlaid(state: { finished?: boolean; exit?: any; loginRequired?: Set<
         { account_id: "acc-cc", name: "Sapphire", mask: "2222", type: "credit", balances: { current: 340, limit: 5000, iso_currency_code: "USD" } }] });
       case "/transactions/get": return Response.json({ accounts: [{ account_id: "acc-cc", name: "Sapphire", mask: "2222" }], transactions: [
         { transaction_id: "t1", account_id: "acc-cc", amount: 12.34, date: "2026-11-01", merchant_name: "Starbucks", pending: false, personal_finance_category: { primary: "FOOD_AND_DRINK" } },
-        { transaction_id: "t2", account_id: "acc-cc", amount: -500, date: "2026-11-02", name: "Payment", pending: false },
+        { transaction_id: "t2", account_id: "acc-cc", amount: -500, date: "2026-11-02", name: "Payment", pending: false, personal_finance_category: { primary: "LOAN_PAYMENTS" } },
         { transaction_id: "t3", account_id: "acc-cc", amount: 3, date: "2026-11-02", merchant_name: "Coffee", pending: true }] });
       case "/liabilities/get": return Response.json({ accounts: [{ account_id: "acc-cc", name: "Sapphire", mask: "2222", balances: { current: 340, limit: 5000 } }],
         liabilities: { credit: [{ account_id: "acc-cc", last_statement_balance: 300, minimum_payment_amount: 35, next_payment_due_date: "2026-11-20", is_overdue: false, aprs: [{ apr_type: "purchase_apr", apr_percentage: 24.99 }] }] } });
       case "/item/remove": return Response.json({ request_id: "r" });
+      case "/transactions/refresh": return Response.json({ request_id: "r" });
       case "/item/webhook/update": return Response.json({ item: { webhook: b.webhook } });
       case "/webhook_verification_key/get": return state.jwk ? Response.json({ key: { ...state.jwk, kid: b.key_id, alg: "ES256", use: "sig", created_at: 1, expired_at: null } }) : err("INVALID_KEY");
     }
@@ -186,4 +187,62 @@ test("points older banks at the hub's webhook once, and only for public https", 
   await p.ensureWebhook("https://hub.example.com/api/plaid/webhook");
   expect(state.seen.filter((s: any) => s.path === "/item/webhook/update").length).toBe(1);
   expect(webhookOk("https://localhost/x")).toBe(false);
+});
+
+test("hearth-plaid answers balances, transactions, spending, cards and refresh", async () => {
+  const state: any = { seen: [], finished: true };
+  const p = new Plaid(newVault(), fakePlaid(state));
+  p.saveCreds(creds);
+  await expect(p.agent(["balances"])).rejects.toThrow("No bank is connected");
+  await p.finishLink((await p.startLink()).token);
+  const bal: any = await p.agent(["balances"]);
+  expect(bal.accounts).toEqual([
+    expect.objectContaining({ bank: "Chase", account: "Checking ••1111", balance: 1200.5 }),
+    expect.objectContaining({ account: "Sapphire ••2222", balance: 340, limit: 5000, note: expect.stringContaining("owed") }),
+  ]);
+  const tx: any = await p.agent(["transactions", "--search", "star"]);
+  expect(tx.transactions).toEqual([expect.objectContaining({ merchant: "Starbucks", amount: 12.34 })]);
+  expect((await p.agent(["transactions", "--min", "100"]) as any).transactions.map((t: any) => t.amount)).toEqual([-500]);
+  const sp: any = await p.agent(["spending", "--days", "30"]);
+  expect(sp.byCategory).toEqual([{ category: "FOOD_AND_DRINK", total: 12.34, count: 1 }]); // pending + payment left out
+  expect((await p.agent(["cards"]) as any).cards[0].minimum).toBe(35);
+  await expect(p.agent(["balances", "--bank", "wells"])).rejects.toThrow("Connected: Chase");
+  state.seen.length = 0;
+  await p.agent(["refresh", "--bank", "chase"]);
+  expect(state.seen.map((s: any) => s.path)).toContain("/transactions/refresh");
+  await expect(p.agent(["pay"])).rejects.toThrow("usage");
+});
+
+test("the hearth-plaid script passes its words to the hub with the key", async () => {
+  const { plaidSkill } = await import("../src/connectors/plaid.ts");
+  let got: any = null;
+  const srv = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch(req) { const u = new URL(req.url); got = { path: u.pathname, a: u.searchParams.getAll("a"), key: req.headers.get("x-hearth-agent") }; return Response.json({ ok: true }); } });
+  const sk = plaidSkill(`http://127.0.0.1:${srv.port}`, "k3y");
+  const dir = mkdtempSync(join(tmpdir(), "hearth-pl-bin-"));
+  const f = join(dir, "hearth-plaid");
+  await Bun.write(f, sk.scripts!["hearth-plaid"]);
+  const proc = Bun.spawn(["bash", f, "transactions", "--search", "uber eats & co"], { stdout: "pipe" });
+  const out = await new Response(proc.stdout).text();
+  srv.stop(true);
+  expect(out).toContain('"ok":true');
+  expect(got).toEqual({ path: "/api/agent/plaid", a: ["transactions", "--search", "uber eats & co"], key: "k3y" });
+  expect(sk.body).toContain("hearth-plaid spending");
+});
+
+test("the skill reaches the brain: catalog, its command on PATH, and permission to run only that", async () => {
+  const { registerSkills, hubSkills, installSkills, skillFlags, codexRules, skillCatalog } = await import("../src/brains/skills.ts");
+  const { plaidSkill } = await import("../src/connectors/plaid.ts");
+  let on = false;
+  registerSkills(() => (on ? [plaidSkill("http://127.0.0.1:1", "k")] : []));
+  const data = mkdtempSync(join(tmpdir(), "hearth-pl-sk-"));
+  const env = { HEARTH_BROWSER: "off", HEARTH_CUA: "off" };
+  expect(hubSkills(data, env).some((s) => s.name === "hearth-plaid")).toBe(false);
+  on = true;
+  const skills = hubSkills(data, env);
+  expect(skillCatalog(skills)).toContain("- hearth-plaid: The owner's money");
+  expect(skillFlags(skills).allowed).toContain("Bash(hearth-plaid:*)");
+  expect(codexRules(skills)).toContain('pattern=["hearth-plaid"]');
+  const bin = installSkills(join(data, "brain"), skills);
+  const { statSync } = await import("node:fs");
+  expect(statSync(join(bin, "hearth-plaid")).mode & 0o777).toBe(0o700);
 });
