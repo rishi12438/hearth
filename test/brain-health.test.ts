@@ -74,8 +74,11 @@ test("Codex's streamed events show as progress while it works, and the answer st
 cat >/dev/null
 while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
 echo '{"type":"item.completed","item":{"type":"agent_message","text":"I will check fares from SFO to PHX first."}}'
-echo '{"type":"item.started","item":{"type":"web_search","query":"SFO to PHX flights Friday"}}'
-echo '{"type":"item.started","item":{"type":"command_execution","command":"/bin/sh -lc python3 fares.py"}}'
+echo '{"type":"item.started","item":{"type":"web_search","query":"","action":{"type":"other"}}}'
+echo '{"type":"item.completed","item":{"type":"web_search","query":"SFO to PHX flights Friday","action":{"type":"search","query":"SFO to PHX flights Friday"}}}'
+echo '{"type":"item.started","item":{"type":"command_execution","command":"/bin/zsh -lc '"'"'curl -sL https://www.frontier.com/fares | head -3'"'"'"}}'
+echo '{"type":"item.started","item":{"type":"command_execution","command":"/bin/zsh -lc '"'"'python3 fares.py'"'"'"}}'
+echo '{"type":"item.started","item":{"type":"command_execution","command":"/bin/zsh -lc '"'"'mkdir -p out'"'"'"}}'
 echo "Cheapest is \\$89 on Frontier." > "$out"
 `);
   chmodSync(join(dir, "codex"), 0o755);
@@ -87,6 +90,7 @@ echo "Cheapest is \\$89 on Frontier." > "$out"
     const steps: string[] = [];
     const out = await brain.think({ mode: "clean", context: {}, input: "hi" }, { harness: "codex", model: "" }, { costUsd: 0, unknown: false, onProgress: (s) => steps.push(s) });
     expect(out).toBe("Cheapest is $89 on Frontier.");
-    expect(steps).toEqual(["I will check fares from SFO to PHX first", "Searching: SFO to PHX flights Friday", "Working it out"]);
+    expect(steps).toEqual(["I will check fares from SFO to PHX first", "Searching the web", "Searching: SFO to PHX flights Friday",
+      "Reading frontier.com", "Running code", "Working it out"]);
   } finally { process.env.PATH = oldPath; }
 });
