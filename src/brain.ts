@@ -450,6 +450,32 @@ export function describeStep(name: string, input: any): string | null {
   if (name === "WebFetch") { try { return `Reading ${new URL(String(input?.url)).hostname.replace(/^www\./, "")}`; } catch { return "Reading a page"; } }
   return null;
 }
+/**
+ * A shell command in plain words, for harnesses (Codex) whose only research tool is the shell:
+ * "Reading scottsdalearts.org" for a curl, "Running code" for a script, "Looking through files" for grep/cat.
+ */
+export function describeCommand(command: unknown): string | null {
+  let c = String(command ?? "").trim();
+  // Codex wraps every command: /bin/zsh -lc 'curl …'. Unwrap it.
+  const wrapped = c.match(/^\S*\b(?:ba|z)?sh\s+-l?c\s+(['"])([\s\S]*)\1$/);
+  if (wrapped) c = wrapped[2].replace(/'\\''/g, "'");
+  else c = c.replace(/^\S*\b(?:ba|z)?sh\s+-l?c\s+/, "");
+  const skill = describeSkillStep(c);
+  if (skill) return skill;
+  if (/(^|[\s;&|(])(curl|wget|http)\s/.test(c)) {
+    const url = c.match(/https?:\/\/[^\s'"\\)]+/)?.[0];
+    if (url) { try { return `Reading ${new URL(url).hostname.replace(/^www\./, "")}`; } catch {} }
+    return "Reading a page";
+  }
+  if (/(^|[\s;&|(])(python3?|node|bun|deno|ruby|perl)\s/.test(c)) {
+    const url = c.match(/https?:\/\/[^\s'"\\)]+/)?.[0];
+    if (url) { try { return `Reading ${new URL(url).hostname.replace(/^www\./, "")}`; } catch {} }
+    return "Running code";
+  }
+  if (/^(cat|sed|head|tail|less|rg|grep|ls|find|jq|wc)\b/.test(c)) return "Looking through files";
+  if (/^(cat\s*>|tee|apply_patch|printf|echo)\b/.test(c)) return "Putting it together";
+  return null;
+}
 /** Any other tool, in plain words. */
 function genericStep(name: string): string | null {
   if (name === "Read") return "Reading through its notes";
@@ -722,8 +748,10 @@ export class Brain {
       if (it.type === "agent_message" && e.type === "item.completed") codexLast = String(it.text || "");
       if (!meter?.onProgress) return;
       const q = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 70);
-      const step = it.type === "web_search" && e.type === "item.started" ? (q(it.query || it.action?.query) ? `Searching: ${q(it.query || it.action?.query)}` : "Searching the web")
-        : it.type === "command_execution" && e.type === "item.started" ? describeSkillStep(String(it.command || "").replace(/^\S*sh -l?c\s+/, "")) ?? "Working it out"
+      // A search's query only arrives when it completes (it starts as ""), so show it then.
+      const query = q(it.query || it.action?.query);
+      const step = it.type === "web_search" ? (query ? `Searching: ${query}` : e.type === "item.started" ? "Searching the web" : null)
+        : it.type === "command_execution" && e.type === "item.started" ? describeCommand(it.command) ?? "Working it out"
         : it.type === "agent_message" && e.type === "item.completed" && b.mode !== "voice" ? noteStep(it.text)
         : it.type === "reasoning" && e.type === "item.completed" ? noteStep(String(it.text || "").replace(/\*\*/g, "")) : null;
       if (step) meter.onProgress(step);
