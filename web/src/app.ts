@@ -1093,17 +1093,18 @@ function drawActivity() {
   };
   const of = (...k: string[]) => items.filter((it: any) => k.includes(it.kind));
   const running = [...of("running"), ...of("queued")];
-  const sec = (title: string, list: any[], draw: (it: any) => Node, count = true) => list.length ? h("section", { class: "actsec" }, h("h4", null, title, count ? h("em", null, String(list.length)) : null), list.map(draw)) : null;
+  const sec = (title: string, list: any[], draw: (it: any) => Node) => list.length ? h("section", { class: "actsec" }, h("h4", null, title, h("em", null, String(list.length))), list.map(draw)) : null;
   if (actVisit === null) actVisit = actSeen;
   const past = of("proactive", "done", "failed");
+  // Like notifications: what you've seen clears off. It's still in its chat.
   const fresh = past.filter((it: any) => isFresh(it, actVisit!));
   markActivitySeen();
-  clear(el, [
+  const secs = [
     sec("Working now", running, runRow),
     sec("Needs you", of("approval", "blocked"), row),
     sec("New", fresh, row),
-    sec("Earlier", past.filter((it: any) => !fresh.includes(it)), row, false),
-  ].filter(Boolean) as Node[]);
+  ].filter(Boolean) as Node[];
+  clear(el, secs.length ? secs : h("p", { class: "hempty" }, "You're all caught up."));
   drawActivityBadge();
 }
 
