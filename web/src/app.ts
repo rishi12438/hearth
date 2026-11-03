@@ -845,14 +845,14 @@ function drawHeader() {
           h("button", { class: "crowdface", "aria-label": `${a.t.name}: open thread`, on: { click: () => { location.hash = `#c/${chat.thread.id}/${a.jobId}`; } } }, face(a.t, 46, a.state)))),
         h("button", { class: "stagepill", on: { click: chatMenu } }, h("b", null, names)),
         h("small", null, [`#${name}`, `${open} working`].join(" · "))),
-      projectButton()));
+      projectButton()), threadTabs(chat, null));
     return;
   }
   const who = speaker(chat);
   const others = [...new Set(jobs.map((j: any) => j.teammateId))].filter((id) => id !== who.t.id).slice(0, 3).map((id) => mate(id as string));
   clear(top, h("div", { class: "toprow stagerow" }, back,
     stage("chat", who.t, who.state, who.t.name, [`#${name}`, open ? `${open} working` : null].filter(Boolean).join(" · "), chatMenu, false, others),
-    projectButton()));
+    projectButton()), threadTabs(chat, null));
 }
 
 /** Teammates with something open in this ramble (one entry each, their most recent task), busiest first. */
@@ -1360,6 +1360,17 @@ const alwaysBtn = (ap: any, then?: () => void) => ap?.action?.type === "message"
   : null;
 async function retry(id: string) { try { await call(`/api/jobs/${id}/retry`, { body: {} }); } catch (e) { handleError(e); } }
 
+/** The ramble's threads as a row of chips, one tap away (like switching threads in Slack). */
+function threadTabs(chat: any, activeId: string | null, min = 1): HTMLElement | null {
+  const roots = (chat?.jobs || []).filter((x: any) => !x.parentId && !x.followsUp);
+  if (!chat?.thread || roots.length < min) return null;
+  const strip = h("div", { class: "threadtabs" }, roots.map((x: any) =>
+    h("button", { class: `threadtab ${x.id === activeId ? "on" : ""}`, on: { click: () => { location.hash = `#c/${chat.thread.id}/${x.id}`; } } },
+      face(mate(x.teammateId), 20, jobState(x)), h("span", null, jobLabel(x)), x.status === "done" ? null : h("i", { class: `tdot ${x.status}` }))));
+  if (activeId) requestAnimationFrame(() => strip.querySelector(".on")?.scrollIntoView({ inline: "center", block: "nearest" }));
+  return strip;
+}
+
 /** A task's thread: the task on top, "N replies" divider, the teammate's answers and your replies. */
 function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
   const j = S.chat.jobs.find((x: any) => x.id === jobId);
@@ -1368,11 +1379,7 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
   const follow = S.chat.jobs.filter((x: any) => x.followsUp === j.id);
   const n = (j.status === "done" || j.status === "failed" ? 1 : 0) + follow.length * 2;
   // The ramble's other threads, one tap away (like switching threads in Slack).
-  const roots = S.chat.jobs.filter((x: any) => !x.parentId && !x.followsUp);
-  const switcher = roots.length > 1 ? h("div", { class: "threadtabs" }, roots.map((x: any) =>
-    h("button", { class: `threadtab ${x.id === j.id ? "on" : ""}`, on: { click: () => { location.hash = `#c/${S.chat.thread.id}/${x.id}`; } } },
-      face(mate(x.teammateId), 20, jobState(x)), h("span", null, jobLabel(x)), x.status === "done" ? null : h("i", { class: `tdot ${x.status}` })))) : null;
-  if (switcher) requestAnimationFrame(() => switcher.querySelector(".on")?.scrollIntoView({ inline: "center", block: "nearest" }));
+  const switcher = threadTabs(S.chat, j.id, 2);
   const nodes: (Node | null)[] = [
     switcher,
     row(mateWho("hearth"), j.createdAt, [h("div", { class: "ttitle" }, jobLabel(j)), h("div", { class: "brief" }, withMentions(`@${t.name} ${j.task}`))]),
