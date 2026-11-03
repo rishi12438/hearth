@@ -641,6 +641,9 @@ a.place:active { background: var(--surface-2); }
 .threadtab span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .threadtab.on { background: var(--ink); color: #fff; }
 .threadtab .face::after { display: none; }
+/* In a ramble's top bar: the threads sit under the stage, centered when they fit. */
+.chrome-top > .threadtabs { margin: 10px -14px -14px; justify-content: safe center; }
+.screen:has(.chrome-top > .threadtabs) .scroll { padding-top: calc(196px + var(--safe-t)); }
 .tdot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
 .tdot.working, .tdot.queued { background: var(--ok); animation: pulse 1.4s infinite; }
 .tdot.waiting, .tdot.blocked { background: var(--warn); }
