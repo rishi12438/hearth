@@ -478,7 +478,7 @@ export class Brain {
   /** Linked computers. When one is online with the harness, calls run there, on its own logins. */
   remote: Remote | null = null;
   /** Live usage of each brain's subscription; work goes to the one with the most room. */
-  usage = new BrainUsage();
+  usage: BrainUsage;
   /** Whether each brain is really signed in, from every call it answers (see brains/health.ts). */
   health = new BrainHealth();
   /** The brains the user picked (Settings → Brains). Two or more share the work by live usage. */
@@ -487,6 +487,7 @@ export class Brain {
   constructor(private config: Config) {
     this.global = new Semaphore(config.maxParallel);
     this.workDir = join(config.dataDir, "brain");
+    this.usage = new BrainUsage(undefined, undefined, join(config.dataDir, "brain-usage.json"));
     mkdirSync(this.workDir, { recursive: true, mode: 0o700 });
   }
 
