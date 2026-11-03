@@ -7,7 +7,7 @@ import { adminFetch } from "./admin.ts";
 export const has = (args: string[], f: string) => args.includes(f);
 export const flag = (args: string[], f: string) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : undefined; };
 /** Words that aren't flags or a flag's value. */
-export const positional = (args: string[], valued: string[] = ["--key", "--token", "--all-groups", "--archived", "--muted", "--to"]) =>
+export const positional = (args: string[], valued: string[] = ["--key", "--token", "--all-groups", "--archived", "--muted", "--to", "--env", "--update"]) =>
   args.filter((a, i) => !a.startsWith("--") && !(i > 0 && valued.includes(args[i - 1])));
 export const onOff = (v?: string) => (v === undefined ? undefined : /^(on|yes|true|1)$/i.test(v));
 export async function stdin(): Promise<string> { return (await new Response(Bun.stdin.stream()).text()).trim(); }

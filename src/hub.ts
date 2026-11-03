@@ -2400,6 +2400,11 @@ export class Hub {
   }
 
   /** A source hook's check: items it hasn't seen before, or null. The first check only remembers what's there. */
+  /** A source says something changed (a Plaid webhook): check its hooks now instead of waiting for their timer. */
+  async pollNow(sourceId: string, why: string) {
+    for (const h of await this.store.all<Hook>("hooks"))
+      if (h.status === "active" && h.trigger.type === "source" && h.trigger.source === sourceId && !this.firing.has(h.id)) await this.fire(h, why);
+  }
   private async pollSource(h: Hook & { trigger: { type: "source" } }) {
     const t = h.trigger, src = sourceById(t.source);
     if (!src) { await this.log("hook.source", `${h.title}: unknown source ${t.source}`); return null; }

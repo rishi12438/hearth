@@ -89,6 +89,15 @@ async function boot() {
   connect();
   if (localStorage.getItem("hearth.autoLocation") === "1") shareLocation(true);
   window.addEventListener("hashchange", show);
+  // #connector/<id> (e.g. a Plaid alert's link): open that connector's screen, where its details load live.
+  const openLinkedConnector = async () => {
+    const m = location.hash.match(/^#connector\/([\w-]+)$/);
+    if (!m) return;
+    history.replaceState(null, "", "#"); show();
+    try { const t = (await loadTiles()).find((x) => x.id === m[1]); if (t) openTile(t); } catch (e) { handleError(e); }
+  };
+  window.addEventListener("hashchange", () => void openLinkedConnector());
+  void openLinkedConnector();
   // Crossing the desktop width (resizing the window, full screen) swaps sidebar ⇄ tab bar.
   matchMedia("(min-width: 980px)").addEventListener("change", () => { lastLayout = ""; show(); });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) { checkForUpdate(); refresh(); live?.restart(); } });

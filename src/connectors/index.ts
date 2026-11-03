@@ -6,6 +6,9 @@ import type { VoiceSettings } from "../voice.ts";
 import type { Connector, Ctx, Tile, AddInput } from "./types.ts";
 import { WhatsApp, whatsapp, type IgnoreRules } from "./whatsapp.ts";
 import { Slack, slack, slackSource } from "./slack.ts";
+import { Plaid, plaid, plaidSource, plaidSkill } from "./plaid.ts";
+import { registerSkills } from "../brains/skills.ts";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { serper, serperKey } from "./serper.ts";
 import { deepgram } from "./deepgram.ts";
 import { instagram, linkedin } from "./cookies.ts";
@@ -19,7 +22,7 @@ import { isBrainId, removeLogin } from "../brains/logins.ts";
 // (types.ts); this file only lists them, in the order the grid shows them, and runs the shared parts: the ban-risk
 // gate, the log line, and telling the app something changed. To add a connector: write its module, add it here.
 
-export const CONNECTORS: Connector[] = [claude, codex, serper, deepgram, whatsapp, slack, instagram, linkedin, google];
+export const CONNECTORS: Connector[] = [claude, codex, serper, deepgram, whatsapp, slack, instagram, linkedin, google, plaid];
 export const connectorById = (id: string) => CONNECTORS.find((c) => c.def.id === id) ?? null;
 export type { Tile } from "./types.ts";
 
@@ -31,12 +34,14 @@ export const riskAccepted = (vault: Vault | null, id: string) => !!vault?.get(`r
 export class Connect {
   readonly whatsapp: WhatsApp;
   readonly slack: Slack;
+  readonly plaid: Plaid;
   private ctx: Ctx;
 
   constructor(private hub: Hub, private vault: Vault | null, voice: VoiceSettings | null) {
     this.whatsapp = new WhatsApp(hub.config.dataDir, hub.store, () => riskAccepted(vault, "whatsapp"));
     this.slack = new Slack(vault);
-    this.ctx = { hub, vault, voice, whatsapp: this.whatsapp, slack: this.slack };
+    this.plaid = new Plaid(vault);
+    this.ctx = { hub, vault, voice, whatsapp: this.whatsapp, slack: this.slack, plaid: this.plaid };
     this.whatsapp.onChange = () => hub.emit("connections");
     // What the rest of the hub reaches through here: senders for message.send, "is it connected" for triggers,
     // the Serper key for scripts that ask for it, and WhatsApp and Slack as trigger sources.
@@ -45,10 +50,26 @@ export class Connect {
     hub.senders.gmail = { connected: () => hub.google.canSend(), send: (to, text, x) => hub.google.sendMail(to, x?.subject || "(no subject)", text, x?.threadId) };
     for (const ch of ["instagram", "linkedin", "x"] as const)
       hub.senders[ch] = webSender(ch, (d) => hub.connections.cookies(d), (url, text, o) => sendInPage(url, text, { fingerprint: hub.connections.fingerprintFor(url), ...o }));
-    hub.connections.extra = { whatsapp: () => this.whatsapp.connected() || this.whatsapp.linked(), slack: () => this.slack.connected() };
+    hub.connections.extra = { whatsapp: () => this.whatsapp.connected() || this.whatsapp.linked(), slack: () => this.slack.connected(), plaid: () => this.plaid.connected() };
     hub.scripts.keys = (name) => (name === "serper" ? serperKey(vault) : null);
     registerSource(slackSource(() => this.slack));
     registerSource(whatsappSource(this.whatsapp));
+    registerSource(plaidSource(() => this.plaid));
+    // A Plaid webhook: check the Plaid triggers now rather than at their next timer; a bank's state changed: redraw.
+    this.plaid.onNews = (bank) => { void hub.pollNow("plaid", `${bank} has new transactions`).catch(() => {}); };
+    this.plaid.onChange = () => hub.emit("connections");
+    this.plaid.onItems = () => hub.brain.refreshSkills?.();
+    // The agent's hearth-plaid command asks this hub on its own machine with a key made fresh each start, which opens
+    // only the read-only Plaid questions. The skill is there only while a bank is connected.
+    const h = hub.config.host, local = !h || h === "0.0.0.0" || h === "::" ? "127.0.0.1" : h.includes(":") ? `[${h}]` : h;
+    registerSkills(() => (this.plaid.connected() ? [plaidSkill(`http://${local}:${hub.config.port}`, this.agentKey)] : []));
+  }
+
+  /** The key hearth-plaid sends. */
+  private readonly agentKey = randomBytes(24).toString("hex");
+  isAgentKey(k: string | null) {
+    const a = Buffer.from(String(k || "")), b = Buffer.from(this.agentKey);
+    return a.length === b.length && timingSafeEqual(a, b);
   }
 
   /** Let each connector pick up where it left off (WhatsApp keeps its link across restarts). */
