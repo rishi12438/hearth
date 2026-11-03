@@ -967,18 +967,11 @@ async function lookForIdeas() {
 function drawHome() {
   const el = document.getElementById("home"), top = document.getElementById("htiles");
   if (!el || !top) return;
-  const active = S.threads.filter((t) => !t.archived);
-  const archived = S.threads.filter((t) => t.archived);
-  const team = (S.roster.length ? S.roster : S.teammates.map((t) => ({ ...t, state: "idle", status: t.description })));
-  const working = S.roster.reduce((n, t) => n + (t.busy || 0), 0);
-  const plans = S.roster.filter((t) => String(t.status).startsWith("Next:")).length;
-  const tiles: [string, string, string, () => void, boolean][] = [
-    ["lock", "Needs you", `${needsYouCount()} waiting`, () => { location.hash = "#activity"; }, needsYouCount() > 0],
-    ["board", "Board", working ? `${working} working` : "Everyone's to-dos", () => { location.hash = "#b"; }, working > 0],
-    ["bell", "Plans", plans ? `${plans} coming up` : "Reminders", openPlans, false],
-    ["clip", "Files", `${S.files.size} files`, openFiles, false],
-    ["sparkle", "Ideas", S.ideas.length ? `${S.ideas.length} for you` : "Look now", lookForIdeas, false],
-  ];
+  // Most recent first, open ones before archived: the top 3 are "Continue with", the rest fold into "Earlier".
+  const when = (t: any) => t.updatedAt || t.createdAt || "";
+  const byRecent = [...S.threads].sort((a, b) => Number(!!a.archived) - Number(!!b.archived) || when(b).localeCompare(when(a)));
+  const recent = byRecent.filter((t) => !t.archived).slice(0, 3);
+  const earlier = byRecent.filter((t) => !recent.includes(t));
   const section = (id: string, title: string, rows: Node[], extra?: Node | null) => h("section", { class: "hsec" },
     h("div", { class: "hsec-head" },
       h("button", { class: "hsec-title", on: { click: () => toggleSection(id) } }, h("span", null, title), icon("chevron", 16)),
@@ -992,21 +985,17 @@ function drawHome() {
   clear(top,
     brainStrip(),
     linkStrip(),
-    S.ideas.length ? h("section", { class: "ideas" }, h("h2", { class: "bigtitle" }, "Ideas"), h("div", { class: "ideacards" }, S.ideas.slice(0, 3).map(ideaCard))) : null,
-    h("div", { class: "tiles" }, tiles.map(([ic, title, sub, fn, hot]) =>
-      h("button", { class: `tilebtn ${hot ? "hot" : ""}`, on: { click: fn } }, h("span", { class: "ti" }, icon(ic, 22), hot ? h("i", { class: "dot" }) : null), h("b", null, title), h("small", null, sub)))));
+    S.ideas.length ? h("section", { class: "ideas" }, h("h2", { class: "bigtitle" }, "Ideas"), h("div", { class: "ideacards" }, S.ideas.slice(0, 3).map(ideaCard))) : null);
   clear(el,
-    section("rambles", "Active rambles", active.length ? active.map(channelRow)
+    section("rambles", "Continue with", recent.length ? recent.map(channelRow)
       : [h("p", { class: "hempty" }, "Tap + and ramble. Each ramble becomes a channel; it archives itself an hour after everything's done.")],
       h("button", { class: "chev", "aria-label": "New ramble", on: { click: () => { location.hash = "#c/new"; } } }, icon("plus", 20))),
     section("apps", "Mini apps", S.apps.some((a) => !a.inline) ? [...S.apps].filter((a) => !a.inline).sort((a, b) => Number(b.pinned) - Number(a.pinned)).map((a) => h("button", { class: "hrow", on: { click: () => { location.hash = `#a/${a.id}`; } } },
       appIcon(a, 30), h("span", { class: "grow" }, a.title), h("small", null, mate(a.teammateId).name)))
       : [h("p", { class: "hempty" }, "Little apps your teammates build for you: flashcards, trackers, a today view. Ask for one anywhere, or say \"pin it to Home\".")],
       h("button", { class: "chev", "aria-label": "New app", on: { click: newApp } }, icon("plus", 20))),
-    section("dms", "Direct messages", team.map((t) => h("button", { class: `hrow ${t.needsYou || t.busy || unreadDm(t) ? "unread" : ""}`, on: { click: () => { location.hash = `#t/${t.id}`; } } },
-      face(t, 30, t.state), h("span", { class: "grow" }, t.name), t.needsYou ? h("em", { class: "badge" }, String(t.needsYou)) : unreadDm(t) ? h("i", { class: "udot", "aria-label": "New message" }) : null))),
-    archived.length ? section("archived", `Archived (${archived.length})`, archived.slice(0, 30).map((t) => h("button", { class: "hrow dim", on: { click: () => { location.hash = `#c/${t.id}`; } } },
-      h("span", { class: "hicon" }, "#"), h("span", { class: "grow" }, channelName(t)), h("small", null, t.title)))) : null,
+    earlier.length ? section("archived", `Earlier (${earlier.length})`, earlier.slice(0, 30).map((t) => t.archived ? h("button", { class: "hrow dim", on: { click: () => { location.hash = `#c/${t.id}`; } } },
+      h("span", { class: "hicon" }, "#"), h("span", { class: "grow" }, channelName(t)), h("small", null, t.title)) : channelRow(t))) : null,
   );
 }
 
