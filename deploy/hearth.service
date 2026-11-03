@@ -20,7 +20,9 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/opt/hearth/data /home/hearth/.claude /home/hearth/.codex -/home/hearth/.claude.json -/home/hearth/.local/share/claude -/home/hearth/.local/state/claude
-ProtectKernelTunables=true
+# No ProtectKernelTunables: it stops the brain's jail (bubblewrap, src/brains/jail.ts) from giving each run its own /proc,
+# which is what hides this hub's environment (API keys) from code the brain runs. The hub isn't root, so it can't change
+# kernel settings anyway.
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 

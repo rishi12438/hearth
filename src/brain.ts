@@ -9,6 +9,8 @@ import { BrainUsage, isLimitError } from "./brains/usage.ts";
 import { readClaudeToken } from "./brains/logins.ts";
 import { describeSkillStep, hubSkills, installCodexRules, installSkills, skillCatalog, skillFlags, type Skill } from "./brains/skills.ts";
 import { BrainHealth, signInProblem } from "./brains/health.ts";
+import { jailArgs, jailWorks } from "./brains/jail.ts";
+import { masterKeyPath } from "./vault.ts";
 
 /** Each trigger module's own description of its config, for the hook docs below. */
 /** Each trigger module's own description, read when a prompt is built (the hub adds WhatsApp and Slack at start). */
@@ -16,8 +18,9 @@ const sourceDocs = () => SOURCES.map((s) => `        ${s.id}: ${s.doc}`).join("\
 
 // The brain is whatever coding agent you already use, run headless: one call per event.
 // It gets context in, and replies with text plus an optional ```hearth block of actions.
-// It never touches your data or the shell directly: the hub validates and applies every action,
-// and the agent runs in an empty folder with no file or shell tools and none of the hub's secrets.
+// It never touches your data directly: the hub validates and applies every action. On a Linux hub it runs in a jail
+// (brains/jail.ts) that hides the hub's secrets, so working calls can have a shell, files and the internet to write code
+// with; elsewhere it gets the web tools only, in an empty folder.
 
 export type BrainInput = {
   mode: "chat" | "hook" | "review" | "job" | "orchestrate" | "ideas" | "legwork" | "voice" | "clean" | "describe";
@@ -31,6 +34,17 @@ export const ESCALATE = "[[escalate]]";
 export const REDO = "[[redo]]";
 /** Calls that only read and write text: no web tools. */
 const NO_TOOLS = new Set<BrainInput["mode"]>(["orchestrate", "voice", "review", "ideas", "clean", "describe"]);
+/** Claude's tools for calls that can run code (in the jail). */
+const CODE_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent"];
+/** A helper on the small model that Claude fans wide searches out to. */
+const SCOUT = {
+  scout: {
+    description: "Fast, cheap helper for wide lookups: one company, page or question each. Run several at once.",
+    prompt: "You are a fast research helper. Do exactly the lookup you were given, with sources, and reply with only the facts found.",
+    model: "haiku",
+    tools: ["WebSearch", "WebFetch", "Bash", "Read"],
+  },
+};
 /** Dictation clean-up (like Wispr Flow): tidy what was said without changing what it means. */
 const CLEAN = `Clean up this dictated text so it reads as if typed. Remove filler (um, uh, like, you know), false starts and repeated
 words. When the speaker corrects themselves ("at 5, no, 6"), keep only the correction. Fix punctuation, capitals and obvious
@@ -277,7 +291,24 @@ yes/no or one-line answer, anything with no research and no writing to speak of.
 every job, and light jobs escalate on their own if they can't do it, so heavy is the exception (at most one per ramble, usually none).
 `.trim();
 
-export function buildPrompt(b: BrainInput) {
+/**
+ * For calls that can run code (in the jail): do many things with a script, not by hand, and on Claude hand wide searching
+ * to the scout (a small fast model) so the expensive model only thinks and writes.
+ */
+function atScale(code: "claude" | "codex" | null | undefined): string[] {
+  if (!code) return [];
+  return ["", "WORKING AT SCALE: you have a shell, files and the open internet in a sandbox (your current folder is scratch space; nothing",
+    "there is kept). When a job covers many items (every holding, every product, a dozen sites), don't do them one by one by hand:",
+    "write a short script (Python or bash) that fetches or computes them all, with the requests running in parallel, and read its",
+    "output. Use the hub's tools (hearth-*) for the user's own data. Check what a script printed before relying on it.",
+    ...(code === "claude" ? ["For wide searching, hand pieces to the scout agent (a small fast model), several at once in one message, and keep the",
+      "judgement and the answer for yourself."] : []),
+    "Well-known facts (a large company's sector, a capital city) you may state from knowledge; say so where it matters. Mark only",
+    "what you truly couldn't find as missing, and never invent numbers."];
+}
+
+/** code: which brain can run code in this call (in the jail), else null. */
+export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = null) {
   if (b.mode === "clean") return [CLEAN, "", "DICTATED:", b.input].join("\n");
   if (b.mode === "describe") return ["Write ONE sentence describing this reusable UI component for a library: what it shows and when to use it, so a",
     "teammate searching later can tell if it fits (e.g. \"Tabs per day with a zoomed map and a short list of things to do; use for any multi-day trip.\").",
@@ -293,7 +324,7 @@ export function buildPrompt(b: BrainInput) {
     parts.push("", "You were handed ONE job from the user's ramble by the orchestrator. Do it fully now: use actions for reminders,",
       "routines, watches and memory; search the web if you need to. Then reply with the result in 1-5 short lines, written to the user.",
       `If the job is clearly beyond you or you can't do it well, reply exactly ${ESCALATE} and a stronger model will take it.`,
-      "JOB:", b.input);
+      ...atScale(code), "JOB:", b.input);
   } else if (b.mode === "legwork") {
     parts.push("", "You were handed ONE job from the user's ramble. You do the LEGWORK; a stronger model on the team (the lead) will read",
       "your notes and write the reply the user sees. Do the job fully now: search the web, read pages, and take the actions it needs",
@@ -302,7 +333,7 @@ export function buildPrompt(b: BrainInput) {
       "- what you did: actions taken and their results",
       "- anything uncertain or missing, and what you'd ask the user",
       `Be complete and factual; the lead can't search again cheaply. If the job is beyond you, reply exactly ${ESCALATE}.`,
-      "JOB:", b.input);
+      ...atScale(code), "JOB:", b.input);
   } else if (b.mode === "voice") {
     parts.push("", "You are the lead on ONE job. A teammate on a cheaper model already did the legwork (searches, actions); their notes are",
       "below. Write the reply the user sees, in your teammate voice. They read it on a PHONE: the answer first in 1-3 short lines,",
@@ -398,7 +429,9 @@ function findCommandDir(cmd: string): string | null {
 export function describeStep(name: string, input: any): string | null {
   const q = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 70);
   if (name === "WebSearch") return `Searching: ${q(input?.query)}`;
-  if (name === "Bash") return describeSkillStep(input?.command);
+  if (name === "Bash") return describeSkillStep(input?.command) ?? (/\b(python3?|node|bun|curl|bash|sh)\b/.test(String(input?.command ?? "")) ? `Running code${input?.description ? `: ${q(input.description)}` : ""}` : null);
+  if (name === "Agent") return `Asking a helper: ${q(input?.description)}`;
+  if (name === "Write") return /\.(py|sh|js|ts|mjs)$/i.test(String(input?.file_path ?? "")) ? "Writing a script" : null;
   if (name === "Skill") return `Reading the ${String(input?.skill ?? input?.name ?? "").slice(0, 40)} skill`;
   if (name === "Read" && /\.png$/i.test(String(input?.file_path ?? ""))) return "Looking at the page";
   if (name === "WebFetch") { try { return `Reading ${new URL(String(input?.url)).hostname.replace(/^www\./, "")}`; } catch { return "Reading a page"; } }
@@ -454,6 +487,14 @@ export class Brain {
     this.global = new Semaphore(config.maxParallel);
     this.workDir = join(config.dataDir, "brain");
     mkdirSync(this.workDir, { recursive: true, mode: 0o700 });
+  }
+
+  private jailState: string[] | null | undefined;
+  /** The bubblewrap prefix for brain runs on this hub, or null when there's no jail here (see brains/jail.ts). */
+  jail(): string[] | null {
+    if (this.jailState !== undefined) return this.jailState;
+    const args = jailArgs({ dataDir: this.config.dataDir, workDir: this.workDir, hideFiles: [join(process.cwd(), ".env"), masterKeyPath()] });
+    return (this.jailState = jailWorks(args) ? args : null);
   }
 
   private skillState: { at: number; key: string; skills: Skill[]; paths: string[] } | null = null;
@@ -586,7 +627,11 @@ export class Brain {
     if (harness === "echo") return b.mode === "orchestrate" ? echoOrchestrator(b) : echoBrain(b);
     // Codex has no system prompt flag: the skills catalog goes at the top of its message.
     const codexSkills = harness === "codex" && !NO_TOOLS.has(b.mode) ? this.skills().skills : [];
-    const prompt = (codexSkills.length ? skillCatalog(codexSkills, "codex").trim() + "\n\n" : "") + buildPrompt(b);
+    const web = !NO_TOOLS.has(b.mode);
+    // Working calls in the jail can run code: a shell, files and the open internet (the jail hides the hub's secrets).
+    const jail = web && (harness === "claude" || harness === "codex") ? this.jail() : null;
+    const coder = jail ? (harness as "claude" | "codex") : null;
+    const prompt = (codexSkills.length ? skillCatalog(codexSkills, "codex").trim() + "\n\n" : "") + buildPrompt(b, coder);
     const planning = b.mode === "orchestrate";
     const name = `${harness}${model ? ` (${model})` : ""}`;
     let outFile: string | null = null;
@@ -595,20 +640,27 @@ export class Brain {
       case "claude": {
         // Slim: our own short system prompt instead of Claude Code's, only the tools this call needs, none of the machine's
         // MCP servers, settings or hooks. Cuts ~22k tokens of overhead from every call (~$0.06 on Sonnet, ~5x that on Opus).
-        const web = !NO_TOOLS.has(b.mode);
-        // Web calls also get the hub's skills: a catalog to search, and Bash/Read only for what those skills need.
+        // Web calls also get the hub's skills: a catalog to search, and Bash/Read only for what those skills need. In the jail
+        // they get the whole shell and files, plus a scout on the small model to fan wide searches out to.
         const { skills } = web ? this.skills() : { skills: [] };
         const sf = skillFlags(skills);
-        const tools = web ? ["WebSearch", "WebFetch", ...sf.tools] : [];
-        const allowed = web ? ["WebSearch", "WebFetch", ...sf.allowed] : [];
+        const coding = coder ? CODE_TOOLS : [];
+        const tools = web ? [...new Set(["WebSearch", "WebFetch", ...sf.tools, ...coding])] : [];
+        const allowed = web ? [...new Set(["WebSearch", "WebFetch", ...(coder ? [] : sf.allowed), ...coding])] : [];
         cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence", ...(model ? ["--model", model] : []),
           "--system-prompt", SYSTEM_PROMPT + skillCatalog(skills), "--strict-mcp-config", "--setting-sources", "project",
-          "--tools", tools.join(","), ...(allowed.length ? ["--allowedTools", ...allowed] : [])];
+          "--tools", tools.join(","), ...(allowed.length ? ["--allowedTools", ...allowed] : []),
+          ...(coder ? ["--agents", JSON.stringify(SCOUT)] : [])];
         break;
       }
       case "codex":
         outFile = join(this.workDir, `${randomUUID()}.txt`);
-        cmd = ["codex", "exec", ...(model ? ["-m", model] : []), "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "--color", "never", "-o", outFile, "-"];
+        // Working calls search the web. In the jail Codex may also write in its folder and reach the internet from code;
+        // outside it, read-only and no network, as before.
+        cmd = ["codex", "exec", ...(model ? ["-m", model] : []), "--skip-git-repo-check", "--ephemeral",
+          ...(web ? ["-c", 'web_search="live"'] : []),
+          ...(coder ? ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"] : ["--sandbox", "read-only"]),
+          "--color", "never", "-o", outFile, "-"];
         break;
       case "custom":
         if (!this.config.agentCmd?.length) throw new Error("The custom harness needs HEARTH_AGENT_CMD in the hub's .env");
@@ -617,6 +669,7 @@ export class Brain {
       default:
         throw new Error(`Unknown harness: ${harness}`);
     }
+    if (jail) cmd = [...jail, ...cmd];
     const proc = Bun.spawn(cmd, {
       cwd: this.workDir, env: agentEnv(harness, harness === "claude" || harness === "codex" ? this.skills().paths : []),
       stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe",
