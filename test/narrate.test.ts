@@ -53,3 +53,11 @@ test("only short, clean status lines get through", () => {
   expect(cleanNarration("x".repeat(90))).toBeNull();
   expect(narratePrompt("t", ["a", "b"])).toContain("- a\n- b");
 });
+
+test("Codex's real browser commands get plain labels", async () => {
+  const { describeCommand } = await import("../src/brain.ts");
+  expect(describeCommand(`/bin/bash -lc "enkidu-browser session use hearth-aliexpress-xqkm open '{\\"url\\":\\"https://www.aliexpress.com/p/order/index.html\\"}'"`)).toBe("Browsing aliexpress.com");
+  expect(describeCommand(`/bin/bash -lc "enkidu-browser session new hearth-aliexpress-xqkm '{\\"recordName\\":\\"Check AliExpress orders\\"}'"`)).toBe("Opening the browser");
+  expect(describeCommand(`/bin/bash -lc 'enkidu-browser session use hearth-aliexpress-xqkm observe'`)).toBe("Looking at the page");
+  expect(describeCommand(`/bin/bash -lc 'enkidu-browser session close hearth-aliexpress-xqkm'`)).toBe("Closing the browser");
+});

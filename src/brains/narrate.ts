@@ -74,7 +74,7 @@ export class Narrator {
   }
 
   async tick() {
-    const stale = this.o.staleMs ?? 10_000;
+    const stale = this.o.staleMs ?? 5_000;
     if (this.stopped || this.busy || !this.fresh || this.calls >= (this.o.maxCalls ?? 15)) return;
     if (!GENERIC_STEPS.has(this.label) || this.now() - this.since < stale) return;
     this.busy = true; this.fresh = false; this.calls++;
