@@ -1,0 +1,21 @@
+web/src/app.ts
+  s_55fe69fc45a010::t_9a11b81164e3d1 966-971,973-1006
+web/styles.css
+  s_55fe69fc45a010::t_9a11b81164e3d1 259-269
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "c6adba998a9392ce3b66426cff6bf7fed17d6cb1",
+  "prompts": {},
+  "sessions": {
+    "s_55fe69fc45a010": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9e6f1f6-a9d1-4aa9-8bd6-e0e95de03166",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
