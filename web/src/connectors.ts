@@ -104,7 +104,7 @@ export function grid(tiles: Tile[], q = ""): HTMLElement {
         h("b", null, t.label),
         h("small", null, t.kind === "brain" && t.usage && t.state === "connected" ? usageLine(t.usage) : t.detail || t.blurb),
         h("span", { class: `cgstate ${t.state}` }, t.state === "connected" ? icon("check", 12) : null, STATE_LABEL[t.state]),
-        t.risk ? h("span", { class: "cgrisk", title: "Unofficial: uses your own login" }, "!") : null)))];
+        t.risk ? h("span", { class: "cgrisk", title: "Uses your own login" }, "Unofficial") : null)))];
   }));
 }
 

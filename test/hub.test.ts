@@ -459,6 +459,11 @@ test("projects: file rambles under one, its memory comes first in that ramble, a
   expect(d.rambles.map((t: any) => t.id)).toEqual(["t1"]);
   expect(d.memory.map((f) => f.fact)).toEqual(["The wedding is in Chennai in February 2027."]);
   expect((await hub.listProjects())[0]).toMatchObject({ name: "Wedding", rambles: 1 });
+  // A new ramble started in a project is filed before its first message is planned.
+  const started = (await hub.ramble("find a florist", undefined, [], p.id)).value!;
+  expect((await store.get<Thread>("threads", started.thread.id))?.projectId).toBe(p.id);
+  expect((await hub.ramble("loose one", undefined, [], "nope")).value!.thread.projectId).toBeUndefined();
+  await until(async () => !hub.thinking);
   expect(await hub.removeProject(p.id)).toBe(true);
   expect((await store.get<Thread>("threads", "t1"))?.projectId).toBeUndefined();
 });

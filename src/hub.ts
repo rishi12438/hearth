@@ -502,7 +502,7 @@ export class Hub {
   private async updatesThread() { return (await this.dmThread("hearth")).id; }
 
   /** Stores what you said right away; the orchestrator and teammates work in the background. */
-  async ramble(text: string, threadId?: string, fileIds: string[] = []) {
+  async ramble(text: string, threadId?: string, fileIds: string[] = [], projectId?: string) {
     const clean = text.trim().slice(0, 8000) || (fileIds.length ? "Have a look at this." : "");
     if (!clean) return { error: "Say something first." };
     // Every new ramble starts its own group chat (Slack-style); a ramble inside a chat continues it.
@@ -511,7 +511,10 @@ export class Hub {
     if (!thread) {
       const now = this.clock().toISOString();
       const num = Math.max(0, ...(await this.store.all<Thread>("threads")).map((t) => t.num || 0)) + 1;
-      thread = await this.store.put<Thread>("threads", { id: randomUUID(), createdAt: now, updatedAt: now, num, title: clean.split(/\s+/).slice(0, 6).join(" ") });
+      // Started from a project (or with one picked): filed before planning, so the first message already uses its memory.
+      const project = projectId ? await this.store.get<Project>("projects", projectId) : null;
+      thread = await this.store.put<Thread>("threads", { id: randomUUID(), createdAt: now, updatedAt: now, num, title: clean.split(/\s+/).slice(0, 6).join(" "), ...(project ? { projectId: project.id } : {}) });
+      if (project) this.emit("projects");
     }
     const files = (await Promise.all(fileIds.slice(0, 5).map((id) => this.store.get<StoredFile>("files", id)))).filter(Boolean) as StoredFile[];
     for (const f of files) await this.store.put<StoredFile>("files", { ...f, threadId: thread.id });
@@ -2480,13 +2483,13 @@ export class Hub {
   }
 
   /**
-   * Your recent conversations on a logged-in site (LinkedIn, Instagram), for its Connectors screen, like WhatsApp's
+   * Your recent conversations (LinkedIn, Instagram) or notifications (X) on a logged-in site, for its Connectors screen, like WhatsApp's
    * chat list. Kept from the last read (encrypted in the vault); a new read happens only when that's over 15 minutes
    * old, or you tap Refresh (not more than once a minute), so opening the screen doesn't keep hitting the site.
    */
   async recentConversations(id: string, fresh = false, what = "messages"): Promise<{ items: { name: string; preview: string; lines: string[]; when: string; unread: boolean; url: string }[]; readAt: string | null; error?: string }> {
     const src = sourceById(id);
-    if (!src || !["linkedin", "instagram"].includes(id)) return { items: [], readAt: null, error: "Not a site with a list." };
+    if (!src || !["linkedin", "instagram", "x"].includes(id)) return { items: [], readAt: null, error: "Not a site with a list." };
     const config = src.validate({ what });
     const kind = String((config as any).what || "messages");
     const key = kind === "messages" ? `recent:${id}` : `recent:${id}:${kind}`;
@@ -2500,7 +2503,7 @@ export class Hub {
   }
 
   private keepRecent(id: string, kind: string, items: Item[]) {
-    if (!this.vault || !["linkedin", "instagram"].includes(id)) return;
+    if (!this.vault || !["linkedin", "instagram", "x"].includes(id)) return;
     const list = items.slice(0, 30).map((i) => {
       // LinkedIn puts screen-reader labels in each row ("Open the options list in your conversation with …",
       // "Status is online"); they're not the message, so they never become the preview.

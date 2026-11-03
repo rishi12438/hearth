@@ -455,6 +455,7 @@ function frame(opts: { header: Node; body: Node; composer?: boolean; fab?: boole
     h("button", { class: "searchbtn glass", "aria-label": "Search (⌘K)", on: { click: openJump } }, icon("search", 24)));
   // Wide windows (the Mac app, a desktop browser): a sidebar beside the screen instead of the phone's tab bar.
   app.classList.toggle("desk", wide());
+  app.classList.remove("fullapp");
   clear(app,
     wide() ? h("aside", { class: "side", id: "side" }) : null,
     h("div", { class: `screen ${opts.purple ? "purple" : ""}` },
@@ -475,8 +476,18 @@ function drawSide() {
   const r = route(), tab = tabOf(r);
   const nav = (ic: string, label: string, on: boolean, go: () => void, badge?: number) =>
     h("button", { class: `snav ${on ? "on" : ""}`, on: { click: go } }, icon(ic, 18), h("span", { class: "grow" }, label), badge ? h("em", null, String(badge)) : null);
-  const ramble = (t: any, nested = false) => h("button", { class: `snav ${nested ? "nested" : ""} ${r.view === "chat" && r.id === t.id ? "on" : ""}`, on: { click: () => { location.hash = `#c/${t.id}`; } } },
-    h("span", { class: "shash" }, "#"), h("span", { class: "grow" }, channelName(t)));
+  // A ramble row: drag it onto a project (or onto Rambles to take it out); the folder button or right-click files it too.
+  const ramble = (t: any, nested = false) => h("div", { class: "srow", draggable: "true",
+      on: { dragstart: (e: DragEvent) => { e.dataTransfer?.setData("text/hearth-thread", t.id); e.dataTransfer!.effectAllowed = "move"; },
+        contextmenu: (e: Event) => { e.preventDefault(); moveToProject(t); } } },
+    h("button", { class: `snav ${nested ? "nested" : ""} ${r.view === "chat" && r.id === t.id ? "on" : ""}`, on: { click: () => { location.hash = `#c/${t.id}`; } } },
+      h("span", { class: "shash" }, "#"), h("span", { class: "grow" }, channelName(t))),
+    h("button", { class: "sact", "aria-label": t.projectId ? "Move to another project" : "Add to a project", title: t.projectId ? "Move to another project" : "Add to a project", on: { click: () => moveToProject(t) } }, icon("folder", 14)));
+  const dropTo = (projectId: string | null) => ({
+    dragover: (e: DragEvent) => { if (e.dataTransfer?.types.includes("text/hearth-thread")) { e.preventDefault(); (e.currentTarget as HTMLElement).classList.add("drop"); } },
+    dragleave: (e: DragEvent) => (e.currentTarget as HTMLElement).classList.remove("drop"),
+    drop: (e: DragEvent) => { e.preventDefault(); (e.currentTarget as HTMLElement).classList.remove("drop"); const id = e.dataTransfer?.getData("text/hearth-thread"); if (id) fileRamble(id, projectId); },
+  });
   const team = [...(S.roster.length ? S.roster : S.teammates)].sort((a, b) => (b.at || "").localeCompare(a.at || ""));
   const live = S.threads.filter((t: any) => !t.archived);
   const loose = live.filter((t: any) => !t.projectId).slice(0, 12);
@@ -495,12 +506,12 @@ function drawSide() {
       nav("plug", "Connectors", false, () => openConnections())),
     h("div", { class: "slabel" }, "Projects", h("button", { class: "sadd", "aria-label": "New project", on: { click: newProject } }, icon("plus", 14))),
     h("nav", { class: "sgroup" }, S.projects.length ? S.projects.map((p: any) => [
-      h("button", { class: `snav ${r.view === "project" && r.id === p.id ? "on" : ""}`, on: { click: () => { location.hash = `#p/${p.id}`; } } },
+      h("button", { class: `snav ${r.view === "project" && r.id === p.id ? "on" : ""}`, on: { click: () => { location.hash = `#p/${p.id}`; }, ...dropTo(p.id) } },
         p.emoji ? h("span", { class: "semoji" }, p.emoji) : icon("folder", 18), h("span", { class: "grow" }, p.name), p.rambles ? h("small", { class: "scount" }, String(p.rambles)) : null),
       openProject === p.id ? live.filter((t: any) => t.projectId === p.id).map((t: any) => ramble(t, true)) : null,
     ]) : h("p", { class: "snone" }, "Group rambles, files and memory, like Wedding or Move to SF.")),
     h("div", { class: "slabel" }, "Rambles", h("button", { class: "sadd", "aria-label": "New ramble", on: { click: () => { S.newProject = null; location.hash = "#c/new"; } } }, icon("plus", 14))),
-    h("nav", { class: "sgroup" }, loose.length ? loose.map((t: any) => ramble(t)) : h("p", { class: "snone" }, "Tap + to start one.")),
+    h("nav", { class: "sgroup", on: dropTo(null) }, loose.length ? loose.map((t: any) => ramble(t)) : h("p", { class: "snone" }, "Tap + to start one.")),
     team.length ? [h("div", { class: "slabel" }, "Teammates"), h("nav", { class: "sgroup" }, team.map((t: any) =>
       h("button", { class: `snav mate ${r.view === "dm" && r.id === t.id ? "on" : ""}`, on: { click: () => { location.hash = `#t/${t.id}`; } } },
         face(t, 22, t.state || "idle"), h("span", { class: "grow" }, t.name), t.needsYou ? h("em", null, String(t.needsYou)) : null)))] : null,
@@ -558,7 +569,7 @@ async function drawProject(id: string) {
     sec("Rambles", null, d.rambles.length ? h("div", { class: "wcard" }, d.rambles.map((t: any) =>
       h("button", { class: "wrow", on: { click: () => { location.hash = `#c/${t.id}`; } } }, h("span", { class: "shash big" }, "#"),
         h("span", { class: "grow" }, h("b", null, channelName(t)), h("small", null, `${t.title || ""}${t.archived ? " · archived" : ""}`)))))
-      : h("p", { class: "wlede" }, "No rambles yet. Start one here, or open any ramble and choose Move to project.")),
+      : h("p", { class: "wlede" }, "No rambles yet. Start one here, or drag a ramble from the sidebar onto this project.")),
     sec("Memory", null, d.memory.length ? h("div", { class: "wcard" }, d.memory.map((f: any) =>
       h("div", { class: "wrow" }, h("span", { class: "grow" }, h("b", { class: "plain" }, f.fact), h("small", null, dayLabel(f.createdAt))))))
       : h("p", { class: "wlede" }, "What teammates learn while working in this project's rambles shows up here, and they use it in every ramble in it.")),
@@ -577,9 +588,40 @@ function projectMenu(p: any) {
   ]);
 }
 
+/** On a new ramble: which project it goes in (or none). Teammates use that project's memory from the first message. */
+function projectChip(): Node | null {
+  if (!S.projects.length) return null;
+  const el = h("div", { class: "projchip" });
+  const draw = () => {
+    const cur = S.projects.find((x: any) => x.id === S.newProject);
+    clear(el, h("button", { class: `pchip ${cur ? "on" : ""}`, on: { click: pickNewProject } },
+      cur?.emoji ? h("span", { class: "semoji" }, cur.emoji) : icon("folder", 15),
+      h("span", null, cur ? `In ${cur.name}` : "Add to a project"), icon("chevron", 13)),
+      cur ? h("button", { class: "pchipx", "aria-label": "Not in a project", on: { click: () => { S.newProject = null; draw(); } } }, icon("x", 12)) : null);
+  };
+  const pickNewProject = () => openSheet("Put this ramble in", [
+    h("div", { class: "wcard" },
+      S.projects.map((x: any) => h("button", { class: "wrow", on: { click: () => { S.newProject = x.id; closeSheet(); draw(); } } }, x.emoji ? h("span", { class: "semoji" }, x.emoji) : icon("folder", 18),
+        h("span", { class: "grow" }, h("b", null, x.name)), S.newProject === x.id ? icon("check", 16) : null)),
+      h("button", { class: "wrow", on: { click: () => { closeSheet(); newProject(); } } }, icon("plus", 18), h("span", { class: "grow" }, h("b", null, "New project…")))),
+    S.newProject ? h("button", { class: "btn ghost", on: { click: () => { S.newProject = null; closeSheet(); draw(); } } }, "No project") : null,
+  ]);
+  draw();
+  return el;
+}
+
+/** File a ramble under a project straight from the sidebar (drag it onto one). */
+async function fileRamble(threadId: string, projectId: string | null) {
+  const t = S.threads.find((x: any) => x.id === threadId);
+  if (!t || (t.projectId || null) === projectId) return;
+  try { await call(`/api/threads/${threadId}/project`, { body: { projectId } }); t.projectId = projectId || undefined; drawSide(); loadThreads(); loadProjects();
+    toast(projectId ? `Moved to ${S.projects.find((p: any) => p.id === projectId)?.name || "the project"}` : "Taken out of the project"); }
+  catch (e) { handleError(e); }
+}
+
 /** File this ramble under a project (or take it out). */
 function moveToProject(t: any) {
-  const pick = async (projectId: string | null) => { try { await call(`/api/threads/${t.id}/project`, { body: { projectId } }); closeSheet(); loadThreads(); toast(projectId ? "Moved" : "Taken out of the project"); } catch (e) { handleError(e); } };
+  const pick = async (projectId: string | null) => { try { await call(`/api/threads/${t.id}/project`, { body: { projectId } }); closeSheet(); if (S.chat?.thread?.id === t.id) S.chat.thread.projectId = projectId || undefined; loadThreads(); loadProjects(); toast(projectId ? "Moved" : "Taken out of the project"); } catch (e) { handleError(e); } };
   openSheet("Move to project", [
     h("div", { class: "wcard" },
       S.projects.map((p: any) => h("button", { class: "wrow", on: { click: () => pick(p.id) } }, p.emoji ? h("span", { class: "semoji" }, p.emoji) : icon("folder", 18),
@@ -1050,7 +1092,8 @@ function drawChannel(el: HTMLElement, stick: boolean) {
     const live = h("div", { class: "nowlist" });
     clear(el, h("div", { class: "hello" },
       h("h2", null, "What's on your mind?"),
-      h("p", null, "Talk or type, however it comes out. Hearth hands it to the right teammates."), live));
+      h("p", null, "Talk or type, however it comes out. Hearth hands it to the right teammates."),
+      (S.chat?.thread?.id ?? "new") === "new" ? projectChip() : null, live));
     fillNow(live);
     return;
   }
@@ -1389,10 +1432,10 @@ async function send(text: string, threadJob?: string) {
     if (threadJob) { await call(`/api/jobs/${threadJob}/reply`, { body: { text: t } }); if (r.view === "chat") loadChat(r.id); return; }
     if (r.view === "dm") { await call(`/api/teammates/${r.id}/messages`, { body: { text: t } }); loadDm(r.id); return; }
     const inChat = r.view === "chat" && r.id !== "new";
-    const res = inChat ? await call(`/api/threads/${r.id}/messages`, { body: { text: t, fileIds } }) : await call("/api/threads", { body: { text: t, fileIds } });
+    const res = inChat ? await call(`/api/threads/${r.id}/messages`, { body: { text: t, fileIds } }) : await call("/api/threads", { body: { text: t, fileIds, projectId: S.newProject || undefined } });
     S.planning = res.thread.id;
     if (!inChat) {
-      if (S.newProject) { await call(`/api/threads/${res.thread.id}/project`, { body: { projectId: S.newProject } }).catch(() => {}); res.thread.projectId = S.newProject; S.newProject = null; loadThreads(); }
+      if (S.newProject) { S.newProject = null; loadThreads(); }
       S.chat = { thread: res.thread, messages: [res.message], jobs: [], approvals: [] }; location.hash = `#c/${res.thread.id}`; return;
     }
     upsert(S.chat.messages, res.message);
@@ -1753,6 +1796,13 @@ function askMac(type: string, args: Record<string, unknown>, timeoutMs = 120_000
   });
 }
 
+/** What a successful read says: plain and about the connection, never someone's name from your inbox. */
+const READS: Record<string, [string, string]> = { linkedin: ["conversation", "conversations"], instagram: ["conversation", "conversations"], x: ["notification", "notifications"] };
+function verified(via: string, count = 0) {
+  const [one, many] = READS[via] || ["item", "items"];
+  return count ? `Connection verified · ${count} recent ${count === 1 ? one : many} found` : `Connection verified · no recent ${many} yet`;
+}
+
 async function openCookieSetup(c: Connector | { via: string; name: string; blurb: string; bg?: string; shapes?: Shape[] }) {
   const tile = (c as any).shapes ? connectorTile(c as Connector, 52) : connectorTile({ id: c.via!, name: c.name, blurb: c.blurb, group: "Social", via: c.via, bg: (c as any).bg || "#eef2f7", shapes: GENERIC_SHAPES } as Connector, 52);
   const [connResp, browsers, auditAll] = await Promise.all([call("/api/connections").catch(() => ({})), call(`/api/connections/${c.via}/browsers`).catch(() => []), call("/api/conn-audit").catch(() => [])]);
@@ -1761,7 +1811,7 @@ async function openCookieSetup(c: Connector | { via: string; name: string; blurb
   const help = COOKIE_HELP[c.via!] || { site: `https://${c.via}`, need: "a login (session) cookie" };
   const out0 = h("div", { class: "ctest" });
   const showResult = (t: any) => clear(out0, t.ok
-    ? h("p", { class: "okline" }, icon("check", 16), ` Works: read ${t.count} ${t.count === 1 ? "item" : "items"}${t.sample?.length ? `, like “${t.sample[0].replace(/^● /, "")}”` : ""}.`)
+    ? h("p", { class: "okline" }, icon("check", 16), ` ${verified(c.via!, t.count)}`)
     : h("p", { class: "err small" }, t.error));
   // In the Mac app: check Chrome on this Mac and bring the login over in one tap (the app reads it; the hub never does).
   const inApp = !!(window as any).webkit?.messageHandlers?.hearth && /^[a-z]+$/.test(c.via!);
@@ -1819,7 +1869,7 @@ async function openCookieSetup(c: Connector | { via: string; name: string; blurb
   const box = h("textarea", { class: "field mono", rows: 4, placeholder: `Paste cookies: the Cookie-Editor export, or ${help.need.replace(/ \(.*\)/, "")} as name=value; name=value`, autocapitalize: "off", spellcheck: false }) as HTMLTextAreaElement;
   const out = h("div", { class: "ctest" });
   const show = (t: any) => clear(out, t.ok
-    ? h("p", { class: "okline" }, icon("check", 16), ` Works: read ${t.count} ${t.count === 1 ? "item" : "items"}${t.sample?.length ? `, like “${t.sample[0].replace(/^● /, "")}”` : ""}.`)
+    ? h("p", { class: "okline" }, icon("check", 16), ` ${verified(c.via!, t.count)}`)
     : h("p", { class: "err small" }, t.error));
   const save = h("button", { class: "btn primary big", on: { click: async () => {
     if (!box.value.trim()) return box.focus();
@@ -1828,7 +1878,7 @@ async function openCookieSetup(c: Connector | { via: string; name: string; blurb
     catch (e: any) { show({ ok: false, error: e.message }); }
     save.disabled = false; save.textContent = "Save and test";
   } } }, "Save and test");
-  if (settled && (c.via === "linkedin" || c.via === "instagram")) return conversationsSheet(c, st, auditAll as any[]);
+  if (settled && (c.via === "linkedin" || c.via === "instagram" || c.via === "x")) return conversationsSheet(c, st, auditAll as any[]);
   openSheet(c.name, [
     h("button", { class: "btn ghost", on: { click: () => openConnections() } }, icon("back", 16), "All connectors"),
     h("div", { class: "phero" }, tile, h("b", null, st?.connected ? (st.problem ? `${c.name} needs reconnecting` : `${c.name} is connected`) : `Connect ${c.name}`),
@@ -1851,21 +1901,31 @@ async function openCookieSetup(c: Connector | { via: string; name: string; blurb
   ]);
 }
 
-/** Connected LinkedIn or Instagram: who you've been talking to lately, newest first. Tap a name to open it. */
+/** Connected LinkedIn or Instagram: who you've been talking to lately, newest first (X: your latest notifications). Tap one to open it. */
 function conversationsSheet(c: any, st: any, auditAll: any[]) {
   const hidden = /^(\.\s|open the options list|status is|active now|press return)/i; // lists kept before the hub dropped these
   const list = h("div", { class: "list" }, h("p", { class: "muted small" }, "Loading…"));
   const foot = h("p", { class: "muted small" });
+  const isX = c.via === "x";
+  const what = isX ? "notifications" : "messages";
   const load = async (fresh = false) => {
     if (fresh) clear(foot, `Reading ${c.name}…`);
     let r: any;
-    try { r = await call(`/api/connections/${c.via}/recent${fresh ? "?fresh=1" : ""}`); } catch (e: any) { r = { items: [], readAt: null, error: e.message }; }
+    try { r = await call(`/api/connections/${c.via}/recent?what=${what}${fresh ? "&fresh=1" : ""}`); } catch (e: any) { r = { items: [], readAt: null, error: e.message }; }
     const items: any[] = (r.items || []).slice(0, 8);
     clear(list, items.length ? items.map((x) => {
+      if (isX) { // "Ana" "and" "Ben" "liked your post·" "the post…" → "Ana and Ben liked your post" over "Sep 25 · the post…"
+        const lines: string[] = x.lines || [];
+        const act = lines.findIndex((l) => /·$/.test(l));
+        const head = [x.name, ...lines.slice(0, act + 1)].join(" ").replace(/\s*·$/, "");
+        const post = act >= 0 ? lines[act + 1] || "" : lines[0] || "";
+        return h("a", { class: "item", href: x.url || undefined, target: "_blank", rel: "noopener noreferrer" },
+          h("span", { class: "grow" }, h("b", { class: "light" }, head), h("small", { class: "sub" }, [x.when, post].filter(Boolean).join(" · "))));
+      }
       const last = (x.lines || []).find((l: string) => !hidden.test(l) && l !== x.when) || ""; // the message comes first
       return h("a", { class: "item", href: x.url || undefined, target: "_blank", rel: "noopener noreferrer" },
         h("span", { class: "grow" }, h("b", { class: "light" }, x.name), h("small", { class: "sub" }, [x.when, last].filter(Boolean).join(" · "))));
-    }) : h("p", { class: "muted small" }, r.error || "No conversations yet."));
+    }) : h("p", { class: "muted small" }, r.error || (isX ? "No notifications yet." : "No conversations yet.")));
     clear(foot, r.readAt ? `Updated ${relTime(r.readAt)} · ` : "", h("button", { class: "wa-link", on: { click: () => load(true) } }, "Refresh"));
     if (r.error && /signed hearth out/i.test(r.error)) setTimeout(() => openCookieSetup(c), 1500); // back to Reconnect
   };
@@ -1874,7 +1934,7 @@ function conversationsSheet(c: any, st: any, auditAll: any[]) {
     h("button", { class: "btn ghost", on: { click: () => openConnections() } }, icon("back", 16), "All connectors"),
     h("div", { class: "phero" }, connectorTile({ id: c.via, name: c.name, blurb: c.blurb, group: "Social", via: c.via, bg: c.bg, shapes: c.shapes } as Connector, 52),
       h("b", null, `${c.name} is connected`), h("small", null, `${st.detail || "Connected"} · read-only`)),
-    h("p", { class: "muted small" }, "Recently contacted"),
+    h("p", { class: "muted small" }, isX ? "Recent notifications" : "Recently contacted"),
     list, foot,
     accessLog(auditAll, st.domain || c.via),
     h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet(`Disconnect ${c.name}?`, "Your login is deleted from the hub. Triggers on it stop until you connect again.", "Disconnect", async () => { await call(`/api/connections/${c.via}`, { method: "DELETE" }); toast(`${c.name} disconnected`); openConnections(); }) } }, `Disconnect ${c.name}`),
@@ -3639,12 +3699,14 @@ async function drawPins() {
 async function renderApp(id: string) {
   const box = h("div", { class: "appframe" }, h("p", { class: "muted center" }, "Opening…"));
   const title = h("b", null, S.apps.find((x) => x.id === id)?.title || "App");
+  // No sidebar here, so drop the desktop grid (else the app sits in the 252px sidebar column) and span the window.
+  app.classList.remove("desk", "split");
+  app.classList.add("fullapp");
   clear(app, h("div", { class: "screen appscreen" },
     box,
     h("header", { class: "chrome-top" }, h("div", { class: "toprow" },
       h("button", { class: "circle glass", "aria-label": "Back", on: { click: () => { history.length > 1 ? history.back() : (location.hash = ""); } } }, icon("back", 24)),
-      h("button", { class: "titlepill glass", on: { click: () => appMenu(id) } }, h("span", { class: "grow" }, title, h("small", null, "Tap to change, pin or undo"))),
-      h("button", { class: "circle glass", "aria-label": "Reload", on: { click: () => renderApp(id) } }, icon("repeat", 20))))));
+      h("button", { class: "titlepill glass", on: { click: () => appMenu(id) } }, h("span", { class: "grow" }, title, h("small", null, "Tap to change, pin or undo")))))));
   try { clear(box, await appFrame(id, title.textContent || "App")); }
   catch (err) { clear(box, h("p", { class: "muted center" }, "That app is gone.")); handleError(err); }
 }
