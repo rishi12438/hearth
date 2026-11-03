@@ -187,6 +187,11 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
     try { return text ? JSON.parse(text) : {}; } catch { throw new HttpError(400, "Bad JSON."); }
   }
 
+  const fromThisMachine = (req: Request, server: Server) => {
+    if (req.headers.has("x-forwarded-for") || req.headers.has("forwarded") || req.headers.has("x-real-ip")) return false;
+    const a = server.requestIP(req)?.address || "";
+    return a === "127.0.0.1" || a === "::1" || a === "::ffff:127.0.0.1";
+  };
   const clientIp = (req: Request, server: Server) =>
     (config.behindProxy && req.headers.get("x-forwarded-for")?.split(",").pop()!.trim()) || server.requestIP(req)?.address || "?";
 
@@ -270,8 +275,10 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       return json({ ok: true }, 202);
     }
     // The agent's hearth-plaid command (from this machine, with the hub's agent key): read-only bank questions.
+    // Only straight from this machine: the key is written in the brain's tool, so a copy leaked off the box (or a request
+    // through the public proxy, which adds X-Forwarded-For) is refused.
     if (path === "/api/agent/plaid" && method === "GET") {
-      if (!connect.isAgentKey(req.headers.get("x-hearth-agent"))) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not the agent's key."); }
+      if (!fromThisMachine(req, server) || !connect.isAgentKey(req.headers.get("x-hearth-agent"))) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not the agent's key."); }
       const argv = url.searchParams.getAll("a").slice(0, 20).map((a) => a.slice(0, 200));
       try {
         const r = await connect.plaid.agent(argv);
