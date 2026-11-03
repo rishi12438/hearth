@@ -54,7 +54,13 @@ export class Plaid {
 
   creds(): Creds | null { try { const v = this.vault?.get("plaid"); return v ? JSON.parse(v) : null; } catch { return null; } }
   items(): SavedItem[] { try { return JSON.parse(this.vault?.get("plaid:items") || "[]"); } catch { return []; } }
-  private saveItems(list: SavedItem[]) { this.vault!.set("plaid:items", JSON.stringify(list)); }
+  private saveItems(list: SavedItem[]) {
+    const had = this.items().length;
+    this.vault!.set("plaid:items", JSON.stringify(list));
+    if (!had !== !list.length) this.onItems(); // first bank in, or last one out: the agent's skill comes or goes
+  }
+  /** Called when the agent's hearth-plaid skill should appear or go (first bank added, last one removed). */
+  onItems: () => void = () => {};
   connected() { return !!this.creds() && this.items().length > 0; }
   needsYou() { return this.items().filter((i) => i.error && RELOGIN.has(i.error)); }
 
@@ -359,6 +365,7 @@ export class Plaid {
     for (const i of this.items()) await this.removeItem(i.itemId).catch(() => {});
     if (this.items().length) return "Plaid wouldn't let go of every bank. Try again.";
     this.vault?.delete("plaid"); this.vault?.delete("plaid:items");
+    this.onItems();
     return null;
   }
 }

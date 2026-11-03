@@ -246,3 +246,15 @@ test("the skill reaches the brain: catalog, its command on PATH, and permission 
   const { statSync } = await import("node:fs");
   expect(statSync(join(bin, "hearth-plaid")).mode & 0o777).toBe(0o700);
 });
+
+test("adding the first bank (and removing the last) tells the brain to look at its skills again", async () => {
+  const state: any = { seen: [], finished: true };
+  const p = new Plaid(newVault(), fakePlaid(state));
+  p.saveCreds(creds);
+  let n = 0;
+  p.onItems = () => n++;
+  await p.finishLink((await p.startLink()).token);
+  expect(n).toBe(1);
+  await p.removeAll();
+  expect(n).toBeGreaterThanOrEqual(2);
+});

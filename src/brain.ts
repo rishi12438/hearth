@@ -457,6 +457,9 @@ export class Brain {
   }
 
   private skillState: { at: number; key: string; skills: Skill[]; paths: string[] } | null = null;
+  /** Look again on the next call (a connector that brings a skill just connected or left). */
+  refreshSkills() { if (this.skillState) this.skillState.at = 0; }
+
   /** The hub's skills, re-scanned at most every 5 minutes (a tool installed later shows up without a restart). */
   skills(): { skills: Skill[]; paths: string[] } {
     if (this.skillState && Date.now() - this.skillState.at < 300_000) return this.skillState;

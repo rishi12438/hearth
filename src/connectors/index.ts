@@ -58,6 +58,7 @@ export class Connect {
     // A Plaid webhook: check the Plaid triggers now rather than at their next timer; a bank's state changed: redraw.
     this.plaid.onNews = (bank) => { void hub.pollNow("plaid", `${bank} has new transactions`).catch(() => {}); };
     this.plaid.onChange = () => hub.emit("connections");
+    this.plaid.onItems = () => hub.brain.refreshSkills?.();
     // The agent's hearth-plaid command asks this hub on its own machine with a key made fresh each start, which opens
     // only the read-only Plaid questions. The skill is there only while a bank is connected.
     const h = hub.config.host, local = !h || h === "0.0.0.0" || h === "::" ? "127.0.0.1" : h.includes(":") ? `[${h}]` : h;
