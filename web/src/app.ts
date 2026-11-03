@@ -1606,7 +1606,7 @@ const CONNECTORS: Connector[] = [
     ["circle", { cx: 12, cy: 13, r: 7, fill: "#fff" }], ["circle", { cx: 9.3, cy: 12.5, r: 1, fill: "#FF4500" }], ["circle", { cx: 14.7, cy: 12.5, r: 1, fill: "#FF4500" }]] },
   { id: "github", name: "GitHub", blurb: "Notifications and mentions", group: "Productivity", via: "github", bg: "#111", shapes: [
     ["circle", { cx: 12, cy: 12, r: 7, fill: "none", stroke: "#fff", "stroke-width": 2 }]] },
-  { id: "drive", name: "Google Drive", blurb: "Find and read your files", group: "Productivity", bg: "#fff", shapes: [
+  { id: "drive", name: "Google Drive", blurb: "Find and read your files, read-only", group: "Productivity", via: "google", bg: "#fff", shapes: [
     ["path", { d: "M9 5h6l5 9h-6z", fill: "#FBBC04" }], ["path", { d: "M9 5l-5 9 3 5 5-9z", fill: "#34A853" }], ["path", { d: "M7 19h10l3-5H10z", fill: "#4285F4" }]] },
 ];
 const TILE_TEXT: Record<string, string> = { calendar: "31", linkedin: "in", outlook: "O" };
@@ -1868,6 +1868,12 @@ function conversationsSheet(c: any, st: any, auditAll: any[]) {
   ]);
 }
 
+/** What one account let Hearth do, and what a reconnect would add. */
+const googleAllows = (a: any) => {
+  const missing = [!a.canSend && "sending", !a.canDrive && "Drive"].filter(Boolean);
+  return `Mail, calendar${a.canDrive ? ", Drive" : ""}${a.canSend ? " · sends after you Approve" : ""}${missing.length ? ` · reconnect to allow ${missing.join(" and ")}` : ""}`;
+};
+
 /** "me@x.com", or "me@x.com +1" with several accounts. */
 const googleWho = (g: any) => { const n = (g.accounts || []).length; return n > 1 ? `${g.email} +${n - 1}` : g.email || "Google"; };
 
@@ -1882,7 +1888,7 @@ async function openGoogleSetup() {
   const accounts: any[] = g.accounts || [];
   const accountRow = (a: any) => h("div", { class: "item" },
     h("span", { class: "grow" }, h("b", null, a.email),
-      h("small", { class: a.problem ? "err" : "sub" }, a.problem ? "Signed out · reconnect it" : a.canSend ? "Reads mail and calendar · sends after you Approve" : "Read-only · reconnect to allow sending")),
+      h("small", { class: a.problem ? "err" : "sub" }, a.problem ? "Signed out · reconnect it" : googleAllows(a))),
     h("button", { class: "iconbtn", title: "Reconnect", "aria-label": `Reconnect ${a.email}`, on: { click: () => connect(a.email) } }, icon("repeat", 16)),
     h("button", { class: "iconbtn", title: "Remove", "aria-label": `Remove ${a.email}`, on: { click: () => confirmSheet(`Remove ${a.email}?`, accounts.length > 1 ? "Hearth signs out of this account. Your other Google accounts stay connected." : "Hearth signs out of your Google account. Gmail and Calendar triggers stop until you connect again.", "Remove", async () => {
       const left = await call(`/api/google?account=${encodeURIComponent(a.email)}`, { method: "DELETE" });
@@ -1901,8 +1907,8 @@ async function openGoogleSetup() {
   const cloud = (path: string, label: string) => h("a", { href: `https://console.cloud.google.com/${path}`, target: "_blank", rel: "noopener noreferrer" }, label);
   openSheet("Google", [
     h("button", { class: "btn ghost", on: { click: () => openConnections() } }, icon("back", 16), "All connectors"),
-    h("div", { class: "phero" }, h("span", { class: "ctile-pair" }, connectorTile(CONNECTORS[0], 48), connectorTile(CONNECTORS[1], 48)), h("b", null, g.connected ? (accounts.length > 1 ? `${accounts.length} Google accounts connected` : "Google is connected") : "Gmail and Calendar"),
-      h("small", null, g.connected ? "Teammates read every account below unless you ask for one." : "Teammates can watch your inbox and calendar and tell you what matters.")),
+    h("div", { class: "phero" }, h("span", { class: "ctile-pair" }, connectorTile(CONNECTORS[0], 48), connectorTile(CONNECTORS[1], 48), connectorTile(CONNECTORS.find((c) => c.id === "drive")!, 48)), h("b", null, g.connected ? (accounts.length > 1 ? `${accounts.length} Google accounts connected` : "Google is connected") : "Gmail, Calendar and Drive"),
+      h("small", null, g.connected ? "Teammates read every account below unless you ask for one." : "Teammates can watch your inbox, calendar and files and tell you what matters.")),
     g.connected ? [
       h("p", { class: "muted" }, "Ask for things like “tell me when the school emails”, “LinkedIn digest every 30 min” or “what's on tomorrow?”. They show up under Triggers in Plans."),
       h("div", { class: "list" }, accounts.map(accountRow)),
@@ -1918,13 +1924,13 @@ async function openGoogleSetup() {
     ] : [
       h("ol", { class: "steps" },
         h("li", null, "In Google Cloud, ", cloud("projectcreate", "create a project"), " (any name, like “Hearth”)."),
-        h("li", null, "Turn on the ", cloud("apis/library/gmail.googleapis.com", "Gmail API"), " and the ", cloud("apis/library/calendar-json.googleapis.com", "Calendar API"), "."),
+        h("li", null, "Turn on the ", cloud("apis/library/gmail.googleapis.com", "Gmail API"), ", the ", cloud("apis/library/calendar-json.googleapis.com", "Calendar API"), " and the ", cloud("apis/library/drive.googleapis.com", "Drive API"), "."),
         h("li", null, "Set up the ", cloud("auth/branding", "consent screen"), ": External, add your own email as a test user. Then publish it (“In production”) so the sign-in doesn't expire every 7 days. Google will warn it's unverified; that's fine for your own account."),
         h("li", null, "Create an ", cloud("auth/clients/create", "OAuth client"), ": Web application. Under Authorized redirect URIs, add:", h("div", { class: "hookurl" }, copyRow(g.redirectUri))),
         h("li", null, "Paste the client ID and secret here.")),
       id, secret, err, save,
     ],
-    h("p", { class: "muted small" }, "Each sign-in stays on your hub in a private file. It never goes to the model, this app or your exports. Hearth reads mail and calendars, and only sends an email after you tap Approve. It can't delete or change anything."),
+    h("p", { class: "muted small" }, "Each sign-in stays on your hub in a private file. It never goes to the model, this app or your exports. Hearth reads mail, calendars and Drive files, and only sends an email after you tap Approve. It can't delete, share or change anything."),
   ]);
 }
 

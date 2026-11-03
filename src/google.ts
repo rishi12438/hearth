@@ -5,7 +5,7 @@ import type { Vault } from "./vault.ts";
 // Google Cloud, paste its ID and secret, tap Connect, and Google hands this hub a refresh token. Connect again to add
 // another account (personal and work Gmail…): one client, a token per account; reads cover all of them unless told one. The client secret and
 // the tokens live in the hub's encrypted vault (vault.ts) with every other key, and never reach the model, the app or
-// an export. Gmail (read, and send after your Approve) and Calendar (read).
+// an export. Gmail (read, and send after your Approve), Calendar (read) and Drive (read).
 
 export const GOOGLE_SCOPES = [
   "openid", "email",
@@ -13,6 +13,8 @@ export const GOOGLE_SCOPES = [
   // Sending only ever happens after you tap Approve on the exact email (hub.requestMessage).
   "https://www.googleapis.com/auth/gmail.send",
   "https://www.googleapis.com/auth/calendar.readonly",
+  // Find and read your files; nothing in Drive is changed, shared or deleted.
+  "https://www.googleapis.com/auth/drive.readonly",
 ];
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -23,7 +25,14 @@ type Account = { email: string; refreshToken: string; connectedAt: string; scope
 type Saved = { clientId?: string; clientSecret?: string; accounts?: Account[]; refreshToken?: string; email?: string; connectedAt?: string; scopes?: string[] };
 export type Mail = { id: string; threadId: string; account: string; from: string; to: string; subject: string; date: string; snippet: string; text: string; labels: string[] };
 export type CalEvent = { id: string; account: string; title: string; start: string; end: string; allDay: boolean; location: string; organizer: string; created: string; updated: string; status: string; myResponse: string; link: string; description: string };
+export type DriveFile = { id: string; account: string; name: string; mimeType: string; modified: string; owner: string; link: string; size: number };
 const canSendWith = (scopes: string[]) => scopes.some((x) => x.endsWith("/gmail.send"));
+const canDriveWith = (scopes: string[]) => scopes.some((x) => /\/auth\/drive(\.readonly)?$/.test(x));
+// Google's own formats export to text; everything else is read only if it's text already.
+const EXPORTS: Record<string, string> = {
+  "application/vnd.google-apps.document": "text/plain", "application/vnd.google-apps.spreadsheet": "text/csv",
+  "application/vnd.google-apps.presentation": "text/plain",
+};
 const header = (msg: any, name: string) => String(msg?.payload?.headers?.find((h: any) => h.name?.toLowerCase() === name)?.value || "");
 const b64 = (s: string) => Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
 
@@ -89,7 +98,7 @@ export class Google {
     const c = this.client(), accounts = this.accounts();
     return { hasClient: !!c, clientFromEnv: !!this.env.HEARTH_GOOGLE_CLIENT_ID, clientIdHint: c ? `${c.id.slice(0, 12)}…` : null,
       connected: accounts.length > 0, email: accounts[0]?.email || null, connectedAt: accounts[0]?.connectedAt || null, scopes: accounts[0]?.scopes || [],
-      accounts: accounts.map((a) => ({ email: a.email, connectedAt: a.connectedAt, canSend: canSendWith(a.scopes), problem: this.problems.get(a.email) ?? null })) };
+      accounts: accounts.map((a) => ({ email: a.email, connectedAt: a.connectedAt, canSend: canSendWith(a.scopes), canDrive: canDriveWith(a.scopes), problem: this.problems.get(a.email) ?? null })) };
   }
 
   setClient(id: string, secret: string) {
@@ -250,5 +259,47 @@ export class Google {
     const seen = new Set<string>();
     const at = (e: CalEvent) => Date.parse(e.start) || 0;
     return all.sort((x, y) => at(x) - at(y)).filter((e) => !seen.has(e.id) && !!seen.add(e.id)).slice(0, max);
+  }
+
+  /** Accounts that allowed Drive (sign-ins from before Drive need a reconnect). Naming one without it is an error. */
+  private driveAccounts(account?: string) {
+    const picked = this.pick(account), ok = picked.filter((a) => canDriveWith(a.scopes));
+    if (!ok.length) throw new Error(`Google Drive isn't allowed${account ? ` for ${account}` : ""} yet. Reconnect ${account || "your account"} in Connectors → Google and allow Drive.`);
+    return ok;
+  }
+  canDrive(account?: string) { try { return this.driveAccounts(account).length > 0; } catch { return false; } }
+
+  /** Files across every account that allowed Drive (or just `account`), most recently changed first. `search` is plain
+   * words (matched in names and contents); `days` keeps only files changed that recently. Trashed files are left out. */
+  async files(search: string, max = 10, account?: string, days?: number): Promise<DriveFile[]> {
+    const terms = String(search || "").trim().slice(0, 200).replace(/\\/g, "").replace(/'/g, "\\'");
+    const since = days ? new Date(Date.now() - days * 86_400_000).toISOString() : "";
+    const q = ["trashed = false", terms && `(name contains '${terms}' or fullText contains '${terms}')`, since && `modifiedTime > '${since}'`].filter(Boolean).join(" and ");
+    const n = Math.min(50, Math.max(1, max));
+    const params = new URLSearchParams({ q, pageSize: String(n), fields: "files(id,name,mimeType,modifiedTime,owners(emailAddress),webViewLink,size)",
+      // fullText search can't be sorted; Google ranks it by relevance then.
+      ...(terms ? {} : { orderBy: "modifiedTime desc" }), includeItemsFromAllDrives: "true", supportsAllDrives: "true", corpora: "allDrives" });
+    const all = await this.each<DriveFile>(this.driveAccounts(account), async (a) => {
+      const j = await this.get(a, `https://www.googleapis.com/drive/v3/files?${params}`);
+      return (j.files || []).map((f: any): DriveFile => ({ id: f.id, account: a.email, name: f.name || "(untitled)", mimeType: f.mimeType || "",
+        modified: f.modifiedTime || "", owner: f.owners?.[0]?.emailAddress || "", link: f.webViewLink || "", size: Number(f.size) || 0 }));
+    });
+    const at = (f: DriveFile) => Date.parse(f.modified) || 0;
+    const seen = new Set<string>();
+    return all.sort((x, y) => at(y) - at(x)).filter((f) => !seen.has(f.id) && !!seen.add(f.id)).slice(0, n);
+  }
+
+  /** A file's text (Docs as text, Sheets as CSV, text files as they are), capped; "" for things that aren't text. */
+  async fileText(f: Pick<DriveFile, "id" | "mimeType" | "account" | "size">, max = 4000): Promise<string> {
+    const a = this.driveAccounts(f.account)[0];
+    const exp = EXPORTS[f.mimeType];
+    const isText = /^text\/|^application\/(json|xml|csv)/.test(f.mimeType);
+    if (!exp && !(isText && f.size <= 2_000_000)) return "";
+    const url = exp ? `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(f.id)}/export?mimeType=${encodeURIComponent(exp)}`
+      : `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(f.id)}?alt=media&supportsAllDrives=true`;
+    const res = await this.fetch(url, { headers: { Authorization: `Bearer ${await this.token(a)}` }, signal: AbortSignal.timeout(20_000) });
+    if (res.status === 401) this.access.delete(a.email);
+    if (!res.ok) return "";
+    return (await res.text()).replace(/\r/g, "").replace(/\n{3,}/g, "\n\n").trim().slice(0, max);
   }
 }

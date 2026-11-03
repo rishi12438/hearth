@@ -257,3 +257,50 @@ test("a single sign-in saved before several accounts still works, and a second o
   expect(hub.google.accounts().map((a) => a.email)).toEqual(["rishi@example.com", "work@corp.com"]);
   expect(JSON.parse(hub.vault!.get("google")!).refreshToken).toBeUndefined();
 });
+
+// ---------------- Drive ----------------
+
+test("Drive: asked for read-only, searched across accounts that allowed it, Docs read as text, old sign-ins told to reconnect", async () => {
+  const url = new URL((hub.google.setClient(CLIENT, "GOCSPX-secret-value"), hub.google.authUrl("https://x/cb").value!));
+  expect(url.searchParams.get("scope")).toContain("auth/drive.readonly");
+  expect(url.searchParams.get("scope")!.split(" ")).not.toContain("https://www.googleapis.com/auth/drive");
+  await connect(); // the fake grants only gmail.readonly: a sign-in from before Drive
+  expect(hub.google.status().accounts[0].canDrive).toBe(false);
+  expect(await hub.readSource({ source: "drive", config: { search: "lease" } })).toContain("Reconnect");
+
+  const driveQs: string[] = [];
+  const base = hub.google.fetch;
+  hub.google.fetch = async (u, init) => {
+    const x = new URL(String(u));
+    if (x.pathname === "/token" && new URLSearchParams(String(init?.body)).get("code") === "drive")
+      return new Response(JSON.stringify({ access_token: "atd", refresh_token: "rtd", expires_in: 3600, scope: "email https://www.googleapis.com/auth/drive.readonly" }));
+    if (x.pathname === "/v1/userinfo" && String((init?.headers as any)?.Authorization).includes("atd")) return new Response(JSON.stringify({ email: "home@example.com" }));
+    if (x.pathname === "/drive/v3/files") {
+      driveQs.push(x.searchParams.get("q")!);
+      return new Response(JSON.stringify({ files: [
+        { id: "d1", name: "Lease 2027", mimeType: "application/vnd.google-apps.document", modifiedTime: "2026-10-30T10:00:00Z", webViewLink: "https://docs.google.com/d1", owners: [{ emailAddress: "home@example.com" }] },
+        { id: "d2", name: "lease scan.pdf", mimeType: "application/pdf", modifiedTime: "2026-10-29T10:00:00Z", webViewLink: "https://drive.google.com/d2", size: "90000" }] }));
+    }
+    if (x.pathname === "/drive/v3/files/d1/export") return new Response("Rent is $2,400, due on the 1st.");
+    return base(u, init);
+  };
+  const st = new URL(hub.google.authUrl("https://x/cb").value!).searchParams.get("state")!;
+  await hub.google.finish("drive", st);
+  expect(hub.google.status().accounts.map((a) => [a.email, a.canDrive])).toEqual([["rishi@example.com", false], ["home@example.com", true]]);
+
+  const out = await hub.readSource({ source: "drive", config: { search: "lease's", days: 30 } });
+  expect(out).toContain("Lease 2027");
+  expect(out).toContain("Rent is $2,400");
+  expect(out).toContain("lease scan.pdf");
+  // Words are quoted safely, trash is left out, and only the account that allowed Drive was asked.
+  expect(driveQs).toHaveLength(1);
+  expect(driveQs[0]).toContain("name contains 'lease\\'s'");
+  expect(driveQs[0]).toContain("trashed = false");
+  expect(driveQs[0]).toContain("modifiedTime >");
+  await expect(hub.google.files("x", 5, "rishi@example.com")).rejects.toThrow("Reconnect rishi@example.com");
+
+  // As a trigger: a file edited again counts again.
+  const r = await hub.addHook({ title: "Lease", trigger: { type: "source", source: "drive", config: { search: "lease" } }, action: { type: "notify", text: "Drive:" } }, "assistant");
+  expect(r.value!.trigger).toMatchObject({ minutes: 30 });
+  expect(describeTrigger(r.value!.trigger, TZ)).toContain("a Drive file matching “lease” added or changed");
+});
