@@ -965,8 +965,7 @@ function drawHome() {
   if (!homeNow) {
     homeNow = h("div", { class: "nowlist" }) as HTMLElement;
     clear(el, h("div", { class: "hello" },
-      h("h2", null, "What's on your mind?"),
-      h("p", null, "Talk or type, however it comes out. Hearth hands it to the right teammates."), homeNow));
+      h("h2", null, "What's on your mind?"), homeNow));
   }
   fillNow(homeNow);
 }
@@ -1145,7 +1144,7 @@ async function fillNow(el: HTMLElement) {
       const box = document.getElementById("composer") as HTMLTextAreaElement | null;
       if (box) { box.value = i.prompt; box.dispatchEvent(new Event("input")); box.focus(); }
     }, i.body || ""))),
-    sec("Continue with", recent.map((t: any) => row(h("span", { class: "hicon" }, "#"), t.title || channelName(t), `#${channelName(t)} · ${shortAgo(when(t))}`, () => { location.hash = `#c/${t.id}`; }))),
+    sec("Continue with", recent.map((t: any) => row(h("span", { class: "hicon" }, "#"), t.title || channelName(t), shortAgo(when(t)), () => { location.hash = `#c/${t.id}`; }))),
   ].filter(Boolean) as Node[];
   clear(el, parts.length ? parts : h("div", { class: "starters" }, [
     "Remind me at 6 to call mom, find a cheap dinner spot, and text Sam that Tuesday works",
@@ -1160,8 +1159,7 @@ function drawChannel(el: HTMLElement, stick: boolean) {
     // A fresh ramble shows what's going on (in progress, coming up, ideas, recent rambles), not the same examples every time.
     const live = h("div", { class: "nowlist" });
     clear(el, h("div", { class: "hello" },
-      h("h2", null, "What's on your mind?"),
-      h("p", null, "Talk or type, however it comes out. Hearth hands it to the right teammates."), live));
+      h("h2", null, "What's on your mind?"), live));
     fillNow(live);
     return;
   }
