@@ -125,7 +125,8 @@ ${sourceDocs()}
 - message.send {channel, to, text, summary}   draft a message for the user to approve; it's only sent after they tap Approve
     (or right away for a chat they marked "Always allow"). channel and "to":
       whatsapp   a WhatsApp chat id or phone number          slack   a Slack channel or user id from what you read
-      gmail      an email address; also subject, and threadId (from a mail you read) to reply in that conversation
+      gmail      an email address; also subject, and threadId (from a mail you read) to reply in that conversation;
+                 with several Gmail accounts, from: the account to send as (a reply goes from the Account: it came to)
       instagram | linkedin | x   the conversation's link from reading that inbox (source.read), e.g.
                  https://www.instagram.com/direct/t/…, https://www.linkedin.com/messaging/thread/…, https://x.com/messages/…
                  Only replies in existing conversations; you can't start a new one on these.

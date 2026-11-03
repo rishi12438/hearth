@@ -47,7 +47,7 @@ export class Connect {
     // the Serper key for scripts that ask for it, and WhatsApp and Slack as trigger sources.
     hub.senders.whatsapp = { connected: () => this.whatsapp.connected(), send: (to, text) => this.whatsapp.send(to, text) };
     hub.senders.slack = { connected: () => this.slack.connected(), send: (to, text) => this.slack.send(to, text) };
-    hub.senders.gmail = { connected: () => hub.google.canSend(), send: (to, text, x) => hub.google.sendMail(to, x?.subject || "(no subject)", text, x?.threadId) };
+    hub.senders.gmail = { connected: () => hub.google.canSend(), send: (to, text, x) => hub.google.sendMail(to, x?.subject || "(no subject)", text, x?.threadId, x?.from) };
     for (const ch of ["instagram", "linkedin", "x"] as const)
       hub.senders[ch] = webSender(ch, (d) => hub.connections.cookies(d), (url, text, o) => sendInPage(url, text, { fingerprint: hub.connections.fingerprintFor(url), ...o }));
     hub.connections.extra = { whatsapp: () => this.whatsapp.connected() || this.whatsapp.linked(), slack: () => this.slack.connected(), plaid: () => this.plaid.connected() };

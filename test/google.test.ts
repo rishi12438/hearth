@@ -168,3 +168,139 @@ test("a Google sign-in saved before the vault moves into it, and the plain file 
   expect(existsSync(join(dir, "google.json"))).toBe(false);
   expect(hub.google.status()).toMatchObject({ connected: true, email: "old@example.com" });
 });
+
+// ---------------- several accounts ----------------
+
+/** Two accounts behind one client: "good" signs in rishi@example.com (the inbox above), "work" signs in work@corp.com. */
+function twoAccounts(workInbox: typeof inbox, workEvents: typeof events, sentFrom: string[]) {
+  hub.google.fetch = async (url, init) => {
+    const u = new URL(String(url));
+    const auth = String((init?.headers as any)?.Authorization || "");
+    const ok = (j: unknown) => new Response(JSON.stringify(j), { headers: { "Content-Type": "application/json" } });
+    if (u.pathname === "/token") {
+      const p = new URLSearchParams(String(init?.body));
+      if (p.get("code") === "work") return ok({ access_token: "atw", refresh_token: "rtw", expires_in: 3600, scope: "email https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send" });
+      if (p.get("refresh_token") === "rtw") return ok({ access_token: "atw", expires_in: 3600 });
+    }
+    if (!auth.includes("atw")) return fakeGoogle(String(url), init);
+    calls.push(`work ${u.pathname}`);
+    if (u.pathname === "/v1/userinfo") return ok({ email: "work@corp.com" });
+    if (u.pathname.endsWith("/messages/send")) { sentFrom.push("work@corp.com"); return ok({ id: "s1" }); }
+    if (u.pathname === "/gmail/v1/users/me/messages") return ok({ messages: workInbox.map((m) => ({ id: m.id, threadId: `t${m.id}` })) });
+    const one = u.pathname.match(/\/messages\/(\w+)$/);
+    if (one) { const m = workInbox.find((x) => x.id === one[1])!; return ok({ id: m.id, threadId: `t${m.id}`, snippet: m.body, payload: { mimeType: "text/plain", headers: [{ name: "From", value: m.from }, { name: "Subject", value: m.subject }, { name: "Date", value: "Fri, 30 Oct 2026 13:00:00 -0700" }], body: { data: b64(m.body) } } }); }
+    if (u.pathname.endsWith("/events")) return ok({ items: workEvents.map((e) => ({ id: e.id, summary: e.summary, start: { dateTime: e.start }, end: { dateTime: e.start }, created: e.created, status: "confirmed" })) });
+    return new Response("not found", { status: 404 });
+  };
+}
+
+async function addWork() {
+  const url = new URL(hub.google.authUrl("https://hub.example.com/api/google/callback").value!);
+  // Google asks which account every time, so the same Connect adds a second one.
+  expect(url.searchParams.get("prompt")).toContain("select_account");
+  return hub.google.finish("work", url.searchParams.get("state")!);
+}
+
+test("several Google accounts: added side by side, read together or one at a time, removed one at a time", async () => {
+  const sentFrom: string[] = [];
+  const later = new Date(now.getTime() + 3600_000).toISOString();
+  twoAccounts([{ id: "w1", from: "ceo@corp.com", subject: "Offsite", body: "Offsite is Thursday." }],
+    [{ id: "e1", summary: "Dentist", start: events[0].start, created: "2026-10-01T00:00:00Z" }, { id: "w-e2", summary: "Standup", start: later, created: "2026-10-02T00:00:00Z" }], sentFrom);
+  await connect();
+  const r = await addWork();
+  expect(r.value).toMatchObject({ added: "work@corp.com", email: "rishi@example.com" });
+  expect(hub.google.status().accounts.map((a) => [a.email, a.canSend])).toEqual([["rishi@example.com", false], ["work@corp.com", true]]);
+  // Signing in to one you already have replaces its token instead of adding a duplicate.
+  await addWork();
+  expect(hub.google.accounts().length).toBe(2);
+  expect(JSON.stringify(hub.google.status())).not.toMatch(/rtw|rt1/);
+  expect(hub.google.authUrl("https://x/cb", "work@corp.com").value).toContain("login_hint=work%40corp.com");
+
+  // Mail from both, newest first, each saying which account it came to.
+  const both = await hub.google.searchMail("in:inbox", 10);
+  expect(both.map((m) => [m.id, m.account])).toEqual([["w1", "work@corp.com"], ["m1", "rishi@example.com"]]);
+  expect((await hub.google.searchMail("in:inbox", 10, "WORK@corp.com")).map((m) => m.id)).toEqual(["w1"]);
+  await expect(hub.google.searchMail("x", 10, "nobody@x.com")).rejects.toThrow("No Google account");
+  const out = await hub.readSource({ source: "gmail", config: { query: "in:inbox" } });
+  expect(out).toContain("Account: work@corp.com");
+  expect(out).toContain("authuser=work%40corp.com");
+
+  // The same meeting on both calendars shows once.
+  const evs = await hub.google.events(now, new Date(now.getTime() + 86_400_000));
+  expect(evs.map((e) => e.title)).toEqual(["Standup", "Dentist"]);
+
+  // Sending goes from an account allowed to send; naming one that can't is refused before an Approve card.
+  expect(hub.google.canSend()).toBe(true);
+  expect(hub.google.canSend("rishi@example.com")).toBe(false);
+  expect((await hub.requestMessage({ channel: "gmail", to: "sam@x.com", text: "hi", from: "rishi@example.com" }, {})).error).toContain("permission to send from rishi@example.com");
+  expect((await hub.requestMessage({ channel: "gmail", to: "sam@x.com", text: "hi", from: "nobody@x.com" }, {})).error).toContain("No Gmail account nobody@x.com");
+  await hub.google.sendMail("sam@x.com", "Hi", "hello");
+  expect(sentFrom).toEqual(["work@corp.com"]);
+
+  // One signed out doesn't hide the other.
+  const s = JSON.parse(hub.vault!.get("google")!); s.accounts[0].refreshToken = "dead"; hub.vault!.set("google", JSON.stringify(s));
+  (hub.google as any).access.clear();
+  expect((await hub.google.searchMail("in:inbox", 10)).map((m) => m.id)).toEqual(["w1"]);
+  expect(hub.google.status().accounts[0].problem).toContain("signed Hearth out of rishi@example.com");
+
+  await hub.google.disconnect("work@corp.com");
+  expect(hub.google.accounts().map((a) => a.email)).toEqual(["rishi@example.com"]);
+  await hub.google.disconnect();
+  expect(hub.google.status()).toMatchObject({ connected: false, hasClient: true, accounts: [] });
+});
+
+test("a single sign-in saved before several accounts still works, and a second one joins it", async () => {
+  hub.vault!.set("google", JSON.stringify({ clientId: CLIENT, clientSecret: "GOCSPX-secret-value", refreshToken: "rt1", email: "rishi@example.com", scopes: ["email"] }));
+  expect(hub.google.status()).toMatchObject({ connected: true, email: "rishi@example.com", accounts: [{ email: "rishi@example.com" }] });
+  twoAccounts([], [], []);
+  await addWork();
+  expect(hub.google.accounts().map((a) => a.email)).toEqual(["rishi@example.com", "work@corp.com"]);
+  expect(JSON.parse(hub.vault!.get("google")!).refreshToken).toBeUndefined();
+});
+
+// ---------------- Drive ----------------
+
+test("Drive: asked for read-only, searched across accounts that allowed it, Docs read as text, old sign-ins told to reconnect", async () => {
+  const url = new URL((hub.google.setClient(CLIENT, "GOCSPX-secret-value"), hub.google.authUrl("https://x/cb").value!));
+  expect(url.searchParams.get("scope")).toContain("auth/drive.readonly");
+  expect(url.searchParams.get("scope")!.split(" ")).not.toContain("https://www.googleapis.com/auth/drive");
+  await connect(); // the fake grants only gmail.readonly: a sign-in from before Drive
+  expect(hub.google.status().accounts[0].canDrive).toBe(false);
+  expect(await hub.readSource({ source: "drive", config: { search: "lease" } })).toContain("Reconnect");
+
+  const driveQs: string[] = [];
+  const base = hub.google.fetch;
+  hub.google.fetch = async (u, init) => {
+    const x = new URL(String(u));
+    if (x.pathname === "/token" && new URLSearchParams(String(init?.body)).get("code") === "drive")
+      return new Response(JSON.stringify({ access_token: "atd", refresh_token: "rtd", expires_in: 3600, scope: "email https://www.googleapis.com/auth/drive.readonly" }));
+    if (x.pathname === "/v1/userinfo" && String((init?.headers as any)?.Authorization).includes("atd")) return new Response(JSON.stringify({ email: "home@example.com" }));
+    if (x.pathname === "/drive/v3/files") {
+      driveQs.push(x.searchParams.get("q")!);
+      return new Response(JSON.stringify({ files: [
+        { id: "d1", name: "Lease 2027", mimeType: "application/vnd.google-apps.document", modifiedTime: "2026-10-30T10:00:00Z", webViewLink: "https://docs.google.com/d1", owners: [{ emailAddress: "home@example.com" }] },
+        { id: "d2", name: "lease scan.pdf", mimeType: "application/pdf", modifiedTime: "2026-10-29T10:00:00Z", webViewLink: "https://drive.google.com/d2", size: "90000" }] }));
+    }
+    if (x.pathname === "/drive/v3/files/d1/export") return new Response("Rent is $2,400, due on the 1st.");
+    return base(u, init);
+  };
+  const st = new URL(hub.google.authUrl("https://x/cb").value!).searchParams.get("state")!;
+  await hub.google.finish("drive", st);
+  expect(hub.google.status().accounts.map((a) => [a.email, a.canDrive])).toEqual([["rishi@example.com", false], ["home@example.com", true]]);
+
+  const out = await hub.readSource({ source: "drive", config: { search: "lease's", days: 30 } });
+  expect(out).toContain("Lease 2027");
+  expect(out).toContain("Rent is $2,400");
+  expect(out).toContain("lease scan.pdf");
+  // Words are quoted safely, trash is left out, and only the account that allowed Drive was asked.
+  expect(driveQs).toHaveLength(1);
+  expect(driveQs[0]).toContain("name contains 'lease\\'s'");
+  expect(driveQs[0]).toContain("trashed = false");
+  expect(driveQs[0]).toContain("modifiedTime >");
+  await expect(hub.google.files("x", 5, "rishi@example.com")).rejects.toThrow("Reconnect rishi@example.com");
+
+  // As a trigger: a file edited again counts again.
+  const r = await hub.addHook({ title: "Lease", trigger: { type: "source", source: "drive", config: { search: "lease" } }, action: { type: "notify", text: "Drive:" } }, "assistant");
+  expect(r.value!.trigger).toMatchObject({ minutes: 30 });
+  expect(describeTrigger(r.value!.trigger, TZ)).toContain("a Drive file matching “lease” added or changed");
+});

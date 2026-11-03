@@ -299,8 +299,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         : await hub.google.finish(url.searchParams.get("code") || "", url.searchParams.get("state") || "");
       if (r.error && badToken.blocked(ip)) throw banned();
       if (r.error) badToken.allow(ip);
-      else { await hub.log("google.connected", `Google connected (${hub.google.status().email || "account"})`); hub.emit("connections"); }
-      const to = `/#connections=${r.error ? `error:${encodeURIComponent(r.error)}` : "google"}`;
+      else { await hub.log("google.connected", `Google connected (${(r as any).value?.added || "account"})`); hub.emit("connections"); }
+      const to = `/#connections=${r.error ? `error:${encodeURIComponent(r.error)}` : `google:${encodeURIComponent((r as any).value?.added || "")}`}`;
       return new Response(null, { status: 302, headers: { Location: to, "Cache-Control": "no-store" } });
     }
     if (path === "/api/pair" && method === "POST") {
@@ -728,11 +728,22 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         }
         if (method === "POST" && id === "connect") {
           ownerOnly();
-          const r = hub.google.authUrl(redirectUri);
+          const b = await body(req).catch(() => ({}));
+          // {account} reconnects that one (Google preselects it); without it, Google asks which, so it can add another.
+          const r = hub.google.authUrl(redirectUri, typeof b?.account === "string" ? b.account.trim().slice(0, 200) || undefined : undefined);
           if (r.error) throw new HttpError(400, r.error);
           return json({ url: r.value });
         }
-        if (method === "DELETE" && !id) { ownerOnly(); const st = await hub.google.disconnect(); await hub.log("google.disconnected", "Google disconnected"); hub.emit("connections"); return json({ ...st, redirectUri }); }
+        // DELETE /api/google signs out of every account; ?account=me@x.com just that one.
+        if (method === "DELETE" && !id) {
+          ownerOnly();
+          const account = url.searchParams.get("account")?.trim() || undefined;
+          if (account && !hub.google.accounts().some((a) => a.email.toLowerCase() === account.toLowerCase())) throw new HttpError(404, `No Google account ${account} is connected.`);
+          const st = await hub.google.disconnect(account);
+          await hub.log("google.disconnected", account ? `Google disconnected (${account})` : "Google disconnected");
+          hub.emit("connections");
+          return json({ ...st, redirectUri });
+        }
         break;
       }
       case "connections": {
