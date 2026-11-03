@@ -51,6 +51,8 @@ const route = (): Route => {
   if (location.hash === "#activity") return { view: "activity" };
   if (location.hash === "#connectors") return { view: "connectors" };
   let m = location.hash.match(/^#c\/([\w-]+)(?:\/([\w-]+))?/);
+  // "New ramble" opens Home: the question, the box, a few suggestions. Typing there starts the ramble.
+  if (m && m[1] === "new") return { view: "home" };
   if (m) return { view: "chat", id: m[1], job: m[2] };
   m = location.hash.match(/^#a\/([\w-]+)/);
   if (m) return { view: "app", id: m[1] };
