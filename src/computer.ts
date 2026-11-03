@@ -196,7 +196,8 @@ export function connect(opts: Opts) {
     try {
       const profile: BrainProfile = { harness: String(m.profile?.harness || ""), model: String(m.profile?.model || "") };
       if (!availableHarnesses(config).includes(profile.harness)) throw new Error(`${profile.harness} isn't installed on ${link.name}.`);
-      const meter = { costUsd: 0, unknown: false, signal: ctl.signal, onProgress: (text: string) => send({ t: "step", id: m.id, text }) };
+      const meter = { costUsd: 0, unknown: false, signal: ctl.signal, onProgress: (text: string) => send({ t: "step", id: m.id, text }),
+        onAction: (text: string) => send({ t: "act", id: m.id, text }) };
       const reply = await brain.think(m.input, profile, meter);
       send({ t: "done", id: m.id, reply, costUsd: meter.unknown ? undefined : meter.costUsd });
     } catch (e: any) {

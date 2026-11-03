@@ -108,6 +108,7 @@ export class Computers implements Remote {
         if (typeof m.ts === "number") { link.rttMs = Math.max(0, this.now() - m.ts); this.changed(); }
         return;
       case "step": link.running.get(m.id)?.meter?.onProgress?.(String(m.text || "").slice(0, 120)); return;
+      case "act": link.running.get(m.id)?.meter?.onAction?.(String(m.text || "").slice(0, 300)); return;
       case "done": case "error": {
         const p = link.running.get(m.id);
         if (!p) return;
