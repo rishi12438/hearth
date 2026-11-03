@@ -588,26 +588,26 @@ function projectMenu(p: any) {
   ]);
 }
 
-/** On a new ramble: which project it goes in (or none). Teammates use that project's memory from the first message. */
-function projectChip(): Node | null {
-  if (!S.projects.length) return null;
-  const el = h("div", { class: "projchip" });
-  const draw = () => {
-    const cur = S.projects.find((x: any) => x.id === S.newProject);
-    clear(el, h("button", { class: `pchip ${cur ? "on" : ""}`, on: { click: pickNewProject } },
-      cur?.emoji ? h("span", { class: "semoji" }, cur.emoji) : icon("folder", 15),
-      h("span", null, cur ? `In ${cur.name}` : "Add to a project"), icon("chevron", 13)),
-      cur ? h("button", { class: "pchipx", "aria-label": "Not in a project", on: { click: () => { S.newProject = null; draw(); } } }, icon("x", 12)) : null);
-  };
-  const pickNewProject = () => openSheet("Put this ramble in", [
+/** Top right of a ramble: which project it's in. A new ramble picks one before sending; an existing one moves. */
+function projectButton(): Node {
+  const t = S.chat?.thread;
+  const isNew = !t || t.id === "new";
+  const cur = S.projects.find((x: any) => x.id === (isNew ? S.newProject : t.projectId));
+  const label = cur ? `In ${cur.name}` : "Add to project";
+  return h("button", { class: `projbtn glass ${cur ? "on" : ""}`, "aria-label": label, title: cur ? `${label} · change` : label, on: { click: () => isNew ? pickNewProject() : moveToProject(t) } },
+    cur?.emoji ? h("span", { class: "semoji" }, cur.emoji) : icon("folder", 18), h("span", { class: "projname" }, cur ? cur.name : "Add to project"));
+}
+
+/** A new ramble: choose its project before the first message (it's filed when it's created). */
+function pickNewProject() {
+  const set = (id: string | null) => { S.newProject = id; closeSheet(); drawHeader(); };
+  openSheet("Put this ramble in", [
     h("div", { class: "wcard" },
-      S.projects.map((x: any) => h("button", { class: "wrow", on: { click: () => { S.newProject = x.id; closeSheet(); draw(); } } }, x.emoji ? h("span", { class: "semoji" }, x.emoji) : icon("folder", 18),
+      S.projects.map((x: any) => h("button", { class: "wrow", on: { click: () => set(x.id) } }, x.emoji ? h("span", { class: "semoji" }, x.emoji) : icon("folder", 18),
         h("span", { class: "grow" }, h("b", null, x.name)), S.newProject === x.id ? icon("check", 16) : null)),
       h("button", { class: "wrow", on: { click: () => { closeSheet(); newProject(); } } }, icon("plus", 18), h("span", { class: "grow" }, h("b", null, "New project…")))),
-    S.newProject ? h("button", { class: "btn ghost", on: { click: () => { S.newProject = null; closeSheet(); draw(); } } }, "No project") : null,
+    S.newProject ? h("button", { class: "btn ghost", on: { click: () => set(null) } }, "No project") : null,
   ]);
-  draw();
-  return el;
 }
 
 /** File a ramble under a project straight from the sidebar (drag it onto one). */
@@ -621,7 +621,7 @@ async function fileRamble(threadId: string, projectId: string | null) {
 
 /** File this ramble under a project (or take it out). */
 function moveToProject(t: any) {
-  const pick = async (projectId: string | null) => { try { await call(`/api/threads/${t.id}/project`, { body: { projectId } }); closeSheet(); if (S.chat?.thread?.id === t.id) S.chat.thread.projectId = projectId || undefined; loadThreads(); loadProjects(); toast(projectId ? "Moved" : "Taken out of the project"); } catch (e) { handleError(e); } };
+  const pick = async (projectId: string | null) => { try { await call(`/api/threads/${t.id}/project`, { body: { projectId } }); closeSheet(); if (S.chat?.thread?.id === t.id) { S.chat.thread.projectId = projectId || undefined; drawHeader(); } loadThreads(); loadProjects(); toast(projectId ? "Moved" : "Taken out of the project"); } catch (e) { handleError(e); } };
   openSheet("Move to project", [
     h("div", { class: "wcard" },
       S.projects.map((p: any) => h("button", { class: "wrow", on: { click: () => pick(p.id) } }, p.emoji ? h("span", { class: "semoji" }, p.emoji) : icon("folder", 18),
@@ -699,14 +699,14 @@ function drawHeader() {
           h("button", { class: "crowdface", "aria-label": `${a.t.name}: open thread`, on: { click: () => { location.hash = `#c/${chat.thread.id}/${a.jobId}`; } } }, face(a.t, 46, a.state)))),
         h("button", { class: "stagepill", on: { click: chatMenu } }, h("b", null, names)),
         h("small", null, [`#${name}`, `${open} working`].join(" · "))),
-      h("button", { class: "circle glass", "aria-label": "Files", on: { click: openFiles } }, icon("clip", 21))));
+      projectButton()));
     return;
   }
   const who = speaker(chat);
   const others = [...new Set(jobs.map((j: any) => j.teammateId))].filter((id) => id !== who.t.id).slice(0, 3).map((id) => mate(id as string));
   clear(top, h("div", { class: "toprow stagerow" }, back,
     stage("chat", who.t, who.state, who.t.name, [`#${name}`, open ? `${open} working` : null].filter(Boolean).join(" · "), chatMenu, false, others),
-    h("button", { class: "circle glass", "aria-label": "Files", on: { click: openFiles } }, icon("clip", 21))));
+    projectButton()));
 }
 
 /** Teammates with something open in this ramble (one entry each, their most recent task), busiest first. */
@@ -1092,8 +1092,7 @@ function drawChannel(el: HTMLElement, stick: boolean) {
     const live = h("div", { class: "nowlist" });
     clear(el, h("div", { class: "hello" },
       h("h2", null, "What's on your mind?"),
-      h("p", null, "Talk or type, however it comes out. Hearth hands it to the right teammates."),
-      (S.chat?.thread?.id ?? "new") === "new" ? projectChip() : null, live));
+      h("p", null, "Talk or type, however it comes out. Hearth hands it to the right teammates."), live));
     fillNow(live);
     return;
   }
@@ -1295,6 +1294,7 @@ function chatMenu() {
       members.map((id) => h("button", { class: "item", on: { click: () => { closeSheet(); location.hash = `#t/${id}`; } } }, face(mate(id), 30, "idle"), h("span", { class: "grow" }, mate(id).name)))),
     h("p", { class: "muted small" }, "Rambles archive themselves an hour after everything in them is done. Posting here brings it back."),
     h("button", { class: "btn ghost", on: { click: () => renameRamble(t) } }, icon("edit", 16), "Rename"),
+    h("button", { class: "btn ghost", on: { click: () => openFiles() } }, icon("clip", 16), "Files"),
     h("button", { class: "btn ghost", on: { click: () => moveToProject(t) } }, icon("folder", 16), t.projectId ? `In ${S.projects.find((p: any) => p.id === t.projectId)?.name || "a project"} · Move` : "Move to project"),
     h("div", { class: "stack" },
       doneAll && lastRamble ? h("button", { class: "btn ghost", on: { click: async () => {
@@ -1402,7 +1402,7 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
     }
     picker.value = "";
   } } }) as HTMLInputElement;
-  const clip = h("button", { class: "plus", "aria-label": "Attach a file", disabled: !canAttach, on: { click: () => picker.click() } }, icon("plus", 22));
+  const clip = h("button", { class: "plus", "aria-label": "Attach a file", title: "Attach a file", disabled: !canAttach, on: { click: () => picker.click() } }, icon("clip", 20));
   attachments = () => pending.splice(0).map((f) => f.id);
   const swap = () => {
     const hasText = !!box.value.trim() || pending.length > 0;
