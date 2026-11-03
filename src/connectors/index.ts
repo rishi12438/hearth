@@ -53,6 +53,9 @@ export class Connect {
     registerSource(slackSource(() => this.slack));
     registerSource(whatsappSource(this.whatsapp));
     registerSource(plaidSource(() => this.plaid));
+    // A Plaid webhook: check the Plaid triggers now rather than at their next timer; a bank's state changed: redraw.
+    this.plaid.onNews = (bank) => { void hub.pollNow("plaid", `${bank} has new transactions`).catch(() => {}); };
+    this.plaid.onChange = () => hub.emit("connections");
   }
 
   /** Let each connector pick up where it left off (WhatsApp keeps its link across restarts). */

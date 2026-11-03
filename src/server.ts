@@ -13,6 +13,7 @@ import { Vault } from "./vault.ts";
 import { Connect } from "./connectors/index.ts";
 import { sourceById } from "./sources/index.ts";
 import { chromeWorkspaces, slackCookie } from "./connectors/slack.ts";
+import { webhookOk } from "./connectors/plaid.ts";
 import { cleanFingerprint } from "./browser.ts";
 import { adminToken, isAdminRequest } from "./admin.ts";
 import { detectBrains } from "./brains/logins.ts";
@@ -266,6 +267,19 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       const text = (await req.text()).slice(0, 64_000);
       if (!(await hub.webhook(seg[2], text))) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(404, "No webhook here."); }
       return json({ ok: true }, 202);
+    }
+    // Plaid says a bank has news (new transactions, signed out). Only a body Plaid signed counts; answer fast, work after.
+    if (path === "/api/plaid/webhook") {
+      if (method !== "POST") throw new HttpError(405, "POST to this address.");
+      if (!webhookLimiter.allow("plaid")) throw new HttpError(429, "Too many calls. Wait a minute.");
+      if (Number(req.headers.get("content-length") || 0) > 64_000) throw new HttpError(413, "Too large.");
+      const raw = (await req.text()).slice(0, 64_000);
+      if (!(await connect.plaid.verify(raw, req.headers.get("plaid-verification")))) throw new HttpError(401, "Not signed by Plaid.");
+      let b: any = null;
+      try { b = JSON.parse(raw); } catch { throw new HttpError(400, "Not JSON."); }
+      const what = connect.plaid.handle(b);
+      await hub.log("plaid.webhook", `${b.webhook_type || "?"} ${b.webhook_code || "?"}: ${what}`);
+      return json({ ok: true });
     }
     // Google sends the browser back here after you approve (no device key on a redirect; the state ties it to your Connect).
     if (path === "/api/google/callback" && method === "GET") {
@@ -540,7 +554,13 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
               else if (r.done) hub.emit("connections");
               return json(r);
             }
-            return json(await connect.plaid.startLink(typeof b.update === "string" ? b.update : null));
+            // Plaid tells this address about new transactions: the hub's own address, as your browser sees it.
+            const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || url.host;
+            const proto = config.behindProxy ? (req.headers.get("x-forwarded-proto") || "https") : url.protocol.replace(":", "");
+            const hook = `${proto}://${host}/api/plaid/webhook`;
+            const ok = webhookOk(hook) ? hook : null;
+            if (ok) void connect.plaid.ensureWebhook(ok);
+            return json({ ...(await connect.plaid.startLink(typeof b.update === "string" ? b.update : null, ok)), webhook: !!ok });
           } catch (e: any) { throw new HttpError(400, e.message); }
         }
         if (id === "plaid" && seg[3] === "items" && seg[4] && method === "DELETE") {

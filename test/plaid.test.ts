@@ -4,13 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { Vault } from "../src/vault.ts";
-import { Plaid, parseCreds, plaidSource, plaid as plaidConnector } from "../src/connectors/plaid.ts";
+import { createHash } from "node:crypto";
+import { Plaid, parseCreds, plaidSource, plaid as plaidConnector, webhookOk } from "../src/connectors/plaid.ts";
 
 const CID = "a".repeat(24), SEC = "b".repeat(30);
 const creds = { clientId: CID, secret: SEC, env: "sandbox" as const };
 
 // A pretend Plaid: keys are checked on every call; Hosted Link finishes when `state.finished` is set.
-function fakePlaid(state: { finished?: boolean; exit?: any; loginRequired?: Set<string>; liabilities?: boolean; seen: any[] } = { seen: [] }) {
+function fakePlaid(state: { finished?: boolean; exit?: any; loginRequired?: Set<string>; liabilities?: boolean; jwk?: any; seen: any[] } = { seen: [] }) {
   let n = 0;
   return (async (url: string, init: any = {}) => {
     const b = JSON.parse(init.body || "{}");
@@ -39,6 +40,8 @@ function fakePlaid(state: { finished?: boolean; exit?: any; loginRequired?: Set<
       case "/liabilities/get": return Response.json({ accounts: [{ account_id: "acc-cc", name: "Sapphire", mask: "2222", balances: { current: 340, limit: 5000 } }],
         liabilities: { credit: [{ account_id: "acc-cc", last_statement_balance: 300, minimum_payment_amount: 35, next_payment_due_date: "2026-11-20", is_overdue: false, aprs: [{ apr_type: "purchase_apr", apr_percentage: 24.99 }] }] } });
       case "/item/remove": return Response.json({ request_id: "r" });
+      case "/item/webhook/update": return Response.json({ item: { webhook: b.webhook } });
+      case "/webhook_verification_key/get": return state.jwk ? Response.json({ key: { ...state.jwk, kid: b.key_id, alg: "ES256", use: "sig", created_at: 1, expired_at: null } }) : err("INVALID_KEY");
     }
     return err("NOT_FOUND", "API_ERROR", 404);
   }) as unknown as typeof fetch;
@@ -81,7 +84,9 @@ test("adds a bank through Hosted Link, then reads balances, transactions and car
   expect(r.cards[0].apr).toBe(24.99);
 
   const items = await plaidSource(() => p).items({ minAmount: 10 } as any, {} as any);
-  expect(items.map((i) => i.title)).toEqual(["+$500.00 from Payment", "$12.34 at Starbucks"]); // pending + small skipped
+  // pending + small skipped; and no amount or merchant leaves the connector
+  expect(items.map((i) => i.title)).toEqual(["New deposit or payment on Chase · Sapphire ••2222", "New charge on Chase · Sapphire ••2222"]);
+  expect(JSON.stringify(items)).not.toMatch(/Starbucks|12\.34|500/);
 });
 
 test("falls back to plain transactions when the plan has no Liabilities", async () => {
@@ -121,4 +126,64 @@ test("removing a bank ends it at Plaid; disconnect forgets the keys", async () =
   expect(await p.removeAll()).toBeNull();
   expect(state.seen.some((s: any) => s.path === "/item/remove" && s.body.access_token === "access-chase")).toBe(true);
   expect(vault.get("plaid")).toBeNull();
+});
+
+// Sign a webhook the way Plaid does: ES256 JWT whose claims carry the body's SHA-256.
+async function signer() {
+  const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const jwk = await crypto.subtle.exportKey("jwk", pair.publicKey);
+  const enc = (o: any) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  const sign = async (body: string, iat = Math.floor(Date.now() / 1000), alg = "ES256") => {
+    const head = enc({ alg, kid: "kid-1", typ: "JWT" });
+    const claims = enc({ iat, request_body_sha256: createHash("sha256").update(body).digest("hex") });
+    const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, new TextEncoder().encode(`${head}.${claims}`));
+    return `${head}.${claims}.${Buffer.from(sig).toString("base64url")}`;
+  };
+  return { jwk: { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y }, sign };
+}
+
+test("only webhooks Plaid signed, for this exact body, in the last 5 minutes, count", async () => {
+  const { jwk, sign } = await signer();
+  const state: any = { seen: [], jwk };
+  const p = new Plaid(newVault(), fakePlaid(state));
+  p.saveCreds(creds);
+  const body = JSON.stringify({ webhook_type: "TRANSACTIONS", webhook_code: "DEFAULT_UPDATE", item_id: "item-chase", new_transactions: 2 }, null, 2);
+  expect(await p.verify(body, await sign(body))).toBe(true);
+  expect(await p.verify(body.replace("2", "3"), await sign(body))).toBe(false); // body changed
+  expect(await p.verify(body, await sign(body, Math.floor(Date.now() / 1000) - 600))).toBe(false); // too old
+  expect(await p.verify(body, await sign(body, undefined, "HS256"))).toBe(false); // wrong alg
+  expect(await p.verify(body, null)).toBe(false);
+  expect(await p.verify(body, "a.b.c")).toBe(false);
+  expect(state.seen.filter((s: any) => s.path === "/webhook_verification_key/get").length).toBe(1); // key cached
+});
+
+test("a webhook checks for new transactions now, and flags a signed-out bank", async () => {
+  const vault = newVault(), state: any = { seen: [], finished: true };
+  const p = new Plaid(vault, fakePlaid(state));
+  p.saveCreds(creds);
+  await p.finishLink((await p.startLink(null, "https://hub.example.com/api/plaid/webhook")).token);
+  expect(state.seen.find((s: any) => s.path === "/link/token/create").body.webhook).toBe("https://hub.example.com/api/plaid/webhook");
+  const news: string[] = [];
+  p.onNews = (b) => news.push(b);
+  expect(p.handle({ webhook_type: "TRANSACTIONS", webhook_code: "DEFAULT_UPDATE", item_id: "item-chase", new_transactions: 1 })).toBe("transactions");
+  expect(p.handle({ webhook_type: "TRANSACTIONS", webhook_code: "DEFAULT_UPDATE", item_id: "item-chase", new_transactions: 0 })).toBe("transactions");
+  expect(news).toEqual(["Chase"]);
+  expect(p.handle({ webhook_type: "TRANSACTIONS", webhook_code: "DEFAULT_UPDATE", item_id: "someone-else" })).toBe("unknown item");
+  p.handle({ webhook_type: "ITEM", webhook_code: "ERROR", item_id: "item-chase", error: { error_code: "ITEM_LOGIN_REQUIRED" } });
+  expect(await plaidConnector.status({ plaid: p, vault } as any)).toMatchObject({ state: "needs-you" });
+  p.handle({ webhook_type: "ITEM", webhook_code: "LOGIN_REPAIRED", item_id: "item-chase" });
+  expect(await plaidConnector.status({ plaid: p, vault } as any)).toMatchObject({ state: "connected" });
+});
+
+test("points older banks at the hub's webhook once, and only for public https", async () => {
+  const vault = newVault(), state: any = { seen: [], finished: true };
+  const p = new Plaid(vault, fakePlaid(state));
+  p.saveCreds(creds);
+  await p.finishLink((await p.startLink()).token); // added before the hub knew its address
+  await p.ensureWebhook("http://127.0.0.1:8790/api/plaid/webhook");
+  expect(state.seen.some((s: any) => s.path === "/item/webhook/update")).toBe(false);
+  await p.ensureWebhook("https://hub.example.com/api/plaid/webhook");
+  await p.ensureWebhook("https://hub.example.com/api/plaid/webhook");
+  expect(state.seen.filter((s: any) => s.path === "/item/webhook/update").length).toBe(1);
+  expect(webhookOk("https://localhost/x")).toBe(false);
 });

@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { Vault } from "../vault.ts";
 import type { Source, Item } from "../sources/index.ts";
 import type { Connector } from "./types.ts";
@@ -18,6 +19,8 @@ export type SavedItem = {
   itemId: string; accessToken: string; institution: { id: string | null; name: string }; accounts: Account[]; addedAt: string;
   /** Plaid's error code when it last failed (ITEM_LOGIN_REQUIRED means: reconnect it). */
   error?: string | null;
+  /** The webhook URL Plaid has for this Item, so it's only updated when the hub's address changes. */
+  webhook?: string | null;
 };
 
 const BASE: Record<PlaidEnv, string> = { sandbox: "https://sandbox.plaid.com", production: "https://production.plaid.com" };
@@ -31,10 +34,21 @@ export class PlaidError extends Error {
 const money = (n: number | null | undefined, cur?: string | null) =>
   n == null ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: cur || "USD" }).format(n);
 const day = (d: Date) => d.toISOString().slice(0, 10);
+const b64url = (x: string) => Buffer.from(x.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+/** Plaid only calls public https addresses. */
+export const webhookOk = (url: string | null | undefined): url is string => {
+  try { const u = new URL(String(url)); return u.protocol === "https:" && !/^(localhost|127\.|10\.|192\.168\.|\[?::1)/.test(u.hostname); } catch { return false; }
+};
 
 export class Plaid {
   /** Link sessions this hub started, so a check only ever finishes our own (lost on restart; just add again). */
-  private pending = new Map<string, { update: string | null; at: number }>();
+  private pending = new Map<string, { update: string | null; at: number; webhook: string | null }>();
+  /** Plaid's webhook signing keys, by key id. */
+  private keys = new Map<string, { key: CryptoKey; expiredAt: number | null }>();
+  /** Called when a webhook says a bank has new transactions (the hub checks its Plaid triggers right away). */
+  onNews: (institution: string) => void = () => {};
+  /** Called when a bank's state changed (signed out, repaired), so the app redraws its tile. */
+  onChange: () => void = () => {};
 
   constructor(private vault: Vault | null, private fetcher: typeof fetch = fetch) {}
 
@@ -70,12 +84,13 @@ export class Plaid {
   saveCreds(c: Creds) { this.vault!.set("plaid", JSON.stringify(c)); }
 
   /** A Plaid Hosted Link page to add a bank (or, with `update`, sign an existing one in again: no new Item). */
-  async startLink(update: string | null = null): Promise<{ url: string; token: string; expiresAt: string }> {
+  async startLink(update: string | null = null, webhook: string | null = null): Promise<{ url: string; token: string; expiresAt: string }> {
     const item = update ? this.items().find((i) => i.itemId === update) : null;
     if (update && !item) throw new PlaidError("NOT_FOUND", "That bank isn't connected.");
     const base: Record<string, unknown> = {
       client_name: "Hearth", language: "en", country_codes: ["US"], user: { client_user_id: "hearth-owner" },
       hosted_link: { url_lifetime_seconds: 30 * 60 },
+      ...(webhook ? { webhook } : {}),
     };
     const create = (extra: Record<string, unknown>) => this.call("/link/token/create", { ...base, ...extra });
     let j: any;
@@ -89,7 +104,7 @@ export class Plaid {
       }
     }
     if (!j.hosted_link_url) throw new PlaidError("NO_HOSTED_LINK", "Plaid didn't give a Hosted Link page for this account.");
-    this.pending.set(j.link_token, { update, at: Date.now() });
+    this.pending.set(j.link_token, { update, at: Date.now(), webhook });
     for (const [t, p] of this.pending) if (Date.now() - p.at > 60 * 60_000) this.pending.delete(t);
     return { url: j.hosted_link_url, token: j.link_token, expiresAt: j.expiration };
   }
@@ -116,7 +131,7 @@ export class Plaid {
           itemId: String(x.item_id), accessToken: String(x.access_token),
           institution: { id: r.institution?.institution_id ?? null, name: String(r.institution?.name || "Your bank") },
           accounts: (r.accounts || []).map((a: any) => ({ id: String(a.id), name: String(a.name || ""), mask: a.mask ?? null, type: String(a.type || ""), subtype: a.subtype ?? null })),
-          addedAt: new Date().toISOString(), error: null,
+          addedAt: new Date().toISOString(), error: null, webhook: p.webhook,
         };
         this.saveItems([...this.items().filter((i) => i.itemId !== item.itemId), item]);
         added.push({ institution: item.institution.name, accounts: item.accounts.length });
@@ -206,6 +221,65 @@ export class Plaid {
     };
   }
 
+  // ---------- webhooks ----------
+
+  /** Point every bank's webhook at this hub (only those that aren't already). Plaid only calls public https URLs. */
+  async ensureWebhook(url: string) {
+    if (!webhookOk(url) || !this.creds()) return;
+    for (const item of this.items()) {
+      if (item.webhook === url) continue;
+      try {
+        await this.call("/item/webhook/update", { access_token: item.accessToken, webhook: url });
+        this.saveItems(this.items().map((i) => (i.itemId === item.itemId ? { ...i, webhook: url } : i)));
+      } catch { /* tried again next time the hub learns its address */ }
+    }
+  }
+
+  /** Is this really from Plaid? The Plaid-Verification JWT (ES256), signed by a key Plaid hands out, carries the
+   *  body's SHA-256 and is at most 5 minutes old. */
+  async verify(raw: string, jwt: string | null, now = Date.now()): Promise<boolean> {
+    if (!jwt || !this.creds()) return false;
+    const parts = jwt.split(".");
+    if (parts.length !== 3) return false;
+    let head: any, claims: any;
+    try { head = JSON.parse(b64url(parts[0]).toString("utf8")); claims = JSON.parse(b64url(parts[1]).toString("utf8")); } catch { return false; }
+    if (head.alg !== "ES256" || typeof head.kid !== "string" || !/^[\w-]{1,100}$/.test(head.kid)) return false;
+    let k = this.keys.get(head.kid);
+    if (!k) {
+      try {
+        const j = await this.call("/webhook_verification_key/get", { key_id: head.kid });
+        const jwk = j.key;
+        const key = await crypto.subtle.importKey("jwk", { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y }, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+        k = { key, expiredAt: jwk.expired_at ? Number(jwk.expired_at) * 1000 : null };
+        this.keys.set(head.kid, k);
+      } catch { return false; }
+    }
+    if (k.expiredAt && k.expiredAt <= now) return false;
+    const ok = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, k.key, b64url(parts[2]), new TextEncoder().encode(`${parts[0]}.${parts[1]}`)).catch(() => false);
+    if (!ok) return false;
+    if (typeof claims.iat !== "number" || Math.abs(now / 1000 - claims.iat) > 5 * 60) return false;
+    const want = Buffer.from(String(claims.request_body_sha256 || ""), "utf8");
+    const got = Buffer.from(createHash("sha256").update(raw, "utf8").digest("hex"), "utf8");
+    return want.length === got.length && timingSafeEqual(want, got);
+  }
+
+  /** A verified webhook: new transactions → check now; a bank signed out or came back → update its tile. */
+  handle(body: any): string {
+    const item = this.items().find((i) => i.itemId === body?.item_id);
+    if (!item) return "unknown item";
+    const type = String(body.webhook_type || ""), code = String(body.webhook_code || "");
+    if (type === "TRANSACTIONS" && ["DEFAULT_UPDATE", "SYNC_UPDATES_AVAILABLE", "INITIAL_UPDATE", "HISTORICAL_UPDATE"].includes(code)) {
+      if (code !== "DEFAULT_UPDATE" || Number(body.new_transactions ?? 1) > 0) this.onNews(item.institution.name);
+      return "transactions";
+    }
+    if (type === "ITEM") {
+      if (code === "ERROR" && body.error?.error_code) { this.mark(item.itemId, String(body.error.error_code)); this.onChange(); return "error"; }
+      if (code === "PENDING_DISCONNECT" || code === "PENDING_EXPIRATION") { this.mark(item.itemId, code); this.onChange(); return "pending"; }
+      if (code === "LOGIN_REPAIRED") { this.mark(item.itemId, null); this.onChange(); return "repaired"; }
+    }
+    return "ignored";
+  }
+
   /** Stop reading one bank: Plaid ends the Item (on a Trial plan this does NOT free its slot). */
   async removeItem(itemId: string) {
     const item = this.items().find((i) => i.itemId === itemId);
@@ -231,15 +305,17 @@ export const line = (t: Tx) => `${t.date} · ${t.amount >= 0 ? `${money(t.amount
 export function plaidSource(plaid: () => Plaid): Source<{ minAmount: number }> {
   return {
     id: "plaid", label: "Bank (Plaid)", needs: "plaid",
-    doc: `New transactions on the owner's connected bank accounts and credit cards (Plaid). config {"minAmount":0} — only amounts at least this big (either direction). Minutes >= 60, default 240 (banks update a few times a day).`,
+    doc: `New posted transactions on the owner's connected bank accounts and credit cards (Plaid). Each item says only which account (no amount or merchant, on purpose); tell the owner to open Banks (Plaid) in Hearth to see it. Checked as soon as Plaid's webhook says there's news, and on the timer as a fallback. config {"minAmount":0} — only amounts at least this big (either direction). Minutes >= 60, default 240 (banks update a few times a day).`,
     validate: (c) => ({ minAmount: Math.max(0, Number(c?.minAmount) || 0) }),
     minutes: () => ({ min: 60, default: 240 }),
     describe: (c) => (c.minAmount ? `new bank transactions of ${money(c.minAmount)} or more` : "new bank transactions"),
     async items(c): Promise<Item[]> {
       const { list } = await plaid().transactions(14, 100);
+      // Which account, never the amount or merchant: what a trigger finds ends up in the hub's store and in front of
+      // the brain, so bank details stay out of both. The app shows the transaction live from Plaid when you open it.
       return list.filter((t) => !t.pending && Math.abs(t.amount) >= c.minAmount).map((t) => ({
-        id: `plaid-${t.id}`, title: `${t.amount >= 0 ? money(t.amount, t.currency) : `+${money(-t.amount, t.currency)}`} ${t.amount >= 0 ? "at" : "from"} ${t.merchant}`,
-        text: `${t.account}${t.category ? ` · ${t.category}` : ""}`, at: `${t.date}T12:00:00.000Z`,
+        id: `plaid-${t.id}`, title: `New ${t.amount >= 0 ? "charge" : "deposit or payment"} on ${t.account}`,
+        text: "The amount and merchant aren't shared or kept. Open Banks (Plaid) in Hearth to see it.", at: `${t.date}T12:00:00.000Z`, url: "#connector/plaid",
       }));
     },
   };
