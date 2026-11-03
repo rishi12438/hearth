@@ -536,13 +536,12 @@ async function loadProjects() {
 
 function newProject() {
   const name = h("input", { class: "field", placeholder: "Wedding, Move to SF, Taxes 2026…", maxLength: 60 }) as HTMLInputElement;
-  const emoji = h("input", { class: "field", placeholder: "💍 (optional)", maxLength: 4, style: "width:120px" }) as HTMLInputElement;
   const err = h("p", { class: "error" });
   openSheet("New project", [
     h("p", { class: "wlede" }, "A project holds rambles, their files and its own memory. Teammates working in its rambles remember what was learned in the others."),
-    h("label", null, h("span", null, "Name"), name), h("label", null, h("span", null, "Emoji"), emoji), err,
+    h("label", null, h("span", null, "Name"), name), err,
     h("button", { class: "btn primary big", on: { click: async () => {
-      try { const p = await call("/api/projects", { body: { name: name.value, emoji: emoji.value.trim() } }); closeSheet(); await loadProjects(); location.hash = `#p/${p.id}`; }
+      try { const p = await call("/api/projects", { body: { name: name.value } }); closeSheet(); await loadProjects(); location.hash = `#p/${p.id}`; }
       catch (e: any) { err.textContent = e.message; }
     } } }, "Create project"),
   ]);
