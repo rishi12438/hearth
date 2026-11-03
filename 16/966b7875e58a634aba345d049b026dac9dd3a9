@@ -1,0 +1,21 @@
+src/connectors/plaid.ts
+  s_4fad9fe3dd1656::t_d0df7e59427b2b 168-180,186,266,269-271
+test/plaid.test.ts
+  s_4fad9fe3dd1656::t_d0df7e59427b2b 43,201
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "16966b7875e58a634aba345d049b026dac9dd3a9",
+  "prompts": {},
+  "sessions": {
+    "s_4fad9fe3dd1656": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cdf4a221-eb98-4ee5-8fe9-f5e7201169e4",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
