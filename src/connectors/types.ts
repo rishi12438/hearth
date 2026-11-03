@@ -3,6 +3,7 @@ import type { Vault } from "../vault.ts";
 import type { VoiceSettings } from "../voice.ts";
 import type { WhatsApp } from "./whatsapp.ts";
 import type { Slack } from "./slack.ts";
+import type { Plaid } from "./plaid.ts";
 
 // The shape every connector module fills in. One file per connector (serper.ts, whatsapp.ts…); the list of them is in
 // index.ts. The grid in the app, the API and the `hearth` CLI all go through the same modules.
@@ -36,6 +37,7 @@ export type Ctx = {
   voice: VoiceSettings | null;
   whatsapp: WhatsApp;
   slack: Slack;
+  plaid: Plaid;
 };
 
 /** What `add` gets: the fields its tile asks for. */

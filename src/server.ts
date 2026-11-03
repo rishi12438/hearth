@@ -528,10 +528,33 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           if (!all) throw new HttpError(502, "Couldn't reach Slack.");
           return json({ workspaces: all.map(({ domain, team, user }) => ({ domain, team, user })) });
         }
+        // Plaid: add a bank through a Plaid-hosted page (or sign one in again), then pick up the result; remove one bank.
+        if (id === "plaid" && seg[3] === "link" && method === "POST") {
+          const b = await body(req);
+          // Checking is polled every few seconds while the page is open; starting a link is the thing to limit.
+          if (!(typeof b.check === "string" ? tileLimiter.allow("plaid-check") : voiceLimiter.allow("plaid-link"))) throw new HttpError(429, "Too many tries. Wait a few minutes.");
+          try {
+            if (typeof b.check === "string") {
+              const r = await connect.plaid.finishLink(b.check);
+              if (r.added.length) { await hub.log("connector.added", `Plaid: ${r.added.map((a) => a.institution).join(", ")} added by ${device.name}`); hub.emit("connections"); }
+              else if (r.done) hub.emit("connections");
+              return json(r);
+            }
+            return json(await connect.plaid.startLink(typeof b.update === "string" ? b.update : null));
+          } catch (e: any) { throw new HttpError(400, e.message); }
+        }
+        if (id === "plaid" && seg[3] === "items" && seg[4] && method === "DELETE") {
+          const name = connect.plaid.items().find((i) => i.itemId === seg[4])?.institution.name;
+          try { await connect.plaid.removeItem(seg[4]); } catch (e: any) { throw new HttpError(400, e.message); }
+          await hub.log("connector.removed", `Plaid: ${name ?? "a bank"} removed by ${device.name}`);
+          hub.emit("connections");
+          return json({ connectors: await connect.tiles() });
+        }
         // Proof it's reading: run the connector's source once and show what came back (Slack DMs, etc.).
         if (method === "POST" && id && seg[3] === "test") {
           if (!voiceLimiter.allow(`test:${id}`)) throw new HttpError(429, "Give it a moment, then try again.");
           if (id === "slack") return json(await connect.slack.probe());
+          if (id === "plaid") return json(await connect.plaid.probe());
           if (!sourceById(id)) throw new HttpError(400, `${id} can't be tested.`);
           return json(await hub.testConnection(id));
         }

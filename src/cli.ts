@@ -191,7 +191,7 @@ if (cmd === "setup" || cmd === "pair") {
   console.log(`usage: hearth [start|setup|recover|status|doctor|share|shares|unshare]   on a computer: hearth [join <hub-url>|computer]
        hearth install local|remote …      set up a hub (see: hearth install --help)
        hearth brains detect|pick|usage|token|login|logout
-       hearth connectors | connect <id> | disconnect <id> | whatsapp chats|ignore …
+       hearth connectors | connect <id> | disconnect <id> | whatsapp chats|ignore … | plaid add|accounts|remove
        add --json to any of these for machine-readable output`);
   process.exit(1);
 }

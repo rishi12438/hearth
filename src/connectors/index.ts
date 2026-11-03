@@ -6,6 +6,7 @@ import type { VoiceSettings } from "../voice.ts";
 import type { Connector, Ctx, Tile, AddInput } from "./types.ts";
 import { WhatsApp, whatsapp, type IgnoreRules } from "./whatsapp.ts";
 import { Slack, slack, slackSource } from "./slack.ts";
+import { Plaid, plaid, plaidSource } from "./plaid.ts";
 import { serper, serperKey } from "./serper.ts";
 import { deepgram } from "./deepgram.ts";
 import { instagram, linkedin } from "./cookies.ts";
@@ -19,7 +20,7 @@ import { isBrainId, removeLogin } from "../brains/logins.ts";
 // (types.ts); this file only lists them, in the order the grid shows them, and runs the shared parts: the ban-risk
 // gate, the log line, and telling the app something changed. To add a connector: write its module, add it here.
 
-export const CONNECTORS: Connector[] = [claude, codex, serper, deepgram, whatsapp, slack, instagram, linkedin, google];
+export const CONNECTORS: Connector[] = [claude, codex, serper, deepgram, whatsapp, slack, instagram, linkedin, google, plaid];
 export const connectorById = (id: string) => CONNECTORS.find((c) => c.def.id === id) ?? null;
 export type { Tile } from "./types.ts";
 
@@ -31,12 +32,14 @@ export const riskAccepted = (vault: Vault | null, id: string) => !!vault?.get(`r
 export class Connect {
   readonly whatsapp: WhatsApp;
   readonly slack: Slack;
+  readonly plaid: Plaid;
   private ctx: Ctx;
 
   constructor(private hub: Hub, private vault: Vault | null, voice: VoiceSettings | null) {
     this.whatsapp = new WhatsApp(hub.config.dataDir, hub.store, () => riskAccepted(vault, "whatsapp"));
     this.slack = new Slack(vault);
-    this.ctx = { hub, vault, voice, whatsapp: this.whatsapp, slack: this.slack };
+    this.plaid = new Plaid(vault);
+    this.ctx = { hub, vault, voice, whatsapp: this.whatsapp, slack: this.slack, plaid: this.plaid };
     this.whatsapp.onChange = () => hub.emit("connections");
     // What the rest of the hub reaches through here: senders for message.send, "is it connected" for triggers,
     // the Serper key for scripts that ask for it, and WhatsApp and Slack as trigger sources.
@@ -45,10 +48,11 @@ export class Connect {
     hub.senders.gmail = { connected: () => hub.google.canSend(), send: (to, text, x) => hub.google.sendMail(to, x?.subject || "(no subject)", text, x?.threadId) };
     for (const ch of ["instagram", "linkedin", "x"] as const)
       hub.senders[ch] = webSender(ch, (d) => hub.connections.cookies(d), (url, text, o) => sendInPage(url, text, { fingerprint: hub.connections.fingerprintFor(url), ...o }));
-    hub.connections.extra = { whatsapp: () => this.whatsapp.connected() || this.whatsapp.linked(), slack: () => this.slack.connected() };
+    hub.connections.extra = { whatsapp: () => this.whatsapp.connected() || this.whatsapp.linked(), slack: () => this.slack.connected(), plaid: () => this.plaid.connected() };
     hub.scripts.keys = (name) => (name === "serper" ? serperKey(vault) : null);
     registerSource(slackSource(() => this.slack));
     registerSource(whatsappSource(this.whatsapp));
+    registerSource(plaidSource(() => this.plaid));
   }
 
   /** Let each connector pick up where it left off (WhatsApp keeps its link across restarts). */
