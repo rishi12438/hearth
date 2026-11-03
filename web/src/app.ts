@@ -1203,8 +1203,6 @@ async function fillNow(el: HTMLElement) {
   const row = (lead: Node | null, title: string, sub: string | null, fn: () => void, hover = "") => h("button", { class: "nowrow", title: hover, on: { click: fn } }, lead, h("span", { class: "grow" }, h("b", null, title), sub ? h("small", null, sub) : null), icon("chevron", 16));
   const go = (c: any) => () => { location.hash = c.kind === "plan" ? "#b" : c.threadId?.startsWith("tm-") ? `#t/${c.teammateId}` : `#c/${c.threadId}/${c.root}`; };
   const sec = (title: string, rows: Node[]) => rows.length ? h("section", { class: "nowsec" }, h("h4", null, title), h("div", { class: "nowcard" }, rows)) : null;
-  const when = (t: any) => t.updatedAt || t.createdAt || "";
-  const recent = [...S.threads].sort((a: any, b: any) => when(b).localeCompare(when(a))).slice(0, 3);
   const parts = [
     sec("Needs you", b.needsYou.slice(0, 3).map((c: any) => row(face(mate(c.teammateId), 32, jobState({ status: c.status })), c.title, c.need ? `Stuck: ${c.need}` : "Needs your OK", go(c)))),
     sec("In progress", b.working.slice(0, 4).map((c: any) => row(face(mate(c.teammateId), 32, "working"), c.title, `${mate(c.teammateId).name} · ${S.progress.get(c.id) || "on it"}`, go(c)))),
@@ -1214,7 +1212,6 @@ async function fillNow(el: HTMLElement) {
       const box = document.getElementById("composer") as HTMLTextAreaElement | null;
       if (box) { box.value = i.prompt; box.dispatchEvent(new Event("input")); box.focus(); }
     }, i.body || ""))),
-    sec("Continue with", recent.map((t: any) => row(h("span", { class: "hicon" }, "#"), t.title || channelName(t), shortAgo(when(t)), () => { location.hash = `#c/${t.id}`; }))),
   ].filter(Boolean) as Node[];
   clear(el, parts.length ? parts : h("div", { class: "starters" }, [
     "Remind me at 6 to call mom, find a cheap dinner spot, and text Sam that Tuesday works",
@@ -1226,7 +1223,7 @@ async function fillNow(el: HTMLElement) {
 function drawChannel(el: HTMLElement, stick: boolean) {
   const top = S.chat.messages.filter((m: any) => !m.replyTo);
   if (!top.length) {
-    // A fresh ramble shows what's going on (in progress, coming up, ideas, recent rambles), not the same examples every time.
+    // A fresh ramble shows what's going on (in progress, coming up, ideas), not the same examples every time.
     const live = h("div", { class: "nowlist" });
     clear(el, h("div", { class: "hello" },
       h("h2", null, "What's on your mind?"), live));
