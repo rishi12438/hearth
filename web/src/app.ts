@@ -80,7 +80,7 @@ async function boot() {
   const wantsAccess = location.hash === "#access";
   const welcome = location.hash === "#welcome";
   if (wantsAccess || welcome) history.replaceState(null, "", "#");
-  // Back from Google's sign-in: #connections=google, or #connections=error:<why>.
+  // Back from Google's sign-in: #connections=google:<email added>, or #connections=error:<why>.
   const backFromGoogle = location.hash.startsWith("#connections=") ? decodeURIComponent(location.hash.slice(13)) : null;
   if (backFromGoogle) history.replaceState(null, "", "#");
   await Promise.all([refreshState(), loadTeammates(), loadSkills(), loadFiles(), loadApps(), loadIdeas(), loadProjects()]);
@@ -95,7 +95,11 @@ async function boot() {
   document.addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openJump(); } });
   setInterval(checkForUpdate, 5 * 60_000);
   setInterval(() => { if (route().view === "home") drawHome(); }, 30_000);
-  if (backFromGoogle) { openConnections(backFromGoogle === "google" ? "connected" : "available"); toast(backFromGoogle === "google" ? "Google connected" : `Google: ${backFromGoogle.replace(/^error:/, "")}`, backFromGoogle === "google" ? undefined : "err"); }
+  if (backFromGoogle) {
+    const ok = !backFromGoogle.startsWith("error:"), who = backFromGoogle.replace(/^google:?/, "");
+    if (ok) openGoogleSetup(); else openConnections("available");
+    toast(ok ? `Google connected${who ? ` · ${who}` : ""}` : `Google: ${backFromGoogle.replace(/^error:/, "")}`, ok ? undefined : "err");
+  }
   else if (welcome) openWelcome();
   else if (wantsAccess || S.state?.pendingAccess) openDevices();
   // Not in the Mac app: it can't use Face ID (or Touch ID) for the hub, so there's nothing to offer there.
@@ -1640,7 +1644,7 @@ async function openConnections(tab: "available" | "connected" = "available") {
   const conn = (c: Connector) => conns.find((x) => x.id === c.via);
   const isOn = (c: Connector) => !!conn(c)?.connected;
   const open = (c: Connector) => (c.via === "google" ? openGoogleSetup() : openCookieSetup(c));
-  const sub = (c: Connector) => conn(c)?.problem ? `Needs reconnecting` : isOn(c) ? `Connected · ${c.via === "google" ? g.email || "Google" : conn(c).detail}` : c.blurb;
+  const sub = (c: Connector) => conn(c)?.problem ? `Needs reconnecting` : isOn(c) ? `Connected · ${c.via === "google" ? googleWho(g) : conn(c).detail}` : c.blurb;
   const body = h("div", { class: "connectors" });
   let q = "";
   const action = (c: Connector) => !c.via ? h("span", { class: "csoon" }, "Soon")
@@ -1864,13 +1868,27 @@ function conversationsSheet(c: any, st: any, auditAll: any[]) {
   ]);
 }
 
+/** "me@x.com", or "me@x.com +1" with several accounts. */
+const googleWho = (g: any) => { const n = (g.accounts || []).length; return n > 1 ? `${g.email} +${n - 1}` : g.email || "Google"; };
+
 async function openGoogleSetup() {
   let g: any, auditAll: any[] = [];
   try { [g, auditAll] = await Promise.all([call("/api/google"), call("/api/conn-audit").catch(() => [])]); } catch (e) { return handleError(e); }
   const copyRow = (text: string) => h("button", { class: "codeline", title: "Copy", on: { click: () => navigator.clipboard?.writeText(text).then(() => toast("Copied"), () => toast("Couldn't copy", "err")) } }, h("code", null, text), icon("clip", 14));
   const err = h("p", { class: "err small", hidden: true });
   const fail = (e: any) => { err.textContent = e.message; err.hidden = false; };
-  const connect = async () => { try { location.href = (await call("/api/google/connect", { body: {} })).url; } catch (e) { fail(e); } };
+  // No account: Google asks which one, so this also adds another. With one: reconnect that account.
+  const connect = async (account?: string) => { try { location.href = (await call("/api/google/connect", { body: account ? { account } : {} })).url; } catch (e) { fail(e); } };
+  const accounts: any[] = g.accounts || [];
+  const accountRow = (a: any) => h("div", { class: "item" },
+    h("span", { class: "grow" }, h("b", null, a.email),
+      h("small", { class: a.problem ? "err" : "sub" }, a.problem ? "Signed out · reconnect it" : a.canSend ? "Reads mail and calendar · sends after you Approve" : "Read-only · reconnect to allow sending")),
+    h("button", { class: "iconbtn", title: "Reconnect", "aria-label": `Reconnect ${a.email}`, on: { click: () => connect(a.email) } }, icon("repeat", 16)),
+    h("button", { class: "iconbtn", title: "Remove", "aria-label": `Remove ${a.email}`, on: { click: () => confirmSheet(`Remove ${a.email}?`, accounts.length > 1 ? "Hearth signs out of this account. Your other Google accounts stay connected." : "Hearth signs out of your Google account. Gmail and Calendar triggers stop until you connect again.", "Remove", async () => {
+      const left = await call(`/api/google?account=${encodeURIComponent(a.email)}`, { method: "DELETE" });
+      toast(`${a.email} removed`);
+      if (left.connected) openGoogleSetup(); else openConnections();
+    }) } }, icon("trash", 16)));
   const id = h("input", { class: "field", placeholder: "Client ID (….apps.googleusercontent.com)", autocomplete: "off", autocapitalize: "off", spellcheck: false });
   const secret = h("input", { class: "field", type: "password", placeholder: "Client secret", autocomplete: "off", autocapitalize: "off", spellcheck: false });
   const save = h("button", { class: "btn primary big", on: { click: async () => {
@@ -1883,17 +1901,19 @@ async function openGoogleSetup() {
   const cloud = (path: string, label: string) => h("a", { href: `https://console.cloud.google.com/${path}`, target: "_blank", rel: "noopener noreferrer" }, label);
   openSheet("Google", [
     h("button", { class: "btn ghost", on: { click: () => openConnections() } }, icon("back", 16), "All connectors"),
-    h("div", { class: "phero" }, h("span", { class: "ctile-pair" }, connectorTile(CONNECTORS[0], 48), connectorTile(CONNECTORS[1], 48)), h("b", null, g.connected ? "Google is connected" : "Gmail and Calendar"),
-      h("small", null, g.connected ? `${g.email || "Your account"} · read-only` : "Teammates can watch your inbox and calendar and tell you what matters. Read-only.")),
+    h("div", { class: "phero" }, h("span", { class: "ctile-pair" }, connectorTile(CONNECTORS[0], 48), connectorTile(CONNECTORS[1], 48)), h("b", null, g.connected ? (accounts.length > 1 ? `${accounts.length} Google accounts connected` : "Google is connected") : "Gmail and Calendar"),
+      h("small", null, g.connected ? "Teammates read every account below unless you ask for one." : "Teammates can watch your inbox and calendar and tell you what matters.")),
     g.connected ? [
       h("p", { class: "muted" }, "Ask for things like “tell me when the school emails”, “LinkedIn digest every 30 min” or “what's on tomorrow?”. They show up under Triggers in Plans."),
-      accessLog(auditAll, "google"),
+      h("div", { class: "list" }, accounts.map(accountRow)),
+      err,
       h("div", { class: "stack" },
-        h("button", { class: "btn ghost", on: { click: connect } }, icon("repeat", 16), "Reconnect"),
-        h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet("Disconnect Google?", "Hearth signs out of your Google account. Gmail and Calendar triggers stop until you connect again.", "Disconnect", async () => { await call("/api/google", { method: "DELETE" }); toast("Google disconnected"); openConnections(); }) } }, "Disconnect Google")),
+        h("button", { class: "btn ghost", on: { click: () => connect() } }, icon("plus", 16), "Add another Google account"),
+        accounts.length > 1 ? h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet("Disconnect every Google account?", "Hearth signs out of all of them. Gmail and Calendar triggers stop until you connect again.", "Disconnect all", async () => { await call("/api/google", { method: "DELETE" }); toast("Google disconnected"); openConnections(); }) } }, "Disconnect all") : null),
+      accessLog(auditAll, "google"),
     ] : g.hasClient ? [
       h("p", { class: "muted" }, `Your Google client is saved (${g.clientIdHint}). Connect to sign in.`),
-      err, h("button", { class: "btn primary big", on: { click: connect } }, "Connect Google"),
+      err, h("button", { class: "btn primary big", on: { click: () => connect() } }, "Connect Google"),
       h("details", null, h("summary", { class: "muted small" }, "Use a different client"), h("div", { class: "stack" }, id, secret, save)),
     ] : [
       h("ol", { class: "steps" },
@@ -1904,7 +1924,7 @@ async function openGoogleSetup() {
         h("li", null, "Paste the client ID and secret here.")),
       id, secret, err, save,
     ],
-    h("p", { class: "muted small" }, "The sign-in stays on your hub in a private file. It never goes to the model, this app or your exports. Hearth asks only to read mail and calendars, so it can't send, delete or change anything."),
+    h("p", { class: "muted small" }, "Each sign-in stays on your hub in a private file. It never goes to the model, this app or your exports. Hearth reads mail and calendars, and only sends an email after you tap Approve. It can't delete or change anything."),
   ]);
 }
 

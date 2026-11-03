@@ -1234,7 +1234,7 @@ export class Hub {
   /** Every connector (set by the server). */
   connect: import("./connectors/index.ts").Connect | null = null;
   /** Senders for message.send, set at start (WhatsApp, Slack). */
-  senders: Partial<Record<Channel, { connected(): boolean; send(to: string, text: string, extra?: { subject?: string; threadId?: string }): Promise<string> }>> = {};
+  senders: Partial<Record<Channel, { connected(): boolean; send(to: string, text: string, extra?: { subject?: string; threadId?: string; from?: string }): Promise<string> }>> = {};
 
   /** A WhatsApp or Slack message a teammate drafted: an Approve card, sent only after the tap. */
   async requestMessage(a: any, where: { threadId?: string; jobId?: string }) {
@@ -1243,14 +1243,19 @@ export class Hub {
     const text = String(a?.text || "").trim().slice(0, channel === "gmail" ? 20_000 : 4000);
     const subject = channel === "gmail" ? String(a?.subject || "").trim().slice(0, 200) || "(no subject)" : undefined;
     const threadId = channel === "gmail" && a?.threadId ? String(a.threadId).slice(0, 100) : undefined;
+    // Which of your Gmail accounts it goes from (with several connected); default the first that may send.
+    const from = channel === "gmail" && a?.from ? String(a.from).trim().replace(/^.*<|>$/g, "").slice(0, 200) : undefined;
     if (!channel) return { error: `channel is one of ${CHANNELS.join(", ")}.` };
     const label = CHANNEL_LABEL[channel];
-    if (!this.senders[channel]?.connected()) return { error: channel === "gmail" && this.google.connected ? "Google is connected without permission to send. Ask the user to reconnect Google in Connectors and allow sending." : `${label} isn't connected.` };
+    if (channel === "gmail" && from && this.google.connected && !this.google.accounts().some((x) => x.email.toLowerCase() === from.toLowerCase()))
+      return { error: `No Gmail account ${from} is connected. Connected: ${this.google.accounts().map((x) => x.email).join(", ")}.` };
+    if (!this.senders[channel]?.connected() || (channel === "gmail" && from && !this.google.canSend(from)))
+      return { error: channel === "gmail" && this.google.connected ? `Google is connected without permission to send${from ? ` from ${from}` : ""}. Ask the user to reconnect that account in Connectors → Google and allow sending.` : `${label} isn't connected.` };
     if (!to || !text) return { error: "Say who it's to and what it says." };
     if (channel === "gmail" && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to.replace(/^.*<|>$/g, ""))) return { error: "For Gmail, \"to\" is an email address." };
     if (channel === "instagram" || channel === "linkedin" || channel === "x") { const bad = badChatLink(channel, to); if (bad) return { error: bad }; }
-    const action = { type: "message" as const, channel, to, text, ...(subject ? { subject } : {}), ...(threadId ? { threadId } : {}) };
-    const sendNow = () => this.senders[channel]!.send(to, text, { subject, threadId });
+    const action = { type: "message" as const, channel, to, text, ...(subject ? { subject } : {}), ...(threadId ? { threadId } : {}), ...(from ? { from } : {}) };
+    const sendNow = () => this.senders[channel]!.send(to, text, { subject, threadId, from });
     // You said "Always allow" for this chat before: send now, and leave a note in Activity instead of asking.
     if ((await this.alwaysAllowed()).includes(allowKey(channel, to))) {
       const out = await sendNow().then(() => ({ ok: true, output: "Sent (always allowed)." }), (e: any) => ({ ok: false, output: String(e?.message || e) }));
@@ -1297,7 +1302,7 @@ export class Hub {
     if (yes) {
       const act = ap.action;
       const out = act.type === "message"
-        ? await (this.senders[act.channel]?.send(act.to, act.text, { subject: act.subject, threadId: act.threadId }).then(() => ({ ok: true, output: "Sent." }), (e: any) => ({ ok: false, output: String(e?.message || e) }))
+        ? await (this.senders[act.channel]?.send(act.to, act.text, { subject: act.subject, threadId: act.threadId, from: act.from }).then(() => ({ ok: true, output: "Sent." }), (e: any) => ({ ok: false, output: String(e?.message || e) }))
           ?? { ok: false, output: `${act.channel} isn't connected.` })
         : await this.scripts.run(act.script, act.args, { approvedRun: true });
       next = { ...next, status: out.ok ? "done" : "failed", result: out.output.slice(0, 2000) };
