@@ -188,7 +188,8 @@ function onEvent(e: { type: string; data?: any }) {
   const open = r.view === "chat" ? r.id : null;
   switch (e.type) {
     case "hello": if (e.data?.build && e.data.build !== __BUILD__) markUpdate(); return;
-    case "projects": loadProjects(); if (r.view === "project") drawProject(r.id!); return;
+    // Don't redraw a project page while you're typing in its title or description (its own saves trigger this).
+    case "projects": loadProjects(); if (r.view === "project" && !document.activeElement?.closest("#project .ietext")) drawProject(r.id!); return;
     case "notify": {
       // In the Mac app: show it as a native notification (phones get the same thing as a push).
       const mac = (window as any).webkit?.messageHandlers?.hearth;
@@ -586,27 +587,26 @@ async function saveProject(p: any, patch: { name?: string; emoji?: string; about
   catch (e) { handleError(e); }
 }
 
-/** Notion-style text you click to edit. A Save pill shows while it has changes; Enter (⌘Enter when multiline) or leaving the field saves, Esc puts it back. */
+/** Notion-style text you click to edit. No Save button: it saves as you type (after a short pause) and when you leave the field. Enter (⌘Enter when multiline) finishes, Esc puts back what was there before you started. */
 function inlineEdit(value: string, placeholder: string, cls: string, save: (v: string) => Promise<void> | void, multiline: boolean): Node {
-  let saved = value;
+  let saved = value, before = value, timer: any = 0;
   const text = h("div", { class: `ietext ${cls}`, contenteditable: "plaintext-only", spellcheck: "false", role: "textbox", "aria-label": placeholder, "data-ph": placeholder }, value) as HTMLElement;
-  const btn = h("button", { class: "iesave", on: { pointerdown: (e: Event) => e.preventDefault(), click: () => commit() } }, "Save") as HTMLButtonElement;
-  const wrap = h("div", { class: "iewrap" }, text, btn);
   const cur = () => (text.textContent || "").replace(/\u00a0/g, " ").trim();
-  const dirty = () => wrap.classList.toggle("dirty", cur() !== saved);
   async function commit() {
+    clearTimeout(timer);
     const v = cur();
-    if (!multiline && !v) { text.textContent = saved; return dirty(); } // a project always has a name
-    if (v === saved) return dirty();
-    saved = v; dirty(); await save(v);
+    if (!v && !multiline) return; // a project always has a name; an empty title just isn't saved
+    if (v === saved) return;
+    saved = v; await save(v);
   }
-  text.addEventListener("input", dirty);
+  text.addEventListener("focus", () => { before = saved; });
+  text.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(commit, 600); });
   text.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && (!multiline || e.metaKey || e.ctrlKey) && !e.isComposing) { e.preventDefault(); commit(); text.blur(); }
-    else if (e.key === "Escape") { text.textContent = saved; dirty(); text.blur(); }
+    if (e.key === "Enter" && (!multiline || e.metaKey || e.ctrlKey) && !e.isComposing) { e.preventDefault(); text.blur(); }
+    else if (e.key === "Escape") { clearTimeout(timer); text.textContent = before; text.blur(); }
   });
-  text.addEventListener("blur", () => commit());
-  return wrap;
+  text.addEventListener("blur", () => { if (!cur() && !multiline) text.textContent = saved; commit(); });
+  return text;
 }
 
 /** A small popover anchored under an element, closed by clicking outside, Esc or navigating. */
