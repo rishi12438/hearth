@@ -1,0 +1,23 @@
+test/brain-health.test.ts
+  s_8e53eef6752d88::t_38655e19f6c322 93-94
+  s_8e53eef6752d88::t_abca2f3e3a99f3 77-81
+src/brain.ts
+  s_8e53eef6752d88::t_795661b0c257b8 751-754
+  s_8e53eef6752d88::t_06ba550c3065f9 453-478
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "244664c7fc7ab461e7b379450235c24e6fdae752",
+  "prompts": {},
+  "sessions": {
+    "s_8e53eef6752d88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1566bfd8-ac2f-402e-8016-cbf10bffe7fd",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
