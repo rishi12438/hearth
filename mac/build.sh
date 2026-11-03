@@ -39,10 +39,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 say "Icon"
+# mac/icon-1024.png is mac/icon.svg rendered on Apple's icon grid (824px body in a 1024px canvas).
+# The web icon is full-bleed, which makes the Dock icon look ~20% too big.
 ICONSET="$OUT/Hearth.iconset"; mkdir -p "$ICONSET"
 for s in 16 32 128 256 512; do
-  sips -z $s $s web/icon-512.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
-  sips -z $((s*2)) $((s*2)) web/icon-512.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+  sips -z $s $s mac/icon-1024.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+  sips -z $((s*2)) $((s*2)) mac/icon-1024.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/Hearth.icns"; rm -rf "$ICONSET"
 
