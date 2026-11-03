@@ -936,7 +936,7 @@ function toggleSection(id: string) {
 }
 
 function renderHome() {
-  frame({ header: h("div"), body: h("div", null, h("div", { id: "htiles" }), h("div", { id: "pins" }), h("div", { id: "home" })), fab: true, purple: true });
+  frame({ header: h("div"), body: h("div", null, h("div", { id: "htiles" }), h("div", { id: "pins" }), h("div", { id: "home" })), purple: true });
   pinsKey = "";
   drawPins();
   drawHeader();
@@ -962,15 +962,6 @@ async function lookForIdeas() {
   toast("Looking for things I can do for you…");
   try { S.ideas = await call("/api/ideas", { body: {} }); drawHome(); if (!S.ideas.length) toast("Nothing worth suggesting right now."); }
   catch (err) { handleError(err); }
-}
-
-/** A recent ramble as a card: its name, what it's about, how long ago. */
-function rambleCard(t: any) {
-  const fresh = !!t.updatedAt && t.updatedAt > (seen[t.id] || t.createdAt);
-  return h("button", { class: `ideacard ramblecard ${t.archived ? "dim" : ""}`, title: t.title || "", on: { click: () => { location.hash = `#c/${t.id}`; } } },
-    h("span", { class: "grow" }, h("b", null, t.title || channelName(t)), h("small", null, `#${channelName(t)} · ${shortAgo(t.updatedAt || t.createdAt)}`)),
-    t.needsYou ? h("em", { class: "badge" }, String(t.needsYou)) : t.working ? h("i", { class: "spin" }) : fresh ? h("i", { class: "udot", "aria-label": "New" }) : null,
-    icon("chevron", 16));
 }
 
 /** Type straight to Hearth from Home: Enter starts a ramble and opens it. Kept across redraws. */
@@ -1001,24 +992,26 @@ function homeAsk() {
   return h("div", { class: "homeask" }, box, go);
 }
 
+let homeNow: HTMLElement | null = null;
 function drawHome() {
   const el = document.getElementById("home"), top = document.getElementById("htiles");
   if (!el || !top) return;
-  // The 3 rambles you touched last, archived or not: one tap back in.
-  const when = (t: any) => t.updatedAt || t.createdAt || "";
-  const recent = [...S.threads].sort((a, b) => when(b).localeCompare(when(a))).slice(0, 3);
   const section = (id: string, title: string, rows: Node[], extra?: Node | null) => h("section", { class: "hsec" },
     h("div", { class: "hsec-head" },
       h("button", { class: "hsec-title", on: { click: () => toggleSection(id) } }, h("span", null, title), icon("chevron", 16)),
       extra || null,
       h("button", { class: `chev ${collapsed.has(id) ? "down" : ""}`, "aria-label": collapsed.has(id) ? "Expand" : "Collapse", on: { click: () => toggleSection(id) } }, icon("up", 22))),
     collapsed.has(id) ? null : rows);
+  // Home is the "What's on your mind?" screen: type to Hearth right here, with what's going on underneath.
+  homeNow ||= h("div", { class: "nowlist" }) as HTMLElement;
   clear(top,
     brainStrip(),
     linkStrip(),
-    S.ideas.length ? h("section", { class: "ideas" }, h("h2", { class: "bigtitle" }, "Ideas"), h("div", { class: "ideacards" }, S.ideas.slice(0, 3).map(ideaCard))) : null,
-    recent.length ? h("section", { class: "ideas" }, h("h2", { class: "bigtitle" }, "Continue with"), h("div", { class: "ideacards" }, recent.map(rambleCard))) : null,
-    homeAsk());
+    h("div", { class: "hello" },
+      h("h2", null, "What's on your mind?"),
+      h("p", null, "Talk or type, however it comes out. Hearth hands it to the right teammates."),
+      homeAsk(), homeNow));
+  fillNow(homeNow);
   clear(el,
     section("apps", "Mini apps", S.apps.some((a) => !a.inline) ? [...S.apps].filter((a) => !a.inline).sort((a, b) => Number(b.pinned) - Number(a.pinned)).map((a) => h("button", { class: "hrow", on: { click: () => { location.hash = `#a/${a.id}`; } } },
       appIcon(a, 30), h("span", { class: "grow" }, a.title), h("small", null, mate(a.teammateId).name)))
@@ -1190,16 +1183,17 @@ async function fillNow(el: HTMLElement) {
   const row = (lead: Node, title: string, sub: string, fn: () => void) => h("button", { class: "nowrow", on: { click: fn } }, lead, h("span", { class: "grow" }, h("b", null, title), h("small", null, sub)), icon("chevron", 16));
   const go = (c: any) => () => { location.hash = c.kind === "plan" ? "#b" : c.threadId?.startsWith("tm-") ? `#t/${c.teammateId}` : `#c/${c.threadId}/${c.root}`; };
   const sec = (title: string, rows: Node[]) => rows.length ? h("section", { class: "nowsec" }, h("h4", null, title), h("div", { class: "nowcard" }, rows)) : null;
-  const recent = S.threads.filter((t: any) => !t.archived).slice(0, 3);
+  const when = (t: any) => t.updatedAt || t.createdAt || "";
+  const recent = [...S.threads].sort((a: any, b: any) => when(b).localeCompare(when(a))).slice(0, 3);
   const parts = [
     sec("Needs you", b.needsYou.slice(0, 3).map((c: any) => row(face(mate(c.teammateId), 32, jobState({ status: c.status })), c.title, c.need ? `Stuck: ${c.need}` : "Needs your OK", go(c)))),
     sec("In progress", b.working.slice(0, 4).map((c: any) => row(face(mate(c.teammateId), 32, "working"), c.title, `${mate(c.teammateId).name} · ${S.progress.get(c.id) || "on it"}`, go(c)))),
     sec("Coming up", b.next.filter((c: any) => c.kind === "plan").slice(0, 3).map((c: any) => row(emoji3d("🔔", "ideaicon small"), c.title, `${dayLabel(c.at)} ${clockTime(c.at)}`, go(c)))),
     sec("Ideas", S.ideas.slice(0, 2).map((i: any) => row(emoji3d(i.emoji || "💡", "ideaicon small"), i.title, i.body || "Tap to ask for it", () => {
-      const box = document.getElementById("composer") as HTMLTextAreaElement | null;
+      const box = (document.getElementById("composer") || document.querySelector(".homeask-in")) as HTMLTextAreaElement | null;
       if (box) { box.value = i.prompt; box.dispatchEvent(new Event("input")); box.focus(); }
     }))),
-    sec("Pick up where you left off", recent.map((t: any) => row(h("span", { class: "hicon" }, "#"), channelName(t), t.title || "", () => { location.hash = `#c/${t.id}`; }))),
+    sec("Continue with", recent.map((t: any) => row(h("span", { class: "hicon" }, "#"), t.title || channelName(t), `#${channelName(t)} · ${shortAgo(when(t))}`, () => { location.hash = `#c/${t.id}`; }))),
   ].filter(Boolean) as Node[];
   clear(el, parts.length ? parts : h("div", { class: "starters" }, [
     "Remind me at 6 to call mom, find a cheap dinner spot, and text Sam that Tuesday works",
