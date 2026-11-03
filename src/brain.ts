@@ -23,7 +23,7 @@ const sourceDocs = () => SOURCES.map((s) => `        ${s.id}: ${s.doc}`).join("\
 // with; elsewhere it gets the web tools only, in an empty folder.
 
 export type BrainInput = {
-  mode: "chat" | "hook" | "review" | "job" | "orchestrate" | "ideas" | "legwork" | "voice" | "clean" | "describe";
+  mode: "chat" | "hook" | "review" | "job" | "orchestrate" | "ideas" | "legwork" | "voice" | "clean" | "describe" | "narrate";
   context: Record<string, unknown>;
   input: string;
   toolResults?: string;
@@ -35,7 +35,7 @@ export const ESCALATE = "[[escalate]]";
 export const HAND_BACK = "[[hand-back]]";
 export const REDO = "[[redo]]";
 /** Calls that only read and write text: no web tools. */
-const NO_TOOLS = new Set<BrainInput["mode"]>(["orchestrate", "voice", "review", "ideas", "clean", "describe"]);
+const NO_TOOLS = new Set<BrainInput["mode"]>(["orchestrate", "voice", "review", "ideas", "clean", "describe", "narrate"]);
 /** Claude's tools for calls that can run code (in the jail). */
 const CODE_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent"];
 /** A helper on the small model that Claude fans wide searches out to. */
@@ -323,6 +323,7 @@ function atScale(code: "claude" | "codex" | null | undefined): string[] {
 /** code: which brain can run code in this call (in the jail), else null. */
 export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = null) {
   if (b.mode === "clean") return [CLEAN, "", "DICTATED:", b.input].join("\n");
+  if (b.mode === "narrate") return b.input; // built by narratePrompt (brains/narrate.ts)
   if (b.mode === "describe") return ["Write ONE sentence describing this reusable UI component for a library: what it shows and when to use it, so a",
     "teammate searching later can tell if it fits (e.g. \"Tabs per day with a zoomed map and a short list of things to do; use for any multi-day trip.\").",
     "Reply with only the sentence.", "", b.input].join("\n");
@@ -418,7 +419,7 @@ export class BrainsFull extends Error { constructor(msg: string, readonly until:
 /** Collects model spend across calls. `unknown` flips when a harness can't report cost. */
 /** Spend for one job; signal stops its model process when the user changes the job mid-run. */
 /** ranOn: set by Brain to the linked computer that ran the call, or "cloud" when this hub ran it while computers are linked. */
-export type Meter = { costUsd: number; unknown: boolean; signal?: AbortSignal; onProgress?: (what: string) => void; ranOn?: string };
+export type Meter = { costUsd: number; unknown: boolean; signal?: AbortSignal; onProgress?: (what: string) => void; onAction?: (raw: string) => void; ranOn?: string };
 
 /** Somewhere else that can run a brain call: a computer linked to this hub (see computers.ts). */
 export type RemoteRunner = { name: string; run(b: BrainInput, p: BrainProfile, meter?: Meter): Promise<string> };
@@ -649,6 +650,14 @@ export class Brain {
     return { harness, model: TIER_MODELS[harness]?.[tierOf(p)] ?? "", role: p.role };
   }
 
+  /**
+   * A live status line from the quick model (see brains/narrate.ts). Skips the queue on purpose: it's a few hundred tokens,
+   * and waiting behind the very job it describes would make it useless.
+   */
+  async narrate(prompt: string, profile: BrainProfile): Promise<string> {
+    return this.dispatch({ mode: "narrate", context: {}, input: prompt }, profile);
+  }
+
   private async thinkOn(b: BrainInput, p: BrainProfile, meter?: Meter): Promise<string> {
     if (b.mode === "orchestrate") return this.dispatch(b, p, meter);
     const cap = this.config.maxParallelPerHarness[p.harness];
@@ -746,12 +755,17 @@ export class Brain {
       const it = e?.item;
       if (!it) return;
       if (it.type === "agent_message" && e.type === "item.completed") codexLast = String(it.text || "");
+      if (e.type === "item.started" && it.type === "command_execution") meter?.onAction?.(`shell: ${String(it.command || "").slice(0, 240)}`);
+      if (e.type === "item.completed" && it.type === "web_search" && (it.query || it.action?.query)) meter?.onAction?.(`web search: ${it.query || it.action?.query}`);
+      if (e.type === "item.started" && it.type === "mcp_tool_call") meter?.onAction?.(`${it.server || "tool"}.${it.tool || ""}: ${String(it.arguments?.title || "")} ${JSON.stringify(it.arguments ?? {}).slice(0, 200)}`);
       if (!meter?.onProgress) return;
       const q = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 70);
       // A search's query only arrives when it completes (it starts as ""), so show it then.
       const query = q(it.query || it.action?.query);
       const step = it.type === "web_search" ? (query ? `Searching: ${query}` : e.type === "item.started" ? "Searching the web" : null)
         : it.type === "command_execution" && e.type === "item.started" ? describeCommand(it.command) ?? "Working it out"
+        // Its browser/computer tools carry their own title ("Inspect official class registration").
+        : it.type === "mcp_tool_call" && e.type === "item.started" ? (noteStep(it.arguments?.title) ?? "Working it out")
         : it.type === "agent_message" && e.type === "item.completed" && b.mode !== "voice" ? noteStep(it.text)
         : it.type === "reasoning" && e.type === "item.completed" ? noteStep(String(it.text || "").replace(/\*\*/g, "")) : null;
       if (step) meter.onProgress(step);
@@ -768,12 +782,13 @@ export class Brain {
           const line = buf.slice(0, i); buf = buf.slice(i + 1);
           if (harness === "codex") { codexLine(line); continue; }
           if (line.includes('"rate_limit_event"')) { try { this.usage.noteClaudeEvent(JSON.parse(line)?.rate_limit_info); } catch {} continue; }
-          if (!meter?.onProgress || !line.includes('"type":"assistant"')) continue;
+          if (!(meter?.onProgress || meter?.onAction) || !line.includes('"type":"assistant"')) continue;
           try {
             for (const c of JSON.parse(line)?.message?.content || []) {
               // What it's doing (a tool) or what it says it's about to do (its own short notes), so the user isn't left on "On it".
               const step = c?.type === "tool_use" ? describeStep(c.name, c.input) ?? genericStep(c.name) : c?.type === "text" && b.mode !== "voice" ? noteStep(c.text) : null;
-              if (step) meter.onProgress(step);
+              if (step) meter.onProgress?.(step);
+              if (c?.type === "tool_use") meter.onAction?.(`${c.name}: ${JSON.stringify(c.input ?? {}).slice(0, 240)}`);
             }
           } catch {}
         }
@@ -843,6 +858,7 @@ function echoBrain(b: BrainInput): string {
   if (b.mode === "review") return QUIET;
   if (b.mode === "describe") return `Shows ${(b.input.match(/^Title: (.*)$/m)?.[1] || "a view").trim()}.`;
   if (b.mode === "clean") return b.input.replace(/\b(um+|uh+|you know),?\s*/gi, "").replace(/\s+/g, " ").trim();
+  if (b.mode === "narrate") return "";
   if (b.mode === "voice") return (b.input.split("NOTES FROM THE LEGWORK:")[1] || b.input).replace(/<\/?untrusted>/g, "").trim();
   if (b.mode === "ideas") {
     const facts = ((b.context as any).memory || []) as { fact: string }[];

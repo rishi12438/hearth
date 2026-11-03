@@ -27,6 +27,7 @@ import { cleanTile, cleanOptions, extractTiles, type Tile } from "./tiles.ts";
 import { Files, extractFiles } from "./files.ts";
 import { Apps, appSize } from "./apps.ts";
 import { sha256 } from "./auth.ts";
+import { Narrator } from "./brains/narrate.ts";
 
 const DEFAULT_PREFS: Prefs = {
   userName: "", tz: "UTC", quietStart: "23:00", quietEnd: "07:30",
@@ -794,10 +795,16 @@ export class Hub {
     const stop = new AbortController();
     this.stops.set(job.id, stop);
     // Live progress for the app ("Searching: pottery gifts"): an event only, not stored, so it can't race the job's own saves.
-    const meter: Meter = { costUsd: 0, unknown: false, signal: stop.signal, onProgress: (what) => { this.steps.set(job.id, what); this.emit("progress", { jobId: job.id, threadId: job.threadId, text: what }); } };
+    const show = (what: string) => { this.steps.set(job.id, what); this.emit("progress", { jobId: job.id, threadId: job.threadId, text: what }); };
+    // When the label is stuck on "Working it out", the quick model reads the last few actions and says what's going on.
+    const narrator = this.config.narrate === false ? null : new Narrator({ task: job.label || job.task, show,
+      ask: async (prompt) => this.brain.narrate(prompt, (await this.brains()).quick) });
+    const meter: Meter = { costUsd: 0, unknown: false, signal: stop.signal,
+      onProgress: (what) => { narrator?.step(what); show(what); }, onAction: (raw) => narrator?.action(raw) };
     const mate = await this.teammate(job.teammateId);
     let cur: Job = await this.saveJob({ ...job, status: "working", startedAt: this.clock().toISOString() });
     const finish = async (patch: Partial<Job>) => {
+      narrator?.stop();
       this.stops.delete(job.id); this.steps.delete(job.id);
       if (stop.signal.aborted && this.cancelled.delete(job.id)) {
         this.additions.delete(job.id); this.additions.delete(`${job.id}:label`);

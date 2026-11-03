@@ -17,6 +17,8 @@ export type Config = {
   agent: string;
   agentCmd: string[] | null;
   agentTimeoutMs: number;
+  /** Quick-model status lines while a long job sits on "Working it out" (HEARTH_NARRATE=off to turn off). */
+  narrate: boolean;
   allowedOrigins: string[];
   contact: string;
   behindProxy: boolean;
@@ -53,6 +55,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     agent: env.HEARTH_AGENT || "claude",
     agentCmd,
     agentTimeoutMs: Number(env.HEARTH_AGENT_TIMEOUT_SEC || 180) * 1000,
+    narrate: env.HEARTH_NARRATE !== "off",
     allowedOrigins: list(env.HEARTH_ALLOWED_ORIGINS),
     contact: env.HEARTH_CONTACT || "mailto:hearth@example.com",
     behindProxy: env.HEARTH_BEHIND_PROXY === "1",
