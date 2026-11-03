@@ -608,13 +608,38 @@ let closeDrop: (() => void) | null = null;
 function projectMenuAt(anchor: HTMLElement | { x: number; y: number }, current: string | null, pick: (id: string | null) => void) {
   if (closeDrop) { const was = (closeDrop as any).anchor; closeDrop(); if (was === anchor) return; } // a second click on the button closes it
   const row = (lead: Node, text: string, on: () => void, check = false, cls = "") =>
-    h("button", { class: `droprow ${cls}`, role: "menuitem", on: { click: () => { close(); on(); } } }, lead, h("span", { class: "grow" }, text), check ? icon("check", 15) : null);
-  const menu = h("div", { class: "dropmenu", role: "menu" },
-    S.projects.length ? h("div", { class: "droplabel" }, "Projects") : null,
-    S.projects.map((x: any) => row(x.emoji ? h("span", { class: "semoji" }, x.emoji) : icon("folder", 16), x.name, () => { if (x.id !== current) pick(x.id); }, x.id === current)),
-    h("div", { class: "dropsep" }),
-    row(icon("plus", 16), "New project…", newProject),
-    current ? row(icon("x", 16), "Remove from project", () => pick(null), false, "muted") : null);
+    h("button", { class: `droprow ${cls}`, role: "menuitem", on: { click: () => { close(); on(); }, mouseenter: (e: Event) => setActive(rows().indexOf(e.currentTarget as HTMLElement)) } }, lead, h("span", { class: "grow" }, text), check ? icon("check", 15) : null);
+  // Type to find a project; Enter picks the highlighted one, or creates one with that name if nothing matches.
+  const q = h("input", { class: "dropsearch", type: "search", placeholder: "Search or create a project…", autocomplete: "off", spellcheck: false, "aria-label": "Search projects" }) as HTMLInputElement;
+  const list = h("div", { class: "droplist" });
+  let active = 0;
+  const rows = () => Array.from(list.querySelectorAll<HTMLElement>(".droprow"));
+  const setActive = (i: number) => { const rs = rows(); active = Math.max(0, Math.min(i, rs.length - 1)); rs.forEach((r, j) => r.classList.toggle("active", j === active)); rs[active]?.scrollIntoView({ block: "nearest" }); };
+  const create = async (name: string) => {
+    try { const p = await call("/api/projects", { body: { name } }); await loadProjects(); pick(p.id); }
+    catch (e: any) { toast(e.message || "Couldn't create the project", "err"); }
+  };
+  const draw = () => {
+    const term = q.value.trim().toLowerCase();
+    const hits = S.projects.filter((x: any) => !term || x.name.toLowerCase().includes(term))
+      .sort((a: any, b: any) => term ? (b.name.toLowerCase().startsWith(term) ? 1 : 0) - (a.name.toLowerCase().startsWith(term) ? 1 : 0) : 0);
+    const exact = S.projects.some((x: any) => x.name.toLowerCase() === term);
+    clear(list,
+      hits.map((x: any) => row(x.emoji ? h("span", { class: "semoji" }, x.emoji) : icon("folder", 16), x.name, () => { if (x.id !== current) pick(x.id); }, x.id === current)),
+      term && !hits.length ? h("p", { class: "dropnone" }, "No project by that name.") : null,
+      h("div", { class: "dropsep" }),
+      term && !exact ? row(icon("plus", 16), `Create “${q.value.trim()}”`, () => create(q.value.trim())) : !term ? row(icon("plus", 16), "New project…", newProject) : null,
+      current && !term ? row(icon("x", 16), "Remove from project", () => pick(null), false, "muted") : null);
+    setActive(0);
+  };
+  q.addEventListener("input", draw);
+  q.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); setActive(active + 1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setActive(active - 1); }
+    else if (e.key === "Enter") { e.preventDefault(); rows()[active]?.click(); }
+  });
+  const menu = h("div", { class: "dropmenu", role: "menu" }, q, list);
+  draw();
   document.body.append(menu);
   const r = anchor instanceof HTMLElement ? anchor.getBoundingClientRect() : { left: anchor.x, right: anchor.x, bottom: anchor.y, top: anchor.y };
   const w = menu.offsetWidth, hgt = menu.offsetHeight;
@@ -626,7 +651,7 @@ function projectMenuAt(anchor: HTMLElement | { x: number; y: number }, current: 
   function close() { menu.remove(); document.removeEventListener("pointerdown", outside, true); document.removeEventListener("keydown", key); window.removeEventListener("hashchange", close); closeDrop = null; }
   closeDrop = Object.assign(close, { anchor });
   setTimeout(() => { document.addEventListener("pointerdown", outside, true); document.addEventListener("keydown", key); window.addEventListener("hashchange", close); });
-  (menu.querySelector(".droprow") as HTMLElement | null)?.focus();
+  q.focus();
 }
 
 /** File a ramble under a project (or take it out with null), from the header menu or the sidebar. */
