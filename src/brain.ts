@@ -31,6 +31,8 @@ export type BrainInput = {
 
 export const QUIET = "[[quiet]]";
 export const ESCALATE = "[[escalate]]";
+/** A teammate's answer to a message that came straight to its thread but isn't about it: plan it instead. */
+export const HAND_BACK = "[[hand-back]]";
 export const REDO = "[[redo]]";
 /** Calls that only read and write text: no web tools. */
 const NO_TOOLS = new Set<BrainInput["mode"]>(["orchestrate", "voice", "review", "ideas", "clean", "describe"]);
@@ -259,7 +261,8 @@ NAMING a new teammate: the user should know what it does from the name alone, li
 Reply with ONLY a JSON object, no prose, no code fence:
 {"title":"3-6 word chat title","channel":"lowercase-dashed name for this ramble, at most 3 words and 24 characters, that covers EVERY topic in it (thisChat, openTasks and this message): one short word per topic when there are several, e.g. japan-trip, knee-gym, landlord-gift-tickets. CONTEXT.thisChannel is the current name: keep it if it still covers everything, otherwise update it. Always give one","reply":"...","facts":[{"fact":"...","notebook":"...","importance":1|2|3}],
  "jobs":[{"id":"j1","label":"2-6 words the user sees","task":"...","teammate":"<existing name>","effort":"quick|light|heavy","dependsOn":["<earlier job id>"]?,"use":{"skill|workflow":"<library name>","inputs":{...}}?}
-       | {"label":"...","task":"...","teammate":"<new name>","effort":"light|heavy","newTeammate":{"name":"...","description":"...","emoji":"🏋️"}}],
+       | {"label":"...","task":"...","teammate":"<new name>","effort":"light|heavy","newTeammate":{"name":"...","description":"...","emoji":"🏋️"}}
+       | {"addTo":"<open task id>","task":"..."} | {"continue":"<recent task id>","task":"..."}],
  "newWorkflows":[{"name","description","inputs","steps":[{"skill","inputs"}]}]?}
 VISUALS FIRST (the user reads on a phone): in each task brief, say what the answer should look like so it's comfortable on a
 small screen: a map for trips and places (each stop with when, one line on what to do, and how you get there + how long), a
@@ -277,6 +280,12 @@ corrects or narrows one of them (same topic, or it belongs in the same answer), 
 restarts with the whole brief and gives ONE answer. E.g. open "Left knee pain before volleyball" + "I also want to strengthen my
 lower body so it doesn't happen again" -> addTo it, label "Knee, volleyball and lower body". Only make a new job for something
 separate. Keep the reply to one short line when you only added to a task ("Added that to Fitness's knee plan.").
+CONTINUE, DON'T SPLIT: CONTEXT.recentTasks are tasks in this ramble that already finished (with the start of their answer). If the
+new message follows on from one (a question about its answer, "more on that", a change to it, the next step, the same subject from
+another angle), DON'T make a new job: use {"continue":"<recent task id>","task":"the follow-up, as an instruction"}. That teammate
+answers in the same thread with the whole conversation so far, which is what the user expects. E.g. recent "Your Robinhood
+balance" + "how is it allocated and how has it grown?" -> continue it. When unsure whether it's the same subject, continue.
+Only make a new job for a genuinely new subject. Reply in one short line ("Money's on it in the Robinhood thread.").
 PARALLEL: jobs run at the same time unless one needs another's result; then list that job's id in dependsOn
 (e.g. "find a restaurant" then "invite Sam to it").
 LABEL: the user sees only the label in the chat, like a Slack message title ("Pottery gift for Priya", "Radiohead tickets").

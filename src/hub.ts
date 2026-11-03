@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store, Collection } from "./store/index.ts";
 import type { Brain, BrainInput, BrainProfile, Brains, Meter } from "./brain.ts";
-import { QUIET, ESCALATE, REDO, HARNESSES, MODEL_RE, availableHarnesses, NeedsComputer, BrainsFull, POOL_HARNESSES } from "./brain.ts";
+import { QUIET, ESCALATE, HAND_BACK, REDO, HARNESSES, MODEL_RE, availableHarnesses, NeedsComputer, BrainsFull, POOL_HARNESSES } from "./brain.ts";
 import type { Scripts } from "./scripts.ts";
 import type { Push } from "./push.ts";
 import { parseReply } from "./reply.ts";
@@ -278,6 +278,7 @@ export class Hub {
     const ctx = await this.context(input, mode, teammate, opts.threadId);
     const first = parseReply(await this.brain.think({ mode, context: ctx, input, toolResults: extra }, profile, opts.meter));
     if (first.text.includes(ESCALATE)) return { text: ESCALATE, did: [] as Done[], used: [] as string[] };
+    if (first.text.includes(HAND_BACK)) return { text: HAND_BACK, did: [] as Done[], used: [] as string[] }; // nothing it proposed is applied
     const applied = await this.applyActions(first.actions, evidence, where);
     if (!applied.runs.length) return { text: first.text, did: applied.done, used: applied.used, split: applied.split, tiles: applied.tiles, fileIds: applied.fileIds };
     const scriptTiles: Tile[] = [];
@@ -518,11 +519,50 @@ export class Hub {
     }
     const files = (await Promise.all(fileIds.slice(0, 5).map((id) => this.store.get<StoredFile>("files", id)))).filter(Boolean) as StoredFile[];
     for (const f of files) await this.store.put<StoredFile>("files", { ...f, threadId: thread.id });
-    const m = await this.addMessage({ role: "user", text: clean, threadId: thread.id, fileIds: files.map((f) => f.id) });
+    // Fast path: the ramble's latest task thread is idle, so it goes straight to that teammate with no planning call.
+    // The teammate hands it back if it's something new, and only then is it planned (see handBack).
+    const root = threadId && !thread.id.startsWith("tm-") && !this.planning.has(thread.id) ? await this.latestTask(thread.id) : null;
+    const m = await this.addMessage({ role: "user", text: clean, threadId: thread.id, fileIds: files.map((f) => f.id), ...(root ? { continues: [root.id] } : {}) });
     await this.setPrefs({ lastUserAt: m.createdAt });
     await this.touchThread(thread.id, { preview: clean.slice(0, 120) });
-    this.queuePlan(thread, m);
+    if (root) {
+      const { job } = await this.followUp(root, m, clean, true);
+      await this.store.put<Message>("messages", { ...m, jobIds: [job.id] });
+      this.emit("job", job);
+      this.pump(m.id);
+    } else this.queuePlan(thread, m);
     return { value: { thread, message: m } };
+  }
+
+  /** The ramble's most recently active task thread, if nothing in it is still going and it was active in the last 3 hours. */
+  private async latestTask(threadId: string): Promise<Job | null> {
+    const jobs = (await this.store.all<Job>("jobs")).filter((j) => j.threadId === threadId && !j.parentId);
+    let best: Job | null = null, bestAt = "";
+    for (const root of jobs.filter((j) => !j.followsUp)) {
+      const line = jobs.filter((j) => j.id === root.id || j.followsUp === root.id);
+      const at = line.map((j) => j.finishedAt || j.updatedAt || j.createdAt).sort().at(-1) || "";
+      if (at > bestAt) { best = root; bestAt = at; }
+    }
+    if (!best) return null;
+    if (jobs.some((j) => (j.id === best!.id || j.followsUp === best!.id) && !["done", "failed"].includes(j.status))) return null;
+    return this.clock().getTime() - new Date(bestAt).getTime() < 3 * 3600_000 ? best : null;
+  }
+
+  /** A teammate said a fast-pathed message isn't about its thread: drop the follow-up and plan the message as usual. */
+  private handedBack = new Map<string, string>(); // message id -> the task thread that handed it back
+  private async handBack(job: Job, meter: Meter) {
+    this.stops.delete(job.id);
+    await this.addSpend(job.messageId, meter.costUsd);
+    await this.store.remove("jobs", job.id);
+    this.emit("job", { ...job, handedBack: true });
+    const m = await this.store.get<Message>("messages", job.messageId);
+    const thread = await this.store.get<Thread>("threads", job.threadId);
+    if (!m || !thread) return;
+    const { continues: _, jobIds: __, ...rest } = m;
+    const plain = await this.store.put<Message>("messages", rest as Message);
+    this.emit("message", plain);
+    if (job.followsUp) this.handedBack.set(m.id, job.followsUp);
+    this.queuePlan(thread, plain);
   }
 
   /** What a teammate gets to see of attached files: the text of text-like ones, the name and type of the rest. */
@@ -559,6 +599,9 @@ export class Hub {
     const said = batch.length === 1 ? m.text : `The user sent these messages in a row; plan them together:\n${batch.map((x, i) => `${i + 1}. ${x.text}`).join("\n")}`;
     const attached = (await Promise.all(batch.map((x) => this.attachmentNote(x.fileIds)))).join("");
     let plan: any = null;
+    // Threads that just handed one of these messages back: not offered to continue, and refused if named anyway.
+    const declined = new Set(batch.map((b) => this.handedBack.get(b.id)).filter(Boolean));
+    for (const b of batch) this.handedBack.delete(b.id);
     try {
       const brains = await this.brains();
       const ctx = await this.context(batch.map((x) => x.text).join(" "), "orchestrate", null);
@@ -566,9 +609,16 @@ export class Hub {
       const openTasks = (await this.store.all<Job>("jobs"))
         .filter((j) => j.threadId === thread.id && !j.parentId && !j.followsUp && (j.status === "queued" || j.status === "working"))
         .map((j) => ({ id: j.id, label: j.label || shortLabel(undefined, j.task), teammate: team0.find((t) => t.id === j.teammateId)?.name, status: j.status, task: j.task.slice(0, 400) }));
+      // Finished tasks in this ramble, so a follow-up about one goes on in its thread instead of starting a new one.
+      const all0 = await this.store.all<Job>("jobs");
+      const recentTasks = all0.filter((j) => j.threadId === thread.id && !j.parentId && !j.followsUp && !declined.has(j.id) && (j.status === "done" || j.status === "failed")).slice(-8)
+        .map((j) => {
+          const last = all0.filter((x) => x.followsUp === j.id && x.result).at(-1);
+          return { id: j.id, label: j.label || shortLabel(undefined, j.task), teammate: team0.find((t) => t.id === j.teammateId)?.name, task: j.task.slice(0, 300), answer: String(last?.result || j.result || "").slice(0, 300) };
+        });
       const history = (await this.store.all<Message>("messages")).filter((x) => x.threadId === thread.id && !batch.some((b) => b.id === x.id)).slice(-10)
         .map((x) => ({ role: x.role, text: x.text.slice(0, 500) }));
-      const raw = await this.brain.think({ mode: "orchestrate", context: { ...ctx, thisChat: history, openTasks, thisChannel: thread.id.startsWith("tm-") ? undefined : (await this.store.get<Thread>("threads", thread.id))?.channel || null }, input: said + attached }, brains.orchestrator);
+      const raw = await this.brain.think({ mode: "orchestrate", context: { ...ctx, thisChat: history, openTasks, recentTasks, thisChannel: thread.id.startsWith("tm-") ? undefined : (await this.store.get<Thread>("threads", thread.id))?.channel || null }, input: said + attached }, brains.orchestrator);
       plan = parsePlan(raw);
     } catch (err: any) {
       await this.log("orchestrator.failed", err.message);
@@ -580,9 +630,11 @@ export class Hub {
     const jobs: Job[] = [];
     const keyToId = new Map<string, string>();
     const wants = new Map<string, string[]>();
+    const continued: Job[] = [];
     for (const j of (plan.jobs || []).slice(0, 8)) {
       if (typeof j?.task !== "string" || !j.task.trim()) continue;
       if (typeof j.addTo === "string" && (await this.addToJob(j.addTo, thread.id, j.task, j.label))) continue;
+      if (typeof j.continue === "string" && !declined.has(j.continue)) { const c = await this.continueTask(j.continue, thread.id, m, j.task); if (c) { continued.push(c); continue; } }
       const wanted = String(j.teammate || "Hearth").toLowerCase();
       let mate = team.find((t) => t.name.toLowerCase() === wanted || t.id === wanted);
       if (!mate && j.newTeammate) {
@@ -621,9 +673,11 @@ export class Hub {
     // Keep Hearth's line short when there are task posts under it; they say the rest.
     let reply = String(plan.reply || "On it.").trim();
     if (jobs.length && reply.length > 160) reply = reply.match(/^.{20,160}?[.!?](\s|$)/)?.[0].trim() || `${reply.slice(0, 150).replace(/\s+\S*$/, "")}…`;
-    await this.addMessage({ role: "assistant", teammateId: "hearth", threadId: thread.id, text: reply.slice(0, 1000), jobIds: jobs.map((j) => j.id) });
+    // Continued threads get a link from Hearth's line instead of a new task post.
+    const continues = [...new Set(continued.map((c) => c.followsUp || c.id))];
+    await this.addMessage({ role: "assistant", teammateId: "hearth", threadId: thread.id, text: reply.slice(0, 1000), jobIds: jobs.map((j) => j.id), ...(continues.length ? { continues } : {}) });
     for (const j of jobs) await this.addMessage({ role: "assistant", teammateId: "hearth", threadId: thread.id, text: j.label || j.task, taskJobId: j.id });
-    for (const j of jobs) this.emit("job", j);
+    for (const j of [...jobs, ...continued]) this.emit("job", j);
     this.pump(m.id); // runs in the background; a new ramble is handled right away
   }
 
@@ -753,7 +807,8 @@ export class Hub {
     const splitNote = job.effort === "heavy" && !job.depth ? "\n\nThis is a heavy job: if it has 2-4 parts that can be done independently, you may use jobs.split." : "";
     const ask = await this.store.get<Message>("messages", job.messageId);
     const attached = await this.attachmentNote(ask?.fileIds);
-    const input = `${job.task}${depNote}${repairNote}${splitNote}${attached}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")`;
+    const handNote = job.mayHandBack ? `\n\nFIRST, before any work or tools: the user sent this in the ramble's channel and it came straight to you because you had the latest thread. If it isn't a follow-up on that thread's subject (a new request, or partly about something else), don't do it: reply with only ${HAND_BACK} and Hearth will route it.` : "";
+    const input = `${job.task}${depNote}${handNote}${repairNote}${splitNote}${attached}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")`;
     type Tier = "quick" | "workhorse" | "heavy";
     // Hybrid (on by default): a cheaper model does the legwork and the heavy model writes what you read.
     const hybrid = (await this.prefs()).hybrid !== false && label(brains.heavy) !== label(brains.workhorse);
@@ -769,6 +824,7 @@ export class Hub {
     try {
       let r: Awaited<ReturnType<typeof attempt>> | null = await attempt(tier).catch((err) => (tier !== "heavy" ? null : Promise.reject(err)));
       if (stop.signal.aborted) throw new Error("Restarted with your new message.");
+      if (job.mayHandBack && r?.text.includes(HAND_BACK)) return await this.handBack(cur, meter);
       while (tier !== "heavy" && (!r || r.text.includes(ESCALATE) || !r.text.trim())) {
         escalated = true; tier = ladder[ladder.indexOf(tier) + 1];
         await this.log("job.escalated", `${job.task.slice(0, 80)} → ${label(brains[tier])}`);
@@ -826,14 +882,24 @@ export class Hub {
     if (!clean) return { error: "Say something first." };
     const m = await this.addMessage({ role: "user", text: clean, threadId: root.threadId, replyTo: root.id, teammateId: root.teammateId });
     await this.setPrefs({ lastUserAt: m.createdAt });
-    // The teammate is still on this thread: fold the reply into what it's doing instead of queueing another answer.
-    const busy = (await this.store.all<Job>("jobs")).filter((j) => (j.id === root.id || j.followsUp === root.id) && (j.status === "queued" || j.status === "working")).at(-1);
-    if (busy && (await this.addToJob(busy.id, root.threadId, clean))) return { value: { message: m, job: busy } };
-    const job = await this.store.put<Job>("jobs", { ...this.doc({}), threadId: root.threadId, messageId: m.id, task: clean, teammateId: root.teammateId, status: "queued", effort: root.effort, followsUp: root.id } as Job);
-    await this.store.put<Message>("messages", { ...m, jobIds: [job.id] });
-    this.emit("job", job);
-    this.pump(m.id);
+    const { job, folded } = await this.followUp(root, m, clean);
+    if (!folded) { await this.store.put<Message>("messages", { ...m, jobIds: [job.id] }); this.emit("job", job); this.pump(m.id); }
     return { value: { message: m, job } };
+  }
+
+  /** The next turn in a task's thread: folded into the teammate's current run if it's still going, else a new follow-up job. */
+  private async followUp(root: Job, m: Message, task: string, mayHandBack = false): Promise<{ job: Job; folded: boolean }> {
+    const busy = (await this.store.all<Job>("jobs")).filter((j) => (j.id === root.id || j.followsUp === root.id) && (j.status === "queued" || j.status === "working")).at(-1);
+    if (busy && (await this.addToJob(busy.id, root.threadId, task))) return { job: busy, folded: true };
+    const job = await this.store.put<Job>("jobs", { ...this.doc({}), threadId: root.threadId, messageId: m.id, task: task.trim().slice(0, 4000), teammateId: root.teammateId, status: "queued", effort: root.effort, followsUp: root.id, ...(mayHandBack ? { mayHandBack: true } : {}) } as Job);
+    return { job, folded: false };
+  }
+
+  /** The orchestrator decided a message in the channel goes on with a task that's already finished: same thread, same teammate. */
+  private async continueTask(rootId: string, threadId: string, m: Message, task: string) {
+    const root = await this.store.get<Job>("jobs", rootId);
+    if (!root || root.threadId !== threadId || root.followsUp || root.parentId) return null;
+    return (await this.followUp(root, m, task)).job;
   }
 
   /** The thread so far (root job, earlier replies and answers), for a follow-up. */

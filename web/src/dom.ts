@@ -54,6 +54,7 @@ const PATHS: Record<string, string[]> = {
   trash: ["M3 6h18", "M8 6V4h8v2", "M6 6l1 14h10l1-14"],
   more: ["M5 12h.01", "M12 12h.01", "M19 12h.01"],
   x: ["M18 6L6 18", "M6 6l12 12"],
+  expand: ["M15 3h6v6", "M9 21H3v-6", "M21 3l-7 7", "M3 21l7-7"],
   check: ["M20 6L9 17l-5-5"],
   search: ["M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z", "M21 21l-4.3-4.3"],
   server: ["M4 4h16v6H4z", "M4 14h16v6H4z", "M8 7h.01", "M8 17h.01"],
