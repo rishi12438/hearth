@@ -11,7 +11,7 @@ const CID = "a".repeat(24), SEC = "b".repeat(30);
 const creds = { clientId: CID, secret: SEC, env: "sandbox" as const };
 
 // A pretend Plaid: keys are checked on every call; Hosted Link finishes when `state.finished` is set.
-function fakePlaid(state: { finished?: boolean; exit?: any; loginRequired?: Set<string>; liabilities?: boolean; jwk?: any; seen: any[] } = { seen: [] }) {
+function fakePlaid(state: { finished?: boolean; exit?: any; loginRequired?: Set<string>; liabilities?: boolean; jwk?: any; investments?: boolean; seen: any[] } = { seen: [] }) {
   let n = 0;
   return (async (url: string, init: any = {}) => {
     const b = JSON.parse(init.body || "{}");

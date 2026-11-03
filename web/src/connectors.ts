@@ -407,8 +407,11 @@ function plaidSheet(t: Tile) {
       r.recent?.length ? h("div", { class: "stack" }, h("small", { class: "sub" }, "Most recent:"), h("div", { class: "list" }, r.recent.map((l: string) => h("div", { class: "item" }, h("small", null, l))))) : null,
       r.txNote ? h("p", { class: "muted small" }, r.txNote) : null);
   };
-  clear(banks, h("p", { class: "muted small" }, "Reading your banks…"));
-  call("/api/connectors/plaid/test", { body: {} }).then(show, (e) => show({ ok: false, error: e.message }));
+  // Keys but no bank yet: nothing to read.
+  if (t.state === "connected" || /sign in again/.test(t.detail || "")) {
+    clear(banks, h("p", { class: "muted small" }, "Reading your banks…"));
+    call("/api/connectors/plaid/test", { body: {} }).then(show, (e) => show({ ok: false, error: e.message }));
+  } else clear(banks, h("p", { class: "muted small" }, "No banks yet. Add your bank, and your investment account if you have one."));
 
   const add = h("button", { class: "btn primary big", on: { click: () => link(add, null, "") } }, "Add a bank") as HTMLButtonElement;
   const addInv = h("button", { class: "btn ghost", on: { click: () => link(addInv, null, "", "investments") } }, "Add an investment account (Robinhood…)") as HTMLButtonElement;

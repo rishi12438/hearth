@@ -75,6 +75,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   drivers: { e2b?: E2b; ssh?: Ssh; readLogin?: typeof readLogin; allowLocalHub?: boolean; vault?: Vault; shares?: Shares | null } = {}) {
   const shares = drivers.shares ?? null;
   const voiceLimiter = new RateLimiter(5, 10 * 60_000);
+  const plaidLimiter = new RateLimiter(20, 60_000);
   const liveTickets = new Map<string, number>();
   const tileKey = randomBytes(12).toString("base64url");
   const tileLimiter = new RateLimiter(600, 60_000);
@@ -582,9 +583,14 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         }
         // Proof it's reading: run the connector's source once and show what came back (Slack DMs, etc.).
         if (method === "POST" && id && seg[3] === "test") {
+          // Plaid's screen reads your banks each time it opens: allow that often (Plaid's own limits are far higher),
+          // and don't count it when there's no bank to read.
+          if (id === "plaid") {
+            if (connect.plaid.items().length && !plaidLimiter.allow("test")) throw new HttpError(429, "Give it a few seconds, then try again.");
+            return json(await connect.plaid.probe());
+          }
           if (!voiceLimiter.allow(`test:${id}`)) throw new HttpError(429, "Give it a moment, then try again.");
           if (id === "slack") return json(await connect.slack.probe());
-          if (id === "plaid") return json(await connect.plaid.probe());
           if (!sourceById(id)) throw new HttpError(400, `${id} can't be tested.`);
           return json(await hub.testConnection(id));
         }
