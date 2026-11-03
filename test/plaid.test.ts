@@ -40,6 +40,7 @@ function fakePlaid(state: { finished?: boolean; exit?: any; loginRequired?: Set<
       case "/liabilities/get": return Response.json({ accounts: [{ account_id: "acc-cc", name: "Sapphire", mask: "2222", balances: { current: 340, limit: 5000 } }],
         liabilities: { credit: [{ account_id: "acc-cc", last_statement_balance: 300, minimum_payment_amount: 35, next_payment_due_date: "2026-11-20", is_overdue: false, aprs: [{ apr_type: "purchase_apr", apr_percentage: 24.99 }] }] } });
       case "/item/remove": return Response.json({ request_id: "r" });
+      case "/item/get": return Response.json({ item: { item_id: "item-chase" }, status: { transactions: { last_successful_update: "2026-11-03T14:14:00Z" } } });
       case "/transactions/refresh": return Response.json({ request_id: "r" });
       case "/item/webhook/update": return Response.json({ item: { webhook: b.webhook } });
       case "/webhook_verification_key/get": return state.jwk ? Response.json({ key: { ...state.jwk, kid: b.key_id, alg: "ES256", use: "sig", created_at: 1, expired_at: null } }) : err("INVALID_KEY");
@@ -197,7 +198,7 @@ test("hearth-plaid answers balances, transactions, spending, cards and refresh",
   await p.finishLink((await p.startLink()).token);
   const bal: any = await p.agent(["balances"]);
   expect(bal.accounts).toEqual([
-    expect.objectContaining({ bank: "Chase", account: "Checking ••1111", balance: 1200.5 }),
+    expect.objectContaining({ bank: "Chase", account: "Checking ••1111", balance: 1200.5, updatedAt: "2026-11-03T14:14:00Z" }),
     expect.objectContaining({ account: "Sapphire ••2222", balance: 340, limit: 5000, note: expect.stringContaining("owed") }),
   ]);
   const tx: any = await p.agent(["transactions", "--search", "star"]);

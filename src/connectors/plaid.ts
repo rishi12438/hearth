@@ -165,11 +165,25 @@ export class Plaid {
     }));
   }
 
+  /** When Plaid last pulled each bank (Item status; free). */
+  private async lastPulled(): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    await Promise.all(this.items().map(async (i) => {
+      try {
+        const j = await this.call("/item/get", { access_token: i.accessToken });
+        const t = j.status?.transactions?.last_successful_update || j.status?.last_webhook?.sent_at;
+        if (t) out.set(i.itemId, String(t));
+      } catch {}
+    }));
+    return out;
+  }
+
   /** Every account with its balance (Plaid's last-known balance: /accounts/get is free; /accounts/balance/get isn't). */
   async accounts() {
     return this.perItem(async (item) => (await this.call("/accounts/get", { access_token: item.accessToken })).accounts.map((a: any) => ({
       id: String(a.account_id), name: String(a.name || a.official_name || ""), mask: a.mask ?? null, type: String(a.type || ""), subtype: a.subtype ?? null,
       current: a.balances?.current ?? null, available: a.balances?.available ?? null, limit: a.balances?.limit ?? null, currency: a.balances?.iso_currency_code ?? "USD",
+      updatedAt: a.balances?.last_updated_datetime ?? null,
     })));
   }
 
@@ -249,10 +263,12 @@ export class Plaid {
     switch (cmd) {
       case "balances": {
         const rs = (await this.accounts()).filter((r) => onBank(r.item));
+        const pulled = await this.lastPulled();
         return { accounts: rs.flatMap((r) => (r.value || []).map((a: any) => ({ bank: r.item.institution.name, account: `${a.name}${a.mask ? ` ••${a.mask}` : ""}`, type: a.subtype || a.type,
           balance: a.current, available: a.available, limit: a.limit, currency: a.currency,
-          ...(a.type === "credit" ? { note: "credit: balance is what's owed" } : {}) }))), problems: problems(rs),
-          asOf: "Plaid's last pull from the bank (1–4 times a day); run `hearth-plaid refresh` for newer." };
+          updatedAt: a.updatedAt || pulled.get(r.item.itemId) || null,
+          ...(a.type === "credit" ? { note: "credit: balance is what's owed" } : a.available == null ? { note: "no spendable amount (e.g. a CD)" } : {}) }))), problems: problems(rs),
+          words: "balance = everything in the account; available = what can be spent now (after pending charges and holds). updatedAt = when Plaid last pulled from the bank (UTC); show it in the owner's time zone, once, not on every account. If it's null, leave the time out rather than saying it's unavailable. `hearth-plaid refresh` gets newer data." };
       }
       case "transactions": {
         const days = num("--days", 30, 730), limit = num("--limit", 50, 500), min = Number(flag("--min") ?? 0) || 0;
