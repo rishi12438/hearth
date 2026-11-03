@@ -32,6 +32,8 @@ export type Message = Doc & {
   jobIds?: string[];
   /** Set on Hearth's task messages in a group chat: the job this message hands out (its thread lives under it). */
   taskJobId?: string;
+  /** Set on Hearth's reply when it carried your message on in existing task threads (their root job ids). */
+  continues?: string[];
   /** Files you attached to this message. */
   fileIds?: string[];
   /** A reply inside a job's thread (Slack-style); the value is the thread's root job id. */
@@ -122,6 +124,8 @@ export type Job = Doc & {
   approvalIds?: string[];
   /** A follow-up you asked in a job's thread; the value is the root job id. */
   followsUp?: string;
+  /** Came straight to this thread without planning: the teammate may hand it back if it's about something else. */
+  mayHandBack?: boolean;
   /** Files the teammate made for this job. */
   fileIds?: string[];
   /** Jobs this one needs results from; it starts when they're done. */

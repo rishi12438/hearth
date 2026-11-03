@@ -211,13 +211,23 @@ function onEvent(e: { type: string; data?: any }) {
       else S.planning = e.data?.threadId || null;
       if (open) drawChat(); soon(); return;
     case "message":
-      if (open && S.chat && e.data.threadId === open) { upsert(S.chat.messages, e.data); drawChat(); }
+      if (open && S.chat && e.data.threadId === open) {
+        upsert(S.chat.messages, e.data); drawChat();
+        // Hearth carried what you just said on in a task's thread: on a wide screen, open it beside the chat.
+        if (wide() && r.view === "chat" && !r.job && e.data.continues?.length === 1) location.hash = `#c/${open}/${e.data.continues[0]}`;
+      }
       else if (r.view === "dm" && e.data.threadId === `tm-${r.id}`) loadDm(r.id);
       else if (e.data.proactive) toast(e.data.proactive.title);
       soon();
       return;
     case "job": {
       if (r.view === "board") loadBoard();
+      // The teammate said it's not about its thread: that reply is gone, and Hearth plans the message as a new task.
+      if (e.data.handedBack) {
+        if (S.chat) S.chat.jobs = S.chat.jobs.filter((x: any) => x.id !== e.data.id);
+        if (r.view === "chat" && r.job === e.data.followsUp && open === e.data.threadId) location.hash = `#c/${open}`; else if (open === e.data.threadId) drawChat(false);
+        return;
+      }
       // A teammate finished something you're not looking at: an in-app banner you can tap, like a phone notification.
       const was = jobStatus.get(e.data.id);
       jobStatus.set(e.data.id, e.data.status);
@@ -1155,11 +1165,15 @@ function renderChatLayout(r: { id: string; job?: string }) {
   frame({ header: h("div"), body: h("div", { id: r.job && !wide() ? "threadview" : "chat", class: "msgs" }), composer: true });
   if (split) {
     app.classList.add("split");
+    // The thread takes half the window; expand gives it the whole main area (remembered), for long answers and typing.
+    app.classList.toggle("thread-max", localStorage.getItem("hearth.threadMax") === "1");
+    const expand = h("button", { class: "iconbtn", "aria-label": "Expand thread", title: "Expand / shrink",
+      on: { click: () => { const on = app.classList.toggle("thread-max"); localStorage.setItem("hearth.threadMax", on ? "1" : "0"); } } }, icon("expand", 18));
     app.appendChild(h("aside", { class: "threadside" },
-      h("div", { class: "threadside-head" }, h("b", null, "Thread"), h("button", { class: "iconbtn", "aria-label": "Close thread", on: { click: () => { location.hash = `#c/${r.id}`; } } }, icon("x", 18))),
+      h("div", { class: "threadside-head" }, h("b", null, "Thread"), h("span", { class: "grow" }), expand, h("button", { class: "iconbtn", "aria-label": "Close thread", on: { click: () => { location.hash = `#c/${r.id}`; } } }, icon("x", 18))),
       h("div", { class: "msgs", id: "threadview" }), h("div", { class: "composer-wrap", id: "threadcomposer" })));
     renderComposer("threadcomposer", r.job);
-  } else app.classList.remove("split");
+  } else app.classList.remove("split", "thread-max");
   drawHeader();
   if (S.chat) drawChat();
 }
@@ -1266,10 +1280,13 @@ function withMentions(text: string) {
 }
 
 function plainMessage(m: any, grouped = false) {
-  if (m.role === "user") return row(youWho(), m.createdAt, [h("div", { class: "mtext" }, m.text), (m.fileIds || []).map(fileCard)], grouped);
+  // Carried on in a task's thread: one tap to it.
+  const goes = (m.continues || []).map((id: string) => { const j = S.chat?.jobs.find((x: any) => x.id === id);
+    return j ? h("button", { class: "fromchip", on: { click: () => { location.hash = `#c/${S.chat.thread.id}/${id}`; } } }, face(mate(j.teammateId), 18, jobState(j)), `Continued in ${jobLabel(j)}`, icon("chevron", 13)) : null; });
+  if (m.role === "user") return row(youWho(), m.createdAt, [h("div", { class: "mtext" }, m.text), (m.fileIds || []).map(fileCard), ...goes], grouped);
   const from = m.fromThreadId ? S.threads.find((t) => t.id === m.fromThreadId) : null;
   const body: (Node | null)[] = [m.proactive ? h("div", { class: "proline" }, icon("bell", 13), m.proactive.title) : null, richText(m.text),
-    from ? h("button", { class: "fromchip", on: { click: () => { location.hash = `#c/${from.id}`; } } }, `From #${channelName(from)}`, icon("chevron", 13)) : null];
+    from ? h("button", { class: "fromchip", on: { click: () => { location.hash = `#c/${from.id}`; } } }, `From #${channelName(from)}`, icon("chevron", 13)) : null, ...goes];
   if (m.proactive) {
     const why = h("div", { class: "why", hidden: true }, m.proactive.why);
     body.push(h("button", { class: "whybtn", on: { click: () => { why.hidden = !why.hidden; } } }, "Why did I get this?"), why);
@@ -1569,7 +1586,8 @@ async function send(text: string, threadJob?: string) {
     if (r.view === "dm") { await call(`/api/teammates/${r.id}/messages`, { body: { text: t } }); loadDm(r.id); return; }
     const inChat = r.view === "chat" && r.id !== "new";
     const res = inChat ? await call(`/api/threads/${r.id}/messages`, { body: { text: t, fileIds } }) : await call("/api/threads", { body: { text: t, fileIds, projectId: S.newProject || undefined } });
-    S.planning = res.thread.id;
+    // Sent straight to a task's thread: nothing to plan, so no "splitting it up" line.
+    if (!res.message?.continues?.length) S.planning = res.thread.id;
     if (!inChat) {
       if (S.newProject) { S.newProject = null; loadThreads(); }
       S.chat = { thread: res.thread, messages: [res.message], jobs: [], approvals: [] }; location.hash = `#c/${res.thread.id}`; return;

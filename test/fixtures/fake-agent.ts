@@ -4,6 +4,8 @@ import { appendFileSync } from "node:fs";
 const prompt = await new Response(Bun.stdin.stream()).text();
 if (prompt.startsWith("You are the orchestrator")) { console.log(process.env.FAKE_PLAN); process.exit(0); }
 const task = prompt.match(/JOB:\n([^\n]*)/)?.[1] ?? "?";
+// A message that came straight to a thread but is about something else: handed back.
+if (prompt.includes("came straight to you") && task.includes("NEW")) { console.log("[[hand-back]]"); process.exit(0); }
 const log = process.env.FAKE_LOG;
 if (log) appendFileSync(log, `start ${Date.now()} ${task}\n`);
 await Bun.sleep(Number(process.env.FAKE_MS || 300));

@@ -316,3 +316,41 @@ test("boards: each teammate's work in Up next / Working / Needs you / Done, or e
   await until(() => allDone(2));
   expect((await hub.board("scout")).done[0].where).toBe("#t");
 });
+
+test("asking more about a finished task goes straight to its thread, with no planning call", async () => {
+  await setup();
+  process.env.FAKE_MS = "20";
+  plan([{ label: "Your Robinhood balance", task: "check my Robinhood balance", teammate: "Hearth" }]);
+  const r = await hub.ramble("what's my robinhood balance");
+  const thread = r.value!.thread.id;
+  await until(() => allDone(1));
+  const root = (await jobs())[0];
+  process.env.FAKE_PLAN = "not json: the planner must not be asked"; // a planning call would make a new task
+  await hub.ramble("how is it allocated and how has it grown?", thread);
+  await until(() => allDone(2));
+  const next = (await jobs()).find((j) => j.id !== root.id)!;
+  expect([next.followsUp, next.teammateId, next.status]).toEqual([root.id, root.teammateId, "done"]); // same thread, same teammate
+  const msgs = await store.all<any>("messages");
+  expect(msgs.filter((m) => m.taskJobId).length).toBe(1); // no second task post
+  expect(msgs.find((m) => m.text.startsWith("how is it"))?.continues).toEqual([root.id]); // your message links to the thread
+  expect(msgs.filter((m) => m.role === "assistant" && m.teammateId === "hearth" && !m.taskJobId).length).toBe(1); // no planner reply
+});
+
+test("a new subject sent to the latest thread is handed back and planned as a new task", async () => {
+  await setup();
+  process.env.FAKE_MS = "20";
+  plan([{ label: "Your Robinhood balance", task: "check my Robinhood balance", teammate: "Hearth" }]);
+  const r = await hub.ramble("what's my robinhood balance");
+  const thread = r.value!.thread.id;
+  await until(() => allDone(1));
+  const root = (await jobs())[0];
+  // The planner may still try to continue the thread that handed it back; it's not offered, and an unknown id makes a new task.
+  plan([{ continue: root.id, label: "Dinner spot", task: "find a dinner spot", teammate: "Hearth" }]);
+  await hub.ramble("NEW: find me a dinner spot tonight", thread);
+  await until(async () => (await jobs()).filter((j) => !j.followsUp).length === 2 && (await allDone(2)));
+  const all = await jobs();
+  expect(all.some((j) => j.followsUp)).toBe(false); // the handed-back follow-up is gone
+  expect(all.find((j) => j.id !== root.id)!.label).toBe("Dinner spot");
+  const msg = (await store.all<any>("messages")).find((m) => m.text.startsWith("NEW"));
+  expect(msg.continues).toBeUndefined();
+});
