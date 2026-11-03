@@ -1,0 +1,57 @@
+web/src/app.ts
+  s_fdeb1d75e7c9ed::t_4dcb3ae38c6b3d 971-975,991,998-999
+  s_d138c0a3e12f63::t_a59fb7214cc354 191-192
+  s_d138c0a3e12f63::t_ad9208fd74346e 989
+  s_469fe9f8acb119::t_a78fa982fb71a5 541,543
+web/styles.css
+  s_e0ad50b5f9c70d::t_933ae38b5b4cf3 604-614
+  s_b1881d9c019a34::t_671e46338e2532 1007
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "7d1104a3ec5ff2138526a4b43333f0c38310bce0",
+  "prompts": {},
+  "sessions": {
+    "s_469fe9f8acb119": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d084dc2d-fde0-48f8-8462-a019ef4fb9db",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    },
+    "s_b1881d9c019a34": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6f7cab09-540b-49b4-86e9-bbc90854f6ef",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    },
+    "s_d138c0a3e12f63": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2d41f0e1-4b75-40d3-b350-331f637d30c2",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    },
+    "s_e0ad50b5f9c70d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8f45deb6-9dd6-401e-abd7-3e6953a4d123",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    },
+    "s_fdeb1d75e7c9ed": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b8aed95d-f45b-432c-9722-aa39d60b5537",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
