@@ -1,0 +1,19 @@
+src/connectors/google.ts
+  s_f216ec0e47f2df::t_6a87a9570201fc 7-14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "f04a9fc45b3d528b87ed1caa8e743e02d739651b",
+  "prompts": {},
+  "sessions": {
+    "s_f216ec0e47f2df": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1b28942b-c983-4572-9fc5-9699506b6723",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
