@@ -321,6 +321,7 @@ function slackConnected(t: Tile) {
       h("p", { class: "okline" }, icon("check", 16), ` ${who}`),
       typeof r.dmCount === "number" ? h("p", { class: "muted small" }, `Can read ${r.dmCount} direct-message ${r.dmCount === 1 ? "conversation" : "conversations"}${r.people?.length ? `, incl. ${r.people.slice(0, 5).join(", ")}` : ""}.`) : null,
       r.note ? h("div", { class: "riskbox" }, h("b", null, "Needs one more permission"), h("p", { class: "small" }, r.note)) : null,
+      r.holdings?.length ? h("div", { class: "stack" }, h("small", { class: "sub" }, "Investments:"), h("div", { class: "list" }, r.holdings.map((l: string) => h("div", { class: "item" }, h("small", null, l))))) : null,
       r.recent?.length ? h("div", { class: "stack" }, h("small", { class: "sub" }, "Most recent:"), h("div", { class: "list" }, r.recent.map((line: string) => h("div", { class: "item" }, h("small", null, line)))))
         : r.note ? null
         : h("p", { class: "muted small" }, "No recent DMs or mentions to show right now — but the read above works."));
@@ -359,15 +360,17 @@ function plaidSheet(t: Tile) {
   const sandbox = /Sandbox/.test(t.detail || "");
 
   // Plaid's hosted page opens in your browser; this sheet watches for it to finish.
-  const link = async (btn: HTMLButtonElement, update: string | null, label: string) => {
+  const link = async (btn: HTMLButtonElement, update: string | null, label: string, kind: "bank" | "investments" = "bank") => {
+    const again = btn.textContent || "Try again";
     btn.disabled = true; err.hidden = true; btn.textContent = "Asking Plaid…";
     try {
-      const r = await call("/api/connectors/plaid/link", { body: update ? { update } : {} });
-      const open = h("a", { class: "btn primary big", href: r.url, target: "_blank", rel: "noopener noreferrer" }, update ? "Open Plaid to sign in again" : "Open Plaid to pick your bank");
-      clear(body, h("p", null, h("b", null, update ? `Sign in to ${label} again` : "Add a bank")),
+      const r = await call("/api/connectors/plaid/link", { body: update ? { update } : { kind } });
+      const inv = kind === "investments" && !update;
+      const open = h("a", { class: "btn primary big", href: r.url, target: "_blank", rel: "noopener noreferrer" }, update ? "Open Plaid to sign in again" : inv ? "Open Plaid to pick your broker" : "Open Plaid to pick your bank");
+      clear(body, h("p", null, h("b", null, update ? `Sign in to ${label} again` : inv ? "Add an investment account" : "Add a bank")),
         h("ol", { class: "steps" },
           h("li", null, "Tap the button: Plaid's page opens in your browser."),
-          h("li", null, sandbox ? "Pick any bank and sign in with user_good / pass_good (Sandbox has only test banks)." : "Pick your bank (Chase, Discover…) and sign in there. Hearth never sees your bank password."),
+          h("li", null, sandbox ? "Pick any bank and sign in with user_good / pass_good (Sandbox has only test banks)." : inv ? "Pick your broker (Robinhood, Fidelity…) and sign in there. Hearth never sees your password, and can't trade." : "Pick your bank (Chase, Discover…) and sign in there. Hearth never sees your bank password."),
           h("li", null, "Come back here: it finishes by itself.")),
         open, h("p", { class: "muted small" }, "Waiting for Plaid…"), err,
         h("button", { class: "btn ghost", on: { click: () => { stop(); reloadPlaid(); } } }, "Cancel"));
@@ -384,7 +387,7 @@ function plaidSheet(t: Tile) {
           reloadPlaid();
         } catch (e) { stop(); fail(e); }
       }, 3000);
-    } catch (e) { fail(e); btn.disabled = false; btn.textContent = update ? "Reconnect" : "Add a bank"; }
+    } catch (e) { fail(e); btn.disabled = false; btn.textContent = again; }
   };
 
   const show = (r: any) => {
@@ -408,14 +411,15 @@ function plaidSheet(t: Tile) {
   call("/api/connectors/plaid/test", { body: {} }).then(show, (e) => show({ ok: false, error: e.message }));
 
   const add = h("button", { class: "btn primary big", on: { click: () => link(add, null, "") } }, "Add a bank") as HTMLButtonElement;
-  clear(body, banks, add,
+  const addInv = h("button", { class: "btn ghost", on: { click: () => link(addInv, null, "", "investments") } }, "Add an investment account (Robinhood…)") as HTMLButtonElement;
+  clear(body, banks, add, addInv,
     h("p", { class: "muted small" }, sandbox ? "Sandbox: test banks only, as many as you like." : "Each bank login you add uses one of your Plaid plan's Items (a Trial has 10, and removing one doesn't free it). If a bank signs Hearth out, use Reconnect instead of adding it again."),
     err);
   D.openSheet(t.label, [
     h("button", { class: "btn ghost", on: { click: () => { stop(); D.back(); } } }, icon("back", 16), "All connectors"),
     h("div", { class: "phero" }, logo(t.id, 52), h("b", null, t.state === "connected" ? "Your banks" : "Plaid keys saved"), h("small", { class: t.state === "needs-you" && /sign in again/.test(t.detail || "") ? "err" : "" }, t.detail || t.blurb)),
     body,
-    h("p", { class: "muted small" }, "Read-only: balances, transactions and card details. Teammates can watch for new transactions; Hearth can't move money."),
+    h("p", { class: "muted small" }, "Read-only: balances, transactions, card details and investments. Teammates can watch for new transactions; Hearth can't move money or trade."),
     h("button", { class: "btn danger-ghost", on: { click: () => D.confirmSheet("Disconnect Plaid?", "Every bank is removed at Plaid and the keys leave the hub. On a Trial plan the slots don't come back.", "Disconnect", async () => { stop(); await call("/api/connectors/plaid", { method: "DELETE" }); toast("Plaid disconnected"); D.back(); }) } }, "Disconnect Plaid"),
     h("p", { class: "muted small" }, "Kept encrypted in your hub's vault. It never goes to the model, this app or your exports."),
   ], { onClose: stop });

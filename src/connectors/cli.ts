@@ -8,7 +8,7 @@ import { flag, has, io, onOff, positional, stdin } from "../cli-common.ts";
 //   hearth connect instagram|linkedin --stdin --accept-risk     (cookies on stdin)
 //   hearth connect whatsapp --accept-risk      shows a QR code to scan, waits until linked
 //   hearth connect plaid --key CLIENT_ID:SECRET [--env sandbox|production]
-//   hearth plaid add [--update ITEM_ID]        prints a Plaid page to open, waits until the bank is added
+//   hearth plaid add [--investments] [--update ITEM_ID]   prints a Plaid page to open, waits until it's added
 //   hearth plaid accounts                      banks, balances, recent transactions, card details
 //   hearth plaid remove <ITEM_ID>              (on a Trial plan this does not free the Item slot)
 //   hearth disconnect <id>
@@ -91,7 +91,7 @@ export async function connectCli(config: Config, argv: string[]): Promise<number
     }
     if (sub === "add") {
       const update = flag(args, "--update");
-      const s = await hub("/api/connectors/plaid/link", { method: "POST", body: update ? { update } : {} });
+      const s = await hub("/api/connectors/plaid/link", { method: "POST", body: update ? { update } : { kind: has(args, "--investments") ? "investments" : "bank" } });
       if ("error" in s) return fail(s.error!, s.code);
       if (json) console.log(JSON.stringify({ state: "open", url: s.data.url }));
       else console.log(`\n  Open this page and sign in to your bank (it's Plaid's own page):\n\n  ${s.data.url}\n`);
@@ -109,7 +109,7 @@ export async function connectCli(config: Config, argv: string[]): Promise<number
       }
       return fail("Nobody finished the page in 30 minutes. Run it again.");
     }
-    return fail("usage: hearth plaid add [--update ITEM_ID] | accounts | remove <ITEM_ID>", 2);
+    return fail("usage: hearth plaid add [--investments] [--update ITEM_ID] | accounts | remove <ITEM_ID>", 2);
   }
 
   if (cmd === "whatsapp") {

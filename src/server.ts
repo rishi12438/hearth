@@ -570,7 +570,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
             const hook = `${proto}://${host}/api/plaid/webhook`;
             const ok = webhookOk(hook) ? hook : null;
             if (ok) void connect.plaid.ensureWebhook(ok);
-            return json({ ...(await connect.plaid.startLink(typeof b.update === "string" ? b.update : null, ok)), webhook: !!ok });
+            return json({ ...(await connect.plaid.startLink(typeof b.update === "string" ? b.update : null, ok, b.kind === "investments" ? "investments" : "bank")), webhook: !!ok });
           } catch (e: any) { throw new HttpError(400, e.message); }
         }
         if (id === "plaid" && seg[3] === "items" && seg[4] && method === "DELETE") {

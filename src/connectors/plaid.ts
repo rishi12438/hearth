@@ -21,10 +21,16 @@ export type SavedItem = {
   error?: string | null;
   /** The webhook URL Plaid has for this Item, so it's only updated when the hub's address changes. */
   webhook?: string | null;
+  /** Added as a bank (transactions first) or an investment account (holdings first: Robinhood, Fidelity…). */
+  kind?: LinkKind;
 };
+export type LinkKind = "bank" | "investments";
 
 const BASE: Record<PlaidEnv, string> = { sandbox: "https://sandbox.plaid.com", production: "https://production.plaid.com" };
 /** Plaid error codes that mean the bank wants you to sign in again (update mode fixes it, no new Item). */
+/** "This bank / this login doesn't offer that": not a problem to show, just nothing to read. */
+const NOT_OFFERED = new Set(["PRODUCTS_NOT_SUPPORTED", "PRODUCT_NOT_ENABLED", "ADDITIONAL_CONSENT_REQUIRED", "INVALID_PRODUCT", "NO_INVESTMENT_ACCOUNTS",
+  "NO_INVESTMENT_AUTH_ACCOUNTS", "NO_LIABILITY_ACCOUNTS", "PRODUCT_NOT_READY", "NO_ACCOUNTS", "INVALID_PRODUCTS"]);
 const RELOGIN = new Set(["ITEM_LOGIN_REQUIRED", "PENDING_EXPIRATION", "PENDING_DISCONNECT", "ACCESS_NOT_GRANTED", "INSUFFICIENT_CREDENTIALS"]);
 
 export class PlaidError extends Error {
@@ -42,7 +48,7 @@ export const webhookOk = (url: string | null | undefined): url is string => {
 
 export class Plaid {
   /** Link sessions this hub started, so a check only ever finishes our own (lost on restart; just add again). */
-  private pending = new Map<string, { update: string | null; at: number; webhook: string | null }>();
+  private pending = new Map<string, { update: string | null; at: number; webhook: string | null; kind: LinkKind }>();
   /** Plaid's webhook signing keys, by key id. */
   private keys = new Map<string, { key: CryptoKey; expiredAt: number | null }>();
   /** Called when a webhook says a bank has new transactions (the hub checks its Plaid triggers right away). */
@@ -90,7 +96,7 @@ export class Plaid {
   saveCreds(c: Creds) { this.vault!.set("plaid", JSON.stringify(c)); }
 
   /** A Plaid Hosted Link page to add a bank (or, with `update`, sign an existing one in again: no new Item). */
-  async startLink(update: string | null = null, webhook: string | null = null): Promise<{ url: string; token: string; expiresAt: string }> {
+  async startLink(update: string | null = null, webhook: string | null = null, kind: LinkKind = "bank"): Promise<{ url: string; token: string; expiresAt: string }> {
     const item = update ? this.items().find((i) => i.itemId === update) : null;
     if (update && !item) throw new PlaidError("NOT_FOUND", "That bank isn't connected.");
     const base: Record<string, unknown> = {
@@ -102,15 +108,21 @@ export class Plaid {
     let j: any;
     if (item) j = await create({ access_token: item.accessToken });
     else {
-      // Card details if the plan allows them; plain transactions if it doesn't.
-      try { j = await create({ products: ["transactions"], optional_products: ["liabilities"], transactions: { days_requested: 90 } }); }
+      // Plaid only lists institutions that offer every product in `products`, so a bank asks for transactions (cards and
+      // investments if it has them) and a brokerage asks for investments (transactions if it has them). If the plan turns
+      // an optional product down, try once without the extras.
+      const want = kind === "investments"
+        ? { products: ["investments"], optional_products: ["transactions"] }
+        : { products: ["transactions"], optional_products: ["liabilities", "investments"] };
+      const days = { transactions: { days_requested: 90 } };
+      try { j = await create({ ...want, ...days }); }
       catch (e: any) {
         if (e.type !== "INVALID_REQUEST" && e.type !== "INVALID_INPUT" && !/PRODUCT/.test(e.code)) throw e;
-        j = await create({ products: ["transactions"], transactions: { days_requested: 90 } });
+        j = await create({ products: want.products, ...(kind === "bank" ? days : {}) });
       }
     }
     if (!j.hosted_link_url) throw new PlaidError("NO_HOSTED_LINK", "Plaid didn't give a Hosted Link page for this account.");
-    this.pending.set(j.link_token, { update, at: Date.now(), webhook });
+    this.pending.set(j.link_token, { update, at: Date.now(), webhook, kind });
     for (const [t, p] of this.pending) if (Date.now() - p.at > 60 * 60_000) this.pending.delete(t);
     return { url: j.hosted_link_url, token: j.link_token, expiresAt: j.expiration };
   }
@@ -137,7 +149,7 @@ export class Plaid {
           itemId: String(x.item_id), accessToken: String(x.access_token),
           institution: { id: r.institution?.institution_id ?? null, name: String(r.institution?.name || "Your bank") },
           accounts: (r.accounts || []).map((a: any) => ({ id: String(a.id), name: String(a.name || ""), mask: a.mask ?? null, type: String(a.type || ""), subtype: a.subtype ?? null })),
-          addedAt: new Date().toISOString(), error: null, webhook: p.webhook,
+          addedAt: new Date().toISOString(), error: null, webhook: p.webhook, kind: p.kind,
         };
         this.saveItems([...this.items().filter((i) => i.itemId !== item.itemId), item]);
         added.push({ institution: item.institution.name, accounts: item.accounts.length });
@@ -206,7 +218,49 @@ export class Plaid {
       }));
     });
     const list = all.flatMap((r) => r.value || []).sort((a, b) => b.date.localeCompare(a.date)).slice(0, limit);
-    return { list, errors: all.filter((r) => r.error).map((r) => ({ institution: r.item.institution.name, code: r.error!.code, message: r.error!.message })) };
+    return { list, errors: all.filter((r) => r.error && (!NOT_OFFERED.has(r.error.code) || r.error.code === "PRODUCT_NOT_READY")).map((r) => ({ institution: r.item.institution.name, code: r.error!.code, message: r.error!.message })) };
+  }
+
+  /** Investment positions (Robinhood, Fidelity, a bank's brokerage account): each holding with its security. Prices are
+   *  Plaid's (about once a day), not live quotes. Banks without investments are quietly skipped. */
+  async holdings(only?: (i: SavedItem) => boolean) {
+    const all = await this.perItem(async (item) => {
+      if (only && !only(item)) return [];
+      try {
+        const j = await this.call("/investments/holdings/get", { access_token: item.accessToken });
+        const sec = new Map<string, any>((j.securities || []).map((x: any) => [String(x.security_id), x]));
+        const acc = new Map<string, any>((j.accounts || []).map((a: any) => [String(a.account_id), a]));
+        const rows = (j.holdings || []).map((h: any) => {
+          const x = sec.get(String(h.security_id)) || {}, a = acc.get(String(h.account_id));
+          const value = h.institution_value ?? (h.quantity != null && h.institution_price != null ? h.quantity * h.institution_price : null);
+          const cost = h.cost_basis ?? null;
+          return { bank: item.institution.name, account: `${a?.name || "Investments"}${a?.mask ? ` ••${a.mask}` : ""}`,
+            symbol: x.ticker_symbol || null, name: String(x.name || x.ticker_symbol || "Holding"), type: x.type || null,
+            quantity: h.quantity ?? null, price: h.institution_price ?? null, priceAsOf: h.institution_price_as_of ?? null,
+            value, costBasis: cost, gain: value != null && cost != null ? Math.round((value - cost) * 100) / 100 : null, currency: h.iso_currency_code || "USD" };
+        });
+        const cash = [...acc.values()].filter((a) => a.type === "investment").map((a) => ({ bank: item.institution.name, account: `${a.name || "Investments"}${a.mask ? ` ••${a.mask}` : ""}`, total: a.balances?.current ?? null, cash: a.balances?.available ?? null }));
+        return { rows, accounts: cash };
+      } catch (e: any) { if (NOT_OFFERED.has(e.code)) return { rows: [], accounts: [] }; throw e; }
+    });
+    return { rows: all.flatMap((r: any) => r.value?.rows || []), accounts: all.flatMap((r: any) => r.value?.accounts || []),
+      errors: all.filter((r) => r.error).map((r) => ({ bank: r.item.institution.name, code: r.error!.code, message: r.error!.message })) };
+  }
+
+  /** Buys, sells, dividends, deposits in investment accounts. amount > 0 = money out of the account (a buy). */
+  async investmentTx(days = 30, only?: (i: SavedItem) => boolean) {
+    const end = new Date(), start = new Date(Date.now() - days * 864e5);
+    const all = await this.perItem(async (item) => {
+      if (only && !only(item)) return [];
+      try {
+        const j = await this.call("/investments/transactions/get", { access_token: item.accessToken, start_date: day(start), end_date: day(end), options: { count: 500 } });
+        const sec = new Map<string, any>((j.securities || []).map((x: any) => [String(x.security_id), x]));
+        return (j.investment_transactions || []).map((t: any) => ({ date: String(t.date), bank: item.institution.name, type: t.type, subtype: t.subtype,
+          symbol: sec.get(String(t.security_id))?.ticker_symbol ?? null, name: String(t.name || ""), quantity: t.quantity ?? null, price: t.price ?? null, amount: t.amount ?? null, currency: t.iso_currency_code || "USD" }));
+      } catch (e: any) { if (NOT_OFFERED.has(e.code)) return []; throw e; }
+    });
+    return { list: all.flatMap((r) => r.value || []).sort((a: any, b: any) => b.date.localeCompare(a.date)),
+      errors: all.filter((r) => r.error).map((r) => ({ bank: r.item.institution.name, code: r.error!.code, message: r.error!.message })) };
   }
 
   /** Credit card details, where the plan and the bank allow Liabilities. Quietly empty otherwise. */
@@ -233,7 +287,7 @@ export class Plaid {
   /** Proof it reads: each bank with its accounts and balances, a few recent transactions, card details if any. */
   async probe() {
     if (!this.creds()) return { ok: false, error: "Plaid isn't set up." };
-    const [accts, tx, cards] = await Promise.all([this.accounts(), this.transactions(30, 8), this.cards()]);
+    const [accts, tx, cards, inv] = await Promise.all([this.accounts(), this.transactions(30, 8), this.cards(), this.holdings()]);
     return {
       ok: true, env: this.creds()!.env,
       banks: accts.map((r) => ({
@@ -243,6 +297,8 @@ export class Plaid {
       })),
       recent: tx.list.map((t) => line(t)),
       cards: cards.map((c: any) => ({ ...c, text: `${c.account}: ${money(c.balance)} owed${c.statement != null ? ` · statement ${money(c.statement)}` : ""}${c.minimum != null ? ` · min ${money(c.minimum)}` : ""}${c.due ? ` due ${c.due}` : ""}${c.apr != null ? ` · ${c.apr}% APR` : ""}` })),
+      holdings: inv.rows.sort((a: any, b: any) => (b.value ?? 0) - (a.value ?? 0)).slice(0, 10).map((h: any) =>
+        `${h.symbol || h.name}${h.quantity != null ? ` · ${+Number(h.quantity).toFixed(4)} ${h.type === "cash" ? "" : "sh"}` : ""} · ${money(h.value, h.currency)}${h.gain != null ? ` (${h.gain >= 0 ? "+" : ""}${money(h.gain, h.currency)})` : ""} · ${h.bank}`),
       txNote: tx.errors.some((e) => e.code === "PRODUCT_NOT_READY") ? "Plaid is still pulling transactions for a new bank. They show up within a few minutes." : null,
     };
   }
@@ -280,6 +336,20 @@ export class Plaid {
           sign: "amount > 0 is money out (a purchase); < 0 is money in (a deposit, refund or card payment)",
           problems: errors.filter((e) => e.code !== "PRODUCT_NOT_READY").map((e) => ({ bank: e.institution, problem: e.message })) };
       }
+      case "holdings": {
+        const r = await this.holdings(onBank);
+        const total = r.rows.reduce((n: number, h: any) => n + (h.value ?? 0), 0);
+        return { holdings: r.rows.sort((a: any, b: any) => (b.value ?? 0) - (a.value ?? 0)), accounts: r.accounts, totalValue: Math.round(total * 100) / 100,
+          words: "value = quantity × Plaid's price (about once a day, see priceAsOf), not a live quote. gain = value − costBasis (null if the broker didn't say).",
+          problems: r.errors.map((e) => ({ bank: e.bank, problem: RELOGIN.has(e.code) ? "The bank signed Hearth out: the owner reconnects it in Hearth (Connectors → Banks)." : e.message })),
+          ...(r.rows.length ? {} : { note: "No investment accounts connected. The owner adds one in Hearth → Connectors → Banks (Plaid) → Add an investment account." }) };
+      }
+      case "investments": {
+        const days = num("--days", 30, 730);
+        const r = await this.investmentTx(days, onBank);
+        return { days, count: r.list.length, transactions: r.list.slice(0, num("--limit", 50, 500)),
+          sign: "amount > 0 is money out of the account (a buy); < 0 is money in (a sale, dividend)", problems: r.errors.map((e) => ({ bank: e.bank, problem: e.message })) };
+      }
       case "cards": return { cards: (await this.cards()).filter((c: any) => !bank || c.account.toLowerCase().startsWith(bank) || c.account.toLowerCase().includes(bank)) };
       case "spending": {
         const days = num("--days", 30, 730);
@@ -305,7 +375,7 @@ export class Plaid {
           note: "Plaid is pulling from the bank now; new transactions arrive within a few minutes (the webhook checks triggers)." };
       }
       default:
-        throw new PlaidError("USAGE", "usage: hearth-plaid balances | transactions [--days N] [--bank B] [--min N] [--search W] [--account A] [--limit N] | cards | spending [--days N] [--bank B] | refresh [--bank B]");
+        throw new PlaidError("USAGE", "usage: hearth-plaid balances | transactions [--days N] [--bank B] [--min N] [--search W] [--account A] [--limit N] | cards | spending [--days N] [--bank B] | holdings [--bank B] | investments [--days N] [--bank B] | refresh [--bank B]");
     }
   }
 
@@ -457,7 +527,7 @@ exec curl -sS -m 90 -G -H "X-Hearth-Agent: ${key}" "${hubUrl}/api/agent/plaid" "
 `;
   return {
     name: "hearth-plaid", common: true, commands: ["hearth-plaid"], reads: [], scripts: { "hearth-plaid": script },
-    description: "The owner's money: bank and card balances, transactions, spending by category, card due dates and APR (Chase, Discover… via Plaid). Read-only.",
+    description: "The owner's money: bank and card balances, transactions, spending by category, card due dates and APR, investment holdings and trades (Chase, Discover, Robinhood… via Plaid). Read-only.",
     body: `# Your owner's bank accounts and credit cards (read-only)
 
 Run \`hearth-plaid <command>\`. It prints JSON. Nothing here can move money, pay a bill or change anything.
@@ -468,6 +538,8 @@ Run \`hearth-plaid <command>\`. It prints JSON. Nothing here can move money, pay
 | \`hearth-plaid transactions [--days 30] [--bank discover] [--min 50] [--search uber] [--account sapphire] [--limit 50]\` | Recent transactions, newest first. amount > 0 = money out, < 0 = money in. |
 | \`hearth-plaid cards [--bank chase]\` | Each card: owed, statement balance, minimum due, due date, purchase APR, overdue. |
 | \`hearth-plaid spending [--days 30] [--bank chase]\` | Total spent and income, by category (card payments and own-account transfers left out). |
+| \`hearth-plaid holdings [--bank robinhood]\` | Investment positions: symbol, quantity, price, value, cost basis, gain; total value. Prices are once a day, not live. |
+| \`hearth-plaid investments [--days 30] [--bank robinhood]\` | Buys, sells, dividends and deposits in investment accounts. |
 | \`hearth-plaid refresh [--bank chase]\` | Ask the bank for fresh data now. Only when the owner wants up-to-the-minute numbers: banks update 1–4 times a day by themselves. |
 
 - Pick the smallest command that answers the question (spending for "how much did I spend", not every transaction).
@@ -475,6 +547,6 @@ Run \`hearth-plaid <command>\`. It prints JSON. Nothing here can move money, pay
 - A \`problems\` entry means a bank needs the owner: tell them to reconnect it in Hearth → Connectors → Banks (Plaid).
 - A "New charge on …" alert from the Plaid trigger has no amount on purpose: look it up with \`hearth-plaid transactions --days 3 --account <name>\`.
 - Money is private: give the owner what they asked for; don't repeat full account lists or numbers in places other people see.
-- Moving money, paying a card, disputing a charge: not possible here. Say what the owner would do in their bank's app.`,
+- Buying or selling, moving money, paying a card, disputing a charge: not possible here. Say what the owner would do in their bank's app.`,
   };
 }

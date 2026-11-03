@@ -41,6 +41,17 @@ function fakePlaid(state: { finished?: boolean; exit?: any; loginRequired?: Set<
         liabilities: { credit: [{ account_id: "acc-cc", last_statement_balance: 300, minimum_payment_amount: 35, next_payment_due_date: "2026-11-20", is_overdue: false, aprs: [{ apr_type: "purchase_apr", apr_percentage: 24.99 }] }] } });
       case "/item/remove": return Response.json({ request_id: "r" });
       case "/item/get": return Response.json({ item: { item_id: "item-chase" }, status: { transactions: { last_successful_update: "2026-11-03T14:14:00Z" } } });
+      case "/investments/holdings/get":
+        if (!state.investments) return err("PRODUCTS_NOT_SUPPORTED", "ITEM_ERROR");
+        return Response.json({ accounts: [{ account_id: "acc-inv", name: "Individual", mask: "9999", type: "investment", balances: { current: 2350, available: 50 } }],
+          securities: [{ security_id: "s-aapl", ticker_symbol: "AAPL", name: "Apple Inc.", type: "equity" }, { security_id: "s-cash", ticker_symbol: "CUR:USD", name: "US Dollar", type: "cash" }],
+          holdings: [{ account_id: "acc-inv", security_id: "s-aapl", quantity: 10, institution_price: 230, institution_price_as_of: "2026-11-02", institution_value: 2300, cost_basis: 1800, iso_currency_code: "USD" },
+            { account_id: "acc-inv", security_id: "s-cash", quantity: 50, institution_price: 1, institution_value: 50, cost_basis: null, iso_currency_code: "USD" }] });
+      case "/investments/transactions/get":
+        if (!state.investments) return err("PRODUCTS_NOT_SUPPORTED", "ITEM_ERROR");
+        return Response.json({ securities: [{ security_id: "s-aapl", ticker_symbol: "AAPL" }], investment_transactions: [
+          { date: "2026-10-20", type: "buy", subtype: "buy", security_id: "s-aapl", name: "BUY AAPL", quantity: 2, price: 225, amount: 450 },
+          { date: "2026-10-28", type: "cash", subtype: "dividend", security_id: "s-aapl", name: "AAPL dividend", quantity: 0, price: 0, amount: -2.5 }] });
       case "/transactions/refresh": return Response.json({ request_id: "r" });
       case "/item/webhook/update": return Response.json({ item: { webhook: b.webhook } });
       case "/webhook_verification_key/get": return state.jwk ? Response.json({ key: { ...state.jwk, kid: b.key_id, alg: "ES256", use: "sig", created_at: 1, expired_at: null } }) : err("INVALID_KEY");
@@ -70,7 +81,7 @@ test("adds a bank through Hosted Link, then reads balances, transactions and car
   expect(link.url).toStartWith("https://secure.plaid.com/hl/");
   const create = state.seen.find((s: any) => s.path === "/link/token/create").body;
   expect(create.hosted_link).toBeDefined();
-  expect(create.optional_products).toEqual(["liabilities"]);
+  expect(create.optional_products).toEqual(["liabilities", "investments"]);
   expect(await p.finishLink(link.token)).toMatchObject({ done: false });
   state.finished = true;
   expect(await p.finishLink(link.token)).toMatchObject({ done: true, added: [{ institution: "Chase", accounts: 2 }] });
@@ -258,4 +269,30 @@ test("adding the first bank (and removing the last) tells the brain to look at i
   expect(n).toBe(1);
   await p.removeAll();
   expect(n).toBeGreaterThanOrEqual(2);
+});
+
+test("investments: a broker link asks for holdings first; holdings and trades come back; banks without them stay quiet", async () => {
+  const state: any = { seen: [], finished: true };
+  const p = new Plaid(newVault(), fakePlaid(state));
+  p.saveCreds(creds);
+  await p.finishLink((await p.startLink()).token);
+  // A plain bank: no investments, and no "problem" for it either.
+  const none: any = await p.agent(["holdings"]);
+  expect(none.holdings).toEqual([]);
+  expect(none.problems).toEqual([]);
+  expect(none.note).toContain("Add an investment account");
+
+  await p.startLink(null, null, "investments");
+  const create = state.seen.filter((x: any) => x.path === "/link/token/create").pop().body;
+  expect(create.products).toEqual(["investments"]);
+  expect(create.optional_products).toEqual(["transactions"]);
+
+  state.investments = true;
+  const h: any = await p.agent(["holdings"]);
+  expect(h.totalValue).toBe(2350);
+  expect(h.holdings[0]).toMatchObject({ symbol: "AAPL", quantity: 10, value: 2300, costBasis: 1800, gain: 500, priceAsOf: "2026-11-02" });
+  const t: any = await p.agent(["investments", "--days", "30"]);
+  expect(t.transactions.map((x: any) => [x.date, x.subtype, x.symbol])).toEqual([["2026-10-28", "dividend", "AAPL"], ["2026-10-20", "buy", "AAPL"]]);
+  const probe: any = await p.probe();
+  expect(probe.holdings[0]).toContain("AAPL · 10 sh · $2,300.00 (+$500.00)");
 });

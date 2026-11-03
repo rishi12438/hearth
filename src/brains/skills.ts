@@ -187,7 +187,7 @@ export function describeSkillStep(command: unknown): string | null {
   const c = String(command ?? "");
   if (/(^|[\s;&|/])hearth-open\s/.test(c)) return "Opening an app";
   const bank = c.match(/(?:^|[\s;&|/])hearth-plaid\s+(\w+)/)?.[1];
-  if (bank) return bank === "refresh" ? "Asking your bank for fresh data" : `Checking your bank${bank === "balances" ? " balances" : bank === "cards" ? " cards" : bank === "spending" ? ": spending" : ""}`;
+  if (bank) return bank === "refresh" ? "Asking your bank for fresh data" : `Checking your bank${bank === "balances" ? " balances" : bank === "cards" ? " cards" : bank === "spending" ? ": spending" : bank === "holdings" || bank === "investments" ? ": investments" : ""}`;
   const find = c.match(/(?:^|[\s;&|/])hearth-skill\s+(search|show)\s+(.+)/);
   if (find) return find[1] === "search" ? `Looking for a skill: ${find[2].replace(/["']/g, "").trim().slice(0, 50)}` : `Reading the ${find[2].replace(/["']/g, "").trim().slice(0, 40)} skill`;
   const tool = c.match(/(?:^|[\s;&|/])(enkidu-browser|enkidu-cua)\s/)?.[1];
