@@ -1,4 +1,4 @@
-import { h, clear, icon, toast } from "./dom.ts";
+import { h, clear, icon, toast, relTime } from "./dom.ts";
 import { call } from "./api.ts";
 
 // The connector grid (Settings → Connectors → Available) and the setup sheets for the connectors that came with it:
@@ -12,7 +12,7 @@ export type Tile = {
   /** Has a login, but the brain turns it away (bad, expired or revoked): reconnect it. */
   signedOut?: boolean;
 };
-type Usage = { harness: string; percent: number; full: boolean; fullUntil: number | null; plan: string | null; detail: string | null; windows: { label: string; usedPercent: number; resetsAt: number | null }[] };
+type Usage = { harness: string; percent: number; full: boolean; fullUntil: number | null; plan: string | null; detail: string | null; at: number | null; lastError: string | null; retryAfter: number | null; windows: { label: string; usedPercent: number; resetsAt: number | null }[] };
 
 export type Deps = {
   openSheet(title: string, body: Node | any[], opts?: { onClose?: () => void }): void;
@@ -108,7 +108,11 @@ export function grid(tiles: Tile[], q = ""): HTMLElement {
   }));
 }
 
-const usageLine = (u: Usage) => (u.full ? "At its limit" : u.windows.length ? `${u.percent}% of ${u.windows.reduce((a, b) => (b.usedPercent > a.usedPercent ? b : a)).label} used` : u.detail || "Usage shows after its next job");
+/** "checked 2 hours ago", when the numbers are the last good ones because the newest read failed. */
+const staleNote = (u: Usage) => (u.lastError && u.at ? `checked ${relTime(new Date(u.at).toISOString())}` : null);
+const usageLine = (u: Usage) => u.full ? "At its limit"
+  : u.windows.length ? [`${u.percent}% of ${u.windows.reduce((a, b) => (b.usedPercent > a.usedPercent ? b : a)).label} used`, staleNote(u)].filter(Boolean).join(" · ")
+  : u.detail || "Usage shows after its next job";
 
 export function openTile(t: Tile) {
   if (t.risk && !t.riskAccepted && t.state !== "connected") return riskSheet(t, () => openTile({ ...t, riskAccepted: true }));
@@ -143,8 +147,11 @@ function riskSheet(t: Tile, then: () => void) {
 // ---------- brains ----------
 
 function bars(u: Usage) {
-  if (!u.windows.length) return h("p", { class: "muted small" }, u.detail || "Usage shows after its next job.");
-  return h("div", { class: "ubars" }, u.windows.map((w) => h("div", { class: "ubar" },
+  const when = (ms: number) => new Date(ms).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" });
+  const later = u.retryAfter ? `, checking again ${when(u.retryAfter)}` : "";
+  if (!u.windows.length) return h("p", { class: "muted small" }, `${u.detail || "Usage shows after its next job"}${later}.`);
+  const stale = u.lastError && u.at ? h("p", { class: "muted small" }, `Last checked ${relTime(new Date(u.at).toISOString())} (${when(u.at)}). ${u.lastError}${later}.`) : null;
+  return h("div", { class: "ubars" }, stale, u.windows.map((w) => h("div", { class: "ubar" },
     h("div", { class: "ubar-top" }, h("span", null, w.label), h("span", null, `${w.usedPercent}%`)),
     h("div", { class: "ubar-track" }, (() => { const f = h("i", { class: w.usedPercent >= 90 ? "hot" : w.usedPercent >= 70 ? "warm" : "" }); f.style.width = `${Math.min(100, w.usedPercent)}%`; return f; })()),
     w.resetsAt ? h("small", { class: "muted" }, `Resets ${new Date(w.resetsAt).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })}`) : null)));

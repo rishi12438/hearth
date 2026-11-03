@@ -1,6 +1,6 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { readClaudeToken } from "./logins.ts";
 
 // Live usage of each brain's subscription, read from the provider (the way Mako does it), so work goes to the brain
@@ -19,9 +19,15 @@ export type Reading = {
   status: "ok" | "unknown" | "error";
   windows: UsageWindow[];
   plan?: string;
-  /** When this reading was taken (ms). */
+  /** When this reading was taken (ms). A failed read keeps the last good one's time, so "checked 2h ago" is honest. */
   at: number;
   detail?: string;
+  /** The last read failed: why (the numbers are then the last good ones). */
+  lastError?: string;
+  /** When we last tried to read, good or not (ms): the TTL counts from this, so a failing read isn't retried on every call. */
+  triedAt?: number;
+  /** The provider asked us to slow down: no reads at all before this (ms), not even forced ones. */
+  retryAfter?: number;
   /** The brain refused a job on its limit: treat it as full until then (ms). */
   fullUntil?: number;
 };
@@ -32,6 +38,8 @@ export const LIMIT_NEAR_PERCENT = 90;
 export const LIMIT_HEADROOM_PERCENT = 70;
 /** How long a reading stays fresh. */
 export const USAGE_TTL_MS = 5 * 60_000;
+/** Anthropic's usage page answered 429 and said no more than that: wait this long before asking again. */
+export const USAGE_BACKOFF_MS = 30 * 60_000;
 /** A brain with no reading yet counts as half full: below a busy one, above one we know is quiet. */
 const UNKNOWN_PERCENT = 50;
 
@@ -149,8 +157,7 @@ function claudeTokenNoKeychain(env: Record<string, string | undefined>, home: st
   try { return JSON.parse(readFileSync(path, "utf8"))?.claudeAiOauth?.accessToken || null; } catch { return null; }
 }
 
-export async function readClaudeUsage(token: string | null, fetcher: typeof fetch = fetch): Promise<Reading> {
-  const now = Date.now();
+export async function readClaudeUsage(token: string | null, fetcher: typeof fetch = fetch, now = Date.now()): Promise<Reading> {
   if (!token) return { harness: "claude", status: "unknown", windows: [], at: now, detail: "Usage shows after Claude's next job" };
   try {
     const r = await fetcher("https://api.anthropic.com/api/oauth/usage", {
@@ -159,6 +166,12 @@ export async function readClaudeUsage(token: string | null, fetcher: typeof fetc
     });
     // A rotated token, or a setup-token without the profile scope: not a failure, the next run's event fills it in.
     if (r.status === 401 || r.status === 403) return { harness: "claude", status: "unknown", windows: [], at: now, detail: "Usage shows after Claude's next job" };
+    // Anthropic throttles this page hard (Claude Code itself reads it too, on the same login). Back off, as long as it says.
+    if (r.status === 429) {
+      const secs = Number(r.headers.get("retry-after"));
+      const wait = Number.isFinite(secs) && secs > 0 ? Math.max(secs * 1000, USAGE_BACKOFF_MS) : USAGE_BACKOFF_MS;
+      return { harness: "claude", status: "error", windows: [], at: now, detail: "Anthropic is limiting usage checks", retryAfter: now + wait };
+    }
     if (!r.ok) return { harness: "claude", status: "error", windows: [], at: now, detail: `Anthropic answered ${r.status}` };
     return parseClaudeUsage(await r.json(), now);
   } catch (e: any) {
@@ -233,28 +246,51 @@ type Readers = { claude: () => Promise<Reading>; codex: () => Promise<Reading> }
 export class BrainUsage {
   private readings = new Map<string, Reading>();
   private inflight = new Map<string, Promise<Reading>>();
+  /** `file`: where the last good readings are kept, so a hub restart doesn't forget them. */
   constructor(private readers: Readers = {
     claude: () => readClaudeUsage(claudeToken()),
     codex: () => readCodexUsage(),
-  }, private clock: () => number = Date.now) {}
+  }, private clock: () => number = Date.now, private file?: string) {
+    if (!file) return;
+    try {
+      const saved = JSON.parse(readFileSync(file, "utf8"));
+      for (const r of Object.values(saved) as Reading[]) if (r?.status === "ok" && Array.isArray(r.windows)) this.readings.set(r.harness, r);
+    } catch {}
+  }
+
+  private save() {
+    if (!this.file) return;
+    try {
+      mkdirSync(dirname(this.file), { recursive: true });
+      const good = Object.fromEntries([...this.readings].filter(([, r]) => r.status === "ok"));
+      writeFileSync(this.file + ".tmp", JSON.stringify(good), { mode: 0o600 });
+      renameSync(this.file + ".tmp", this.file);
+    } catch {}
+  }
 
   get(harness: string) { return this.readings.get(harness); }
   all() { return Object.fromEntries(this.readings); }
 
-  /** Read again if stale (or `force`). Concurrent callers share one read. */
+  /** Read again if stale (or `force`). Concurrent callers share one read. While backing off, nothing reads, forced or not. */
   async refresh(harness: string, force = false): Promise<Reading | undefined> {
     const read = (this.readers as Record<string, (() => Promise<Reading>) | undefined>)[harness];
     if (!read) return undefined;
     const cur = this.readings.get(harness);
-    if (!force && cur && this.clock() - cur.at < USAGE_TTL_MS) return cur;
+    const now = this.clock();
+    if (cur?.retryAfter && cur.retryAfter > now) return cur;
+    if (!force && cur && now - (cur.triedAt ?? cur.at) < USAGE_TTL_MS) return cur;
     let p = this.inflight.get(harness);
     if (!p) {
       p = read().then((r) => {
         const prev = this.readings.get(harness);
-        // A failed read keeps the last good windows: old numbers beat none for routing.
-        const next = r.status === "ok" ? r : prev?.status === "ok" ? { ...prev, detail: r.detail } : r;
-        if (prev?.fullUntil && prev.fullUntil > this.clock() && !next.fullUntil) next.fullUntil = prev.fullUntil;
+        const tried = this.clock();
+        // A failed read keeps the last good windows (and their time): old numbers beat none, for routing and for you.
+        const next: Reading = r.status === "ok" ? { ...r, triedAt: tried }
+          : prev?.status === "ok" ? { ...prev, lastError: r.detail, triedAt: tried, retryAfter: r.retryAfter }
+          : { ...r, triedAt: tried };
+        if (prev?.fullUntil && prev.fullUntil > tried && !next.fullUntil) next.fullUntil = prev.fullUntil;
         this.readings.set(harness, next);
+        if (r.status === "ok") this.save();
         return next;
       }).finally(() => this.inflight.delete(harness));
       this.inflight.set(harness, p);
@@ -274,8 +310,10 @@ export class BrainUsage {
       if (i >= 0) windows[i] = w; else windows.push(w);
     }
     const rejected = info?.status === "rejected";
-    this.readings.set("claude", { ...(cur || {}), harness: "claude", status: "ok", windows, at: now,
+    // Fresh numbers from the run itself: no error to show, but any backoff on the usage page still stands.
+    this.readings.set("claude", { ...(cur || {}), harness: "claude", status: "ok", windows, at: now, detail: undefined, lastError: undefined,
       ...(rejected ? { fullUntil: toMs(info?.resetsAt) ?? now + 15 * 60_000 } : { fullUntil: cur?.fullUntil }) });
+    this.save();
   }
 
   /** The brain refused a job on its limit: full until it resets, then read again. */
@@ -299,6 +337,7 @@ export class BrainUsage {
       const r = this.readings.get(h);
       return {
         harness: h, status: r?.status ?? "unknown", plan: r?.plan ?? null, at: r?.at ?? null, detail: r?.detail ?? null,
+        lastError: r?.lastError ?? null, retryAfter: r?.retryAfter && r.retryAfter > now ? r.retryAfter : null,
         percent: Math.round(score(r, now)), full: !!(r?.fullUntil && r.fullUntil > now), fullUntil: r?.fullUntil ?? null,
         windows: windowsAt(r?.windows || [], now).map((w) => ({ label: windowLabel(w), usedPercent: Math.round(w.usedPercent), resetsAt: w.resetsAt })),
       };

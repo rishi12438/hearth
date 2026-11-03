@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BrainUsage, claudeEventWindows, parseClaudeUsage, parseCodexRateLimits, pickBrain, score, type Reading } from "../src/brains/usage.ts";
+import { BrainUsage, claudeEventWindows, parseClaudeUsage, readClaudeUsage, USAGE_BACKOFF_MS, parseCodexRateLimits, pickBrain, score, type Reading } from "../src/brains/usage.ts";
 import { cleanClaudeToken, detectBrains, lastRefresh, readClaudeToken, redactTokens, saveClaudeToken, saveCodexAuth, tokenInTranscript } from "../src/brains/logins.ts";
 
 const NOW = Date.parse("2026-11-01T12:00:00Z");
@@ -56,6 +56,39 @@ describe("live usage", () => {
     expect(await u.pick(["claude", "codex"])).toMatchObject({ harness: "codex" });
     u.noteClaudeEvent({ unifiedWindows: { seven_day: { utilization: 0.5, resetsAt: 1793901600 } } });
     expect(u.get("claude")?.windows.length).toBe(2);
+  });
+});
+
+describe("usage page throttling", () => {
+  test("a 429 backs off (even forced reads), keeps the last good numbers and their time, and survives a restart", async () => {
+    const file = join(mkdtempSync(join(tmpdir(), "hearth-usage-")), "brain-usage.json");
+    let t = NOW, calls = 0, answer = 200;
+    const fetcher = (async () => { calls++; return answer === 200 ? new Response(JSON.stringify({ seven_day: { utilization: 6, resets_at: null } })) : new Response("", { status: answer }); }) as any;
+    const u = new BrainUsage({ claude: () => readClaudeUsage("tok", fetcher, t), codex: async () => ok("codex", [1, null]) }, () => t, file);
+    await u.refresh("claude");
+    answer = 429; t += 6 * 60_000;
+    const r = await u.refresh("claude", true);
+    expect(r).toMatchObject({ status: "ok", at: NOW, lastError: "Anthropic is limiting usage checks" });
+    expect(r?.windows[0].usedPercent).toBe(6);
+    t += 10 * 60_000;
+    await u.refresh("claude", true); // still backing off: no request
+    expect(calls).toBe(2);
+    expect(u.view(["claude"])[0]).toMatchObject({ percent: 6, at: NOW, lastError: "Anthropic is limiting usage checks" });
+    t = NOW + 6 * 60_000 + USAGE_BACKOFF_MS + 1;
+    answer = 200;
+    const fresh = await u.refresh("claude");
+    expect(fresh?.at).toBe(t);
+    expect(fresh?.lastError).toBeUndefined();
+    expect(calls).toBe(3);
+    const again = new BrainUsage({ claude: async () => ok("claude"), codex: async () => ok("codex") }, () => t, file);
+    expect(again.get("claude")?.windows[0].usedPercent).toBe(6);
+  });
+
+  test("a failing read waits out the TTL instead of retrying on every call", async () => {
+    let calls = 0;
+    const u = new BrainUsage({ claude: async () => { calls++; return { harness: "claude", status: "error", windows: [], at: NOW, detail: "down" }; }, codex: async () => ok("codex") }, () => NOW);
+    await u.refresh("claude"); await u.refresh("claude"); await u.refresh("claude");
+    expect(calls).toBe(1);
   });
 });
 
