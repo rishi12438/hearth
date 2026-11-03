@@ -958,11 +958,47 @@ function drawHome() {
   if (!el) return;
   // Built once per visit and refreshed in place, so live updates don't flash the list.
   if (!homeNow) {
-    homeNow = h("div", { class: "nowlist" }) as HTMLElement;
-    clear(el, h("div", { class: "hello" },
-      h("h2", null, "What's on your mind?"), homeNow));
+    // ChatGPT-style: the question, the box right under it, then a few quiet suggestions. Nothing else.
+    homeNow = h("div", { class: "suggs", on: { keydown: suggKeys } }) as HTMLElement;
+    const wrap = document.getElementById("composerwrap");
+    clear(el, h("div", { class: "hero" }, h("h2", null, "What's on your mind?"), wrap, homeNow));
+    const box = document.getElementById("composer");
+    box?.addEventListener("keydown", (e) => { if (e.key === "ArrowDown" && !(box as HTMLTextAreaElement).value) { e.preventDefault(); homeNow?.querySelector<HTMLElement>(".sugg")?.focus(); } });
   }
-  fillNow(homeNow);
+  fillHome(homeNow);
+}
+
+/** Arrow keys walk the suggestions (and back up into the box), like the ChatGPT start screen. */
+function suggKeys(e: KeyboardEvent) {
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+  const rows = [...(e.currentTarget as HTMLElement).querySelectorAll<HTMLElement>(".sugg")];
+  const i = rows.indexOf(document.activeElement as HTMLElement);
+  if (i < 0) return;
+  e.preventDefault();
+  const next = rows[i + (e.key === "ArrowDown" ? 1 : -1)];
+  if (next) next.focus(); else if (e.key === "ArrowUp") document.getElementById("composer")?.focus();
+}
+
+/** Home's suggestions: anything waiting on you, the newest idea, and your last two rambles. One line each. */
+async function fillHome(el: HTMLElement) {
+  let b: any = { needsYou: [] };
+  try { b = await call("/api/board"); } catch {}
+  const row = (ic: Node, text: string, meta: string | null, fn: () => void, hover = "") =>
+    h("button", { class: "sugg", title: hover, on: { click: fn } }, h("span", { class: "suggic" }, ic), h("span", { class: "grow" }, text), meta ? h("small", null, meta) : null);
+  const fill = (text: string) => { const box = document.getElementById("composer") as HTMLTextAreaElement | null; if (box) { box.value = text; box.dispatchEvent(new Event("input")); box.focus(); } };
+  const when = (t: any) => t.updatedAt || t.createdAt || "";
+  const recent = [...S.threads].sort((a: any, b: any) => when(b).localeCompare(when(a))).slice(0, 2);
+  const idea = S.ideas[0];
+  const rows = [
+    ...(b.needsYou || []).slice(0, 1).map((c: any) => row(icon("lock", 16), c.title, "Needs you", () => { location.hash = c.threadId?.startsWith("tm-") ? `#t/${c.teammateId}` : `#c/${c.threadId}/${c.root}`; })),
+    idea ? row(icon("sparkle", 16), String(idea.title || "").replace(/^i can\s+/i, "").replace(/^./, (c) => c.toUpperCase()), null, () => fill(idea.prompt), idea.body || "") : null,
+    ...recent.map((t: any) => row(document.createTextNode("#"), t.title || channelName(t), shortAgo(when(t)), () => { location.hash = `#c/${t.id}`; })),
+  ].filter(Boolean) as Node[];
+  clear(el, rows.length ? rows : [
+    "Remind me at 6 to call mom, find a cheap dinner spot, and text Sam that Tuesday works",
+    "Plan 5 days in Tokyo in March: food, a day trip, and a map of where we go",
+    "I want to get to the gym 3 times a week, nag me if I don't",
+  ].map((x) => row(icon("sparkle", 16), x, null, () => fill(x))));
 }
 
 // ---------------- DMs tab ----------------
