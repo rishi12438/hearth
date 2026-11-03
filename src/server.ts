@@ -361,7 +361,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (method === "POST" && (!id || seg[3] === "messages")) {
           const b = await body(req);
           const fileIds = Array.isArray(b.fileIds) ? b.fileIds.map(String).slice(0, 5) : [];
-          const r = await hub.ramble(String(b.text || ""), id || undefined, fileIds);
+          const r = await hub.ramble(String(b.text || ""), id || undefined, fileIds, !id && b.projectId ? String(b.projectId) : undefined);
           if (r.error) throw new HttpError(400, r.error);
           return json(r.value);
         }
