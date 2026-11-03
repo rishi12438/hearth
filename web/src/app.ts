@@ -521,8 +521,7 @@ function drawSide() {
     h("nav", { class: "sgroup" },
       nav("brain", "Memory", false, openMemory),
       nav("users", "People", false, openPeople),
-      nav("sparkle", "Skills", false, openSkills),
-      nav("code", "Scripts", false, openScripts, S.state?.pendingScripts || 0)),
+      nav("sparkle", "Skills", false, openSkills)),
     h("div", { class: "sfoot" },
       nav("settings", "Settings", false, openSettings)),
   );
