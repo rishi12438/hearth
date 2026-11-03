@@ -259,7 +259,7 @@ NAMING a new teammate: the user should know what it does from the name alone, li
   Pick one no other teammate in CONTEXT.teammates has.
 
 Reply with ONLY a JSON object, no prose, no code fence:
-{"title":"3-6 word chat title","channel":"lowercase-dashed name for this ramble, at most 3 words and 24 characters, that covers EVERY topic in it (thisChat, openTasks and this message): one short word per topic when there are several, e.g. japan-trip, knee-gym, landlord-gift-tickets. CONTEXT.thisChannel is the current name: keep it if it still covers everything, otherwise update it. Always give one","reply":"...","facts":[{"fact":"...","notebook":"...","importance":1|2|3}],
+{"title":"3-6 word chat title","newTopic":true?,"channel":"lowercase-dashed name for this ramble, at most 3 words and 24 characters, that covers EVERY topic in it (thisChat, openTasks and this message): one short word per topic when there are several, e.g. japan-trip, knee-gym, landlord-gift-tickets. CONTEXT.thisChannel is the current name: keep it if it still covers everything, otherwise update it. Always give one","reply":"...","facts":[{"fact":"...","notebook":"...","importance":1|2|3}],
  "jobs":[{"id":"j1","label":"2-6 words the user sees","task":"...","teammate":"<existing name>","effort":"quick|light|heavy","dependsOn":["<earlier job id>"]?,"use":{"skill|workflow":"<library name>","inputs":{...}}?}
        | {"label":"...","task":"...","teammate":"<new name>","effort":"light|heavy","newTeammate":{"name":"...","description":"...","emoji":"🏋️"}}
        | {"addTo":"<open task id>","task":"..."} | {"continue":"<recent task id>","task":"..."}],
@@ -286,6 +286,9 @@ another angle), DON'T make a new job: use {"continue":"<recent task id>","task":
 answers in the same thread with the whole conversation so far, which is what the user expects. E.g. recent "Your Robinhood
 balance" + "how is it allocated and how has it grown?" -> continue it. When unsure whether it's the same subject, continue.
 Only make a new job for a genuinely new subject. Reply in one short line ("Money's on it in the Robinhood thread.").
+NEW TOPIC: if this ramble already has tasks (openTasks or recentTasks) and the new message has nothing to do with any of them or
+with thisChat (e.g. a ramble about card subscriptions, then "cheapest flights to Phoenix on Friday"), also set "newTopic": true.
+Plan its jobs as usual; the user is offered to move it to its own ramble. Never set it for a follow-up, a related step or chit-chat.
 PARALLEL: jobs run at the same time unless one needs another's result; then list that job's id in dependsOn
 (e.g. "find a restaurant" then "invite Sam to it").
 LABEL: the user sees only the label in the chat, like a Slack message title ("Pottery gift for Priya", "Radiohead tickets").
@@ -690,7 +693,7 @@ export class Brain {
         cmd = ["codex", "exec", ...(model ? ["-m", model] : []), "--skip-git-repo-check", "--ephemeral",
           ...(web ? ["-c", 'web_search="live"'] : []),
           ...(coder ? ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"] : ["--sandbox", "read-only"]),
-          "--color", "never", "-o", outFile, "-"];
+          "--color", "never", "--json", "-o", outFile, "-"];
         break;
       case "custom":
         if (!this.config.agentCmd?.length) throw new Error("The custom harness needs HEARTH_AGENT_CMD in the hub's .env");
@@ -709,8 +712,24 @@ export class Brain {
     const stop = () => proc.kill();
     meter?.signal?.addEventListener("abort", stop);
     // Read stdout as it comes so a streaming harness (claude stream-json) can report progress along the way.
+    // Codex streams JSONL events (--json): its notes, searches and commands become progress; the answer is still in outFile.
+    let codexLast = "", codexErrors = "";
+    const codexLine = (line: string) => {
+      let e: any; try { e = JSON.parse(line); } catch { return; }
+      if (e?.type === "error" || e?.type === "turn.failed") { codexErrors += `${e.message || e.error?.message || ""}\n`; return; }
+      const it = e?.item;
+      if (!it) return;
+      if (it.type === "agent_message" && e.type === "item.completed") codexLast = String(it.text || "");
+      if (!meter?.onProgress) return;
+      const q = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 70);
+      const step = it.type === "web_search" && e.type === "item.started" ? (q(it.query || it.action?.query) ? `Searching: ${q(it.query || it.action?.query)}` : "Searching the web")
+        : it.type === "command_execution" && e.type === "item.started" ? describeSkillStep(String(it.command || "").replace(/^\S*sh -l?c\s+/, "")) ?? "Working it out"
+        : it.type === "agent_message" && e.type === "item.completed" && b.mode !== "voice" ? noteStep(it.text)
+        : it.type === "reasoning" && e.type === "item.completed" ? noteStep(String(it.text || "").replace(/\*\*/g, "")) : null;
+      if (step) meter.onProgress(step);
+    };
     const readOut = async () => {
-      if (harness !== "claude") return new Response(proc.stdout).text();
+      if (harness !== "claude" && harness !== "codex") return new Response(proc.stdout).text();
       let all = "", buf = "";
       const dec = new TextDecoder();
       for await (const chunk of proc.stdout as unknown as AsyncIterable<Uint8Array>) {
@@ -719,6 +738,7 @@ export class Brain {
         let i: number;
         while ((i = buf.indexOf("\n")) >= 0) {
           const line = buf.slice(0, i); buf = buf.slice(i + 1);
+          if (harness === "codex") { codexLine(line); continue; }
           if (line.includes('"rate_limit_event"')) { try { this.usage.noteClaudeEvent(JSON.parse(line)?.rate_limit_info); } catch {} continue; }
           if (!meter?.onProgress || !line.includes('"type":"assistant"')) continue;
           try {
@@ -750,17 +770,18 @@ export class Brain {
         else if (meter) meter.unknown = true;
       } catch { if (meter) meter.unknown = true; }
     } else if (meter) meter.unknown = true;
-    if (outFile) { try { reply = readFileSync(outFile, "utf8"); } catch {} rmSync(outFile, { force: true }); }
+    if (harness === "codex") reply = codexLast; // stdout is the event stream, never the answer
+    if (outFile) { try { reply = readFileSync(outFile, "utf8") || reply; } catch {} rmSync(outFile, { force: true }); }
     // Signed out: say so plainly (never hand "Failed to authenticate" back as the answer) and flag it for Home/Connectors.
     if (harness === "claude" || harness === "codex") {
-      const problem = failed ? signInProblem(`${reply}\n${err}`) : null;
+      const problem = failed ? signInProblem(`${reply}\n${err}\n${codexErrors}`) : null;
       if (problem) {
         this.health.signedOut(harness, problem);
         throw new SignedOut(`${harness === "claude" ? "Claude Code" : "Codex"} is signed out on this hub (${problem}). Reconnect it in Connectors.`, harness);
       }
       if (!failed) this.health.fine(harness);
     }
-    if (code !== 0 && !reply.trim()) throw new Error(`${name} exited with ${code}: ${err.trim().slice(-300)}`);
+    if (code !== 0 && !reply.trim()) throw new Error(`${name} exited with ${code}: ${(codexErrors.trim() || err.trim()).slice(-300)}`);
     return reply.trim();
   }
 }
