@@ -943,7 +943,7 @@ function renderHome() {
   drawHome();
 }
 
-/** "I can follow up on your airline refund": the arrow runs it as a ramble; the × (on hover) makes it go away for good. */
+/** "I can follow up on your airline refund", shown as just its title: the arrow runs it as a ramble; the × (on hover) makes it go away for good. */
 function ideaCard(i: any) {
   const go = h("button", { class: "ideago", "aria-label": `Do it: ${i.title}`, on: { click: async (e: Event) => {
     (e.currentTarget as HTMLButtonElement).disabled = true;
@@ -953,7 +953,9 @@ function ideaCard(i: any) {
     S.ideas = S.ideas.filter((x) => x.id !== i.id); drawHome();
     try { await call(`/api/ideas/${i.id}/dismiss`, { body: {} }); toast("Got it. I won't suggest that again."); } catch (err) { handleError(err); }
   } } }, icon("x", 13));
-  return h("div", { class: "ideacard" }, no, h("b", null, i.title), i.body ? h("p", null, i.body) : null, go);
+  // "I can check your fares" → "Check your fares": the card is already Hearth offering, so the lead-in is noise. The detail is on hover.
+  const short = String(i.title || "").replace(/^i can\s+/i, "").replace(/^./, (c) => c.toUpperCase());
+  return h("div", { class: "ideacard", title: i.body || "" }, h("b", null, short), no, go);
 }
 
 async function lookForIdeas() {
