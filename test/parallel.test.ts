@@ -354,3 +354,17 @@ test("a new subject sent to the latest thread is handed back and planned as a ne
   const msg = (await store.all<any>("messages")).find((m) => m.text.startsWith("NEW"));
   expect(msg.continues).toBeUndefined();
 });
+
+test("a new ramble that's about an earlier one (even a closed one) is matched to it, without a model call", async () => {
+  await setup();
+  process.env.FAKE_MS = "20";
+  plan([{ label: "Your Robinhood balance", task: "check my Robinhood balance and holdings", teammate: "Hearth" }]);
+  const money = (await hub.ramble("what's my robinhood balance")).value!.thread.id;
+  plan([{ label: "Ramen near me", task: "find a good ramen place nearby", teammate: "Hearth" }]);
+  await hub.ramble("find me a good ramen place");
+  await until(() => allDone(2));
+  await hub.renameThread(money, "robinhood-money");
+  expect((await hub.similarRamble("how is my robinhood doing this month?"))?.threadId).toBe(money);
+  expect((await hub.similarRamble("can you plan my week please"))).toBeNull(); // only common words: no match
+  expect((await hub.similarRamble("weather in tokyo"))).toBeNull();
+});

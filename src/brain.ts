@@ -447,6 +447,22 @@ export function describeStep(name: string, input: any): string | null {
   if (name === "WebFetch") { try { return `Reading ${new URL(String(input?.url)).hostname.replace(/^www\./, "")}`; } catch { return "Reading a page"; } }
   return null;
 }
+/** Any other tool, in plain words. */
+function genericStep(name: string): string | null {
+  if (name === "Read") return "Reading through its notes";
+  if (name === "Grep" || name === "Glob") return "Looking through files";
+  if (name === "Bash") return "Working it out";
+  if (name === "Edit" || name === "Write") return "Putting it together";
+  if (name === "TodoWrite") return "Planning the steps";
+  return null;
+}
+/** The model's own line before it acts ("I'll pull your last three months of transactions"): its first sentence, short. */
+export function noteStep(text: unknown): string | null {
+  const t = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (t.length < 12 || t.startsWith("{") || t.startsWith("[[")) return null;
+  const first = t.match(/^.{12,110}?[.!?:](\s|$)/)?.[0].trim() || (t.length <= 110 ? t : `${t.slice(0, 105).replace(/\s+\S*$/, "")}…`);
+  return first.replace(/[:.]$/, "").replace(/^(okay|ok|sure|great|alright)[,!.]?\s+/i, "").replace(/^./, (c) => c.toUpperCase());
+}
 /**
  * The model deck. The orchestrator plans; quick does simple jobs on the cheapest model; the workhorse does normal ones; heavy
  * does hard ones. A job that's too much for its model moves up (quick -> workhorse -> heavy), so starting cheap is safe.
@@ -704,10 +720,11 @@ export class Brain {
         while ((i = buf.indexOf("\n")) >= 0) {
           const line = buf.slice(0, i); buf = buf.slice(i + 1);
           if (line.includes('"rate_limit_event"')) { try { this.usage.noteClaudeEvent(JSON.parse(line)?.rate_limit_info); } catch {} continue; }
-          if (!meter?.onProgress || !line.includes('"tool_use"')) continue;
+          if (!meter?.onProgress || !line.includes('"type":"assistant"')) continue;
           try {
             for (const c of JSON.parse(line)?.message?.content || []) {
-              const step = c?.type === "tool_use" ? describeStep(c.name, c.input) : null;
+              // What it's doing (a tool) or what it says it's about to do (its own short notes), so the user isn't left on "On it".
+              const step = c?.type === "tool_use" ? describeStep(c.name, c.input) ?? genericStep(c.name) : c?.type === "text" && b.mode !== "voice" ? noteStep(c.text) : null;
               if (step) meter.onProgress(step);
             }
           } catch {}

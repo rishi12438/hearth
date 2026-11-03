@@ -389,7 +389,7 @@ export class Hub {
     if (!thread) return null;
     const messages = (await this.store.all<Message>("messages")).filter((m) => m.threadId === id);
     const jobs = (await this.store.all<Job>("jobs")).filter((j) => j.threadId === id);
-    return { thread, messages, jobs };
+    return { thread, messages, jobs, steps: Object.fromEntries(jobs.filter((j) => this.steps.has(j.id)).map((j) => [j.id, this.steps.get(j.id)])) };
   }
 
   async removeThread(id: string) {
@@ -549,9 +549,11 @@ export class Hub {
   }
 
   /** A teammate said a fast-pathed message isn't about its thread: drop the follow-up and plan the message as usual. */
+  /** What each running job is doing right now, so a reload or another device sees it too. */
+  private steps = new Map<string, string>();
   private handedBack = new Map<string, string>(); // message id -> the task thread that handed it back
   private async handBack(job: Job, meter: Meter) {
-    this.stops.delete(job.id);
+    this.stops.delete(job.id); this.steps.delete(job.id);
     await this.addSpend(job.messageId, meter.costUsd);
     await this.store.remove("jobs", job.id);
     this.emit("job", { ...job, handedBack: true });
@@ -742,11 +744,11 @@ export class Hub {
     const stop = new AbortController();
     this.stops.set(job.id, stop);
     // Live progress for the app ("Searching: pottery gifts"): an event only, not stored, so it can't race the job's own saves.
-    const meter: Meter = { costUsd: 0, unknown: false, signal: stop.signal, onProgress: (what) => this.emit("progress", { jobId: job.id, threadId: job.threadId, text: what }) };
+    const meter: Meter = { costUsd: 0, unknown: false, signal: stop.signal, onProgress: (what) => { this.steps.set(job.id, what); this.emit("progress", { jobId: job.id, threadId: job.threadId, text: what }); } };
     const mate = await this.teammate(job.teammateId);
     let cur: Job = await this.saveJob({ ...job, status: "working", startedAt: this.clock().toISOString() });
     const finish = async (patch: Partial<Job>) => {
-      this.stops.delete(job.id);
+      this.stops.delete(job.id); this.steps.delete(job.id);
       if (stop.signal.aborted && this.cancelled.delete(job.id)) {
         this.additions.delete(job.id); this.additions.delete(`${job.id}:label`);
         await this.addSpend(job.messageId, meter.costUsd);
@@ -2206,6 +2208,41 @@ export class Hub {
     return scored.map(({ it }) => `- ${it.at.slice(0, 10)} (${it.where}): ${it.text.replace(/\s+/g, " ").slice(0, 350)}`).join("\n");
   }
 
+  /**
+   * Is a new ramble really about an earlier one (still open or closed)? A quick word match, no model call, so the app can
+   * offer "this goes with #robinhood-money" before anything is planned. Names, titles and task labels count double.
+   */
+  async similarRamble(text: string) {
+    const words = (s: string) => new Set((s.toLowerCase().match(/[a-z0-9]{3,}/g) || []).map((w) => w.replace(/(?<=\w{3})s$/, "")).filter((w) => !STOP.has(w)));
+    const q = words(text);
+    if (!q.size) return null;
+    const since = this.clock().getTime() - 60 * 86400_000;
+    const threads = (await this.store.all<Thread>("threads")).filter((t) => !t.id.startsWith("tm-") && t.id !== "main" && new Date(t.updatedAt || t.createdAt).getTime() > since);
+    if (!threads.length) return null;
+    const msgs = await this.store.all<Message>("messages"), jobs = await this.store.all<Job>("jobs");
+    const docs = threads.map((t) => {
+      const mine = jobs.filter((j) => j.threadId === t.id && !j.parentId);
+      return { t, strong: words([channelOf(t).replace(/-/g, " "), t.title, ...mine.filter((j) => !j.followsUp).map((j) => j.label || "")].join(" ")),
+        weak: words([...msgs.filter((m) => m.threadId === t.id && m.role === "user").map((m) => m.text), ...mine.map((j) => j.task)].join(" ")) };
+    });
+    const df = (w: string) => docs.filter((d) => d.strong.has(w) || d.weak.has(w)).length;
+    let best: { score: number; d: (typeof docs)[number]; hits: string[] } | null = null;
+    for (const d of docs) {
+      let score = 0, strong = 0; const hits: string[] = [];
+      for (const w of q) {
+        const s = d.strong.has(w), wk = d.weak.has(w);
+        if (!s && !wk) continue;
+        const idf = Math.log(1 + docs.length / df(w));
+        score += (s ? 2 : 1) * idf; hits.push(w); if (s) strong++;
+      }
+      // One word in its name or a task's label, or two in what was said there: enough to ask.
+      if ((strong >= 1 || hits.length >= 2) && (!best || score > best.score)) best = { score, d, hits };
+    }
+    if (!best) return null;
+    const t = best.d.t;
+    return { threadId: t.id, channel: channelOf(t), title: t.title, archived: !!t.archivedAt, why: best.hits.slice(0, 4) };
+  }
+
   async removeTeammate(id: string) {
     const t = await this.teammate(id);
     if (!t || t.id === "hearth") return false;
@@ -2762,6 +2799,12 @@ export const channelOf = (t: Thread) => t.channel || (t.num ? `ramble-${t.num}` 
 const slugOf = (name: string) => String(name).toLowerCase().replace(/^#/, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30);
 /** A short channel name from a title: its first three words that carry meaning ("Lisbon trip and Portuguese" -> lisbon-trip-portuguese). */
 const FILLER = new Set(["a", "an", "the", "and", "or", "in", "on", "at", "to", "for", "of", "with", "before", "after", "from", "my", "your", "about", "this", "that"]);
+/** Words too common to say two rambles are about the same thing (stems: a trailing "s" is dropped first). */
+const STOP = new Set(("the and for with this that from into your you yours mine about what when where which who how why are was were will would could "
+  + "should can cant don dont does did have has had just also some any more most much many very really thing stuff lot get got make made find help want "
+  + "need please tell show give check look know like think let put take use done going doing day today tomorrow tonight week weekend month year time "
+  + "now next last good best new old one two remind reminder plan quick idea there here then than them they their our out all not but yes okay hey hi "
+  + "thank thanks hearth again other another way back keep sure same").split(" "));
 const nameFrom = (title: string) => title.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w && !FILLER.has(w)).slice(0, 3).join(" ");
 
 /** The key an "Always allow" is saved under: one chat on one app. */

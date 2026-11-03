@@ -1155,7 +1155,7 @@ function openJump() {
 async function loadChat(id: string) {
   if (id !== "new") markSeen(id);
   if (id === "new") { S.chat = { thread: { id: "new", title: "" }, messages: [], jobs: [], approvals: [] }; drawChat(); setTimeout(() => document.getElementById("composer")?.focus(), 80); return; }
-  try { S.chat = await call(`/api/threads/${id}`); drawChat(); }
+  try { S.chat = await call(`/api/threads/${id}`); for (const [k, v] of Object.entries(S.chat.steps || {})) S.progress.set(k, String(v)); drawChat(); }
   catch (e) { if (e instanceof ApiError && e.status === 404) { location.hash = ""; return; } handleError(e); }
 }
 
@@ -1355,7 +1355,18 @@ function elapsed(since: string) {
   const s = Math.max(0, Math.round((Date.now() - new Date(since).getTime()) / 1000));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
-setInterval(() => { for (const el of document.querySelectorAll<HTMLElement>("[data-since]")) el.textContent = elapsed(el.dataset.since!); }, 1000);
+setInterval(() => {
+  for (const el of document.querySelectorAll<HTMLElement>("[data-since]")) el.textContent = elapsed(el.dataset.since!);
+  // Nothing heard from the teammate yet: say it's still going rather than sitting on "On it".
+  for (const el of document.querySelectorAll<HTMLElement>("[data-progress]")) {
+    if (S.progress.has(el.dataset.progress!)) continue;
+    const since = el.parentElement?.querySelector<HTMLElement>("[data-since]")?.dataset.since;
+    if (!since) continue;
+    const base = (el.dataset.base ??= el.textContent || "On it");
+    const s = (Date.now() - new Date(since).getTime()) / 1000;
+    el.textContent = s < 12 ? base : s < 45 ? "Working through it" : s < 120 ? "Still on it, this one takes a bit" : "Taking a while, still going";
+  }
+}, 1000);
 
 async function decide(id: string, yes: boolean, always = false) { try { await call(`/api/approvals/${id}/${yes ? "approve" : "reject"}`, { body: { always } }); } catch (e) { handleError(e); } }
 const CHANNEL_NAME: Record<string, string> = { whatsapp: "WhatsApp", slack: "Slack", gmail: "Gmail", instagram: "Instagram", linkedin: "LinkedIn", x: "X" };
@@ -1584,14 +1595,21 @@ async function send(text: string, threadJob?: string) {
   try {
     if (threadJob) { await call(`/api/jobs/${threadJob}/reply`, { body: { text: t } }); if (r.view === "chat") loadChat(r.id); return; }
     if (r.view === "dm") { await call(`/api/teammates/${r.id}/messages`, { body: { text: t } }); loadDm(r.id); return; }
-    const inChat = r.view === "chat" && r.id !== "new";
-    const res = inChat ? await call(`/api/threads/${r.id}/messages`, { body: { text: t, fileIds } }) : await call("/api/threads", { body: { text: t, fileIds, projectId: S.newProject || undefined } });
+    let inChat = r.view === "chat" && r.id !== "new";
+    let into = r.view === "chat" ? r.id : "";
+    // A new ramble that's really about an earlier one (even a closed one): offer to carry it on there, and do it after 5s.
+    if (!inChat && !S.newProject) {
+      const match = await Promise.race([call("/api/threads/similar", { body: { text: t } }).then((x: any) => x.match).catch(() => null), new Promise((ok) => setTimeout(() => ok(null), 900))]) as any;
+      if (match && (await suggestMove(match, t)) === "move") { inChat = true; into = match.threadId; }
+    }
+    const res = inChat ? await call(`/api/threads/${into}/messages`, { body: { text: t, fileIds } }) : await call("/api/threads", { body: { text: t, fileIds, projectId: S.newProject || undefined } });
     // Sent straight to a task's thread: nothing to plan, so no "splitting it up" line.
     if (!res.message?.continues?.length) S.planning = res.thread.id;
     if (!inChat) {
       if (S.newProject) { S.newProject = null; loadThreads(); }
       S.chat = { thread: res.thread, messages: [res.message], jobs: [], approvals: [] }; location.hash = `#c/${res.thread.id}`; return;
     }
+    if (into !== (r.view === "chat" ? r.id : "") || !S.chat || S.chat.thread.id !== into) { S.chat = null; location.hash = `#c/${into}`; return; }
     upsert(S.chat.messages, res.message);
     drawChat();
   } catch (e) {
@@ -1640,6 +1658,27 @@ function face(t: any, size = 44, state = "idle") {
 const jobStatus = new Map<string, string>();
 
 /** An in-app notification: who, what, tap to open. Stacks at the top; goes away on its own. */
+/** "Looks like this goes with #robinhood-money": moves there after 5s unless you keep it as a new ramble. */
+function suggestMove(match: { threadId: string; channel: string; archived?: boolean; why?: string[] }, text: string): Promise<"move" | "new"> {
+  return new Promise((done) => {
+    let left = 5, settled = false;
+    const count = h("span", null, `${left}s`);
+    const finish = (how: "move" | "new") => { if (settled) return; settled = true; clearInterval(timer); card.classList.remove("show"); setTimeout(() => card.remove(), 300); done(how); };
+    const card = h("div", { class: "banner suggest", role: "status" },
+      h("span", { class: "grow" },
+        h("b", null, `Looks like this goes with #${match.channel}`),
+        h("small", null, `${match.archived ? "From an earlier ramble. " : ""}Moving it there in `, count, ` · “${text.slice(0, 60)}${text.length > 60 ? "…" : ""}”`),
+        h("i", { class: "suggestbar" })),
+      h("button", { class: "btn small ghost", on: { click: () => finish("new") } }, "Keep as new"),
+      h("button", { class: "btn small primary", on: { click: () => finish("move") } }, "Move now"));
+    let stack = document.getElementById("banners");
+    if (!stack) { stack = h("div", { id: "banners", "aria-live": "polite" }); document.body.appendChild(stack); }
+    stack.appendChild(card);
+    requestAnimationFrame(() => card.classList.add("show"));
+    const timer = setInterval(() => { left--; count.textContent = `${left}s`; if (left <= 0) finish("move"); }, 1000);
+  });
+}
+
 function banner(who: any, title: string, text: string, onTap: () => void) {
   const b = h("button", { class: "banner", on: { click: () => { b.remove(); onTap(); } } },
     face(who, 34, "done"), h("span", { class: "grow" }, h("b", null, title), h("small", null, text)));
