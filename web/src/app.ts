@@ -559,17 +559,19 @@ async function drawProject(id: string) {
   try { d = await call(`/api/projects/${id}`); } catch (e) { if (e instanceof ApiError && e.status === 404) { location.hash = ""; return; } return handleError(e); }
   const p = d.project;
   const start = () => { S.newProject = p.id; location.hash = "#c/new"; };
-  const sec = (title: string, extra: Node | null, body: Node) => h("section", { class: "psec" }, h("div", { class: "psec-head" }, h("h3", null, title), extra), body);
+  const sec = (title: string, extra: Node | null, ...body: (Node | null)[]) => h("section", { class: "psec" }, h("div", { class: "psec-head" }, h("h3", null, title), extra), ...body);
   clear(el,
     h("div", { class: "phead" },
-      h("span", { class: "pemoji" }, p.emoji || icon("folder", 26)),
-      h("span", { class: "grow" }, h("h1", null, p.name), h("small", null, `${d.rambles.length} ramble${d.rambles.length === 1 ? "" : "s"} · ${d.memory.length} thing${d.memory.length === 1 ? "" : "s"} remembered`)),
-      h("button", { class: "sbtn", on: { click: () => projectMenu(p) } }, "Edit"),
-      h("button", { class: "sbtn primary", on: { click: start } }, icon("plus", 14), "New ramble")),
+      h("button", { class: "pemoji", title: "Change icon", "aria-label": "Change icon", on: { click: (e: Event) => emojiPicker(e.currentTarget as HTMLElement, p.emoji || "", (v) => saveProject(p, { emoji: v })) } }, p.emoji || icon("folder", 26)),
+      h("div", { class: "grow" },
+        inlineEdit(p.name, "Untitled", "ptitle", (v) => saveProject(p, { name: v }), false),
+        inlineEdit(p.about || "", "Add a description…", "pabout", (v) => saveProject(p, { about: v }), true),
+        h("small", null, `${d.rambles.length} ramble${d.rambles.length === 1 ? "" : "s"} · ${d.memory.length} thing${d.memory.length === 1 ? "" : "s"} remembered`)),
+      h("button", { class: "pmore", title: "More", "aria-label": "More", on: { click: (e: Event) => projectMore(e.currentTarget as HTMLElement, p) } }, icon("more", 18))),
     sec("Rambles", null, d.rambles.length ? h("div", { class: "wcard" }, d.rambles.map((t: any) =>
       h("button", { class: "wrow", on: { click: () => { location.hash = `#c/${t.id}`; } } }, h("span", { class: "shash big" }, "#"),
         h("span", { class: "grow" }, h("b", null, channelName(t)), h("small", null, `${t.title || ""}${t.archived ? " · archived" : ""}`)))))
-      : h("p", { class: "wlede" }, "No rambles yet. Start one here, or drag a ramble from the sidebar onto this project.")),
+      : null, h("button", { class: "paddrow", on: { click: start } }, icon("plus", 16), d.rambles.length ? "New ramble" : "New ramble, or drag one here from the sidebar")),
     sec("Memory", null, d.memory.length ? h("div", { class: "wcard" }, d.memory.map((f: any) =>
       h("div", { class: "wrow" }, h("span", { class: "grow" }, h("b", { class: "plain" }, f.fact), h("small", null, dayLabel(f.createdAt))))))
       : h("p", { class: "wlede" }, "What teammates learn while working in this project's rambles shows up here, and they use it in every ramble in it.")),
@@ -578,13 +580,72 @@ async function drawProject(id: string) {
   );
 }
 
-function projectMenu(p: any) {
-  const name = h("input", { class: "field", value: p.name, maxLength: 60 }) as HTMLInputElement;
-  const emoji = h("input", { class: "field", value: p.emoji || "", maxLength: 4, style: "width:120px" }) as HTMLInputElement;
-  openSheet(p.name, [
-    h("label", null, h("span", null, "Name"), name), h("label", null, h("span", null, "Emoji"), emoji),
-    h("button", { class: "btn primary big", on: { click: async () => { try { await call(`/api/projects/${p.id}`, { method: "PATCH", body: { name: name.value, emoji: emoji.value.trim() } }); closeSheet(); } catch (e) { handleError(e); } } } }, "Save"),
-    h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet(`Delete ${p.name}?`, "Its rambles and what it remembered stay; they're just not grouped anymore.", "Delete", async () => { await call(`/api/projects/${p.id}`, { method: "DELETE" }); location.hash = ""; }) } }, icon("trash", 16), "Delete project"),
+/** Save a project field in place, then refresh the sidebar (the page itself already shows the new value). */
+async function saveProject(p: any, patch: { name?: string; emoji?: string; about?: string }) {
+  try { Object.assign(p, await call(`/api/projects/${p.id}`, { method: "PATCH", body: patch })); await loadProjects(); if (patch.emoji !== undefined) drawProject(p.id); }
+  catch (e) { handleError(e); }
+}
+
+/** Notion-style text you click to edit. A Save pill shows while it has changes; Enter (⌘Enter when multiline) or leaving the field saves, Esc puts it back. */
+function inlineEdit(value: string, placeholder: string, cls: string, save: (v: string) => Promise<void> | void, multiline: boolean): Node {
+  let saved = value;
+  const text = h("div", { class: `ietext ${cls}`, contenteditable: "plaintext-only", spellcheck: "false", role: "textbox", "aria-label": placeholder, "data-ph": placeholder }, value) as HTMLElement;
+  const btn = h("button", { class: "iesave", on: { pointerdown: (e: Event) => e.preventDefault(), click: () => commit() } }, "Save") as HTMLButtonElement;
+  const wrap = h("div", { class: "iewrap" }, text, btn);
+  const cur = () => (text.textContent || "").replace(/\u00a0/g, " ").trim();
+  const dirty = () => wrap.classList.toggle("dirty", cur() !== saved);
+  async function commit() {
+    const v = cur();
+    if (!multiline && !v) { text.textContent = saved; return dirty(); } // a project always has a name
+    if (v === saved) return dirty();
+    saved = v; dirty(); await save(v);
+  }
+  text.addEventListener("input", dirty);
+  text.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (!multiline || e.metaKey || e.ctrlKey) && !e.isComposing) { e.preventDefault(); commit(); text.blur(); }
+    else if (e.key === "Escape") { text.textContent = saved; dirty(); text.blur(); }
+  });
+  text.addEventListener("blur", () => commit());
+  return wrap;
+}
+
+/** A small popover anchored under an element, closed by clicking outside, Esc or navigating. */
+function popAt(anchor: HTMLElement, content: (Node | null)[], cls = ""): () => void {
+  if (closeDrop) { const was = (closeDrop as any).anchor; closeDrop(); if (was === anchor) return () => {}; }
+  const menu = h("div", { class: `dropmenu ${cls}`, role: "menu" }, content);
+  document.body.append(menu);
+  const r = anchor.getBoundingClientRect();
+  const left = r.left + menu.offsetWidth > innerWidth - 8 ? r.right - menu.offsetWidth : r.left;
+  menu.style.left = `${Math.max(8, left)}px`;
+  menu.style.top = `${Math.min(r.bottom + 6, innerHeight - menu.offsetHeight - 8)}px`;
+  const outside = (e: Event) => { if (!menu.contains(e.target as Node) && !anchor.contains(e.target as Node)) close(); };
+  const key = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
+  function close() { menu.remove(); document.removeEventListener("pointerdown", outside, true); document.removeEventListener("keydown", key); window.removeEventListener("hashchange", close); closeDrop = null; }
+  closeDrop = Object.assign(close, { anchor });
+  setTimeout(() => { document.addEventListener("pointerdown", outside, true); document.addEventListener("keydown", key); window.addEventListener("hashchange", close); });
+  return close;
+}
+
+const PROJECT_EMOJI = ["📁", "💍", "🏠", "✈️", "💼", "💰", "🧾", "📚", "🎓", "🏋️", "🍳", "🎉", "🚗", "🐶", "👶", "❤️", "🌱", "🛠️", "🎨", "🎵", "💻", "📈", "🧠", "🧳", "🏖️", "🗓️", "🩺", "🧸", "⭐", "🔥"];
+
+function emojiPicker(anchor: HTMLElement, current: string, pick: (v: string) => void) {
+  const own = h("input", { class: "dropsearch", placeholder: "Or type any emoji…", maxLength: 8, "aria-label": "Emoji" }) as HTMLInputElement;
+  const choose = (v: string) => { close(); if (v !== current) pick(v); };
+  own.addEventListener("keydown", (e) => { if (e.key === "Enter" && own.value.trim()) { e.preventDefault(); choose(own.value.trim()); } });
+  const close = popAt(anchor, [
+    own,
+    h("div", { class: "emojigrid" }, PROJECT_EMOJI.map((x) => h("button", { class: `emojicell ${x === current ? "on" : ""}`, on: { click: () => choose(x) } }, x))),
+    current ? h("div", { class: "dropsep" }) : null,
+    current ? h("button", { class: "droprow muted", on: { click: () => choose("") } }, icon("x", 16), h("span", { class: "grow" }, "Remove icon")) : null,
+  ], "emojipop");
+  own.focus();
+}
+
+function projectMore(anchor: HTMLElement, p: any) {
+  const close = popAt(anchor, [
+    h("button", { class: "droprow", on: { click: () => { close(); S.newProject = p.id; location.hash = "#c/new"; } } }, icon("plus", 16), h("span", { class: "grow" }, "New ramble")),
+    h("div", { class: "dropsep" }),
+    h("button", { class: "droprow danger", on: { click: () => { close(); confirmSheet(`Delete ${p.name}?`, "Its rambles and what it remembered stay; they're just not grouped anymore.", "Delete", async () => { await call(`/api/projects/${p.id}`, { method: "DELETE" }); await loadProjects(); location.hash = ""; }); } } }, icon("trash", 16), h("span", { class: "grow" }, "Delete project")),
   ]);
 }
 
@@ -1695,15 +1756,15 @@ const CONNECTORS: Connector[] = [
     ["path", { d: "M19 18V8.5", stroke: "#34A853", "stroke-width": 2.4, "stroke-linecap": "round" }]] },
   { id: "calendar", name: "Google Calendar", blurb: "New invites and heads-ups before events", group: "Featured", via: "google", bg: "#fff", shapes: [
     ["rect", { x: 4, y: 5, width: 16, height: 15, rx: 3, fill: "#4285F4" }], ["rect", { x: 4, y: 5, width: 16, height: 4, rx: 2, fill: "#1A73E8" }],
-    ["text", { x: 12, y: 18, "text-anchor": "middle", "font-size": 8.5, "font-weight": 800, fill: "#fff", "font-family": "-apple-system, sans-serif" }]] },
+    ["text", { x: 12, y: 18, "text-anchor": "middle", "font-size": 8.5, "font-weight": 700, fill: "#fff", "font-family": "-apple-system, sans-serif" }]] },
   { id: "linkedin", name: "LinkedIn", blurb: "Messages, notifications and invites", group: "Social", via: "linkedin", bg: "#0A66C2", shapes: [
-    ["text", { x: 12, y: 16.5, "text-anchor": "middle", "font-size": 12, "font-weight": 800, fill: "#fff", "font-family": "-apple-system, sans-serif" }]] },
+    ["text", { x: 12, y: 16.5, "text-anchor": "middle", "font-size": 12, "font-weight": 700, fill: "#fff", "font-family": "-apple-system, sans-serif" }]] },
   { id: "x", name: "X", blurb: "Notifications, mentions and DMs", group: "Social", via: "x", bg: "#000", shapes: [
     ["path", { d: "M6 6l12 12M18 6L6 18", stroke: "#fff", "stroke-width": 2.2, "stroke-linecap": "round" }]] },
   { id: "instagram", name: "Instagram", blurb: "DMs and notifications", group: "Social", via: "instagram", bg: "#E1306C", shapes: [
     ["rect", { x: 6, y: 6, width: 12, height: 12, rx: 3.5, fill: "none", stroke: "#fff", "stroke-width": 1.8 }], ["circle", { cx: 12, cy: 12, r: 2.8, fill: "none", stroke: "#fff", "stroke-width": 1.8 }]] },
   { id: "outlook", name: "Outlook Mail", blurb: "New mail, read-only", group: "Productivity", bg: "#0F6CBD", shapes: [
-    ["text", { x: 12, y: 16.5, "text-anchor": "middle", "font-size": 12, "font-weight": 800, fill: "#fff", "font-family": "-apple-system, sans-serif" }]] },
+    ["text", { x: 12, y: 16.5, "text-anchor": "middle", "font-size": 12, "font-weight": 700, fill: "#fff", "font-family": "-apple-system, sans-serif" }]] },
   { id: "reddit", name: "Reddit", blurb: "Messages and replies", group: "Social", via: "reddit", bg: "#FF4500", shapes: [
     ["circle", { cx: 12, cy: 13, r: 7, fill: "#fff" }], ["circle", { cx: 9.3, cy: 12.5, r: 1, fill: "#FF4500" }], ["circle", { cx: 14.7, cy: 12.5, r: 1, fill: "#FF4500" }]] },
   { id: "github", name: "GitHub", blurb: "Notifications and mentions", group: "Productivity", via: "github", bg: "#111", shapes: [
