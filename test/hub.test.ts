@@ -491,3 +491,14 @@ test("Activity lists who's working right now, and Stop ends a running job withou
   expect(done.result).toBe("Stopped by you.");
   expect((await hub.stopJob(job.id)).error).toBeTruthy();
 });
+
+test("activity seen mark lives on the hub and only moves forward", async () => {
+  expect(await hub.inboxSeen()).toBe("");
+  const first = await hub.markInboxSeen();
+  expect(first).toBeTruthy();
+  expect(await hub.inboxSeen()).toBe(first);
+  await Bun.sleep(5);
+  const second = await hub.markInboxSeen();
+  expect(second > first).toBe(true);
+  expect(await hub.inboxSeen()).toBe(second);
+});
