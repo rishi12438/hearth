@@ -1131,7 +1131,7 @@ function dayDivider(at: string) {
 async function fillNow(el: HTMLElement) {
   let b: any = { working: [], next: [], needsYou: [] };
   try { b = await call("/api/board"); } catch {}
-  const row = (lead: Node, title: string, sub: string, fn: () => void) => h("button", { class: "nowrow", on: { click: fn } }, lead, h("span", { class: "grow" }, h("b", null, title), h("small", null, sub)), icon("chevron", 16));
+  const row = (lead: Node | null, title: string, sub: string | null, fn: () => void, hover = "") => h("button", { class: "nowrow", title: hover, on: { click: fn } }, lead, h("span", { class: "grow" }, h("b", null, title), sub ? h("small", null, sub) : null), icon("chevron", 16));
   const go = (c: any) => () => { location.hash = c.kind === "plan" ? "#b" : c.threadId?.startsWith("tm-") ? `#t/${c.teammateId}` : `#c/${c.threadId}/${c.root}`; };
   const sec = (title: string, rows: Node[]) => rows.length ? h("section", { class: "nowsec" }, h("h4", null, title), h("div", { class: "nowcard" }, rows)) : null;
   const when = (t: any) => t.updatedAt || t.createdAt || "";
@@ -1140,10 +1140,11 @@ async function fillNow(el: HTMLElement) {
     sec("Needs you", b.needsYou.slice(0, 3).map((c: any) => row(face(mate(c.teammateId), 32, jobState({ status: c.status })), c.title, c.need ? `Stuck: ${c.need}` : "Needs your OK", go(c)))),
     sec("In progress", b.working.slice(0, 4).map((c: any) => row(face(mate(c.teammateId), 32, "working"), c.title, `${mate(c.teammateId).name} · ${S.progress.get(c.id) || "on it"}`, go(c)))),
     sec("Coming up", b.next.filter((c: any) => c.kind === "plan").slice(0, 3).map((c: any) => row(emoji3d("🔔", "ideaicon small"), c.title, `${dayLabel(c.at)} ${clockTime(c.at)}`, go(c)))),
-    sec("Ideas", S.ideas.slice(0, 2).map((i: any) => row(emoji3d(i.emoji || "💡", "ideaicon small"), i.title, i.body || "Tap to ask for it", () => {
+    // One quiet line per idea: no emoji, no "I can" lead-in; the detail is on hover.
+    sec("Ideas", S.ideas.slice(0, 2).map((i: any) => row(null, String(i.title || "").replace(/^i can\s+/i, "").replace(/^./, (c) => c.toUpperCase()), null, () => {
       const box = document.getElementById("composer") as HTMLTextAreaElement | null;
       if (box) { box.value = i.prompt; box.dispatchEvent(new Event("input")); box.focus(); }
-    }))),
+    }, i.body || ""))),
     sec("Continue with", recent.map((t: any) => row(h("span", { class: "hicon" }, "#"), t.title || channelName(t), `#${channelName(t)} · ${shortAgo(when(t))}`, () => { location.hash = `#c/${t.id}`; }))),
   ].filter(Boolean) as Node[];
   clear(el, parts.length ? parts : h("div", { class: "starters" }, [
