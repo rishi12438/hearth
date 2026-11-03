@@ -75,6 +75,9 @@ test("skill steps read as plain progress lines", () => {
   expect(describeSkillStep("hearth-open chrome https://x.com")).toBe("Opening an app");
   expect(describeSkillStep("hearth-skill search record screen")).toBe("Looking for a skill: record screen");
   expect(describeSkillStep("hearth-skill show enkidu-cua")).toBe("Reading the enkidu-cua skill");
+  expect(describeSkillStep(`enkidu-browser session use hearth-a open '{\"url\":\"https://www.aliexpress.com/p/order/index.html\"}'`)).toBe("Browsing aliexpress.com");
+  expect(describeSkillStep(`S=hearth-a; enkidu-browser session new $S '{"recordName":"x"}'`)).toBe("Opening the browser");
+  expect(describeSkillStep("enkidu-browser session close hearth-a")).toBe("Closing the browser");
   expect(describeSkillStep("ls -la")).toBeNull();
 });
 

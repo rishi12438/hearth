@@ -459,7 +459,7 @@ export function describeCommand(command: unknown): string | null {
   let c = String(command ?? "").trim();
   // Codex wraps every command: /bin/zsh -lc 'curl …'. Unwrap it.
   const wrapped = c.match(/^\S*\b(?:ba|z)?sh\s+-l?c\s+(['"])([\s\S]*)\1$/);
-  if (wrapped) c = wrapped[2].replace(/'\\''/g, "'");
+  if (wrapped) c = wrapped[1] === "'" ? wrapped[2].replace(/'\\''/g, "'") : wrapped[2].replace(/\\(["\\$`])/g, "$1");
   else c = c.replace(/^\S*\b(?:ba|z)?sh\s+-l?c\s+/, "");
   const skill = describeSkillStep(c);
   if (skill) return skill;

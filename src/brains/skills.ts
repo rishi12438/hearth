@@ -192,8 +192,11 @@ export function describeSkillStep(command: unknown): string | null {
   if (find) return find[1] === "search" ? `Looking for a skill: ${find[2].replace(/["']/g, "").trim().slice(0, 50)}` : `Reading the ${find[2].replace(/["']/g, "").trim().slice(0, 40)} skill`;
   const tool = c.match(/(?:^|[\s;&|/])(enkidu-browser|enkidu-cua)\s/)?.[1];
   if (!tool) return null;
-  const url = c.match(/"url"\s*:\s*"([^"]+)"/)?.[1];
+  // Any web address in the call, however it's quoted or escaped ('{"url":"…"}', "{\"url\":\"…\"}").
+  const url = c.match(/https?:\/\/[^\s'"\\]+/)?.[0];
   if (url) { try { return `Browsing ${new URL(url).hostname.replace(/^www\./, "")}`; } catch {} }
+  if (/\ssession\s+new\b/.test(c)) return tool === "enkidu-cua" ? "Getting the screen ready" : "Opening the browser";
+  if (/\ssession\s+close\b/.test(c)) return tool === "enkidu-cua" ? "Done with the screen" : "Closing the browser";
   if (/\s(screenshot|get_window_state|observe)\b/.test(c)) return tool === "enkidu-cua" ? "Looking at the screen" : "Looking at the page";
   if (/\srecord\b/.test(c)) return "Recording";
   if (/\s(click|type|type_text|press|press_key|scroll|drag)\b/.test(c)) return tool === "enkidu-cua" ? "Using the app" : "Using the page";
