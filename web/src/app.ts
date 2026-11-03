@@ -991,7 +991,7 @@ async function fillHome(el: HTMLElement) {
   const rows = [
     ...(b.needsYou || []).slice(0, 1).map((c: any) => row(icon("lock", 16), c.title, "Needs you", () => { location.hash = c.threadId?.startsWith("tm-") ? `#t/${c.teammateId}` : `#c/${c.threadId}/${c.root}`; })),
     idea ? row(icon("sparkle", 16), String(idea.title || "").replace(/^i can\s+/i, "").replace(/^./, (c) => c.toUpperCase()), null, () => fill(idea.prompt), idea.body || "") : null,
-    ...recent.map((t: any) => row(document.createTextNode("#"), t.title || channelName(t), shortAgo(when(t)), () => { location.hash = `#c/${t.id}`; })),
+    ...recent.map((t: any) => row(icon("history", 16), t.title || channelName(t), shortAgo(when(t)), () => { location.hash = `#c/${t.id}`; }, "Continue this ramble")),
   ].filter(Boolean) as Node[];
   clear(el, rows.length ? rows : [
     "Remind me at 6 to call mom, find a cheap dinner spot, and text Sam that Tuesday works",
