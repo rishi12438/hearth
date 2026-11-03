@@ -943,20 +943,17 @@ function renderHome() {
   drawHome();
 }
 
-/** "I can follow up on your airline refund": yes runs it as a ramble, no makes it go away for good. */
-function ideaRow(i: any) {
-  const busy = (b: HTMLButtonElement) => { b.disabled = true; };
-  return h("div", { class: "idea" }, h("span", { class: "ideamoji", "aria-hidden": "true" }, i.emoji || "💡"),
-    h("div", { class: "grow" }, h("b", null, i.title), i.body ? h("p", null, i.body) : null,
-      h("div", { class: "ideabtns" },
-        h("button", { class: "btn small primary", on: { click: async (e: Event) => {
-          busy(e.currentTarget as HTMLButtonElement);
-          try { const r = await call(`/api/ideas/${i.id}/accept`, { body: {} }); S.ideas = S.ideas.filter((x) => x.id !== i.id); location.hash = `#c/${r.thread.id}`; } catch (err) { handleError(err); }
-        } } }, "Do it"),
-        h("button", { class: "btn small ghost", on: { click: async () => {
-          S.ideas = S.ideas.filter((x) => x.id !== i.id); drawHome();
-          try { await call(`/api/ideas/${i.id}/dismiss`, { body: {} }); toast("Got it. I won't suggest that again."); } catch (err) { handleError(err); }
-        } } }, "Not now"))));
+/** "I can follow up on your airline refund": the arrow runs it as a ramble; the × (on hover) makes it go away for good. */
+function ideaCard(i: any) {
+  const go = h("button", { class: "ideago", "aria-label": `Do it: ${i.title}`, on: { click: async (e: Event) => {
+    (e.currentTarget as HTMLButtonElement).disabled = true;
+    try { const r = await call(`/api/ideas/${i.id}/accept`, { body: {} }); S.ideas = S.ideas.filter((x) => x.id !== i.id); location.hash = `#c/${r.thread.id}`; } catch (err) { handleError(err); }
+  } } }, icon("chevron", 16));
+  const no = h("button", { class: "ideano", "aria-label": "Not now", title: "Not now", on: { click: async () => {
+    S.ideas = S.ideas.filter((x) => x.id !== i.id); drawHome();
+    try { await call(`/api/ideas/${i.id}/dismiss`, { body: {} }); toast("Got it. I won't suggest that again."); } catch (err) { handleError(err); }
+  } } }, icon("x", 13));
+  return h("div", { class: "ideacard" }, no, h("b", null, i.title), i.body ? h("p", null, i.body) : null, go);
 }
 
 async function lookForIdeas() {
@@ -993,7 +990,7 @@ function drawHome() {
   clear(top,
     brainStrip(),
     linkStrip(),
-    S.ideas.length ? h("section", { class: "ideas" }, h("h2", { class: "bigtitle" }, "Ideas"), S.ideas.map(ideaRow)) : null,
+    S.ideas.length ? h("section", { class: "ideas" }, h("h2", { class: "bigtitle" }, "Ideas"), h("div", { class: "ideacards" }, S.ideas.slice(0, 3).map(ideaCard))) : null,
     h("div", { class: "tiles" }, tiles.map(([ic, title, sub, fn, hot]) =>
       h("button", { class: `tilebtn ${hot ? "hot" : ""}`, on: { click: fn } }, h("span", { class: "ti" }, icon(ic, 22), hot ? h("i", { class: "dot" }) : null), h("b", null, title), h("small", null, sub)))));
   clear(el,
