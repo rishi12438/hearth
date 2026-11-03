@@ -146,8 +146,8 @@ let lastLayout = "";
 function show() {
   closeSheet();
   const r = route();
-  // Re-render the skeleton only when the layout changes (opening a thread beside the chat keeps the chat in place).
-  const layout = r.view === "chat" ? `chat:${r.id}:${r.job && !wide() ? "thread" : wide() && r.job ? "split" : "chat"}` : r.view === "dm" ? `dm:${r.id}` : r.view === "board" ? `board:${r.id || ""}` : r.view === "project" ? `project:${r.id}` : r.view;
+  // Re-render the skeleton only when the layout changes (a ramble and one of its threads are different screens).
+  const layout = r.view === "chat" ? `chat:${r.id}:${r.job ? "thread" : "chat"}` : r.view === "dm" ? `dm:${r.id}` : r.view === "board" ? `board:${r.id || ""}` : r.view === "project" ? `project:${r.id}` : r.view;
   if (layout !== lastLayout) {
     lastLayout = layout;
     if (r.view === "home") renderHome();
@@ -213,8 +213,6 @@ function onEvent(e: { type: string; data?: any }) {
     case "message":
       if (open && S.chat && e.data.threadId === open) {
         upsert(S.chat.messages, e.data); drawChat();
-        // Hearth carried what you just said on in a task's thread: on a wide screen, open it beside the chat.
-        if (wide() && r.view === "chat" && !r.job && e.data.continues?.length === 1) location.hash = `#c/${open}/${e.data.continues[0]}`;
       }
       else if (r.view === "dm" && e.data.threadId === `tm-${r.id}`) loadDm(r.id);
       else if (e.data.proactive) toast(e.data.proactive.title);
@@ -1159,21 +1157,10 @@ async function loadChat(id: string) {
   catch (e) { if (e instanceof ApiError && e.status === 404) { location.hash = ""; return; } handleError(e); }
 }
 
+// A thread opens on its own screen (back returns to the ramble), on phones and wide windows alike: one view, one message box.
 function renderChatLayout(r: { id: string; job?: string }) {
   S.chat = S.chat?.thread?.id === r.id ? S.chat : null;
-  const split = wide() && !!r.job;
-  frame({ header: h("div"), body: h("div", { id: r.job && !wide() ? "threadview" : "chat", class: "msgs" }), composer: true });
-  if (split) {
-    app.classList.add("split");
-    // The thread takes half the window; expand gives it the whole main area (remembered), for long answers and typing.
-    app.classList.toggle("thread-max", localStorage.getItem("hearth.threadMax") === "1");
-    const expand = h("button", { class: "iconbtn", "aria-label": "Expand thread", title: "Expand / shrink",
-      on: { click: () => { const on = app.classList.toggle("thread-max"); localStorage.setItem("hearth.threadMax", on ? "1" : "0"); } } }, icon("expand", 18));
-    app.appendChild(h("aside", { class: "threadside" },
-      h("div", { class: "threadside-head" }, h("b", null, "Thread"), h("span", { class: "grow" }), expand, h("button", { class: "iconbtn", "aria-label": "Close thread", on: { click: () => { location.hash = `#c/${r.id}`; } } }, icon("x", 18))),
-      h("div", { class: "msgs", id: "threadview" }), h("div", { class: "composer-wrap", id: "threadcomposer" })));
-    renderComposer("threadcomposer", r.job);
-  } else app.classList.remove("split", "thread-max");
+  frame({ header: h("div"), body: h("div", { id: r.job ? "threadview" : "chat", class: "msgs" }), composer: true });
   drawHeader();
   if (S.chat) drawChat();
 }
@@ -1183,14 +1170,11 @@ function drawChat(stick = true) {
   if (r.view !== "chat" || !S.chat) return;
   drawHeader();
   const box = document.getElementById("composer") as HTMLTextAreaElement | null;
-  if (box && !(r.job && !wide()) && S.chat.thread.id !== "new") box.placeholder = `Message #${channelName(S.chat.thread)}`;
+  if (box && !r.job && S.chat.thread.id !== "new") box.placeholder = `Message #${channelName(S.chat.thread)}`;
   const chatEl = document.getElementById("chat");
   if (chatEl) drawChannel(chatEl, stick);
   const tv = document.getElementById("threadview");
   if (tv && r.job) drawThread(tv, r.job, stick);
-  // Switching threads in the split view keeps the layout, so the side composer must be re-pointed at the open thread.
-  const tc = document.getElementById("threadcomposer");
-  if (tc && r.job && tc.dataset.job !== r.job) renderComposer("threadcomposer", r.job);
 }
 
 /** Slack message row: square avatar, bold name, grey time, text. Consecutive messages from one sender group. */
@@ -1390,7 +1374,7 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
     nodes.push(answer(f));
   }
   clear(el, nodes);
-  if (stick) requestAnimationFrame(() => { const s = el.closest(".threadside") ? el : document.getElementById("scroll")!; s.scrollTop = s.scrollHeight; });
+  if (stick) requestAnimationFrame(() => { const s = document.getElementById("scroll")!; s.scrollTop = s.scrollHeight; });
 }
 
 /** One teammate answer inside a thread (or "working…", or the Approve / stuck block). */
@@ -1523,7 +1507,7 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
   const wrap = document.getElementById(targetId);
   if (!wrap) return;
   const r = route();
-  const inThread = threadJob || (r.view === "chat" && r.job && !wide() ? r.job : undefined);
+  const inThread = threadJob || (r.view === "chat" && r.job ? r.job : undefined);
   const placeholder = S.conn === "offline" ? "Hub is offline"
     : inThread ? "Reply…"
     : r.view === "dm" ? `Message ${mate(r.id).name}`
@@ -3855,7 +3839,7 @@ async function renderApp(id: string) {
   const box = h("div", { class: "appframe" }, h("p", { class: "muted center" }, "Opening…"));
   const title = h("b", null, S.apps.find((x) => x.id === id)?.title || "App");
   // No sidebar here, so drop the desktop grid (else the app sits in the 252px sidebar column) and span the window.
-  app.classList.remove("desk", "split");
+  app.classList.remove("desk");
   app.classList.add("fullapp");
   clear(app, h("div", { class: "screen appscreen" },
     box,
