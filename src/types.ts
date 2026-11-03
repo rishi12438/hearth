@@ -34,6 +34,12 @@ export type Message = Doc & {
   taskJobId?: string;
   /** Set on Hearth's reply when it carried your message on in existing task threads (their root job ids). */
   continues?: string[];
+  /** "Looks like a new topic": it moves to its own ramble at this time unless you keep it. */
+  newTopic?: { until: string };
+  /** Moved here from this ramble as a new topic. */
+  movedFrom?: string;
+  /** Hearth's note in the old ramble: where it went. */
+  movedTo?: string;
   /** Files you attached to this message. */
   fileIds?: string[];
   /** A reply inside a job's thread (Slack-style); the value is the thread's root job id. */

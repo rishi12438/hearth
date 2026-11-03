@@ -564,7 +564,49 @@ export class Hub {
     const plain = await this.store.put<Message>("messages", rest as Message);
     this.emit("message", plain);
     if (job.followsUp) this.handedBack.set(m.id, job.followsUp);
+    // It's a new topic: offer to move it to its own ramble (planning runs meanwhile, so the wait costs nothing extra).
+    await this.offerMove(plain);
     this.queuePlan(thread, plain);
+  }
+
+  /** "Looks like a new topic": moves the message to its own ramble after 5s unless you keep it here. */
+  private moves = new Map<string, { promise: Promise<"move" | "keep">; resolve: (how: "move" | "keep") => void }>();
+  private async offerMove(m: Message) {
+    if (this.moves.has(m.id)) return;
+    let resolve!: (how: "move" | "keep") => void;
+    const promise = new Promise<"move" | "keep">((ok) => { resolve = ok; });
+    const timer = setTimeout(() => resolve("move"), 5000);
+    this.moves.set(m.id, { promise, resolve: (how) => { clearTimeout(timer); resolve(how); } });
+    const until = new Date(this.clock().getTime() + 5000).toISOString();
+    this.emit("message", await this.store.put<Message>("messages", { ...m, newTopic: { until } }));
+  }
+  /** Your answer to the offer: move it now, or keep it in this ramble. */
+  async decideMove(threadId: string, messageId: string, how: "move" | "keep") {
+    const offer = this.moves.get(messageId);
+    const m = await this.store.get<Message>("messages", messageId);
+    if (!offer || !m || m.threadId !== threadId) return false;
+    offer.resolve(how);
+    return true;
+  }
+  /** Waits for the offer on this message (if there is one) and, if it's moving, makes its new ramble and moves it there. */
+  private async settleMove(thread: Thread, m: Message): Promise<{ thread: Thread; m: Message }> {
+    const offer = this.moves.get(m.id);
+    if (!offer) return { thread, m };
+    const how = await offer.promise;
+    this.moves.delete(m.id);
+    const cur = (await this.store.get<Message>("messages", m.id)) || m;
+    const { newTopic: _, ...plain } = cur;
+    if (how === "keep") { const kept = await this.store.put<Message>("messages", plain as Message); this.emit("message", kept); return { thread, m: kept }; }
+    const now = this.clock().toISOString();
+    const num = Math.max(0, ...(await this.store.all<Thread>("threads")).map((t) => t.num || 0)) + 1;
+    const fresh = await this.store.put<Thread>("threads", { id: randomUUID(), createdAt: now, updatedAt: now, num, title: m.text.split(/\s+/).slice(0, 6).join(" "), preview: m.text.slice(0, 120), ...(thread.projectId ? { projectId: thread.projectId } : {}) });
+    const moved = await this.store.put<Message>("messages", { ...(plain as Message), threadId: fresh.id, movedFrom: thread.id });
+    for (const id of moved.fileIds || []) { const f = await this.store.get<StoredFile>("files", id); if (f) await this.store.put<StoredFile>("files", { ...f, threadId: fresh.id }); }
+    await this.addMessage({ role: "assistant", teammateId: "hearth", threadId: thread.id, text: "Moved that to its own ramble.", movedTo: fresh.id });
+    this.emit("threads");
+    this.emit("message", moved);
+    this.emit("thinking", { threadId: fresh.id, on: true });
+    return { thread: fresh, m: moved };
   }
 
   /** What a teammate gets to see of attached files: the text of text-like ones, the name and type of the rest. */
@@ -597,7 +639,7 @@ export class Hub {
   }
 
   private async orchestrate(thread: Thread, batch: Message[]) {
-    const m = batch[batch.length - 1];
+    let m = batch[batch.length - 1];
     const said = batch.length === 1 ? m.text : `The user sent these messages in a row; plan them together:\n${batch.map((x, i) => `${i + 1}. ${x.text}`).join("\n")}`;
     const attached = (await Promise.all(batch.map((x) => this.attachmentNote(x.fileIds)))).join("");
     let plan: any = null;
@@ -626,6 +668,12 @@ export class Hub {
       await this.log("orchestrator.failed", err.message);
     }
     if (!plan) plan = { reply: "On it.", facts: [], jobs: [{ task: batch.map((x) => x.text).join("\n"), teammate: "Hearth", effort: "light" }] };
+    // The planner says this has nothing to do with the ramble so far: offer to move it (adds the 5s wait only here).
+    const hadTasks = (await this.store.all<Job>("jobs")).some((j) => j.threadId === thread.id && !j.parentId);
+    if (plan.newTopic === true && batch.length === 1 && hadTasks && !thread.id.startsWith("tm-")) await this.offerMove(m);
+    const from = thread.id;
+    if (batch.length === 1) ({ thread, m } = await this.settleMove(thread, m));
+    const movedOut = thread.id !== from;
 
     for (const f of (plan.facts || []).slice(0, 10)) await this.addFact({ ...f, evidence: m.text.slice(0, 300) }, "assistant");
     const team = await this.store.all<Teammate>("teammates");
@@ -666,7 +714,8 @@ export class Hub {
 
     const fresh = await this.store.get<Thread>("threads", thread.id);
     // Hearth names the ramble from its topic, and renames it when the topic changes, unless you named it yourself.
-    const wanted = typeof plan.channel === "string" ? plan.channel : !fresh?.channel && typeof plan.title === "string" ? nameFrom(plan.title) : "";
+    // A ramble it just moved to is named from this message alone (plan.channel covered the old ramble too).
+    const wanted = movedOut ? (typeof plan.title === "string" ? nameFrom(plan.title) : "") : typeof plan.channel === "string" ? plan.channel : !fresh?.channel && typeof plan.title === "string" ? nameFrom(plan.title) : "";
     // Hearth's names stay short however many topics a ramble covers: three words, 24 characters at most.
     const short = slugOf(wanted).split("-").filter(Boolean).slice(0, 3).join("-").slice(0, 24).replace(/-+$/, "");
     if (fresh && short && !thread.id.startsWith("tm-") && fresh.channelBy !== "you" && short !== fresh.channel) await this.renameThread(thread.id, short, false);
@@ -680,6 +729,7 @@ export class Hub {
     await this.addMessage({ role: "assistant", teammateId: "hearth", threadId: thread.id, text: reply.slice(0, 1000), jobIds: jobs.map((j) => j.id), ...(continues.length ? { continues } : {}) });
     for (const j of jobs) await this.addMessage({ role: "assistant", teammateId: "hearth", threadId: thread.id, text: j.label || j.task, taskJobId: j.id });
     for (const j of [...jobs, ...continued]) this.emit("job", j);
+    if (movedOut) this.emit("thinking", { threadId: thread.id, on: false });
     this.pump(m.id); // runs in the background; a new ramble is handled right away
   }
 

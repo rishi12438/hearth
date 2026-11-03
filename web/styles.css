@@ -203,7 +203,7 @@ code { font-family: var(--mono); font-size: .86em; background: var(--surface); p
 .clamp { display: -webkit-box; -webkit-line-clamp: 8; -webkit-box-orient: vertical; overflow: hidden; }
 .clamp.short { -webkit-line-clamp: 2; text-align: left; font-size: 16px; line-height: 1.4; color: var(--ink-2); }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-.chipx { font-size: 13px; font-weight: var(--fw-semibold); color: var(--ink-2); background: var(--surface-2); border: 1px solid var(--line); padding: 3px 9px; border-radius: 999px; }
+.tchip { font-size: 13px; font-weight: var(--fw-semibold); color: var(--ink-2); background: var(--surface-2); border: 1px solid var(--line); padding: 3px 9px; border-radius: 999px; }
 .tfoot { display: inline-flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 14px; color: var(--muted); }
 .tfoot b { color: var(--blue); font-weight: var(--fw-semibold); }
 .brief .mtext { font-size: 15px; color: var(--muted); }
@@ -582,6 +582,7 @@ a.place:active { background: var(--surface-2); }
   box-shadow: 0 12px 34px rgba(30, 25, 20, .16); border: 1px solid var(--line); transform: translateY(-120%); opacity: 0; transition: transform .35s cubic-bezier(.2, .9, .3, 1.2), opacity .25s; }
 .banner.show { transform: translateY(0); opacity: 1; }
 .banner.suggest { cursor: default; }
+.banner.suggest small { white-space: normal; }
 .banner.suggest .btn { width: auto; margin: 0; flex: none; }
 .suggestbar { display: block; height: 3px; margin-top: 8px; border-radius: 2px; background: var(--ink); transform-origin: left; animation: suggestbar 5s linear forwards; opacity: .5; }
 @keyframes suggestbar { from { transform: scaleX(1); } to { transform: scaleX(0); } }

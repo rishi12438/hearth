@@ -350,10 +350,47 @@ test("a new subject sent to the latest thread is handed back and planned as a ne
   await until(async () => (await jobs()).filter((j) => !j.followsUp).length === 2 && (await allDone(2)));
   const all = await jobs();
   expect(all.some((j) => j.followsUp)).toBe(false); // the handed-back follow-up is gone
-  expect(all.find((j) => j.id !== root.id)!.label).toBe("Dinner spot");
+  const dinner = all.find((j) => j.id !== root.id)!;
+  expect(dinner.label).toBe("Dinner spot");
   const msg = (await store.all<any>("messages")).find((m) => m.text.startsWith("NEW"));
   expect(msg.continues).toBeUndefined();
+  // Nobody said keep it: after 5s it moved to its own ramble, with the task, and the old ramble says where it went.
+  expect([msg.threadId !== thread, msg.movedFrom, dinner.threadId, msg.newTopic]).toEqual([true, thread, msg.threadId, undefined]);
+  expect((await store.all<any>("messages")).some((m) => m.threadId === thread && m.movedTo === msg.threadId)).toBe(true);
+}, 20_000);
+
+test("tapping Keep here on a new topic keeps it in the ramble", async () => {
+  await setup();
+  process.env.FAKE_MS = "20";
+  plan([{ label: "Your Robinhood balance", task: "check my Robinhood balance", teammate: "Hearth" }]);
+  const thread = (await hub.ramble("what's my robinhood balance")).value!.thread.id;
+  await until(() => allDone(1));
+  plan([{ label: "Dinner spot", task: "find a dinner spot", teammate: "Hearth" }]);
+  const m = (await hub.ramble("NEW: find me a dinner spot tonight", thread)).value!.message;
+  await until(async () => !!(await store.get<any>("messages", m.id))?.newTopic);
+  expect(await hub.decideMove(thread, m.id, "keep")).toBe(true);
+  await until(async () => (await jobs()).length === 2 && (await allDone(2)));
+  const dinner = (await jobs()).find((j) => j.label === "Dinner spot")!;
+  expect(dinner.threadId).toBe(thread);
+  expect((await store.get<any>("messages", m.id)).newTopic).toBeUndefined();
 });
+
+test("when the planner says it's a new topic, it's offered and moved too", async () => {
+  await setup();
+  process.env.FAKE_MS = "20";
+  plan([{ label: "Card subscriptions", task: "list my card subscriptions", teammate: "Hearth" }]);
+  const thread = (await hub.ramble("what subscriptions are on my card")).value!.thread.id;
+  await until(() => allDone(1));
+  process.env.FAKE_MS = "3000"; // the thread's still busy, so this goes to the planner, not the teammate
+  plan([{ label: "Card subscriptions 2", task: "more", teammate: "Hearth" }]);
+  await hub.ramble("also the annual ones", thread);
+  await until(async () => (await jobs()).some((j) => j.status === "working"));
+  process.env.FAKE_PLAN = JSON.stringify({ title: "Phoenix flights", reply: "On it", newTopic: true, jobs: [{ label: "Phoenix flights", task: "cheapest flights to Phoenix", teammate: "Hearth" }] });
+  await hub.ramble("cheapest flights sf to phoenix friday", thread);
+  await until(async () => (await jobs()).some((j) => j.label === "Phoenix flights"), 12_000);
+  const fl = (await jobs()).find((j) => j.label === "Phoenix flights")!;
+  expect(fl.threadId).not.toBe(thread);
+}, 25_000);
 
 test("a new ramble that's about an earlier one (even a closed one) is matched to it, without a model call", async () => {
   await setup();

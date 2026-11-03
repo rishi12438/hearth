@@ -391,6 +391,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       }
       case "threads": {
         if (method === "GET" && !id) return json(await hub.listThreads());
+        if (method === "POST" && id && seg[3] === "topic") { const b = await body(req); return json({ ok: await hub.decideMove(id, String(b.messageId || ""), b.how === "keep" ? "keep" : "move") }); }
         if (method === "POST" && id === "similar") return json({ match: await hub.similarRamble(String((await body(req)).text || "")) });
         if (method === "GET" && id) { const d = await hub.threadDetail(id); if (!d) break; return json({ ...d, approvals: (await store.all<Approval>("approvals")).filter((a) => a.threadId === id) }); }
         if (method === "POST" && (!id || seg[3] === "messages")) {

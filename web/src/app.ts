@@ -211,8 +211,18 @@ function onEvent(e: { type: string; data?: any }) {
       else S.planning = e.data?.threadId || null;
       if (open) drawChat(); soon(); return;
     case "message":
+      // Moved out of the ramble you're in as a new topic: follow it there.
+      if (open && S.chat && e.data.movedFrom === open && e.data.threadId !== open) {
+        S.chat.messages = S.chat.messages.filter((x: any) => x.id !== e.data.id);
+        countdowns.get(e.data.id)?.();
+        loadThreads(); toast("Moved to its own ramble");
+        location.hash = `#c/${e.data.threadId}`;
+        return;
+      }
       if (open && S.chat && e.data.threadId === open) {
         upsert(S.chat.messages, e.data); drawChat();
+        if (e.data.newTopic && new Date(e.data.newTopic.until).getTime() > Date.now()) offerTopicMove(e.data);
+        else if (e.data.role === "user") countdowns.get(e.data.id)?.(); // decided (or kept) elsewhere
         // Hearth carried what you just said on in a task's thread: on a wide screen, open it beside the chat.
         if (wide() && r.view === "chat" && !r.job && e.data.continues?.length === 1) location.hash = `#c/${open}/${e.data.continues[0]}`;
       }
@@ -1286,7 +1296,8 @@ function plainMessage(m: any, grouped = false) {
   if (m.role === "user") return row(youWho(), m.createdAt, [h("div", { class: "mtext" }, m.text), (m.fileIds || []).map(fileCard), ...goes], grouped);
   const from = m.fromThreadId ? S.threads.find((t) => t.id === m.fromThreadId) : null;
   const body: (Node | null)[] = [m.proactive ? h("div", { class: "proline" }, icon("bell", 13), m.proactive.title) : null, richText(m.text),
-    from ? h("button", { class: "fromchip", on: { click: () => { location.hash = `#c/${from.id}`; } } }, `From #${channelName(from)}`, icon("chevron", 13)) : null, ...goes];
+    from ? h("button", { class: "fromchip", on: { click: () => { location.hash = `#c/${from.id}`; } } }, `From #${channelName(from)}`, icon("chevron", 13)) : null, ...goes,
+    m.movedTo ? h("button", { class: "fromchip", on: { click: () => { location.hash = `#c/${m.movedTo}`; } } }, `Go to ${(() => { const t = S.threads.find((x: any) => x.id === m.movedTo); return t ? `#${channelName(t)}` : "the new ramble"; })()}`, icon("chevron", 13)) : null];
   if (m.proactive) {
     const why = h("div", { class: "why", hidden: true }, m.proactive.why);
     body.push(h("button", { class: "whybtn", on: { click: () => { why.hidden = !why.hidden; } } }, "Why did I get this?"), why);
@@ -1343,7 +1354,7 @@ function taskMessage(m: any) {
       appCards(latest),
       h("button", { class: "clamp short", on: { click: open } }, plain(st === "failed" ? `Couldn't do it: ${latest.result || "it failed"}` : latest.result || "Done.")),
       small.length ? h("button", { class: "tilelink", on: { click: open } }, small.map(tile)) : null,
-      more.length ? h("button", { class: "chips", on: { click: open } }, more.map((x) => h("span", { class: "chipx" }, x))) : null);
+      more.length ? h("button", { class: "chips", on: { click: open } }, more.map((x) => h("span", { class: "tchip" }, x))) : null);
     const n = follow.length * 2;
     body.push(h("button", { class: "tfoot", on: { click: open } }, n ? h("b", null, `${n} replies`) : null, h("span", null, n ? `Last ${clockTime(latest.finishedAt || latest.updatedAt)}` : "Open thread"), icon("chevron", 14)));
   }
@@ -1658,25 +1669,42 @@ function face(t: any, size = 44, state = "idle") {
 const jobStatus = new Map<string, string>();
 
 /** An in-app notification: who, what, tap to open. Stacks at the top; goes away on its own. */
-/** "Looks like this goes with #robinhood-money": moves there after 5s unless you keep it as a new ramble. */
-function suggestMove(match: { threadId: string; channel: string; archived?: boolean; why?: string[] }, text: string): Promise<"move" | "new"> {
+/** A card with a countdown: does "move" when the time's up unless you tap the other choice. Several can be up at once (by key). */
+const countdowns = new Map<string, (how?: "move" | "keep") => void>();
+function countdownCard(key: string, title: string, sub: string, until: number, keepLabel: string): Promise<"move" | "keep"> {
+  countdowns.get(key)?.();
   return new Promise((done) => {
-    let left = 5, settled = false;
-    const count = h("span", null, `${left}s`);
-    const finish = (how: "move" | "new") => { if (settled) return; settled = true; clearInterval(timer); card.classList.remove("show"); setTimeout(() => card.remove(), 300); done(how); };
+    let settled = false;
+    const left = () => Math.max(0, Math.ceil((until - Date.now()) / 1000));
+    const count = h("span", null, `${left()}s`);
+    const finish = (how?: "move" | "keep") => { if (settled) return; settled = true; countdowns.delete(key); clearInterval(timer); card.classList.remove("show"); setTimeout(() => card.remove(), 300); if (how) done(how); };
+    const bar = h("i", { class: "suggestbar" });
+    bar.style.animationDuration = `${Math.max(0.2, (until - Date.now()) / 1000)}s`;
     const card = h("div", { class: "banner suggest", role: "status" },
-      h("span", { class: "grow" },
-        h("b", null, `Looks like this goes with #${match.channel}`),
-        h("small", null, `${match.archived ? "From an earlier ramble. " : ""}Moving it there in `, count, ` · “${text.slice(0, 60)}${text.length > 60 ? "…" : ""}”`),
-        h("i", { class: "suggestbar" })),
-      h("button", { class: "btn small ghost", on: { click: () => finish("new") } }, "Keep as new"),
+      h("span", { class: "grow" }, h("b", null, title), h("small", null, sub, " in ", count), bar),
+      h("button", { class: "btn small ghost", on: { click: () => finish("keep") } }, keepLabel),
       h("button", { class: "btn small primary", on: { click: () => finish("move") } }, "Move now"));
     let stack = document.getElementById("banners");
     if (!stack) { stack = h("div", { id: "banners", "aria-live": "polite" }); document.body.appendChild(stack); }
     stack.appendChild(card);
     requestAnimationFrame(() => card.classList.add("show"));
-    const timer = setInterval(() => { left--; count.textContent = `${left}s`; if (left <= 0) finish("move"); }, 1000);
+    const timer = setInterval(() => { count.textContent = `${left()}s`; if (left() <= 0) finish("move"); }, 250);
+    countdowns.set(key, finish);
   });
+}
+
+/** "Looks like this goes with #robinhood-money": moves there after 5s unless you keep it as a new ramble. */
+async function suggestMove(match: { threadId: string; channel: string; archived?: boolean }, text: string): Promise<"move" | "new"> {
+  const how = await countdownCard("home", `Looks like this goes with #${match.channel}`,
+    `${match.archived ? "From an earlier ramble. " : ""}“${text.slice(0, 50)}${text.length > 50 ? "…" : ""}” moves there`, Date.now() + 5000, "Keep as new");
+  return how === "move" ? "move" : "new";
+}
+
+/** The hub thinks a message is a new topic: it moves to its own ramble when the hub's timer runs out, unless you keep it. */
+function offerTopicMove(m: any) {
+  if (countdowns.has(m.id)) return;
+  countdownCard(m.id, "Looks like a new topic", "Moving it to its own ramble", new Date(m.newTopic.until).getTime(), "Keep here")
+    .then((how) => call(`/api/threads/${m.threadId}/topic`, { body: { messageId: m.id, how } }).catch(() => {}));
 }
 
 function banner(who: any, title: string, text: string, onTap: () => void) {
