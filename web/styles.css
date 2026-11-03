@@ -597,20 +597,26 @@ a.place:active { background: var(--surface-2); }
 .emojibtn .e3d { width: 30px; height: 30px; font-size: 24px; }
 
 /* ---------- Ideas (Home) ---------- */
-.bigtitle { font-size: 30px; font-weight: 700; letter-spacing: -.02em; padding: 6px 18px 4px; }
+.bigtitle { font-size: 13px; font-weight: 500; color: var(--muted); letter-spacing: 0; padding: 8px 18px 2px; }
 .ideas { padding-bottom: 10px; }
-.idea { display: flex; gap: 14px; padding: 16px 18px; border-bottom: 1px solid var(--line); }
+.idea { display: flex; gap: 12px; padding: 12px 18px; border-bottom: 1px solid var(--line); }
+.ideamoji { flex: none; width: 28px; height: 28px; margin-top: -2px; border-radius: 8px; background: var(--surface); display: grid; place-items: center; font-size: 15px; line-height: 1; }
+.idea .grow { max-width: 640px; }
 .idea:last-child { border-bottom: 0; }
 .ideaicon { width: 46px; height: 46px; flex: none; font-size: 36px; display: inline-grid; place-items: center; filter: drop-shadow(0 3px 4px rgba(60, 40, 20, .18)); }
 .ideaicon img { width: 100%; height: 100%; object-fit: contain; }
 .ideaicon.small { width: 28px; height: 28px; font-size: 22px; }
-.idea b { display: block; font-size: 18px; font-weight: 650; line-height: 1.3; color: var(--ink); }
-.idea p { margin: 4px 0 0; font-size: 16px; line-height: 1.45; color: var(--muted); }
-.ideabtns { display: flex; gap: 8px; margin-top: 10px; }
+.idea b { display: block; font-size: 15px; font-weight: 500; line-height: 1.35; color: var(--ink); }
+.idea p { margin: 2px 0 0; font-size: 14px; line-height: 1.5; color: var(--muted); }
+.ideabtns { display: flex; align-items: center; gap: 4px; margin-top: 10px; }
 .aboutcard { background: var(--card); box-shadow: var(--shadow); border-radius: 20px; padding: 14px 16px; margin: 4px 0 14px; display: flex; flex-direction: column; gap: 8px; }
 .aboutcard .row b { font-size: 17px; }
 .abouttext .rich { font-size: 15.5px; }
-.ideabtns .btn { width: auto; flex: none; height: 36px; padding: 0 16px; border-radius: 999px; font-size: 14.5px; font-weight: 650; }
+.ideabtns .btn { width: auto; flex: none; height: 28px; margin: 0; padding: 0 12px; border-radius: 7px; font-size: 13px; font-weight: 500; letter-spacing: .005em; transition: background .12s, color .12s; }
+.ideabtns .btn.primary { background: var(--ink); color: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .12); }
+.ideabtns .btn.primary:hover { background: var(--ink-2); }
+.ideabtns .btn.ghost { background: none; color: var(--muted); }
+.ideabtns .btn.ghost:hover { background: var(--surface); color: var(--ink); }
 
 /* several teammates at work: they share the stage */
 .stage.crowd { gap: 0; }

@@ -885,7 +885,7 @@ function renderHome() {
 /** "I can follow up on your airline refund": yes runs it as a ramble, no makes it go away for good. */
 function ideaRow(i: any) {
   const busy = (b: HTMLButtonElement) => { b.disabled = true; };
-  return h("div", { class: "idea" }, emoji3d(i.emoji || "💡", "ideaicon"),
+  return h("div", { class: "idea" }, h("span", { class: "ideamoji", "aria-hidden": "true" }, i.emoji || "💡"),
     h("div", { class: "grow" }, h("b", null, i.title), i.body ? h("p", null, i.body) : null,
       h("div", { class: "ideabtns" },
         h("button", { class: "btn small primary", on: { click: async (e: Event) => {
