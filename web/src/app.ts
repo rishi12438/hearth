@@ -479,10 +479,10 @@ function drawSide() {
   // A ramble row: drag it onto a project (or onto Rambles to take it out); the folder button or right-click files it too.
   const ramble = (t: any, nested = false) => h("div", { class: "srow", draggable: "true",
       on: { dragstart: (e: DragEvent) => { e.dataTransfer?.setData("text/hearth-thread", t.id); e.dataTransfer!.effectAllowed = "move"; },
-        contextmenu: (e: Event) => { e.preventDefault(); moveToProject(t); } } },
+        contextmenu: (e: MouseEvent) => { e.preventDefault(); projectMenuAt({ x: e.clientX, y: e.clientY }, t.projectId || null, (id) => fileRamble(t.id, id)); } } },
     h("button", { class: `snav ${nested ? "nested" : ""} ${r.view === "chat" && r.id === t.id ? "on" : ""}`, on: { click: () => { location.hash = `#c/${t.id}`; } } },
       h("span", { class: "shash" }, "#"), h("span", { class: "grow" }, channelName(t))),
-    h("button", { class: "sact", "aria-label": t.projectId ? "Move to another project" : "Add to a project", title: t.projectId ? "Move to another project" : "Add to a project", on: { click: () => moveToProject(t) } }, icon("folder", 14)));
+    h("button", { class: "sact", "aria-label": t.projectId ? "Move to another project" : "Add to a project", title: t.projectId ? "Move to another project" : "Add to a project", on: { click: (e: Event) => projectMenuAt(e.currentTarget as HTMLElement, t.projectId || null, (id) => fileRamble(t.id, id)) } }, icon("folder", 14)));
   const dropTo = (projectId: string | null) => ({
     dragover: (e: DragEvent) => { if (e.dataTransfer?.types.includes("text/hearth-thread")) { e.preventDefault(); (e.currentTarget as HTMLElement).classList.add("drop"); } },
     dragleave: (e: DragEvent) => (e.currentTarget as HTMLElement).classList.remove("drop"),
@@ -588,33 +588,54 @@ function projectMenu(p: any) {
   ]);
 }
 
-/** Top right of a ramble: which project it's in. A new ramble picks one before sending; an existing one moves. */
+/** Top right of a ramble: which project it's in. Opens a menu right under it to pick or change. */
 function projectButton(): Node {
   const t = S.chat?.thread;
   const isNew = !t || t.id === "new";
-  const cur = S.projects.find((x: any) => x.id === (isNew ? S.newProject : t.projectId));
+  const curId = isNew ? S.newProject : t.projectId;
+  const cur = S.projects.find((x: any) => x.id === curId);
   const label = cur ? `In ${cur.name}` : "Add to project";
-  return h("button", { class: `projbtn glass ${cur ? "on" : ""}`, "aria-label": label, title: cur ? `${label} · change` : label, on: { click: () => isNew ? pickNewProject() : moveToProject(t) } },
-    cur?.emoji ? h("span", { class: "semoji" }, cur.emoji) : icon("folder", 18), h("span", { class: "projname" }, cur ? cur.name : "Add to project"));
+  const btn: HTMLElement = h("button", { class: `projbtn glass ${cur ? "on" : ""}`, "aria-label": label, "aria-haspopup": "menu", title: cur ? `${label} · change` : label,
+    on: { click: () => projectMenuAt(btn, curId || null, (id) => {
+      if (isNew) { S.newProject = id; drawHeader(); } else fileRamble(t.id, id);
+    }) } },
+    cur?.emoji ? h("span", { class: "semoji" }, cur.emoji) : icon("folder", 18), h("span", { class: "projname" }, cur ? cur.name : "Add to project"), icon("chevron", 13));
+  return btn;
 }
 
-/** A new ramble: choose its project before the first message (it's filed when it's created). */
-function pickNewProject() {
-  const set = (id: string | null) => { S.newProject = id; closeSheet(); drawHeader(); };
-  openSheet("Put this ramble in", [
-    h("div", { class: "wcard" },
-      S.projects.map((x: any) => h("button", { class: "wrow", on: { click: () => set(x.id) } }, x.emoji ? h("span", { class: "semoji" }, x.emoji) : icon("folder", 18),
-        h("span", { class: "grow" }, h("b", null, x.name)), S.newProject === x.id ? icon("check", 16) : null)),
-      h("button", { class: "wrow", on: { click: () => { closeSheet(); newProject(); } } }, icon("plus", 18), h("span", { class: "grow" }, h("b", null, "New project…")))),
-    S.newProject ? h("button", { class: "btn ghost", on: { click: () => set(null) } }, "No project") : null,
-  ]);
+let closeDrop: (() => void) | null = null;
+/** A small menu of projects that drops down from `anchor` (or opens at a point, for right-click). */
+function projectMenuAt(anchor: HTMLElement | { x: number; y: number }, current: string | null, pick: (id: string | null) => void) {
+  if (closeDrop) { const was = (closeDrop as any).anchor; closeDrop(); if (was === anchor) return; } // a second click on the button closes it
+  const row = (lead: Node, text: string, on: () => void, check = false, cls = "") =>
+    h("button", { class: `droprow ${cls}`, role: "menuitem", on: { click: () => { close(); on(); } } }, lead, h("span", { class: "grow" }, text), check ? icon("check", 15) : null);
+  const menu = h("div", { class: "dropmenu", role: "menu" },
+    S.projects.length ? h("div", { class: "droplabel" }, "Projects") : null,
+    S.projects.map((x: any) => row(x.emoji ? h("span", { class: "semoji" }, x.emoji) : icon("folder", 16), x.name, () => { if (x.id !== current) pick(x.id); }, x.id === current)),
+    h("div", { class: "dropsep" }),
+    row(icon("plus", 16), "New project…", newProject),
+    current ? row(icon("x", 16), "Remove from project", () => pick(null), false, "muted") : null);
+  document.body.append(menu);
+  const r = anchor instanceof HTMLElement ? anchor.getBoundingClientRect() : { left: anchor.x, right: anchor.x, bottom: anchor.y, top: anchor.y };
+  const w = menu.offsetWidth, hgt = menu.offsetHeight;
+  const left = anchor instanceof HTMLElement ? Math.min(r.right - w, innerWidth - w - 8) : Math.min(r.left, innerWidth - w - 8);
+  menu.style.left = `${Math.max(8, left)}px`;
+  menu.style.top = `${Math.min(r.bottom + 6, innerHeight - hgt - 8)}px`;
+  const outside = (e: Event) => { if (!menu.contains(e.target as Node) && !(anchor instanceof HTMLElement && anchor.contains(e.target as Node))) close(); };
+  const key = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
+  function close() { menu.remove(); document.removeEventListener("pointerdown", outside, true); document.removeEventListener("keydown", key); window.removeEventListener("hashchange", close); closeDrop = null; }
+  closeDrop = Object.assign(close, { anchor });
+  setTimeout(() => { document.addEventListener("pointerdown", outside, true); document.addEventListener("keydown", key); window.addEventListener("hashchange", close); });
+  (menu.querySelector(".droprow") as HTMLElement | null)?.focus();
 }
 
-/** File a ramble under a project straight from the sidebar (drag it onto one). */
+/** File a ramble under a project (or take it out with null), from the header menu or the sidebar. */
 async function fileRamble(threadId: string, projectId: string | null) {
-  const t = S.threads.find((x: any) => x.id === threadId);
+  const t = S.threads.find((x: any) => x.id === threadId) || (S.chat?.thread?.id === threadId ? S.chat.thread : null);
   if (!t || (t.projectId || null) === projectId) return;
-  try { await call(`/api/threads/${threadId}/project`, { body: { projectId } }); t.projectId = projectId || undefined; drawSide(); loadThreads(); loadProjects();
+  try { await call(`/api/threads/${threadId}/project`, { body: { projectId } }); t.projectId = projectId || undefined;
+    if (S.chat?.thread?.id === threadId) { S.chat.thread.projectId = projectId || undefined; drawHeader(); }
+    drawSide(); loadThreads(); loadProjects();
     toast(projectId ? `Moved to ${S.projects.find((p: any) => p.id === projectId)?.name || "the project"}` : "Taken out of the project"); }
   catch (e) { handleError(e); }
 }
