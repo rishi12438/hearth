@@ -928,17 +928,10 @@ function rosterEntry(id: string) {
 
 // ---------------- Home (Slack Home tab) ----------------
 
-const collapsed = new Set<string>(JSON.parse(localStorage.getItem("hearth.collapsed") || '["archived"]'));
-function toggleSection(id: string) {
-  collapsed.has(id) ? collapsed.delete(id) : collapsed.add(id);
-  localStorage.setItem("hearth.collapsed", JSON.stringify([...collapsed]));
-  drawHome();
-}
-
+// Home is the same screen a new ramble opens on: what's going on, and the composer at the bottom. Typing starts a ramble.
 function renderHome() {
-  frame({ header: h("div"), body: h("div", null, h("div", { id: "htiles" }), h("div", { id: "pins" }), h("div", { id: "home" })), purple: true });
-  pinsKey = "";
-  drawPins();
+  homeNow = null;
+  frame({ header: h("div"), body: h("div", { id: "home", class: "msgs" }), composer: true });
   drawHeader();
   drawHome();
 }
@@ -964,60 +957,18 @@ async function lookForIdeas() {
   catch (err) { handleError(err); }
 }
 
-/** Type straight to Hearth from Home: Enter starts a ramble and opens it. Kept across redraws. */
-let homeDraft = "";
-function homeAsk() {
-  const box = h("textarea", { class: "homeask-in", rows: "1", placeholder: "Tell Hearth anything…" }) as HTMLTextAreaElement;
-  box.value = homeDraft;
-  const go = h("button", { class: "homeask-go", "aria-label": "Send" }, icon("up", 18)) as HTMLButtonElement;
-  const fit = () => { box.style.height = "auto"; box.style.height = `${Math.min(box.scrollHeight, 200)}px`; go.disabled = !box.value.trim(); };
-  const submit = async () => {
-    const text = box.value.trim();
-    if (!text || go.disabled) return;
-    go.disabled = true; box.disabled = true;
-    try {
-      const res = await call("/api/threads", { body: { text, fileIds: [] } });
-      homeDraft = "";
-      S.planning = res.thread.id;
-      S.chat = { thread: res.thread, messages: [res.message], jobs: [], approvals: [] };
-      location.hash = `#c/${res.thread.id}`;
-    } catch (e) { box.disabled = false; go.disabled = false; toast(`Not sent: ${(e as Error).message}`, "err"); handleError(e); }
-  };
-  box.addEventListener("input", () => { homeDraft = box.value; fit(); });
-  box.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); } });
-  go.addEventListener("click", submit);
-  // Home redraws on live updates; don't steal the cursor from you mid-sentence.
-  const typing = document.activeElement?.classList.contains("homeask-in");
-  requestAnimationFrame(() => { fit(); if (typing) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); } });
-  return h("div", { class: "homeask" }, box, go);
-}
-
 let homeNow: HTMLElement | null = null;
 function drawHome() {
-  const el = document.getElementById("home"), top = document.getElementById("htiles");
-  if (!el || !top) return;
-  const section = (id: string, title: string, rows: Node[], extra?: Node | null) => h("section", { class: "hsec" },
-    h("div", { class: "hsec-head" },
-      h("button", { class: "hsec-title", on: { click: () => toggleSection(id) } }, h("span", null, title), icon("chevron", 16)),
-      extra || null,
-      h("button", { class: `chev ${collapsed.has(id) ? "down" : ""}`, "aria-label": collapsed.has(id) ? "Expand" : "Collapse", on: { click: () => toggleSection(id) } }, icon("up", 22))),
-    collapsed.has(id) ? null : rows);
-  // Home is the "What's on your mind?" screen: type to Hearth right here, with what's going on underneath.
-  homeNow ||= h("div", { class: "nowlist" }) as HTMLElement;
-  clear(top,
-    brainStrip(),
-    linkStrip(),
-    h("div", { class: "hello" },
+  const el = document.getElementById("home");
+  if (!el) return;
+  // Built once per visit and refreshed in place, so live updates don't flash the list.
+  if (!homeNow) {
+    homeNow = h("div", { class: "nowlist" }) as HTMLElement;
+    clear(el, h("div", { class: "hello" },
       h("h2", null, "What's on your mind?"),
-      h("p", null, "Talk or type, however it comes out. Hearth hands it to the right teammates."),
-      homeAsk(), homeNow));
+      h("p", null, "Talk or type, however it comes out. Hearth hands it to the right teammates."), homeNow));
+  }
   fillNow(homeNow);
-  clear(el,
-    section("apps", "Mini apps", S.apps.some((a) => !a.inline) ? [...S.apps].filter((a) => !a.inline).sort((a, b) => Number(b.pinned) - Number(a.pinned)).map((a) => h("button", { class: "hrow", on: { click: () => { location.hash = `#a/${a.id}`; } } },
-      appIcon(a, 30), h("span", { class: "grow" }, a.title), h("small", null, mate(a.teammateId).name)))
-      : [h("p", { class: "hempty" }, "Little apps your teammates build for you: flashcards, trackers, a today view. Ask for one anywhere, or say \"pin it to Home\".")],
-      h("button", { class: "chev", "aria-label": "New app", on: { click: newApp } }, icon("plus", 20))),
-  );
 }
 
 // ---------------- DMs tab ----------------
@@ -1190,7 +1141,7 @@ async function fillNow(el: HTMLElement) {
     sec("In progress", b.working.slice(0, 4).map((c: any) => row(face(mate(c.teammateId), 32, "working"), c.title, `${mate(c.teammateId).name} · ${S.progress.get(c.id) || "on it"}`, go(c)))),
     sec("Coming up", b.next.filter((c: any) => c.kind === "plan").slice(0, 3).map((c: any) => row(emoji3d("🔔", "ideaicon small"), c.title, `${dayLabel(c.at)} ${clockTime(c.at)}`, go(c)))),
     sec("Ideas", S.ideas.slice(0, 2).map((i: any) => row(emoji3d(i.emoji || "💡", "ideaicon small"), i.title, i.body || "Tap to ask for it", () => {
-      const box = (document.getElementById("composer") || document.querySelector(".homeask-in")) as HTMLTextAreaElement | null;
+      const box = document.getElementById("composer") as HTMLTextAreaElement | null;
       if (box) { box.value = i.prompt; box.dispatchEvent(new Event("input")); box.focus(); }
     }))),
     sec("Continue with", recent.map((t: any) => row(h("span", { class: "hicon" }, "#"), t.title || channelName(t), `#${channelName(t)} · ${shortAgo(when(t))}`, () => { location.hash = `#c/${t.id}`; }))),
