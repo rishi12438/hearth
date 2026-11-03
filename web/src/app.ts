@@ -521,8 +521,7 @@ function drawSide() {
     h("nav", { class: "sgroup" },
       nav("brain", "Memory", false, openMemory),
       nav("users", "People", false, openPeople),
-      nav("sparkle", "Skills", false, openSkills),
-      nav("code", "Scripts", false, openScripts, S.state?.pendingScripts || 0)),
+      nav("sparkle", "Skills", false, openSkills)),
     h("div", { class: "sfoot" },
       nav("settings", "Settings", false, openSettings)),
   );
@@ -754,7 +753,7 @@ function drawHeader() {
   // A project's page has its own title; just a way back on phones.
   if (r.view === "project") { clear(top, wide() ? h("div") : h("div", { class: "toprow" }, h("button", { class: "circle glass", "aria-label": "Back", on: { click: () => { location.hash = ""; } } }, icon("back", 22)))); return; }
   if (r.view === "home" || r.view === "dms" || r.view === "activity" || r.view === "connectors") {
-    const left = h("button", { class: "circle glass", "aria-label": "Menu", on: { click: openMenu } }, icon("filter", 22), (S.state?.pendingScripts || 0) ? h("i", { class: "dot" }) : null);
+    const left = h("button", { class: "circle glass", "aria-label": "Menu", on: { click: openMenu } }, icon("filter", 22));
     const right = h("div", { class: "pillgroup glass" },
       S.updateReady ? h("button", { class: "pillbtn", on: { click: () => location.reload() } }, "Update") : null,
       h("button", { class: "pillbtn", "aria-label": "You", on: { click: openSettings } }, userAvatar(36)));
@@ -2307,7 +2306,6 @@ function openMenu() {
       item("sparkle", "Skills", "What the team already knows how to do", openSkills),
       item("brain", "Brains", "Which harness and model does what", openBrains),
       item("download", "Files", "Attached and made, ready to download", openFiles),
-      item("code", "Scripts", "What I can run", openScripts, st?.pendingScripts ? `${st.pendingScripts} to approve` : undefined),
       item("settings", "Settings", "Notifications, location, data", openSettings)),
     h("p", { class: "foot" }, `Hearth · open source · ${__BUILD__}`),
   );
