@@ -981,6 +981,9 @@ function drawChat(stick = true) {
   if (chatEl) drawChannel(chatEl, stick);
   const tv = document.getElementById("threadview");
   if (tv && r.job) drawThread(tv, r.job, stick);
+  // Switching threads in the split view keeps the layout, so the side composer must be re-pointed at the open thread.
+  const tc = document.getElementById("threadcomposer");
+  if (tc && r.job && tc.dataset.job !== r.job) renderComposer("threadcomposer", r.job);
 }
 
 /** Slack message row: square avatar, bold name, grey time, text. Consecutive messages from one sender group. */
@@ -1317,7 +1320,8 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
     : r.view === "dm" ? `Message ${mate(r.id).name}`
     : r.view === "chat" && r.id !== "new" && S.chat?.thread ? `Message #${channelName(S.chat.thread)}`
     : "Ramble. Hearth will hand it out…";
-  const draftKey = `hearth.draft.${targetId}`;
+  const draftKey = `hearth.draft.${targetId}${threadJob ? `.${threadJob}` : ""}`;
+  wrap.dataset.job = threadJob || "";
   const box = h("textarea", { rows: 1, value: sessionStorage.getItem(draftKey) || "", placeholder, enterKeyHint: "send",
     on: {
       input: () => { autosize(box); sessionStorage.setItem(draftKey, box.value); swap(); },
