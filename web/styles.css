@@ -234,13 +234,11 @@ code { font-family: var(--mono); font-size: .86em; background: var(--surface); p
 .hello { padding: 30px 16px; }
 .hello h2 { font-size: 26px; font-weight: 800; }
 .hello p { color: var(--muted); margin: 8px 0 20px; }
-.projchip { display: flex; align-items: center; gap: 4px; margin: -8px 0 20px; }
-.pchip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface, #fff); font-size: 14px; font-weight: 600; color: var(--ink-2); }
-.pchip:hover { color: var(--ink); border-color: var(--muted); }
-.pchip.on { color: var(--ink); background: rgba(30, 25, 20, .06); }
-.pchip svg { opacity: .7; }
-.pchipx { width: 24px; height: 24px; border-radius: 999px; display: grid; place-items: center; color: var(--muted); }
-.pchipx:hover { background: rgba(30, 25, 20, .07); color: var(--ink); }
+.projbtn { flex: none; display: inline-flex; align-items: center; gap: 7px; height: 48px; max-width: 220px; padding: 0 16px; border-radius: 999px; font-size: 14.5px; font-weight: 600; color: var(--ink-2); }
+.projbtn:hover { color: var(--ink); }
+.projbtn.on { color: var(--ink); }
+.projbtn .projname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 600px) { .projbtn { width: 48px; padding: 0; justify-content: center; } .projbtn .projname { display: none; } }
 .starters { display: flex; flex-direction: column; gap: 8px; }
 .starters button { text-align: left; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); color: var(--ink-2); font-size: 16px; }
 .dmhero { display: flex; flex-direction: column; align-items: flex-start; padding: 18px 16px 14px; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
