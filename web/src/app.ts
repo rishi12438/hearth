@@ -964,38 +964,66 @@ async function lookForIdeas() {
   catch (err) { handleError(err); }
 }
 
+/** A recent ramble as a card: its name, what it's about, how long ago. */
+function rambleCard(t: any) {
+  const fresh = !!t.updatedAt && t.updatedAt > (seen[t.id] || t.createdAt);
+  return h("button", { class: `ideacard ramblecard ${t.archived ? "dim" : ""}`, title: t.title || "", on: { click: () => { location.hash = `#c/${t.id}`; } } },
+    h("span", { class: "grow" }, h("b", null, t.title || channelName(t)), h("small", null, `#${channelName(t)} · ${shortAgo(t.updatedAt || t.createdAt)}`)),
+    t.needsYou ? h("em", { class: "badge" }, String(t.needsYou)) : t.working ? h("i", { class: "spin" }) : fresh ? h("i", { class: "udot", "aria-label": "New" }) : null,
+    icon("chevron", 16));
+}
+
+/** Type straight to Hearth from Home: Enter starts a ramble and opens it. Kept across redraws. */
+let homeDraft = "";
+function homeAsk() {
+  const box = h("textarea", { class: "homeask-in", rows: "1", placeholder: "Tell Hearth anything…" }) as HTMLTextAreaElement;
+  box.value = homeDraft;
+  const go = h("button", { class: "homeask-go", "aria-label": "Send" }, icon("up", 18)) as HTMLButtonElement;
+  const fit = () => { box.style.height = "auto"; box.style.height = `${Math.min(box.scrollHeight, 200)}px`; go.disabled = !box.value.trim(); };
+  const submit = async () => {
+    const text = box.value.trim();
+    if (!text || go.disabled) return;
+    go.disabled = true; box.disabled = true;
+    try {
+      const res = await call("/api/threads", { body: { text, fileIds: [] } });
+      homeDraft = "";
+      S.planning = res.thread.id;
+      S.chat = { thread: res.thread, messages: [res.message], jobs: [], approvals: [] };
+      location.hash = `#c/${res.thread.id}`;
+    } catch (e) { box.disabled = false; go.disabled = false; toast(`Not sent: ${(e as Error).message}`, "err"); handleError(e); }
+  };
+  box.addEventListener("input", () => { homeDraft = box.value; fit(); });
+  box.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); } });
+  go.addEventListener("click", submit);
+  // Home redraws on live updates; don't steal the cursor from you mid-sentence.
+  const typing = document.activeElement?.classList.contains("homeask-in");
+  requestAnimationFrame(() => { fit(); if (typing) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); } });
+  return h("div", { class: "homeask" }, box, go);
+}
+
 function drawHome() {
   const el = document.getElementById("home"), top = document.getElementById("htiles");
   if (!el || !top) return;
-  // Most recent first, open ones before archived: the top 3 are "Continue with", the rest fold into "Earlier".
+  // The 3 rambles you touched last, archived or not: one tap back in.
   const when = (t: any) => t.updatedAt || t.createdAt || "";
-  const byRecent = [...S.threads].sort((a, b) => Number(!!a.archived) - Number(!!b.archived) || when(b).localeCompare(when(a)));
-  const recent = byRecent.filter((t) => !t.archived).slice(0, 3);
-  const earlier = byRecent.filter((t) => !recent.includes(t));
+  const recent = [...S.threads].sort((a, b) => when(b).localeCompare(when(a))).slice(0, 3);
   const section = (id: string, title: string, rows: Node[], extra?: Node | null) => h("section", { class: "hsec" },
     h("div", { class: "hsec-head" },
       h("button", { class: "hsec-title", on: { click: () => toggleSection(id) } }, h("span", null, title), icon("chevron", 16)),
       extra || null,
       h("button", { class: `chev ${collapsed.has(id) ? "down" : ""}`, "aria-label": collapsed.has(id) ? "Expand" : "Collapse", on: { click: () => toggleSection(id) } }, icon("up", 22))),
     collapsed.has(id) ? null : rows);
-  const fresh = (t: any) => !!t.updatedAt && t.updatedAt > (seen[t.id] || t.createdAt);
-  const channelRow = (t: any) => h("button", { class: `hrow ${t.working || t.needsYou || fresh(t) ? "unread" : ""}`, on: { click: () => { location.hash = `#c/${t.id}`; } } },
-    h("span", { class: "hicon" }, "#"), h("span", { class: "grow" }, channelName(t)),
-    t.needsYou ? h("em", { class: "badge" }, String(t.needsYou)) : t.working ? h("i", { class: "spin" }) : fresh(t) ? h("i", { class: "udot", "aria-label": "New" }) : null);
   clear(top,
     brainStrip(),
     linkStrip(),
-    S.ideas.length ? h("section", { class: "ideas" }, h("h2", { class: "bigtitle" }, "Ideas"), h("div", { class: "ideacards" }, S.ideas.slice(0, 3).map(ideaCard))) : null);
+    S.ideas.length ? h("section", { class: "ideas" }, h("h2", { class: "bigtitle" }, "Ideas"), h("div", { class: "ideacards" }, S.ideas.slice(0, 3).map(ideaCard))) : null,
+    recent.length ? h("section", { class: "ideas" }, h("h2", { class: "bigtitle" }, "Continue with"), h("div", { class: "ideacards" }, recent.map(rambleCard))) : null,
+    homeAsk());
   clear(el,
-    section("rambles", "Continue with", recent.length ? recent.map(channelRow)
-      : [h("p", { class: "hempty" }, "Tap + and ramble. Each ramble becomes a channel; it archives itself an hour after everything's done.")],
-      h("button", { class: "chev", "aria-label": "New ramble", on: { click: () => { location.hash = "#c/new"; } } }, icon("plus", 20))),
     section("apps", "Mini apps", S.apps.some((a) => !a.inline) ? [...S.apps].filter((a) => !a.inline).sort((a, b) => Number(b.pinned) - Number(a.pinned)).map((a) => h("button", { class: "hrow", on: { click: () => { location.hash = `#a/${a.id}`; } } },
       appIcon(a, 30), h("span", { class: "grow" }, a.title), h("small", null, mate(a.teammateId).name)))
       : [h("p", { class: "hempty" }, "Little apps your teammates build for you: flashcards, trackers, a today view. Ask for one anywhere, or say \"pin it to Home\".")],
       h("button", { class: "chev", "aria-label": "New app", on: { click: newApp } }, icon("plus", 20))),
-    earlier.length ? section("archived", `Earlier (${earlier.length})`, earlier.slice(0, 30).map((t) => t.archived ? h("button", { class: "hrow dim", on: { click: () => { location.hash = `#c/${t.id}`; } } },
-      h("span", { class: "hicon" }, "#"), h("span", { class: "grow" }, channelName(t)), h("small", null, t.title)) : channelRow(t))) : null,
   );
 }
 
