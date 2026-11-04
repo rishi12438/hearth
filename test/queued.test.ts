@@ -139,7 +139,8 @@ test("New session → New thread hands a queued reply to Hearth to plan in the r
   await setup();
   const { thread, root, run, q } = await queuedInRamble("also find a florist");
   // Even if the planner tries to fold it into the thread it was queued on, that's refused: it becomes a task of its own.
-  process.env.FAKE_PLAN = JSON.stringify({ title: "t", reply: "On it", jobs: [{ task: "find a florist", teammate: "Scout", addTo: root.id, continue: root.id }] });
+  // And even if it calls it a new topic: you chose New thread, so it isn't moved to its own ramble.
+  process.env.FAKE_PLAN = JSON.stringify({ title: "t", reply: "On it", newTopic: true, jobs: [{ task: "find a florist", teammate: "Scout", addTo: root.id, continue: root.id }] });
   expect((await hub.startQueuedApart(q.id, "thread")).value!.threadId).toBe(thread.id);
   await until(async () => (await jobs()).some((j) => j.task === "find a florist"));
   const fresh = (await jobs()).find((j) => j.task === "find a florist")!;
@@ -149,6 +150,9 @@ test("New session → New thread hands a queued reply to Hearth to plan in the r
   const m = (await store.get<Message>("messages", q.id))!;
   expect(m.queued).toBeUndefined();
   expect(m.replyTo).toBeUndefined();
+  expect(m.threadId).toBe(thread.id);
+  expect(m.newTopic).toBeUndefined();
+  expect((await msgs()).some((x) => x.movedTo)).toBe(false);
   expect((await store.get<Job>("jobs", run.id))!.task).not.toContain("florist");
 });
 
