@@ -2244,6 +2244,13 @@ async function openGoogleSetup() {
   // No account: Google asks which one, so this also adds another. With one: reconnect that account.
   const connect = async (account?: string) => { try { location.href = (await call("/api/google/connect", { body: account ? { account } : {} })).url; } catch (e) { fail(e); } };
   const accounts: any[] = g.accounts || [];
+  // Accounts signed out, or signed in before Hearth asked for something (saving to Drive, adding events): a sign-in only
+  // covers what Google's consent screen listed then, so each needs one more trip through it. Said plainly, with a button.
+  const needing = accounts.filter((a) => a.problem || !a.canSend || !a.canDrive || a.canDriveWrite === false || a.canCalendarWrite === false);
+  const needBox = needing.length ? h("div", { class: "notice" }, icon("repeat", 16), h("div", { class: "stack" },
+    h("span", null, h("b", null, needing.length > 1 ? `${needing.length} accounts need one more sign-in` : `${needing[0].email} needs one more sign-in`),
+      h("br"), needing.some((a) => a.problem) ? "Google signed Hearth out. Sign in again to turn it back on." : "Hearth can now save to your Drive and add calendar events, but your account was connected before that, so Google hasn't allowed it yet. Tap below, pick the account, and tick every box on Google's screen."),
+    ...needing.map((a) => h("button", { class: "btn primary", on: { click: () => connect(a.email) } }, `Reconnect ${a.email}`)))) : null;
   const accountRow = (a: any) => h("div", { class: "item" },
     h("span", { class: "grow" }, h("b", null, a.email),
       h("small", { class: a.problem ? "err" : "sub" }, a.problem ? "Signed out · reconnect it" : googleAllows(a))),
@@ -2269,6 +2276,7 @@ async function openGoogleSetup() {
       h("small", null, g.connected ? "Teammates read every account below unless you ask for one." : "Teammates can watch your inbox, calendar and files and tell you what matters.")),
     g.connected ? [
       h("p", { class: "muted" }, "Ask for things like “tell me when the school emails”, “LinkedIn digest every 30 min” or “what's on tomorrow?”. They show up under Triggers in Plans."),
+      needBox,
       h("div", { class: "list" }, accounts.map(accountRow)),
       err,
       h("div", { class: "stack" },
