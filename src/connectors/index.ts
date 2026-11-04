@@ -83,9 +83,11 @@ export class Connect {
         void hub.log("mcp.requested", `MCP: ${s.addedBy} asked to add ${s.name} (${s.url})`).catch(() => {});
         void hub.push?.send({ title: "An agent wants to add an MCP server", body: `${s.name} · ${s.url}. Approve it or deny it in Hearth.`, tag: `mcp-${s.name}`, url: "/#activity" }).catch(() => {});
       },
+      // A call to a tool that asks first: an Approve card in the job's thread; the hub makes the call after the tap.
+      onAsk: (c) => hub.requestMcp(c),
     });
     registerSkills(() => [mcpSkill(base, this.agentKey)]);
-    hub.brain.mcpServers = () => this.mcp.forRun(base, this.agentKey);
+    hub.brain.mcpServers = (jobId) => this.mcp.forRun(base, this.agentKey, jobId);
   }
 
   /** MCP servers and their logins (mcp.ts). */

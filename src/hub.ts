@@ -977,7 +977,7 @@ export class Hub {
       ask: async (prompt) => this.brain.narrate(prompt, (await this.brains()).quick) });
     // Its thread's runs are one session on the hub: a follow-up resumes where the last one left off. A part of a split
     // job runs alongside its siblings, so it gets its own.
-    const meter: Meter = { costUsd: 0, unknown: false, signal: stop.signal, thread: job.parentId ? job.id : job.followsUp || job.id, workspace: await this.placeFor(job),
+    const meter: Meter = { costUsd: 0, unknown: false, signal: stop.signal, thread: job.parentId ? job.id : job.followsUp || job.id, jobId: job.id, workspace: await this.placeFor(job),
       onProgress: (what) => { narrator?.step(what); show(what); }, onAction: (raw) => narrator?.action(raw),
       // A picture of the page or window it's on: kept in memory; the app fetches it when told there's a new one.
       onFrame: (f) => {
@@ -1743,6 +1743,49 @@ export class Hub {
     return { value: ap };
   }
 
+  /**
+   * An agent called an MCP tool that asks first (mcp.ts): an Approve card, in the job's thread. The call hasn't been made;
+   * Approve makes exactly this call. The same call again while one waits gets the same card, not a second one.
+   */
+  async requestMcp(c: import("./mcp.ts").McpAsk): Promise<string> {
+    let job = c.jobId ? await this.store.get<Job>("jobs", c.jobId) : null;
+    if (!job) {
+      // hearth-mcp call doesn't say which job: the one working, when there's only one.
+      const working = (await this.store.all<Job>("jobs")).filter((j) => j.status === "working");
+      if (working.length === 1) job = working[0];
+    }
+    const args = c.args && typeof c.args === "object" ? c.args : {};
+    const shown = JSON.stringify(args, null, 1);
+    const all = await this.store.all<Approval>("approvals");
+    const same = all.find((a) => a.status === "pending" && a.action.type === "mcp" && a.action.server === c.server && a.action.tool === c.tool
+      && JSON.stringify(a.action.args) === JSON.stringify(args) && a.jobId === job?.id);
+    const told = `This call hasn't run: ${c.tool} on ${c.server} waits for the user's Approve in Hearth. Don't call it again or try another way. Say in your reply that it's waiting for their Approve; when they tap it, the hub makes this exact call and adds the result to your reply.`;
+    if (same) return told;
+    const ap = await this.store.put<Approval>("approvals", {
+      ...this.doc({}), threadId: job?.threadId, jobId: job?.id,
+      summary: `${c.server}: ${c.tool.replace(/_/g, " ")}`.slice(0, 200),
+      details: shown.length > 1500 ? `${shown.slice(0, 1500)}…` : shown,
+      action: { type: "mcp", server: c.server, tool: c.tool, args },
+      status: "pending",
+    } as Approval);
+    if (job) await this.saveJob({ ...job, approvalIds: [...(job.approvalIds || []), ap.id] });
+    await this.log("approval.requested", ap.summary);
+    this.emit("approval", ap);
+    await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: ap.threadId ? threadLink(ap.threadId) : "/#activity" });
+    return told;
+  }
+
+  /** An approved MCP call: made now, its text answer kept. */
+  private async runMcp(act: { server: string; tool: string; args: unknown }): Promise<{ ok: boolean; output: string }> {
+    const mcp = this.connect?.mcp;
+    if (!mcp?.get(act.server)) return { ok: false, output: `${act.server} isn't connected any more.` };
+    try {
+      const r: any = await mcp.call(act.server, act.tool, act.args);
+      const text = Array.isArray(r?.content) ? r.content.filter((x: any) => x?.type === "text").map((x: any) => String(x.text)).join("\n") : "";
+      return { ok: r?.isError !== true, output: text || (r?.isError ? "It failed." : "Done.") };
+    } catch (e: any) { return { ok: false, output: String(e?.message || e) }; }
+  }
+
   /** Every connector (set by the server). */
   connect: import("./connectors/index.ts").Connect | null = null;
   /** Senders for message.send, set at start (WhatsApp, Slack). */
@@ -1857,11 +1900,16 @@ export class Hub {
       await this.setAlwaysAllowed([...(await this.alwaysAllowed()), `google:${ap.action.kind}`]);
       await this.log("approval.always", `Always allow: ${CHANGE_KINDS[ap.action.kind]}`);
     }
+    if (yes && always && ap.action.type === "mcp") {
+      this.connect?.mcp.setGate(ap.action.server, ap.action.tool, false);
+      await this.log("approval.always", `Always allow ${ap.action.server}: ${ap.action.tool}`);
+    }
     let next: Approval = { ...ap, status: yes ? "approved" : "rejected", decidedAt: this.clock().toISOString() };
     await this.store.put("approvals", next);
     if (yes) {
       const act = ap.action;
       const out = act.type === "google" ? await this.runGoogle(act)
+        : act.type === "mcp" ? await this.runMcp(act)
         : act.type === "message"
         ? await (this.senders[act.channel]?.send(act.to, act.text, { subject: act.subject, threadId: act.threadId, from: act.from }).then(() => ({ ok: true, output: "Sent." }), (e: any) => ({ ok: false, output: String(e?.message || e) }))
           ?? { ok: false, output: `${act.channel} isn't connected.` })

@@ -294,7 +294,9 @@ export type Approval = Doc & {
   /** sha256: set when the script's code wasn't approved yet at ask time. Approving this run approves exactly that code too. */
   action: { type: "script"; script: string; args: string[]; sha256?: string } | { type: "message"; channel: Channel; to: string; text: string; subject?: string; threadId?: string; from?: string }
     /** A Gmail/Drive/Calendar command that changes or removes something (connectors/google-agent.ts); kind is what "Always allow" remembers. */
-    | { type: "google"; service: "gmail" | "drive" | "calendar"; args: string[]; body?: string; kind: string };
+    | { type: "google"; service: "gmail" | "drive" | "calendar"; args: string[]; body?: string; kind: string }
+    /** A call to an MCP tool that asks first (mcp.ts); "Always allow" lets that tool run without asking. */
+    | { type: "mcp"; server: string; tool: string; args: unknown };
   status: "pending" | "approved" | "rejected" | "done" | "failed";
   result?: string;
   decidedAt?: string;

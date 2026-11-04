@@ -1513,9 +1513,9 @@ setInterval(() => {
 
 async function decide(id: string, yes: boolean, always = false) { try { await call(`/api/approvals/${id}/${yes ? "approve" : "reject"}`, { body: { always } }); } catch (e) { handleError(e); } }
 const CHANNEL_NAME: Record<string, string> = { whatsapp: "WhatsApp", slack: "Slack", gmail: "Gmail", instagram: "Instagram", linkedin: "LinkedIn", x: "X" };
-/** "Always allow": for a message to one chat, or one kind of Google change (scripts and payments always ask). */
-const alwaysBtn = (ap: any, then?: () => void) => ap?.action?.type === "message" || (ap?.action?.type === "google" && GOOGLE_KINDS[ap.action.kind])
-  ? h("button", { class: "sbtn", title: ap.action.type === "google" ? `${GOOGLE_KINDS[ap.action.kind]}: do it without asking from now on` : `Send future ${CHANNEL_NAME[ap.action.channel] || ""} messages to ${ap.action.to} without asking`, on: { click: async () => { await decide(ap.id, true, true); then?.(); } } }, "Always allow")
+/** "Always allow": for a message to one chat, one kind of Google change, or one MCP tool (scripts and payments always ask). */
+const alwaysBtn = (ap: any, then?: () => void) => ap?.action?.type === "message" || ap?.action?.type === "mcp" || (ap?.action?.type === "google" && GOOGLE_KINDS[ap.action.kind])
+  ? h("button", { class: "sbtn", title: ap.action.type === "mcp" ? `Let ${ap.action.server}'s ${ap.action.tool} run without asking from now on (change it in /mcp)` : ap.action.type === "google" ? `${GOOGLE_KINDS[ap.action.kind]}: do it without asking from now on` : `Send future ${CHANNEL_NAME[ap.action.channel] || ""} messages to ${ap.action.to} without asking`, on: { click: async () => { await decide(ap.id, true, true); then?.(); } } }, "Always allow")
   : null;
 /** The Google changes that wait for Approve (connectors/google-agent.ts CHANGE_KINDS), as Settings → Always allowed names them. */
 const GOOGLE_KINDS: Record<string, string> = {
@@ -1929,6 +1929,21 @@ async function drawMcp() {
     if (r.url) location.href = r.url; // back at #mcp=ok:<name>
     else toast(`${name} is connected`);
   };
+  // Each tool, tap to switch: ones that ask wait for your Approve before they run; the rest run straight away.
+  const toolGates = (s: any) => {
+    const ask = new Set<string>(s.ask || []);
+    const chip = (t: string) => {
+      const on = ask.has(t);
+      const b = h("button", { class: `mcpchip${on ? " ask" : ""}`, "aria-pressed": String(on),
+        title: on ? `${t} waits for your Approve. Tap to let it run without asking.` : `${t} runs without asking. Tap to make it ask first.` }, t) as HTMLButtonElement;
+      b.addEventListener("click", busy(b, () => call(`/api/mcp/${encodeURIComponent(s.name)}`, { method: "PATCH", body: { tool: t, ask: !on } }).then(() => {})));
+      return b;
+    };
+    return h("details", { class: "mcpgates" },
+      h("summary", { class: "sub" }, `${ask.size ? `${ask.size} of ${s.tools.length} ask for your Approve` : "None ask for your Approve"}`),
+      h("small", { class: "muted" }, "Highlighted tools wait for your Approve before they run. Tap one to change it."),
+      h("div", { class: "mcpchips" }, ...s.tools.map(chip)));
+  };
   const btn = (label: string, cls: string, fn: () => Promise<void>) => { const b = h("button", { class: `sbtn ${cls}` }, label) as HTMLButtonElement; b.addEventListener("click", busy(b, fn)); return b; };
   const row = (s: any) => {
     const [tone, label] = MCP_STATE[s.state] || ["muted", s.state];
@@ -1952,7 +1967,7 @@ async function drawMcp() {
     return h("div", { class: "item mcprow" },
       h("span", { class: `mcpdot ${tone}`, "aria-hidden": "true" }),
       h("span", { class: "grow left" }, h("b", { class: "light" }, s.name), h("small", { class: s.state === "failed" ? "err" : "sub" }, detail),
-        s.state === "connected" && s.tools.length ? h("small", { class: "sub mcptools" }, s.tools.slice(0, 12).join(", ") + (s.tools.length > 12 ? ` +${s.tools.length - 12}` : "")) : null),
+        s.state === "connected" && s.tools.length ? toolGates(s) : null),
       h("span", { class: "row gap" }, ...actions.filter(Boolean)));
   };
   // Adding one: its address, and an optional API key (most servers sign in with OAuth instead).

@@ -399,6 +399,39 @@ test("a refused ask says so in the reply instead of leaving 'Tap Approve' with n
   expect(job.result).toContain("takes the name of a saved script, not code");
 });
 
+test("a held MCP call is an Approve card in its job's thread; Approve makes that exact call, Always allow stops the asking", async () => {
+  const made: any[] = [], gates: any[] = [];
+  (hub as any).connect = { mcp: { get: () => ({}), call: async (server: string, tool: string, args: unknown) => { made.push({ server, tool, args }); return { content: [{ type: "text", text: "sent ok" }] }; },
+    setGate: (...a: any[]) => gates.push(a) } };
+  await hub.ensureTeammates();
+  let told = "";
+  (hub.brain as any).think = async (b: any) => {
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "Send Ramitha a GIF", teammate: "Hearth", effort: "light" }] });
+    const [job] = await store.all<Job>("jobs");
+    const c = { server: "parley", tool: "send_message", args: { to: "447700", media: { url: "https://x/g.gif" } }, jobId: job.id };
+    told = await hub.requestMcp(c);
+    await hub.requestMcp(c); // the same call again: still one card
+    return "It's waiting for your Approve.";
+  };
+  await hub.ramble("send ramitha a gif");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "waiting"));
+  expect(told).toContain("hasn't run");
+  const aps = await store.all<any>("approvals");
+  expect(aps).toHaveLength(1);
+  const [job] = await store.all<Job>("jobs");
+  expect(aps[0]).toMatchObject({ jobId: job.id, threadId: job.threadId, summary: "parley: send message", status: "pending", action: { type: "mcp", tool: "send_message" } });
+  expect(aps[0].details).toContain("g.gif");
+  expect(made).toEqual([]); // nothing until the tap
+
+  await hub.decideApproval(aps[0].id, true, true);
+  expect(made).toEqual([{ server: "parley", tool: "send_message", args: { to: "447700", media: { url: "https://x/g.gif" } } }]);
+  expect(gates).toEqual([["parley", "send_message", false]]);
+  const done = (await store.all<Job>("jobs"))[0];
+  expect(done.status).toBe("done");
+  expect(done.result).toContain("Done: parley: send message\nsent ok");
+  (hub as any).connect = null;
+});
+
 test("a job matched to a script skill runs with no model at all", async () => {
   await hub.ensureTeammates();
   await approvedScript("echo-city", 'console.log("weather in " + process.argv[2])');
