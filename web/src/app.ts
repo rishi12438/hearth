@@ -1110,7 +1110,7 @@ function drawActivity() {
           h("span", { class: "l1" }, h("b", null, line), h("small", null, chan(it.threadId)), h("time", null, shortAgo(it.at))),
           h("span", { class: "l2" }, it.kind === "done" || it.kind === "failed" ? `${it.summary}${it.result ? ` — ${it.result}` : ""}` : it.kind === "blocked" ? `${it.summary}. ${it.unblock || ""}` : it.summary))),
       it.kind === "approval" ? h("div", { class: "actbtns" }, h("button", { class: "sbtn", on: { click: async () => { await decide(it.approval.id, false); renderActivity(); } } }, "No"), h("button", { class: "sbtn primary", on: { click: async () => { await decide(it.approval.id, true); renderActivity(); } } }, "Approve"), alwaysBtn(it.approval, renderActivity)) : null,
-      it.kind === "blocked" ? h("div", { class: "actbtns" }, h("button", { class: "sbtn primary", on: { click: async () => { await retry(it.id); renderActivity(); } } }, "Try again")) : null);
+      it.kind === "blocked" ? h("div", { class: "actbtns" }, h("button", { class: "sbtn primary", on: { click: async () => { await retry(it.id); renderActivity(); } } }, "Try again"), dismissBtn(it.id, renderActivity)) : null);
   };
   const of = (...k: string[]) => items.filter((it: any) => k.includes(it.kind));
   const running = [...of("running"), ...of("queued")];
@@ -1323,7 +1323,7 @@ function taskMessage(m: any) {
       aps.length ? h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => decide(aps[0].id, true) } }, "Approve"), alwaysBtn(aps[0]), h("button", { class: "sbtn", on: { click: () => decide(aps[0].id, false) } }, "No")) : null));
   } else if (st === "blocked") {
     body.push(h("div", { class: "block" }, h("div", { class: "blockhead" }, h("b", null, `Stuck: ${latest.blocked?.need || ""}`)), latest.blocked?.unblock ? h("p", null, latest.blocked.unblock) : null,
-      h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => retry(latest.id) } }, "Try again"))));
+      h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => retry(latest.id) } }, "Try again"), dismissBtn(latest.id))));
   } else {
     // The channel keeps it short: two lines and small tiles. Lists, files and the full answer live in the thread.
     const tiles = st === "done" ? (latest.tiles || []) : [];
@@ -1371,6 +1371,9 @@ const alwaysBtn = (ap: any, then?: () => void) => ap?.action?.type === "message"
   ? h("button", { class: "sbtn", title: `Send future ${CHANNEL_NAME[ap.action.channel] || ""} messages to ${ap.action.to} without asking`, on: { click: async () => { await decide(ap.id, true, true); then?.(); } } }, "Always allow")
   : null;
 async function retry(id: string) { try { await call(`/api/jobs/${id}/retry`, { body: {} }); } catch (e) { handleError(e); } }
+/** Let a stuck job go, so it stops waiting on you (and stops counting in the badges). */
+async function dismiss(id: string) { try { await call(`/api/jobs/${id}/stop`, { body: {} }); loadRoster(); loadInbox(); } catch (e) { handleError(e); } }
+const dismissBtn = (id: string, then?: () => void) => h("button", { class: "sbtn", on: { click: async () => { await dismiss(id); then?.(); } } }, "Dismiss");
 
 /** The ramble's threads as a row of chips, one tap away (like switching threads in Slack). */
 function threadTabs(chat: any, activeId: string | null, min = 1): HTMLElement | null {
@@ -1422,7 +1425,7 @@ function answer(j: any) {
         : h("small", { class: "muted" }, a.status === "done" ? "Approved and done" : a.status === "rejected" ? "You said no" : a.status)))]);
   }
   if (j.status === "blocked") return row(who, at, [h("div", { class: "block" }, h("div", { class: "blockhead" }, h("b", null, j.blocked?.need)), j.blocked?.why ? h("p", null, j.blocked.why) : null,
-    h("p", null, j.blocked?.unblock), h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => retry(j.id) } }, "Try again")))]);
+    h("p", null, j.blocked?.unblock), h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => retry(j.id) } }, "Try again"), dismissBtn(j.id)))]);
   const tiles = j.status === "done" ? (j.tiles || []) : [];
   const did = (j.did || []).filter((d: any) => ["hook", "memory", "skill", "place"].includes(d.kind)).map((d: any) => d.label);
   const canSave = j.status === "done" && !j.followsUp && (j.how === "fresh" || j.how === "repaired") && !(j.did || []).some((d: any) => d.kind === "skill");
