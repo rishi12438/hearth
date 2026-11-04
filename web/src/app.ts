@@ -250,6 +250,11 @@ function onEvent(e: { type: string; data?: any }) {
     }
       if (open && S.chat && e.data.threadId === open) { upsert(S.chat.jobs, e.data); drawChat(false); }
       if (r.view === "dm" && S.dm && e.data.teammateId === r.id) { upsert(S.dm.jobs, e.data); drawDm(false); }
+      if (unseenStuck(e.data) && !e.data.parentId && !document.hidden) {
+        if (open && e.data.threadId === open) seeStuck(`/api/threads/${open}/seen`);
+        else if (r.view === "dm" && e.data.teammateId === r.id) seeStuck(`/api/teammates/${r.id}/seen`);
+        else if (r.view === "activity") seeStuck("/api/inbox/seen");
+      }
       soon();
       return;
     case "approval":
@@ -773,7 +778,7 @@ const unseenCount = () => (S.inbox || []).filter((it: any) => isFresh(it)).lengt
 const activityBadge = () => needsYouCount() + (route().view === "activity" ? 0 : unseenCount());
 function markActivitySeen() {
   // Only tell the hub when there's something new to clear, so redraws don't keep pinging it.
-  if (!(S.inbox || []).some((it: any) => String(it.at) > actSeen)) return;
+  if (!(S.inbox || []).some((it: any) => String(it.at) > actSeen || (it.kind === "blocked" && !it.seen))) return;
   actSeen = new Date().toISOString();
   call("/api/inbox/seen", { body: {} }).then((x: any) => { if (x?.at > actSeen) actSeen = x.at; }).catch(() => {});
 }
@@ -1164,7 +1169,7 @@ function openJump() {
 async function loadChat(id: string) {
   if (id !== "new") markSeen(id);
   if (id === "new") { S.chat = { thread: { id: "new", title: "" }, messages: [], jobs: [], approvals: [] }; drawChat(); setTimeout(() => document.getElementById("composer")?.focus(), 80); return; }
-  try { S.chat = await call(`/api/threads/${id}`); for (const [k, v] of Object.entries(S.chat.steps || {})) S.progress.set(k, String(v)); drawChat(); }
+  try { S.chat = await call(`/api/threads/${id}`); for (const [k, v] of Object.entries(S.chat.steps || {})) S.progress.set(k, String(v)); drawChat(); if (S.chat.jobs.some(unseenStuck)) seeStuck(`/api/threads/${id}/seen`); }
   catch (e) { if (e instanceof ApiError && e.status === 404) { location.hash = ""; return; } handleError(e); }
 }
 
@@ -1497,10 +1502,13 @@ function markSeen(id: string) {
   seen[id] = new Date(Date.now() + 2000).toISOString(); // a little ahead, so your own message landing doesn't count as new
   localStorage.setItem("hearth.seen", JSON.stringify(seen));
 }
+// Seeing a stuck job is enough to clear it from the badges (the hub remembers, on every device); it stays stuck until you act.
+const unseenStuck = (j: any) => j?.status === "blocked" && !(j.seenAt && j.seenAt >= (j.updatedAt || j.createdAt));
+const seeStuck = (path: string) => { call(path, { body: {} }).catch(() => {}); };
 const unreadDm = (t: any) => !!t.lastDmAt && t.lastDmAt > (seen[t.id] || "");
 
 async function loadDm(id: string) {
-  try { S.dm = await call(`/api/teammates/${id}`); markSeen(id); drawDm(); }
+  try { S.dm = await call(`/api/teammates/${id}`); markSeen(id); seeStuck(`/api/teammates/${id}/seen`); drawDm(); }
   catch (e) { if (e instanceof ApiError && e.status === 404) { location.hash = ""; return; } handleError(e); }
 }
 

@@ -386,7 +386,7 @@ export class Hub {
         const mine = jobs.filter((j) => j.threadId === t.id);
         return { ...t, name: channelOf(t), archived: !!t.archivedAt, members: [...new Set(mine.map((j) => j.teammateId))],
           working: mine.filter((j) => j.status === "working" || j.status === "queued").length,
-          needsYou: mine.filter((j) => j.status === "waiting" || j.status === "blocked").length };
+          needsYou: mine.filter(needsYouBadge).length };
       });
   }
 
@@ -1965,7 +1965,7 @@ export class Hub {
         status = next ? `Next: ${next.title}, ${new Date(next.nextAt!).toLocaleString("en-US", { timeZone: prefs.tz, weekday: "short", hour: "numeric", minute: "2-digit" })}` : t.description;
       }
       return { id: t.id, name: t.name, color: t.color, emoji: t.emoji, description: t.description, builtIn: t.builtIn, state, status: clip(status), at,
-        busy: working.length + queued.length, needsYou: waiting.length + blocked.length, lastDmAt: lastDm.get(t.id) };
+        busy: working.length + queued.length, needsYou: mine.filter(needsYouBadge).length, lastDmAt: lastDm.get(t.id) };
     });
   }
 
@@ -1985,7 +1985,7 @@ export class Hub {
       const j = jobs.find((x) => x.id === a.jobId);
       items.push({ kind: "approval", at: a.createdAt, id: a.id, summary: a.summary, approval: a, teammateId: j?.teammateId || "hearth", threadId: a.threadId, jobId: j ? rootOf(j) : undefined });
     }
-    for (const j of jobs.filter((x) => x.status === "blocked")) items.push({ kind: "blocked", at: j.updatedAt || j.createdAt, id: j.id, summary: j.blocked?.need || j.task, unblock: j.blocked?.unblock, teammateId: j.teammateId, threadId: j.threadId, jobId: rootOf(j) });
+    for (const j of jobs.filter((x) => x.status === "blocked")) items.push({ kind: "blocked", at: j.updatedAt || j.createdAt, id: j.id, summary: j.blocked?.need || j.task, unblock: j.blocked?.unblock, seen: stuckSeen(j), teammateId: j.teammateId, threadId: j.threadId, jobId: rootOf(j) });
     for (const m of msgs.filter((x) => x.proactive)) items.push({ kind: "proactive", at: m.createdAt, id: m.id, summary: m.text, title: m.proactive!.title, teammateId: m.teammateId || "hearth", threadId: m.threadId });
     for (const j of jobs.filter((x) => (x.status === "done" || x.status === "failed") && x.finishedAt).sort((a, b) => b.finishedAt!.localeCompare(a.finishedAt!)).slice(0, 25)) {
       items.push({ kind: j.status === "failed" ? "failed" : "done", at: j.finishedAt, id: j.id, summary: j.task, result: (j.result || "").split("\n").find((l) => l.trim()) || "", teammateId: j.teammateId, threadId: j.threadId, jobId: rootOf(j) });
@@ -2005,12 +2005,26 @@ export class Hub {
 
   /** Mark Activity as seen up to now. Only moves forward, so a slow device can't bring old results back. */
   async markInboxSeen(): Promise<string> {
+    await this.markStuckSeen(); // Activity lists every stuck job, so looking at it is seeing them
     const cur = await this.inboxSeen();
     const at = new Date().toISOString();
     if (at <= cur) return cur;
     await this.store.put("settings", { id: "inboxSeen", createdAt: "1970-01-01T00:00:00.000Z", at });
     this.emit("inbox");
     return at;
+  }
+
+  /**
+   * You looked at these stuck jobs (their thread, the teammate's page, or Activity): like a read notification, they stop
+   * counting in the badges. They stay stuck, with Try again and Dismiss, and count again if they get stuck again.
+   */
+  async markStuckSeen(where: { threadId?: string; teammateId?: string } = {}) {
+    const at = this.clock().toISOString();
+    const fresh = (await this.store.all<Job>("jobs")).filter((j) => j.status === "blocked" && !stuckSeen(j) &&
+      (!where.threadId || j.threadId === where.threadId) && (!where.teammateId || j.teammateId === where.teammateId));
+    // Not saveJob: seeing it isn't news, so updatedAt (what "stuck again" is measured against) stays put.
+    for (const j of fresh) this.emit("job", await this.store.put<Job>("jobs", { ...j, seenAt: at }));
+    return fresh.length;
   }
 
   /** Everything one teammate has done, across chats, plus its routines and direct messages. */
@@ -2860,6 +2874,11 @@ export function supersededJobs(jobs: Job[]): Set<string> {
   }
   return new Set(jobs.filter((j) => !j.parentId && j.status === "blocked" && (newest.get(j.followsUp || j.id) || "") > j.createdAt).map((j) => j.id));
 }
+
+/** You've seen this job stuck since it last got stuck. */
+export const stuckSeen = (j: Job) => !!j.seenAt && j.seenAt >= (j.updatedAt || j.createdAt);
+/** Counts in a needs-you badge: an approval waiting on you, or a stuck job you haven't seen yet. */
+const needsYouBadge = (j: Job) => j.status === "waiting" || (j.status === "blocked" && !stuckSeen(j));
 
 /** The few words shown in the chat for a job: the orchestrator's label, else the first clause of the task. */
 export function shortLabel(label: unknown, task: string) {

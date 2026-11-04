@@ -414,6 +414,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (method === "GET" && !id) return json(await hub.listThreads());
         if (method === "POST" && id && seg[3] === "topic") { const b = await body(req); return json({ ok: await hub.decideMove(id, String(b.messageId || ""), b.how === "keep" ? "keep" : "move") }); }
         if (method === "POST" && id === "similar") return json({ match: await hub.similarRamble(String((await body(req)).text || "")) });
+        if (method === "POST" && id && seg[3] === "seen") return json({ marked: await hub.markStuckSeen({ threadId: id }) });
         if (method === "GET" && id) { const d = await hub.threadDetail(id); if (!d) break; return json({ ...d, approvals: (await store.all<Approval>("approvals")).filter((a) => a.threadId === id) }); }
         if (method === "POST" && (!id || seg[3] === "messages")) {
           const b = await body(req);
@@ -670,6 +671,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         return json(await hub.inbox());
       case "teammates": {
         if (method === "GET" && id) { const d = await hub.teammateDetail(id); if (!d) break; return json(d); }
+        if (method === "POST" && id && seg[3] === "seen") return json({ marked: await hub.markStuckSeen({ teammateId: id }) });
         if (method === "POST" && id && seg[3] === "messages") { const r = await hub.askTeammate(id, String((await body(req)).text || "")); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "GET") return json(await store.all<Teammate>("teammates"));
         if (method === "POST") { const r = await hub.addTeammate(await body(req)); if (r.error) throw new HttpError(400, r.error); return json(r.value); }

@@ -362,6 +362,27 @@ test("a stuck job a follow-up replaced stops needing you, and a stuck job can be
   expect((await scout()).needsYou).toBe(0);
 });
 
+test("seeing a stuck job clears it from the badges, on every device, until it gets stuck again", async () => {
+  await hub.ensureTeammates();
+  const job = { id: "j1", createdAt: "2026-10-30T10:00:00.000Z", updatedAt: "2026-10-30T10:00:00.000Z", threadId: "th-1", teammateId: "scout", messageId: "m-x", effort: "light", task: "check my orders", status: "blocked", blocked: { need: "A browser" } };
+  await store.put<Job>("jobs", job as any);
+  const scout = async () => (await hub.roster()).find((t) => t.id === "scout")!;
+  expect((await scout()).needsYou).toBe(1);
+
+  expect(await hub.markStuckSeen({ threadId: "elsewhere" })).toBe(0); // looking at another thread isn't seeing it
+  expect(await hub.markStuckSeen({ threadId: "th-1" })).toBe(1);
+  expect((await scout()).needsYou).toBe(0);
+  expect((await scout()).state).toBe("blocked"); // still stuck, still says so; it just stops nagging
+  expect((await hub.inbox()).find((i) => i.id === "j1")!.seen).toBe(true);
+
+  // Try again, stuck again: that's news, so it counts again until you look.
+  now = new Date(now.getTime() + 60_000);
+  await store.put<Job>("jobs", { ...(await store.get<Job>("jobs", "j1"))!, updatedAt: now.toISOString() });
+  expect((await scout()).needsYou).toBe(1);
+  await hub.markInboxSeen(); // opening Activity sees everything there
+  expect((await scout()).needsYou).toBe(0);
+});
+
 test("teammates wear an emoji badge the orchestrator or the user can set; only real emoji are accepted", async () => {
   await hub.ensureTeammates();
   expect((await hub.teammate("scout"))!.emoji).toBe("🔍");
