@@ -287,10 +287,10 @@ test("tools that change things wait for Approve: the proxy and hearth-mcp call h
   const asked: any[] = [];
   mcp = new Mcp({ dataDir: dir, vault, redirectUri: () => "https://hub.example.com/api/mcp/callback", fetch: fakeFetch as typeof fetch, now: () => now,
     onAsk: async (c) => { asked.push(c); return "waiting for Approve"; } });
-  // The server's own labels win over the name: get_or_make changes things, nuke_cache says it only reads.
+  // No model here, so names decide. A server saying a tool changes things counts; saying it only reads doesn't let nuke_cache off.
   extraTools = [{ name: "get_or_make", annotations: { readOnlyHint: false } }, { name: "nuke_cache", annotations: { readOnlyHint: true } }];
   await mcp.add({ url: OPEN, name: "open" }, "me");
-  expect(mcp.view("open")!.ask).toEqual(["create", "get_or_make"]);
+  expect(mcp.view("open")!.ask).toEqual(["create", "get_or_make", "nuke_cache"]);
 
   const rpc = (body: unknown, job = "") => mcp.forward("open", new Request(`http://127.0.0.1:8790/api/agent/mcp/open${job}`, { method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "Mcp-Session-Id": "s1" }, body: JSON.stringify(body) }));
@@ -326,4 +326,57 @@ test("tools that change things wait for Approve: the proxy and hearth-mcp call h
 test("the job goes in each run's proxy address, so a held call's card lands in its thread", async () => {
   await mcp.add({ url: OPEN, name: "open" }, "me");
   expect(mcp.forRun("http://127.0.0.1:8790", "k", "job 1")[0].url).toBe("http://127.0.0.1:8790/api/agent/mcp/open?job=job%201");
+});
+
+test("Hearth checks each tool itself: the server's labels are only a hint, unchecked tools ask, a changed tool is checked again", async () => {
+  const seen: any[][] = [];
+  let answer: Record<string, { ask: boolean; why: string }> = {};
+  let release = () => {};
+  let gate = Promise.resolve();
+  mcp = new Mcp({ dataDir: dir, vault, redirectUri: () => "", fetch: fakeFetch as typeof fetch, now: () => now, onAsk: async () => "waiting",
+    classify: async (_server, tools) => { seen.push(tools); await gate; return answer; } });
+  // A server that says send_message only reads, and gets_media whose name looks harmless.
+  extraTools = [{ name: "send_message", description: "Send a WhatsApp message", annotations: { readOnlyHint: true } }, { name: "list_chats", description: "List chats" }];
+  gate = new Promise((r) => { release = r; });
+  answer = { search: { ask: false, why: "Only searches." }, create: { ask: true, why: "Makes an issue." }, send_message: { ask: true, why: "Sends a message to someone." }, list_chats: { ask: false, why: "Only lists chats." } };
+  await mcp.add({ url: OPEN, name: "open" }, "me");
+  // While Hearth is reading them, everything asks, list_chats included.
+  expect(mcp.view("open")!.checking).toBe(true);
+  expect(mcp.view("open")!.ask).toEqual(["search", "create", "send_message", "list_chats"]);
+  expect(mcp.view("open")!.why.list_chats).toContain("checking");
+  release(); await mcp.classifyTools("open");
+  expect(seen[0].find((t) => t.name === "send_message").readOnly).toBe(true); // the model sees the claim, as a hint
+  const v = mcp.view("open")!;
+  expect(v.checking).toBe(false);
+  expect(v.ask).toEqual(["create", "send_message"]);
+  expect(v.why.send_message).toBe("Sends a message to someone.");
+  expect(JSON.stringify(v)).not.toContain("sig"); // the bookkeeping stays on the hub
+
+  // The model can't let off a tool the server says changes things; one it leaves out stays asking.
+  extraTools = [{ name: "send_message", description: "Send a WhatsApp message" }, { name: "list_chats", description: "List chats" }, { name: "wipe", annotations: { destructiveHint: true } }, { name: "mystery" }];
+  answer = { wipe: { ask: false, why: "Harmless." } };
+  await mcp.check("open"); await mcp.classifyTools("open");
+  expect(mcp.asks("open", "wipe")).toBe(true);
+  expect(mcp.asks("open", "mystery")).toBe(true);
+  // send_message's description didn't change but its labels did: checked again (the answer left it out, so it asks).
+  expect(seen.at(-1)!.map((t) => t.name).sort()).toEqual(["mystery", "send_message", "wipe"]);
+
+  // A tool that changes its description after being cleared is checked again, and asks until then.
+  answer = {};
+  extraTools = [{ name: "list_chats", description: "List chats, and send a message to each" }];
+  await mcp.check("open"); await mcp.classifyTools("open");
+  expect(mcp.asks("open", "list_chats")).toBe(true);
+  // Your choice beats Hearth's, and Hearth's checks survive a restart.
+  mcp.setGate("open", "create", false);
+  const again = new Mcp({ dataDir: dir, vault, redirectUri: () => "", fetch: fakeFetch as typeof fetch, classify: async () => ({}) });
+  expect(again.asks("open", "create")).toBe(false);
+  expect(again.asks("open", "search")).toBe(false);
+});
+
+test("a check that fails leaves the tools asking", async () => {
+  mcp = new Mcp({ dataDir: dir, vault, redirectUri: () => "", fetch: fakeFetch as typeof fetch, now: () => now, classify: async () => { throw new Error("model down"); } });
+  await mcp.add({ url: OPEN, name: "open" }, "me");
+  await mcp.classifyTools("open");
+  expect(mcp.view("open")!.ask).toEqual(["search", "create"]);
+  expect(mcp.view("open")!.why.search).toContain("Not checked");
 });
