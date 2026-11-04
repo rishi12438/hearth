@@ -351,9 +351,12 @@ export class Hub {
       scriptTiles.push(...ex.tiles);
       results.push(`## ${r.name}\n${ex.text}${ex.tiles.length ? `\n(${ex.tiles.length} tile(s) already shown to the user)` : ""}`);
     }
+    // What the first reply already did: the second call is told, so it doesn't make it again (a reminder twice).
+    const already = applied.done.length ? `## Already done this turn (don't repeat these actions)\n${applied.done.map((d) => `- ${d.label}`).join("\n")}` : "";
     const ctx2 = await this.context(input, mode, teammate, opts.threadId);
-    const second = parseReply(await this.brain.think({ mode, context: ctx2, input, toolResults: [extra, ...results].filter(Boolean).join("\n\n"), top: opts.top }, profile, opts.meter));
-    const applied2 = await this.applyActions(second.actions.filter((a: any) => a?.type !== "script.run"), evidence, where);
+    const second = parseReply(await this.brain.think({ mode, context: ctx2, input, toolResults: [extra, already, ...results].filter(Boolean).join("\n\n"), top: opts.top }, profile, opts.meter));
+    const firstActions = new Set(first.actions.map((a: any) => JSON.stringify(a)));
+    const applied2 = await this.applyActions(second.actions.filter((a: any) => a?.type !== "script.run" && !firstActions.has(JSON.stringify(a))), evidence, where);
     const tiles = [...applied.tiles, ...applied2.tiles, ...scriptTiles].slice(0, 4);
     const fileIds = [...applied.fileIds, ...applied2.fileIds, ...scriptFiles];
     return { text: second.text || first.text, did: [...applied.done, ...applied2.done], used: [...applied.used, ...applied2.used], split: applied.split ?? applied2.split, tiles, fileIds };

@@ -721,6 +721,13 @@ export class EventPipeline {
     const schedule = this.cleanSchedule(input?.schedule ?? input);
     if (typeof schedule === "string") return { error: schedule };
     const action = input?.action ?? (input?.text ? { type: "notify", text: input.text } : input?.prompt ? { type: "think", prompt: input.prompt } : { type: "notify", text: title });
+    // The same reminder twice (same time, same words, same teammate) is a mistake, not a second reminder.
+    if (!input?.force && !o.allowPast) {
+      const act = this.cleanAction(action, o.system);
+      const same = this.triggers(TIME_SOURCE).find((t) => t.status === "active" && t.timer && j(t.timer.schedule) === j(schedule)
+        && typeof act !== "string" && j(t.action) === j(act) && (t.teammateId || null) === (str(input?.teammateId, 64) || null));
+      if (same) return this.conflict({ kind: "duplicate", message: `"${same.title}" already does this at the same time.`, existing: same, options: [`keep "${same.name}"`, `time.update "${same.name}" to move it`, "force: true if they really want two"] });
+    }
     const name = input?.name && !this.findTimer(slug(input.name)) && !this.findTrigger(slug(input.name)) ? slug(input.name) : this.freeName(input?.name || title, "triggers");
     const timer = await this.addTimer({ name, schedule, data: input?.data, nextAt: input?.nextAt }, createdBy, { silent: true, allowPast: o.allowPast });
     if (!timer.value) return timer;

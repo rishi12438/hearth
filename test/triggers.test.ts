@@ -220,3 +220,25 @@ test("old hooks are moved into the pipeline once at start, and the old webhook U
   expect((await sent()).map((m) => m.text)).toContain("Door");
   expect((await store.all<any>("activity")).some((a) => a.text.includes("Moved 5 plans"))).toBe(true);
 });
+
+test("a reminder isn't made twice when the brain looks something up and repeats itself", async () => {
+  const at = new Date(now.getTime() + 3.6e6).toISOString();
+  const remind = { type: "remind", title: "9:40 AM notification", schedule: { at }, text: "It's 9:40", requestedByUser: true };
+  const seen: string[] = [];
+  // First reply: the reminder plus a look at the pipeline; second reply (with what it found): the same reminder again.
+  (hub.brain as any).think = async (b: any) => {
+    seen.push(String(b.toolResults || ""));
+    return seen.length === 1 ? "On it.\n```hearth\n" + JSON.stringify([remind, { type: "source.list" }]) + "\n```"
+      : "Done.\n```hearth\n" + JSON.stringify([remind, { ...remind, why: "You asked just now" }]) + "\n```";
+  };
+  const r = await hub.turn("chat", "notify me at 9:40", "test");
+  expect(r.text).toBe("Done.");
+  expect(seen[1]).toContain("Already done this turn");
+  expect(seen[1]).toContain("Reminder: 9:40 AM notification");
+  // The exact repeat is dropped, and the same reminder with other words around it is refused: one reminder.
+  expect(hub.pipeline.triggers().map((t) => t.title)).toEqual(["9:40 AM notification"]);
+  // Asked again for the very same one: refused, with what to do instead (force when they really want two).
+  const again = await hub.pipeline.remind({ title: "9:40 AM notification", schedule: { at }, text: "It's 9:40" }, "you");
+  expect(again.conflict?.kind).toBe("duplicate");
+  expect((await hub.pipeline.remind({ title: "x", schedule: { at }, text: "It's 9:40", force: true }, "you")).value).toBeTruthy();
+});
