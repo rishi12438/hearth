@@ -631,8 +631,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       case "messages": {
         // A message queued behind a run that's going: send it now (into the run), or take it back.
         if (method === "POST" && id && seg[3] === "send") { const r = await hub.sendQueuedNow(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
-        // Or start it apart: as its own ramble, or as a separate run in the same chat.
-        if (method === "POST" && id && (seg[3] === "ramble" || seg[3] === "run")) { const r = await hub.startQueuedApart(id, seg[3]); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        // Or start it now on its own (New session): a new thread here, or its own ramble.
+        if (method === "POST" && id && (seg[3] === "ramble" || seg[3] === "thread")) { const r = await hub.startQueuedApart(id, seg[3]); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "DELETE" && id) { const r = await hub.unqueueMessage(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         break;
       }
