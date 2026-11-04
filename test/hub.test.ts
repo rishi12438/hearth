@@ -347,6 +347,21 @@ test("a job that can't go on says it's blocked, parks, and resumes when you unbl
   expect(job.blocked).toBeUndefined();
 });
 
+test("a stuck job a follow-up replaced stops needing you, and a stuck job can be dismissed", async () => {
+  await hub.ensureTeammates();
+  const base = { threadId: "th-1", teammateId: "scout", messageId: "m-x", effort: "light" };
+  await store.put<Job>("jobs", { id: "j1", createdAt: "2026-10-30T10:00:00.000Z", ...base, task: "check my orders", status: "blocked", blocked: { need: "Order text" } } as any);
+  await store.put<Job>("jobs", { id: "j2", createdAt: "2026-10-30T11:00:00.000Z", ...base, task: "is it done", status: "blocked", followsUp: "j1", blocked: { need: "A browser" } } as any);
+  const scout = async () => (await hub.roster()).find((t) => t.id === "scout")!;
+  expect((await scout()).needsYou).toBe(1); // only the newest in the thread, the one you can see and retry
+  expect((await hub.inbox()).filter((i) => i.kind === "blocked").map((i) => i.id)).toEqual(["j2"]);
+  expect((await hub.board("scout")).needsYou.map((c) => c.id)).toEqual(["j2"]);
+
+  expect((await hub.stopJob("j2")).error).toBeUndefined(); // Dismiss
+  expect((await store.get<Job>("jobs", "j2"))!.status).toBe("failed");
+  expect((await scout()).needsYou).toBe(0);
+});
+
 test("teammates wear an emoji badge the orchestrator or the user can set; only real emoji are accepted", async () => {
   await hub.ensureTeammates();
   expect((await hub.teammate("scout"))!.emoji).toBe("🔍");

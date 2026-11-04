@@ -376,7 +376,9 @@ export class Hub {
 
   /** Group chats (one per ramble), newest first, with who's in them and whether anything is running or needs you. */
   async listThreads() {
-    const jobs = (await this.store.all<Job>("jobs")).filter((j) => !j.parentId);
+    const all = await this.store.all<Job>("jobs");
+    const stale = supersededJobs(all);
+    const jobs = all.filter((j) => !j.parentId && !stale.has(j.id));
     return (await this.store.all<Thread>("threads"))
       .filter((t) => !t.id.startsWith("tm-") && t.id !== "main")
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
@@ -1021,7 +1023,8 @@ export class Hub {
     if (this.brainsTimer) clearTimeout(this.brainsTimer);
     this.brainsTimer = setTimeout(async () => {
       this.brainsTimer = null;
-      const parked = (await this.store.all<Job>("jobs")).filter((j) => j.status === "blocked" && j.blocked?.needs === "brains");
+      const all = await this.store.all<Job>("jobs"), stale = supersededJobs(all);
+      const parked = all.filter((j) => j.status === "blocked" && j.blocked?.needs === "brains" && !stale.has(j.id));
       for (const j of parked) await this.retryJob(j.id);
     }, wait);
     (this.brainsTimer as any).unref?.();
@@ -1029,15 +1032,20 @@ export class Hub {
 
   /** A linked computer came online: run every job that was parked waiting for one. */
   async resumeForComputer() {
-    const parked = (await this.store.all<Job>("jobs")).filter((j) => j.status === "blocked" && j.blocked?.needs === "computer");
+    const all = await this.store.all<Job>("jobs"), stale = supersededJobs(all);
+    const parked = all.filter((j) => j.status === "blocked" && j.blocked?.needs === "computer" && !stale.has(j.id));
     for (const j of parked) await this.retryJob(j.id);
     if (parked.length) await this.log("computer.resumed", `${parked.length} job(s) picked up by your computer`);
   }
 
-  /** You unblocked it (opened the laptop, logged in, tapped Allow): run the job again from the top. */
-  /** Stop button: a running job is cut off where it is; a queued one never starts. */
+  /** Stop button: a running job is cut off where it is; a queued one never starts; a stuck one is let go (Dismiss). */
   async stopJob(id: string) {
     const j = await this.store.get<Job>("jobs", id);
+    if (j?.status === "blocked") {
+      await this.saveJob({ ...j, status: "failed", result: `Dismissed by you (was stuck: ${j.blocked?.need || "needed something"}).`, finishedAt: this.clock().toISOString() });
+      await this.log("job.dismissed", (j.label || j.task).slice(0, 80));
+      return { value: { ok: true } };
+    }
     if (!j || !["queued", "working"].includes(j.status)) return { error: "That isn't running." };
     const stop = this.stops.get(id);
     if (stop) { this.cancelled.add(id); stop.abort(); }
@@ -1046,6 +1054,7 @@ export class Hub {
     return { value: { ok: true } };
   }
 
+  /** You unblocked it (opened the laptop, logged in, tapped Allow): run the job again from the top. */
   async retryJob(id: string) {
     const job = await this.store.get<Job>("jobs", id);
     if (!job || !["blocked", "failed"].includes(job.status)) return { error: "Only blocked or failed jobs can be retried." };
@@ -1920,7 +1929,9 @@ export class Hub {
   async roster() {
     const now = this.clock().getTime();
     const team = await this.store.all<Teammate>("teammates");
-    const jobs = (await this.store.all<Job>("jobs")).filter((j) => !j.parentId).sort((a, b) => (b.updatedAt || b.createdAt).localeCompare(a.updatedAt || a.createdAt));
+    const all = await this.store.all<Job>("jobs");
+    const stale = supersededJobs(all);
+    const jobs = all.filter((j) => !j.parentId && !stale.has(j.id)).sort((a, b) => (b.updatedAt || b.createdAt).localeCompare(a.updatedAt || a.createdAt));
     const approvals = await this.store.all<Approval>("approvals");
     const prefs = await this.prefs();
     const hooks = (await this.store.all<Hook>("hooks")).filter((h) => h.status === "active" && h.nextAt && h.source !== "system").sort((a, b) => a.nextAt!.localeCompare(b.nextAt!));
@@ -1963,7 +1974,9 @@ export class Hub {
    * and recently finished work, newest first.
    */
   async inbox() {
-    const jobs = (await this.store.all<Job>("jobs")).filter((j) => !j.parentId);
+    const all = await this.store.all<Job>("jobs");
+    const stale = supersededJobs(all);
+    const jobs = all.filter((j) => !j.parentId && !stale.has(j.id));
     const approvals = (await this.store.all<Approval>("approvals")).filter((a) => a.status === "pending");
     const msgs = await this.store.recent<Message>("messages", 200);
     const rootOf = (j: Job) => j.followsUp || j.id;
@@ -2180,7 +2193,9 @@ export class Hub {
     const threads = new Map((await this.store.all<Thread>("threads")).map((t) => [t.id, t]));
     const where = (id?: string) => !id ? "" : id.startsWith("tm-") ? "DM" : threads.get(id) ? `#${channelOf(threads.get(id)!)}` : "";
     const mine = (id?: string) => !teammateId || id === teammateId;
-    const jobs = (await this.store.all<Job>("jobs")).filter((j) => !j.parentId && mine(j.teammateId));
+    const all = await this.store.all<Job>("jobs");
+    const stale = supersededJobs(all);
+    const jobs = all.filter((j) => !j.parentId && !stale.has(j.id) && mine(j.teammateId));
     const card = (j: Job) => ({ kind: "task" as const, id: j.id, root: j.followsUp || j.id, title: j.label || shortLabel(undefined, j.task), teammateId: j.teammateId, threadId: j.threadId, where: where(j.threadId),
       status: j.status, at: j.finishedAt || j.startedAt || j.createdAt, startedAt: j.startedAt, need: j.blocked?.need });
     const by = (st: Job["status"][]) => jobs.filter((j) => st.includes(j.status));
@@ -2830,6 +2845,20 @@ export class Hub {
     await this.log("data.wiped", "All personal data deleted from this hub.");
     this.emit("reset");
   }
+}
+
+/**
+ * Blocked jobs that a newer follow-up in the same thread has taken over. You only ever see (and can retry) the newest
+ * job of a thread, so an older stuck one would otherwise count as "needs you" forever with nothing to tap.
+ */
+export function supersededJobs(jobs: Job[]): Set<string> {
+  const newest = new Map<string, string>();
+  for (const j of jobs) {
+    if (j.parentId) continue;
+    const root = j.followsUp || j.id;
+    if ((newest.get(root) || "") < j.createdAt) newest.set(root, j.createdAt);
+  }
+  return new Set(jobs.filter((j) => !j.parentId && j.status === "blocked" && (newest.get(j.followsUp || j.id) || "") > j.createdAt).map((j) => j.id));
 }
 
 /** The few words shown in the chat for a job: the orchestrator's label, else the first clause of the task. */
