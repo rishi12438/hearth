@@ -15,6 +15,7 @@ import { masterKeyPath } from "./vault.ts";
 import { liveOwner, watchLive, type Frame } from "./brains/live-view.ts";
 import { Sessions, type Place, type SessionHarness } from "./brains/sessions.ts";
 import { CodexAppTurn } from "./brains/codex-app.ts";
+import { estimateUsd } from "./brains/prices.ts";
 import { tidyWorkspaces, type TidyReport } from "./brains/archive.ts";
 import { commandLog } from "./brains/history.ts";
 import { ADVISE } from "./brains/lead.ts";
@@ -42,7 +43,9 @@ export const QUIET = "[[quiet]]";
 export const ESCALATE = "[[escalate]]";
 /** Why a model handed a job up: the line it wrote after the marker, or a stand-in when it gave none. */
 export function escalateWhy(text: string): string {
-  const why = text.replace(ESCALATE, " ").replace(/\s+/g, " ").trim().slice(0, 300);
+  // Its first line only: some add their notes after it ("NOTES FOR THE LEAD: …"), which isn't the reason.
+  const rest = text.replace(ESCALATE, "\n").split(/NOTES FOR THE LEAD/i)[0];
+  const why = (rest.split("\n").map((l) => l.trim()).find(Boolean) || "").replace(/\s+/g, " ").slice(0, 240);
   return why || "it gave no reason";
 }
 /** What a model at the top of the ladder is told to do instead of handing the job up. */
@@ -545,6 +548,8 @@ export type Meter = { costUsd: number; unknown: boolean; signal?: AbortSignal; o
   onBrain?: (who: { harness: string; model: string; ranOn?: string }) => void;
   /** Tokens used so far, for brains on a plan that report no dollar cost (Codex). */
   tokens?: number;
+  /** What those tokens would cost at the model's API prices (brains/prices.ts): an estimate, never billed. */
+  estUsd?: number;
   /** The cost or tokens just went up. */
   onUsage?: () => void };
 
@@ -842,7 +847,9 @@ export class Brain {
     for (const q of local) {
       if (!works(q.harness)) continue;
       if (meter) meter.ranOn = this.remote?.linked() ? "cloud" : undefined;
-      meter?.onBrain?.({ harness: q.harness, model: q.model, ranOn: meter.ranOn });
+      // Codex on its default model says which one as its thread opens (codex-app.ts): it announces itself then, so the
+      // card never shows a bare "Codex" first.
+      if (q.harness !== "codex" || q.model) meter?.onBrain?.({ harness: q.harness, model: q.model, ranOn: meter.ranOn });
       try { return await this.run(b, q, meter); }
       catch (e) { if (!(e instanceof SignedOut)) throw e; signedOut = e; }
     }
@@ -944,7 +951,13 @@ export class Brain {
       const turn = (app = new CodexAppTurn((l) => { sink.write(l); sink.flush(); },
         { cwd, prompt, model, resume, web, ephemeral: !thread,
           onModel: (m) => { if (m !== model) meter?.onBrain?.({ harness, model: m, ranOn: meter.ranOn }); },
-          onTokens: (n) => { if (!meter) return; meter.tokens = (meter.tokens ?? 0) + n; meter.onUsage?.(); } }));
+          onTokens: (t, m) => {
+            if (!meter) return;
+            meter.tokens = (meter.tokens ?? 0) + Number(t.totalTokens || 0);
+            const usd = estimateUsd(m, t);
+            if (usd !== null) meter.estUsd = (meter.estUsd ?? 0) + usd;
+            meter.onUsage?.();
+          } }));
       turn.done.then(() => { try { sink.end(); } catch {} proc.kill(); });
       proc.exited.then(() => turn.closed(), () => turn.closed());
       turn.start();

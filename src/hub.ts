@@ -63,11 +63,12 @@ const label = (p: BrainProfile) => `${p.harness}${p.model ? `/${p.model}` : ""}`
 /** A model in words for the app: "Claude opus", "Codex gpt-5.5", "Claude" (its default model). */
 export const brainName = (w: { harness: string; model?: string }) =>
   `${w.harness === "claude" ? "Claude" : w.harness === "codex" ? "Codex" : w.harness}${w.model ? ` ${w.model.replace(/^claude-/, "")}` : ""}`;
-/** What a job has cost so far, in words: "$0.42", "340k tokens", "$0.42 + 340k tokens", or "" before anything is known. */
-export function usageText(costUsd?: number | null, tokens?: number): string {
-  const usd = costUsd ? `$${costUsd < 0.01 ? costUsd.toFixed(3) : costUsd.toFixed(2)}` : "";
-  const tok = tokens ? `${tokens >= 1_000_000 ? `${(tokens / 1_000_000).toFixed(1)}M` : tokens >= 1000 ? `${Math.round(tokens / 1000)}k` : tokens} tokens` : "";
-  return [usd, tok].filter(Boolean).join(" + ");
+/** What a job has cost so far, in words: "$0.42", "340k tokens (≈$0.31)", "$0.42 + 340k tokens (≈$0.31)", or "" before
+ * anything is known. The ≈ part is what a plan's tokens would cost at API prices (brains/prices.ts). */
+export function usageText(costUsd?: number | null, tokens?: number, estUsd?: number | null): string {
+  const usd = (c: number) => `$${c < 0.01 ? c.toFixed(3) : c.toFixed(2)}`;
+  const tok = tokens ? `${tokens >= 1_000_000 ? `${(tokens / 1_000_000).toFixed(1)}M` : tokens >= 1000 ? `${Math.round(tokens / 1000)}k` : tokens} tokens${estUsd ? ` (≈${usd(estUsd)})` : ""}` : "";
+  return [costUsd ? usd(costUsd) : "", tok].filter(Boolean).join(" + ");
 }
 /** Where a call ran, in words: "on the cloud", "on Rishi's MacBook Pro", or nothing on a laptop hub. */
 const whereName = (ranOn?: string) => (ranOn ? ` on ${ranOn === "cloud" ? "the cloud" : ranOn}` : "");
@@ -847,6 +848,7 @@ export class Hub {
       if (meter) {
         meter.costUsd += tips.costUsd;
         if (tips.tokens) meter.tokens = (meter.tokens ?? 0) + tips.tokens;
+        if (tips.estUsd) meter.estUsd = (meter.estUsd ?? 0) + tips.estUsd;
         if (tips.unknown) meter.unknown = true;
         meter.onUsage?.();
       }
@@ -921,7 +923,7 @@ export class Hub {
     let onIt = "";
     const showRunning = () => {
       if (!onIt) return;
-      const spent = usageText(meter.costUsd, meter.tokens);
+      const spent = usageText(meter.costUsd, meter.tokens, meter.estUsd);
       const text = spent ? `${onIt} · ${spent}` : onIt;
       if (this.running.get(job.id) === text) return;
       this.running.set(job.id, text);
@@ -957,7 +959,7 @@ export class Hub {
         ...cur, ...patch, blocked, relogged: stored?.relogged, status, ranOn: meter.ranOn, ...(models.length ? { models } : {}),
         // A job that ran partly on a plan (Codex) keeps the dollars it did report, plus its tokens.
         durationMs: Date.now() - started, costUsd: meter.unknown && !meter.costUsd ? null : +meter.costUsd.toFixed(4),
-        ...(meter.tokens ? { tokens: meter.tokens } : {}),
+        ...(meter.tokens ? { tokens: meter.tokens } : {}), ...(meter.estUsd ? { estCostUsd: +meter.estUsd.toFixed(4) } : {}),
         finishedAt: status === "done" || status === "failed" ? this.clock().toISOString() : undefined,
       });
       // It pulled a fresh login from your Mac mid-run: go again with it, without you tapping anything.
@@ -1016,7 +1018,9 @@ export class Hub {
     const escalations: NonNullable<Job["escalations"]> = [];
     const moveUp = async (from: Tier, to: Tier, why: string) => {
       escalated = true;
-      escalations.push({ from: brainName(brains[from]), to: brainName(brains[to]), why, at: this.clock().toISOString() });
+      // The model that actually gave up (the pool may have swapped it), and the tier it goes to: which brain takes that
+      // tier is only known once it starts (it's in models).
+      escalations.push({ from: models.at(-1) ?? brainName(brains[from]), to: `${to} model`, why, at: this.clock().toISOString() });
       cur = await this.saveJob({ ...cur, escalated, escalations });
       await this.log("job.escalated", `${job.task.slice(0, 80)} → ${label(brains[to])}: ${why.slice(0, 160)}`);
     };

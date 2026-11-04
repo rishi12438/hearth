@@ -158,6 +158,8 @@ export type Job = Doc & {
   models?: string[];
   /** Tokens used by brains on a plan that report no dollar cost (Codex). */
   tokens?: number;
+  /** What those tokens would cost at the model's API prices: an estimate (the plan bills no dollars). */
+  estCostUsd?: number;
   /** Hybrid: the heavy model wrote the answer from a cheaper model's legwork. */
   voiced?: boolean;
   escalated?: boolean;
