@@ -60,6 +60,11 @@ const LOCATION_KEEP_DAYS = 7;
 
 type TurnOpts = { teammate?: Teammate | null; threadId?: string; jobId?: string; extra?: string; profile?: BrainProfile; meter?: Meter; allowedScripts?: string[] };
 const label = (p: BrainProfile) => `${p.harness}${p.model ? `/${p.model}` : ""}`;
+/** A model in words for the app: "Claude opus", "Codex gpt-5.5", "Claude" (its default model). */
+export const brainName = (w: { harness: string; model?: string }) =>
+  `${w.harness === "claude" ? "Claude" : w.harness === "codex" ? "Codex" : w.harness}${w.model ? ` ${w.model.replace(/^claude-/, "")}` : ""}`;
+/** Where a call ran, in words: "on the cloud", "on Rishi's MacBook Pro", or nothing on a laptop hub. */
+const whereName = (ranOn?: string) => (ranOn ? ` on ${ranOn === "cloud" ? "the cloud" : ranOn}` : "");
 
 /** The orchestrator answers with JSON; tolerate a code fence or prose around it. */
 export function parsePlan(raw: string): any | null {
@@ -133,6 +138,7 @@ export class Hub {
   private started = new Set<string>();   // job ids already handed to runJob
   private stops = new Map<string, AbortController>(); // running jobs, so a new message can restart one
   private cancelled = new Set<string>();              // running jobs you tapped Stop on
+  private running = new Map<string, string>();     // job id -> the model on it now and where ("Claude opus on the cloud")
   private additions = new Map<string, string[]>();    // what the user added to a running job, applied when it restarts
   private inflight = 0;                   // orchestrations, splits and retries still running
   private rambleSpend = new Map<string, number>(); // message id -> USD
@@ -146,7 +152,7 @@ export class Hub {
   ) {
     brain.pool = () => this.brainPool();
     // The brain's browser (enkidu-browser) opens signed in to every site you connected.
-    brain.beforeBrowse = () => { syncBrowserLogins(this.connections.allCookies(), join(config.dataDir, "browser-logins.json")); };
+    brain.beforeBrowse = () => this.giveBrowserLogins();
     brain.health.onChange = (st) => { void this.brainHealthChanged(st.harness, st.ok, st.message).catch(() => {}); };
     brain.health.onSeen = () => this.emit("brains");
     // Every phone notification also goes out on the live stream, so the Mac app can show it as a Mac notification.
@@ -410,7 +416,8 @@ export class Hub {
     const jobs = (await this.store.all<Job>("jobs")).filter((j) => j.threadId === id);
     return { thread, messages, jobs, steps: Object.fromEntries(jobs.filter((j) => this.steps.has(j.id)).map((j) => [j.id, this.steps.get(j.id)!.at(-1)!.text])),
       stepLog: Object.fromEntries(jobs.filter((j) => this.steps.has(j.id)).map((j) => [j.id, this.steps.get(j.id)])),
-      frames: Object.fromEntries(jobs.filter((j) => this.frames.has(j.id)).map((j) => [j.id, this.frames.get(j.id)!.n])) };
+      frames: Object.fromEntries(jobs.filter((j) => this.frames.has(j.id)).map((j) => [j.id, this.frames.get(j.id)!.n])),
+      running: Object.fromEntries(jobs.filter((j) => this.running.has(j.id)).map((j) => [j.id, this.running.get(j.id)!])) };
   }
 
   async removeThread(id: string) {
@@ -877,12 +884,23 @@ export class Hub {
         const n = (this.frames.get(job.id)?.n ?? 0) + 1, at = this.clock().toISOString();
         this.frames.set(job.id, { n, at, mime: f.mime, data: f.data });
         this.emit("frame", { jobId: job.id, threadId: job.threadId, n, at });
+      },
+      // Which model is on it right now, and where: the working card shows it, the step log keeps each change.
+      onBrain: (w) => {
+        const name = brainName(w);
+        if (!models.includes(name)) models.push(name);
+        const text = `${name}${whereName(w.ranOn)}`;
+        if (this.running.get(job.id) === text) return;
+        this.running.set(job.id, text);
+        this.emit("running", { jobId: job.id, threadId: job.threadId, text });
+        show(`${text} started`);
       } };
+    const models: string[] = [];
     const mate = await this.teammate(job.teammateId);
     let cur: Job = await this.saveJob({ ...job, status: "working", startedAt: this.clock().toISOString() });
     const finish = async (patch: Partial<Job>) => {
       narrator?.stop();
-      this.stops.delete(job.id); this.steps.delete(job.id); this.frames.delete(job.id);
+      this.stops.delete(job.id); this.steps.delete(job.id); this.frames.delete(job.id); this.running.delete(job.id);
       if (stop.signal.aborted && this.cancelled.delete(job.id)) {
         this.additions.delete(job.id); this.additions.delete(`${job.id}:label`);
         await this.addSpend(job.messageId, meter.costUsd);
@@ -904,7 +922,7 @@ export class Hub {
       const status = patch.status === "failed" ? "failed" : blocked ? "blocked" : pending ? "waiting" : "done";
       await this.addSpend(job.messageId, meter.costUsd);
       cur = await this.saveJob({
-        ...cur, ...patch, blocked, relogged: stored?.relogged, status, ranOn: meter.ranOn,
+        ...cur, ...patch, blocked, relogged: stored?.relogged, status, ranOn: meter.ranOn, ...(models.length ? { models } : {}),
         durationMs: Date.now() - started, costUsd: meter.unknown ? null : +meter.costUsd.toFixed(4),
         finishedAt: status === "done" || status === "failed" ? this.clock().toISOString() : undefined,
       });
@@ -2559,8 +2577,38 @@ export class Hub {
     // Rambles from before they had names: name them from their titles (Hearth refines it on the next message).
     for (const t of await this.store.all<Thread>("threads")) if (t.num && !t.channel && t.title) await this.renameThread(t.id, nameFrom(t.title), false);
     this.timer = setInterval(() => this.tick().catch((e) => console.error("tick failed", e)), intervalMs);
-    if (this.config.agent !== "echo") this.checkBrainsSoon();
+    if (this.config.agent !== "echo") {
+      this.checkBrainsSoon();
+      // Find out now, not at the first job, if the browser can't get your logins (e.g. the service can't write them).
+      // Only where jobs browse with enkidu-browser, the same check the brain makes before each call.
+      try { if (this.brain.skills().skills.some((s) => s.name === "enkidu-browser")) this.giveBrowserLogins(); } catch {}
+    }
     await this.tick();
+  }
+
+  /** Why the brain's browser can't get your logins right now, or null. Said once when it starts and once when it's fixed. */
+  loginsProblem: string | null = null;
+  /** Where the browser's logins go; undefined means ~/.enkidu/chrome-logins.json. Tests point it elsewhere. */
+  browserLoginsFile: string | undefined = undefined;
+
+  /** Write your connected logins where the brain's browser opens with them (brains/browser-logins.ts). Throws on failure. */
+  giveBrowserLogins() {
+    try {
+      syncBrowserLogins(this.connections.allCookies(), join(this.config.dataDir, "browser-logins.json"), this.browserLoginsFile);
+    } catch (e: any) {
+      const why = String(e?.code || e?.message || e).slice(0, 200);
+      if (this.loginsProblem !== why) {
+        this.loginsProblem = why;
+        const text = `Jobs' browser will open signed out of every site: the hub couldn't write its logins file (${why}).`;
+        void this.log("browser.logins", text).catch(() => {});
+        void this.push?.send({ title: "Signed-in browsing is off", body: text.slice(0, 180), tag: "browser-logins", url: "/" }).catch(() => {});
+      }
+      throw e;
+    }
+    if (this.loginsProblem) {
+      this.loginsProblem = null;
+      void this.log("browser.logins", "Jobs' browser opens signed in to your connected sites again").catch(() => {});
+    }
   }
 
   stop() { if (this.timer) clearInterval(this.timer); if (this.brainsTimer) clearTimeout(this.brainsTimer); if (this.healthTimer) clearTimeout(this.healthTimer); }

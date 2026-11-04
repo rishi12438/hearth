@@ -154,6 +154,8 @@ export type Job = Doc & {
   depth?: number;
   startedAt?: string;
   tier?: "quick" | "workhorse" | "heavy";
+  /** The models that worked on it, in order ("Claude sonnet", "Claude opus"): what actually ran, after any swap. */
+  models?: string[];
   /** Hybrid: the heavy model wrote the answer from a cheaper model's legwork. */
   voiced?: boolean;
   escalated?: boolean;

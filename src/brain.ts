@@ -523,7 +523,9 @@ export type Meter = { costUsd: number; unknown: boolean; signal?: AbortSignal; o
   /** A cheaper model is doing the job: the lead (the heavy model) is on hand to ask (see brains/lead.ts). */
   lead?: boolean;
   /** Set by Brain when a run carried on the thread's earlier session instead of starting a new one. */
-  resumed?: boolean };
+  resumed?: boolean;
+  /** Called as each model starts on the call: the brain that actually runs it (after any swap) and where. */
+  onBrain?: (who: { harness: string; model: string; ranOn?: string }) => void };
 
 /** Somewhere else that can run a brain call: a computer linked to this hub (see computers.ts). */
 export type RemoteRunner = { name: string; run(b: BrainInput, p: BrainProfile, meter?: Meter): Promise<string> };
@@ -819,6 +821,7 @@ export class Brain {
     for (const q of local) {
       if (!works(q.harness)) continue;
       if (meter) meter.ranOn = this.remote?.linked() ? "cloud" : undefined;
+      meter?.onBrain?.({ harness: q.harness, model: q.model, ranOn: meter.ranOn });
       try { return await this.run(b, q, meter); }
       catch (e) { if (!(e instanceof SignedOut)) throw e; signedOut = e; }
     }
@@ -826,6 +829,7 @@ export class Brain {
     const r = this.remote?.pick(p) ?? null;
     if (r) {
       if (meter) meter.ranOn = r.name;
+      meter?.onBrain?.({ harness: p.harness, model: p.model, ranOn: r.name });
       try { return await r.run(b, p, meter); }
       catch (e) { if (!(e instanceof ComputerGone)) throw e; }
     }
@@ -836,6 +840,7 @@ export class Brain {
     // Every brain here is marked signed out and no computer can take it: try the one asked for anyway (a login fixed
     // since then shows up this way).
     if (meter) meter.ranOn = this.remote?.linked() ? "cloud" : undefined;
+    meter?.onBrain?.({ harness: p.harness, model: p.model, ranOn: meter.ranOn });
     return this.run(b, p, meter);
   }
 

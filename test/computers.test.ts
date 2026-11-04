@@ -116,9 +116,12 @@ test("Brain runs on this hub whenever it can, on a computer only what the hub ca
   expect(m1.ranOn).toBe("cloud");
 
   // custom isn't set up on this hub: the Mac does it.
-  const m2: Meter = { costUsd: 0, unknown: false };
-  expect(await brain.think(input, { harness: "custom", model: "" }, m2)).toBe("from the mac");
+  const ran: { harness: string; model: string; ranOn?: string }[] = [];
+  const m2: Meter = { costUsd: 0, unknown: false, onBrain: (w) => ran.push(w) };
+  expect(await brain.think(input, { harness: "custom", model: "big-1" }, m2)).toBe("from the mac");
   expect(m2.ranOn).toBe("Mac");
+  // The app's "which model is on it" comes from here: the brain that actually ran, and where.
+  expect(ran).toEqual([{ harness: "custom", model: "big-1", ranOn: "Mac" }]);
 
   // Signed out here: the Mac takes it until the hub's login is fixed.
   brain.health.signedOut("echo", "401");
