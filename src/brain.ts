@@ -16,6 +16,7 @@ import { liveOwner, watchLive, type Frame } from "./brains/live-view.ts";
 import { Sessions, type Place, type SessionHarness } from "./brains/sessions.ts";
 import { CodexAppTurn } from "./brains/codex-app.ts";
 import { tidyWorkspaces, type TidyReport } from "./brains/archive.ts";
+import { commandLog } from "./brains/history.ts";
 
 /** Each trigger module's own description of its config, for the hook docs below. */
 /** Each trigger module's own description, read when a prompt is built (the hub adds WhatsApp and Slack at start). */
@@ -354,6 +355,9 @@ export function workspaceNote(place?: Place): string[] {
     "  breaks it. Use the skills already there (and, in a project, the other workspaces' skills/) before working it out again, and",
     "  improve one in place when you find a better way, with a dated line saying what changed. If it's useful beyond this subject,",
     "  also save it with skill.save.",
+    "- history/ has every command earlier runs executed (one file per day and thread; Hearth writes it, you don't): grep it",
+    "  for code that worked before (`grep -n hn_links history/*.sh`). It's a safety net, not a home: code worth keeping goes",
+    "  in scripts/.",
     "- archive/ holds what's old: notes moved out of NOTES.md and data or results nobody touched for a month (gzipped). Look there",
     "  when you need something from long ago (`zcat archive/<month>/<file>.gz`).",
     "PARSE WITH CODE, NOT BY EYE: don't read big pages or files and pick things out by hand. Write code to extract, count, dedupe, sort,",
@@ -876,6 +880,8 @@ export class Brain {
       proc.exited.then(() => turn.closed(), () => turn.closed());
       turn.start();
     }
+    // A thread's run keeps every command it executes in its workspace, so the code is never lost.
+    const history = thread && folder ? commandLog(folder, thread) : null;
     let timedOut = false;
     // Planning and chat should answer fast. Real jobs (browsing, logging in, research) run until done, unless
     // HEARTH_JOB_TIMEOUT_SEC sets a cap; a new message from the user still stops them.
@@ -892,6 +898,7 @@ export class Brain {
       const it = e?.item;
       if (!it) return;
       if (it.type === "agent_message" && e.type === "item.completed") codexLast = String(it.text || "");
+      if (e.type === "item.started" && it.type === "command_execution") history?.command(it.command);
       if (e.type === "item.started" && it.type === "command_execution") meter?.onAction?.(`shell: ${String(it.command || "").slice(0, 240)}`);
       if (e.type === "item.completed" && it.type === "web_search" && (it.query || it.action?.query)) meter?.onAction?.(`web search: ${it.query || it.action?.query}`);
       if (e.type === "item.started" && it.type === "mcp_tool_call") meter?.onAction?.(`${it.server || "tool"}.${it.tool || ""}: ${String(it.arguments?.title || "")} ${JSON.stringify(it.arguments ?? {}).slice(0, 200)}`);
@@ -926,6 +933,16 @@ export class Brain {
                 if (c?.type !== "tool_result" || !c.is_error) continue;
                 const text = (Array.isArray(c.content) ? c.content.map((x: any) => x?.text || "").join(" ") : String(c.content ?? "")).replace(/\s+/g, " ").trim();
                 console.warn(`brain tool error (${name}): ${text.slice(0, 500)}`);
+              }
+            } catch {}
+          }
+          // The code it runs and the files it writes, into the workspace's history/ (see brains/history.ts).
+          if (history && line.includes('"tool_use"') && line.includes('"type":"assistant"')) {
+            try {
+              for (const c of JSON.parse(line)?.message?.content || []) {
+                if (c?.type !== "tool_use") continue;
+                if (c.name === "Bash") history.command(c.input?.command);
+                else if (c.name === "Write" || c.name === "Edit") history.wrote(c.input?.file_path);
               }
             } catch {}
           }

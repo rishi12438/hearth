@@ -242,3 +242,31 @@ test("the hub puts a job in its ramble's project, in the planner's workspace, el
   expect(await place(job("j-anon", "t-anon"))).toBeUndefined();
   await store.close();
 });
+
+test("every command a thread's run executes is kept in its workspace's history/, for Claude and Codex", async () => {
+  const bin = mkdtempSync(join(tmpdir(), "hearth-hist-"));
+  const script = "python3 - <<'PY'\nimport re\nprint(len(re.findall(r'github\\.com', open('data/hn.html').read())))\nPY";
+  writeFileSync(join(bin, "claude"), `#!/bin/sh
+cat >/dev/null
+printf '%s\\n' '${JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: script } }, { type: "tool_use", name: "Write", input: { file_path: "scripts/count.py" } }] } }).replace(/'/g, "'\\''")}'
+echo '{"type":"result","is_error":false,"result":"done","session_id":"sess-hist1"}'
+`);
+  chmodSync(join(bin, "claude"), 0o755);
+  fakeCodex(bin, { answer: "ok", events: [{ method: "item/started", params: { item: { type: "commandExecution", id: "c1", command: "/bin/bash -lc 'jq .orders data/o.json'", status: "inProgress" } } }] });
+  const data = mkdtempSync(join(tmpdir(), "hearth-hist-data-"));
+  const brain = new Brain(loadConfig({ HEARTH_DATA: data, HEARTH_AGENT: "claude", HEARTH_SKILLS: "off", HEARTH_BRAIN_JAIL: "off" }));
+  const place = { workspace: "hn-research" };
+  await withPath(bin, async () => {
+    await brain.think(JOB, { harness: "claude", model: "" }, { ...meter("thread-hist-1"), workspace: place });
+    await brain.think(JOB, { harness: "codex", model: "" }, { ...meter("thread-hist-2"), workspace: place });
+    await brain.think(JOB, { harness: "claude", model: "" }, meter()); // no thread: nothing kept
+  });
+  const dir = join(data, "brain/workspaces/hn-research/history");
+  const files = (await import("node:fs")).readdirSync(dir).sort();
+  expect(files.length).toBe(2);
+  const all = files.map((f) => readFileSync(join(dir, f), "utf8")).join("\n");
+  expect(all).toContain("re.findall(r'github\\.com'");
+  expect(all).toContain("wrote scripts/count.py");
+  expect(all).toContain("jq .orders data/o.json");
+  expect(existsSync(join(data, "brain/history"))).toBe(false);
+});
