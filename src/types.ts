@@ -159,6 +159,8 @@ export type Job = Doc & {
   /** Hybrid: the heavy model wrote the answer from a cheaper model's legwork. */
   voiced?: boolean;
   escalated?: boolean;
+  /** Each time it moved up a model, and why: the model's own reason, the lead's redo note, or the error it hit. */
+  escalations?: { from: string; to: string; why: string; at: string }[];
   result?: string;
   did?: Done[];
   finishedAt?: string;

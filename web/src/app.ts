@@ -1507,6 +1507,8 @@ function answer(j: any) {
     appCards(j),
     (j.fileIds || []).map(fileCard),
     did.length ? h("div", { class: "did-line" }, icon("check", 12), did.join(" · ")) : null,
+    // Why it moved up a model: the model's own reason, the lead's redo note, or the error it hit.
+    (j.escalations || []).map((e: any) => h("div", { class: "did-line muted" }, `Moved up to ${e.to}: ${e.why}`)),
     canSave ? h("button", { class: "linkbtn", on: { click: async (e: Event) => {
       const b = e.currentTarget as HTMLButtonElement; b.disabled = true;
       try { const sk = await call(`/api/jobs/${j.id}/save-skill`, { body: {} }); toast(`Saved skill ${sk.name}`); b.textContent = "Saved as skill"; loadSkills(); } catch (err) { b.disabled = false; handleError(err); }
