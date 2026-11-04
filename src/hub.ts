@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store, Collection } from "./store/index.ts";
-import type { Brain, BrainInput, BrainProfile, Brains, Meter } from "./brain.ts";
+import type { Brain, BrainImage, BrainInput, BrainProfile, Brains, Meter } from "./brain.ts";
 import { QUIET, ESCALATE, escalateWhy, HAND_BACK, REDO, HARNESSES, MODEL_RE, availableHarnesses, NeedsComputer, BrainsFull, POOL_HARNESSES } from "./brain.ts";
 import type { Scripts } from "./scripts.ts";
 import type { Push } from "./push.ts";
@@ -60,7 +60,7 @@ const IDEAS_MARKER = "[[ideas]]";
 const MAX_OPEN_IDEAS = 4;
 const LOCATION_KEEP_DAYS = 7;
 
-type TurnOpts = { teammate?: Teammate | null; threadId?: string; jobId?: string; extra?: string; profile?: BrainProfile; meter?: Meter; allowedScripts?: string[]; top?: boolean };
+type TurnOpts = { teammate?: Teammate | null; threadId?: string; jobId?: string; extra?: string; profile?: BrainProfile; meter?: Meter; allowedScripts?: string[]; top?: boolean; images?: BrainImage[] };
 const label = (p: BrainProfile) => `${p.harness}${p.model ? `/${p.model}` : ""}`;
 /** A model in words for the app: "Claude opus", "Codex gpt-5.5", "Claude" (its default model). */
 export const brainName = (w: { harness: string; model?: string }) =>
@@ -165,6 +165,7 @@ export class Hub {
   private stops = new Map<string, AbortController>(); // running jobs, so a new message can restart one
   private cancelled = new Set<string>();              // running jobs you tapped Stop on
   private running = new Map<string, string>();     // job id -> the model on it now and where ("Claude opus on the cloud")
+  private flushing = new Set<string>();               // threads whose queued messages are going out right now
   private additions = new Map<string, string[]>();    // what the user added to a running job, applied when it restarts
   private inflight = 0;                   // orchestrations, splits and retries still running
   private rambleSpend = new Map<string, number>(); // message id -> USD
@@ -322,7 +323,7 @@ export class Hub {
     const profile = opts.profile || (await this.brains()).workhorse;
     const where = { teammateId: teammate?.id, threadId: opts.threadId, jobId: opts.jobId, recipe: opts.allowedScripts };
     const ctx = await this.context(input, mode, teammate, opts.threadId);
-    const first = parseReply(await this.brain.think({ mode, context: ctx, input, toolResults: extra, top: opts.top }, profile, opts.meter));
+    const first = parseReply(await this.brain.think({ mode, context: ctx, input, toolResults: extra, top: opts.top, ...(opts.images?.length ? { images: opts.images } : {}) }, profile, opts.meter));
     // Keeps the model's reason with the marker: nothing it proposed is applied.
     if (first.text.includes(ESCALATE)) return { text: `${ESCALATE} ${escalateWhy(first.text)}`, did: [] as Done[], used: [] as string[] };
     if (first.text.includes(HAND_BACK)) return { text: HAND_BACK, did: [] as Done[], used: [] as string[] }; // nothing it proposed is applied
@@ -679,9 +680,26 @@ export class Hub {
       const f = await this.store.get<StoredFile>("files", id);
       if (!f) continue;
       const text = this.files.textOf(f);
-      parts.push(text ? `### ${f.name}\n${text}` : `### ${f.name} (${f.mime}, ${Math.round(f.size / 1024)} KB; you can't open this type yet, say so if you need its contents)`);
+      parts.push(text ? `### ${f.name}\n${text}`
+        : f.mime.startsWith("image/") ? `### ${f.name} (a picture, ${Math.round(f.size / 1024)} KB; if it isn't in your working folder's attachments/, you can't see it: say so if you need to)`
+        : `### ${f.name} (${f.mime}, ${Math.round(f.size / 1024)} KB; you can't open this type yet, say so if you need its contents)`);
     }
     return parts.length ? `\n\nAttached files:\n<untrusted>\n${parts.join("\n\n")}\n</untrusted>` : "";
+  }
+
+  /** The pictures among a job's attachments, for its teammate to look at (brain.ts saves them in its folder). */
+  private async jobImages(ids: string[]): Promise<BrainImage[]> {
+    const out: BrainImage[] = [];
+    let budget = 12 * 1024 * 1024; // what one run carries (it goes over the wire to a linked computer)
+    for (const id of [...new Set(ids)].slice(0, 5)) {
+      const f = await this.store.get<StoredFile>("files", id);
+      if (!f?.mime.startsWith("image/") || f.size > budget) continue;
+      const bytes = this.files.bytes(f.id);
+      if (!bytes) continue;
+      budget -= bytes.length;
+      out.push({ name: f.name, mime: f.mime, data: Buffer.from(bytes).toString("base64") });
+    }
+    return out;
   }
 
   /** Send as many messages as you like: if this ramble is being planned, the new one waits and joins the next batch. */
@@ -1021,7 +1039,11 @@ export class Hub {
     const depNote = earlier ? `\n\nResults from earlier jobs you depend on:\n<untrusted>\n${earlier.slice(0, 6000)}\n</untrusted>` : "";
     const splitNote = job.effort === "heavy" && !job.depth ? "\n\nThis is a heavy job: if it has 2-4 parts that can be done independently, you may use jobs.split." : "";
     const ask = await this.store.get<Message>("messages", job.messageId);
-    const attached = await this.attachmentNote(ask?.fileIds);
+    const later = (await this.store.all<Message>("messages")).filter((m) => m.role === "user" && m.replyTo === (job.followsUp || job.id) && m.id !== ask?.id && m.createdAt >= job.createdAt);
+    // What came with it: the files on the message that started it, and on replies sent into it while it ran.
+    const fileIds = [...(ask?.fileIds || []), ...later.flatMap((m) => m.fileIds || [])];
+    const attached = await this.attachmentNote(fileIds);
+    const images = await this.jobImages(fileIds);
     const handNote = job.mayHandBack ? `\n\nFIRST, before any work or tools: the user sent this in the ramble's channel and it came straight to you because you had the latest thread. If it isn't a follow-up on that thread's subject (a new request, or partly about something else), don't do it: reply with only ${HAND_BACK} and Hearth will route it.` : "";
     let input = `${job.task}${depNote}${handNote}${repairNote}${splitNote}${attached}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")`;
     type Tier = "quick" | "workhorse" | "heavy";
@@ -1030,7 +1052,7 @@ export class Hub {
     const attempt = async (tier: Tier) => {
       cur = await this.saveJob({ ...cur, status: "working", tier });
       meter.lead = hybrid && tier !== "heavy" && label(brains[tier]) !== label(brains.heavy);
-      return this.turn(hybrid && tier !== "heavy" ? "legwork" : "job", input, job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains[tier], meter, top: tier === "heavy" });
+      return this.turn(hybrid && tier !== "heavy" ? "legwork" : "job", input, job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains[tier], meter, top: tier === "heavy", images });
     };
     // Start on the cheapest model the plan allows; move up a step when a model can't do it.
     const ladder: Tier[] = job.effort === "heavy" ? ["heavy"] : job.effort === "quick" ? ["quick", "workhorse", "heavy"] : ["workhorse", "heavy"];
@@ -1129,21 +1151,90 @@ export class Hub {
   }
 
   /** Reply inside a job's thread: the same teammate picks it up, with the thread so far as context. */
-  async replyToJob(rootId: string, text: string) {
+  /** Reply inside a job's thread: the same teammate picks it up, with the thread so far as context. queue: wait for a run that's going instead of restarting it. */
+  async replyToJob(rootId: string, text: string, opts: { queue?: boolean; fileIds?: string[] } = {}) {
     const root = await this.store.get<Job>("jobs", rootId);
-    const clean = text.trim().slice(0, 4000);
     if (!root || root.followsUp || root.parentId) return { error: "No such thread." };
+    const files = (await Promise.all((opts.fileIds || []).slice(0, 5).map((id) => this.store.get<StoredFile>("files", id)))).filter(Boolean) as StoredFile[];
+    const clean = text.trim().slice(0, 4000) || (files.length ? "Have a look at this." : "");
     if (!clean) return { error: "Say something first." };
-    const m = await this.addMessage({ role: "user", text: clean, threadId: root.threadId, replyTo: root.id, teammateId: root.teammateId });
+    // The files belong to this ramble now (they show under it in Files).
+    for (const f of files) if (!f.threadId) await this.store.put<StoredFile>("files", { ...f, threadId: root.threadId });
+    const m = await this.addMessage({ role: "user", text: clean, threadId: root.threadId, replyTo: root.id, teammateId: root.teammateId, ...(files.length ? { fileIds: files.map((f) => f.id) } : {}) });
     await this.setPrefs({ lastUserAt: m.createdAt });
-    const { job, folded } = await this.followUp(root, m, clean);
-    if (!folded) { await this.store.put<Message>("messages", { ...m, jobIds: [job.id] }); this.emit("job", job); this.pump(m.id); }
-    return { value: { message: m, job } };
+    return { value: await this.deliverReply(root, m, clean, opts.queue) };
   }
 
-  /** The next turn in a task's thread: folded into the teammate's current run if it's still going, else a new follow-up job. */
-  private async followUp(root: Job, m: Message, task: string, mayHandBack = false): Promise<{ job: Job; folded: boolean }> {
+  private async deliverReply(root: Job, m: Message, text: string, queue = false) {
+    const { job, folded, held } = await this.followUp(root, m, text, false, queue);
+    if (held) return { message: held, job };
+    if (!folded) { await this.store.put<Message>("messages", { ...m, jobIds: [job.id] }); this.emit("job", job); this.pump(m.id); }
+    return { message: m, job };
+  }
+
+  /** Holds a message for the run it would interrupt: it goes out when the run ends (see sendQueued), or on Send now. */
+  private async holdMessage(m: Message) {
+    const held = await this.store.put<Message>("messages", { ...m, queued: true });
+    this.emit("message", held);
+    return held;
+  }
+
+  /** A run is going (not just waiting its turn), so folding a message in would stop it and start over. */
+  private midRun(j: Job) { return j.status === "working" && this.stops.has(j.id); }
+
+  /** You tapped Send now on a queued message: it goes in the way it would have without the queue (into the run, which starts over with it). */
+  async sendQueuedNow(id: string) {
+    const m = await this.store.get<Message>("messages", id);
+    if (!m?.queued) return { error: "That's already sent." };
+    const sent = await this.store.put<Message>("messages", { ...m, queued: undefined });
+    this.emit("message", sent);
+    if (sent.replyTo) {
+      const root = await this.store.get<Job>("jobs", sent.replyTo);
+      if (!root) return { error: "No such thread." };
+      return { value: await this.deliverReply(root, sent, sent.text) };
+    }
+    return { value: await this.deliverDm(sent.teammateId || "hearth", sent.threadId!, sent, sent.text) };
+  }
+
+  /** Took a queued message back (× or Edit): it's deleted, never sent. */
+  async unqueueMessage(id: string) {
+    const m = await this.store.get<Message>("messages", id);
+    if (!m?.queued) return { error: "That's already sent." };
+    await this.store.remove("messages", id);
+    this.emit("message", { ...m, deleted: true });
+    return { value: { ok: true } };
+  }
+
+  /** A run in a thread ended: whatever you queued for it goes out together as the next turn (unless another run there is still going). */
+  private async sendQueued(done: Job) {
+    const rootId = done.followsUp || done.id;
+    const key = `${done.threadId}:${rootId}`;
+    if (this.flushing.has(key)) return;
+    this.flushing.add(key);
+    try {
+      const dm = done.threadId.startsWith("tm-"); // a DM: each message is its own job, no thread root
+      const inScope = (j: Job) => !j.parentId && j.threadId === done.threadId && (dm ? true : j.id === rootId || j.followsUp === rootId);
+      if ((await this.store.all<Job>("jobs")).some((j) => inScope(j) && (j.status === "queued" || j.status === "working"))) return;
+      const held = (await this.store.all<Message>("messages")).filter((m) => m.queued && m.threadId === done.threadId && (dm ? !m.replyTo : m.replyTo === rootId))
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      if (!held.length) return;
+      for (const m of held) this.emit("message", await this.store.put<Message>("messages", { ...m, queued: undefined }));
+      // One turn for all of them, filed under the last one (so it reads in order: your messages, then the answer).
+      const last = { ...held.at(-1)!, queued: undefined };
+      const text = held.map((m) => m.text).join("\n\n").slice(0, 4000);
+      await this.log("message.unqueued", `${held.length} queued → ${text.slice(0, 80)}`);
+      if (dm) await this.deliverDm(last.teammateId || done.teammateId, done.threadId, last, text);
+      else {
+        const root = await this.store.get<Job>("jobs", rootId);
+        if (root) await this.deliverReply(root, last, text);
+      }
+    } finally { this.flushing.delete(key); }
+  }
+
+  /** The next turn in a task's thread: folded into the teammate's current run if it's still going, else a new follow-up job. queue: held for a run that's going instead. */
+  private async followUp(root: Job, m: Message, task: string, mayHandBack = false, queue = false): Promise<{ job: Job; folded: boolean; held?: Message }> {
     const busy = (await this.store.all<Job>("jobs")).filter((j) => (j.id === root.id || j.followsUp === root.id) && (j.status === "queued" || j.status === "working")).at(-1);
+    if (busy && queue && this.midRun(busy)) return { job: busy, folded: true, held: await this.holdMessage(m) };
     if (busy && (await this.addToJob(busy.id, root.threadId, task))) return { job: busy, folded: true };
     // Replying in a stuck thread picks it up: the stuck turn is settled (it stops saying "Stuck") and the new turn goes on from it.
     for (const j of (await this.store.all<Job>("jobs")).filter((x) => (x.id === root.id || x.followsUp === root.id) && x.status === "blocked"))
@@ -1728,6 +1819,7 @@ export class Hub {
     if (!saved.parentId && (saved.status === "done" || saved.status === "failed")) {
       this.pump(saved.messageId).catch((e) => console.error("pump failed", e));
       this.touchThread(saved.threadId, {}).catch(() => {});
+      this.sendQueued(saved).catch((e) => console.error("queued messages failed", e));
     }
     return saved;
   }
@@ -2180,7 +2272,7 @@ export class Hub {
   }
 
   /** Message one teammate directly: no orchestrator, the job goes straight to them in their own thread. */
-  async askTeammate(id: string, text: string) {
+  async askTeammate(id: string, text: string, opts: { queue?: boolean } = {}) {
     const mate = await this.teammate(id);
     const clean = text.trim().slice(0, 4000);
     if (!mate) return { error: "No such teammate." };
@@ -2188,14 +2280,19 @@ export class Hub {
     const tid = (await this.dmThread(mate.id)).id;
     const m = await this.addMessage({ role: "user", text: clean, threadId: tid, teammateId: mate.id });
     await this.setPrefs({ lastUserAt: m.createdAt });
-    // Still working on your last message? This one goes into that task, so you get one answer.
+    return { value: await this.deliverDm(mate.id, tid, m, clean, opts.queue) };
+  }
+
+  private async deliverDm(mateId: string, tid: string, m: Message, text: string, queue = false) {
+    // Still working on your last message? This one goes into that task, so you get one answer (or, queued, waits for it).
     const busy = (await this.store.all<Job>("jobs")).filter((j) => j.threadId === tid && !j.parentId && (j.status === "queued" || j.status === "working")).at(-1);
-    if (busy && (await this.addToJob(busy.id, tid, clean))) return { value: { message: m, job: busy } };
-    const job = await this.store.put<Job>("jobs", { ...this.doc({}), threadId: tid, messageId: m.id, task: clean, teammateId: mate.id, status: "queued", effort: "light" } as Job);
+    if (busy && queue && this.midRun(busy)) return { message: await this.holdMessage(m), job: busy };
+    if (busy && (await this.addToJob(busy.id, tid, text))) return { message: m, job: busy };
+    const job = await this.store.put<Job>("jobs", { ...this.doc({}), threadId: tid, messageId: m.id, task: text, teammateId: mateId, status: "queued", effort: "light" } as Job);
     await this.store.put<Message>("messages", { ...m, jobIds: [job.id] });
     this.emit("job", job);
     this.pump(m.id);
-    return { value: { message: m, job } };
+    return { message: m, job };
   }
 
   /**

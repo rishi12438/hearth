@@ -17,6 +17,8 @@
 export type CodexAppOptions = {
   cwd: string;
   prompt: string;
+  /** Pictures the user attached, saved in cwd: sent with the prompt so the model sees them. */
+  images?: string[];
   model?: string;
   /** The thread to carry on, from an earlier run in this job's thread. */
   resume?: string;
@@ -136,7 +138,7 @@ export class CodexAppTurn {
     this.resumed = resumed;
     const model = m.result?.model ?? m.result?.thread?.model;
     if (typeof model === "string" && model) { this.model = model; this.o.onModel?.(model); }
-    this.request("turn/start", { threadId: id, input: [{ type: "text", text: this.o.prompt, text_elements: [] }] }, (r) => {
+    this.request("turn/start", { threadId: id, input: [{ type: "text", text: this.o.prompt, text_elements: [] }, ...(this.o.images || []).map((path) => ({ type: "localImage", path }))] }, (r) => {
       if (r.error) this.fail(`Codex couldn't start the turn: ${r.error.message || "turn/start failed"}`);
     });
   }

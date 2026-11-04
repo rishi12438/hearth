@@ -126,6 +126,9 @@ code { font-family: var(--mono); font-size: .86em; background: var(--surface); p
 .attach-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 8px 8px; }
 .attach-chips:empty { display: none; }
 .attach-chips .chip button { display: inline-grid; place-items: center; margin-left: 4px; color: var(--muted); }
+.attach-chips .chip.thumb { position: relative; padding: 0; overflow: hidden; border-radius: 12px; border: 1px solid var(--line, rgba(0,0,0,.1)); }
+.attach-chips .chip.thumb img { display: block; height: 64px; max-width: 160px; object-fit: cover; }
+.attach-chips .chip.thumb button { position: absolute; top: 4px; right: 4px; margin: 0; width: 20px; height: 20px; border-radius: 50%; background: rgba(20,18,16,.65); color: #fff; }
 
 /* ---------- Home ---------- */
 .tiles { display: flex; gap: 12px; overflow-x: auto; padding: 10px 16px 20px; scrollbar-width: none; }
@@ -192,6 +195,13 @@ code { font-family: var(--mono); font-size: .86em; background: var(--surface); p
 .rich ul, .rich ol { margin: 2px 0 6px; padding-left: 22px; }
 .rich a { color: var(--blue); text-decoration: none; }
 .mrow.err .rich { color: var(--danger); }
+/* Sent while the teammate was mid-run: greyed until it goes out (Send now / Edit / × beside it). */
+.mrow.queued .mav, .mrow.queued .mhead, .mrow.queued .mtext { opacity: .5; }
+.mrow.queued .mtext { border-left: 3px dashed var(--line); padding-left: 10px; }
+.qbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.qbar small { font-size: 13px; color: var(--muted); margin-right: auto; }
+.qbtn { display: inline-flex; align-items: center; height: 28px; padding: 0 10px; border-radius: 7px; border: 1px solid var(--line); font-size: 13.5px; font-weight: var(--fw-semibold); color: var(--ink-2); background: var(--bg); }
+.qbtn:first-of-type { color: var(--ink); }
 .mention { color: var(--blue); background: var(--mention-bg); padding: 0 3px; border-radius: 4px; font: inherit; }
 .proline { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); margin-bottom: 2px; }
 .whybtn { font-size: 13px; color: var(--muted); margin-top: 4px; }
@@ -447,8 +457,7 @@ textarea.field { resize: vertical; line-height: 1.4; }
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 
-/* ======================================================================
-   Faces: simple shapes, expressive eyes. The face acts out the state:
+/* ===============================================================   Faces: simple shapes, expressive eyes. The face acts out the state:
    idle (blinks), thinking (glances around), working (busy bob + scanning),
    waiting (looks at you, warm ring), blocked (sleepy, faded), done (happy).
    ====================================================================== */
@@ -1159,3 +1168,5 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 .judged b { display: inline; font-weight: var(--fw-semibold); color: var(--ink); }
 .judgepick .btn { width: auto; flex: none; }
 .judgepick .btn.cur { background: var(--surface-2); color: var(--ink); }
+=======
+.composer.drop { outline: 1.5px dashed var(--muted); outline-offset: -1.5px; }
