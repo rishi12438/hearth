@@ -178,6 +178,8 @@ export type Script = Doc & {
   /** "external" scripts can send, post, pay or change things outside the hub; every run needs your Approve. */
   effects: "read" | "external";
   origin: "repo" | "assistant";
+  /** ts (Bun, the default for older scripts), py (python3) or sh (bash). */
+  lang?: "ts" | "py" | "sh";
   status: "proposed" | "approved" | "rejected";
   sha256: string;
   lastRunAt?: string;

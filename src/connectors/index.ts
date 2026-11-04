@@ -1,3 +1,4 @@
+import { portsSkill } from "../events/ports.ts";
 import { sendInPage } from "../browser.ts";
 import { webSender } from "./web-senders.ts";
 import type { Hub } from "../hub.ts";
@@ -54,7 +55,9 @@ export class Connect {
     for (const ch of ["instagram", "linkedin", "x"] as const)
       hub.senders[ch] = webSender(ch, (d) => hub.connections.cookies(d), (url, text, o) => sendInPage(url, text, { fingerprint: hub.connections.fingerprintFor(url), ...o }));
     hub.connections.extra = { whatsapp: () => this.whatsapp.connected() || this.whatsapp.linked(), slack: () => this.slack.connected(), plaid: () => this.plaid.connected() };
-    hub.scripts.keys = (name) => (name === "serper" ? serperKey(vault) : null);
+    // `needs: plaid`: a key that opens only the read-only bank questions (/api/agent/plaid), for scripts that act on
+    // a Plaid ping. Made fresh each start, like the agent's key.
+    hub.scripts.keys = (name) => (name === "serper" ? serperKey(vault) : name === "plaid" ? (this.plaid.connected() ? this.plaidKey : null) : null);
     registerSource(slackSource(() => this.slack));
     registerSource(whatsappSource(this.whatsapp));
     registerSource(plaidSource(() => this.plaid));
@@ -65,6 +68,7 @@ export class Connect {
     // The agent's hearth-plaid command asks this hub on its own machine with a key made fresh each start, which opens
     // only the read-only Plaid questions. The skill is there only while a bank is connected.
     const h = hub.config.host, local = !h || h === "0.0.0.0" || h === "::" ? "127.0.0.1" : h.includes(":") ? `[${h}]` : h;
+    hub.scripts.hubUrl = `http://${local}:${hub.config.port}`;
     registerSkills(() => (this.plaid.connected() ? [plaidSkill(`http://${local}:${hub.config.port}`, this.agentKey)] : []));
     // Gmail, Drive and Calendar for the agent, while Google is connected, with the same key (google-agent.ts).
     registerSkills(() => (hub.google.connected ? googleSkills(`http://${local}:${hub.config.port}`, this.agentKey) : []));
@@ -89,6 +93,8 @@ export class Connect {
       classify: (server, tools) => hub.classifyMcpTools(server, tools),
     });
     registerSkills(() => [mcpSkill(base, this.agentKey)]);
+    // Trigger ports: claim a callback URL for a webhook, with a reason the hub records (events/ports.ts).
+    registerSkills(() => [portsSkill(base, this.agentKey)]);
     hub.brain.mcpServers = (jobId) => this.mcp.forRun(base, this.agentKey, jobId);
   }
 
@@ -97,6 +103,13 @@ export class Connect {
 
   /** The key hearth-plaid and the Google commands send from this machine. */
   private readonly agentKey = randomBytes(24).toString("hex");
+  /** Opens only /api/agent/plaid, for scripts with `// needs: plaid`. */
+  private plaidKey = randomBytes(24).toString("base64url");
+  isPlaidKey(k: string | null) {
+    const a = Buffer.from(String(k || "")), b = Buffer.from(this.plaidKey);
+    return a.length === b.length && timingSafeEqual(a, b);
+  }
+
   isAgentKey(k: string | null) {
     const a = Buffer.from(String(k || "")), b = Buffer.from(this.agentKey);
     return a.length === b.length && timingSafeEqual(a, b);

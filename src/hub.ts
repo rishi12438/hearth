@@ -2093,7 +2093,7 @@ ${JSON.stringify(shown, null, 1)}
       if (!a || typeof a !== "object") continue;
       try {
         switch (a.type) {
-          case "source.list": case "source.create": case "source.update": case "source.remove": case "source.test":
+          case "source.list": case "source.create": case "port.claim": case "source.update": case "source.remove": case "source.test":
           case "trigger.add": case "trigger.update": case "trigger.remove": case "trigger.list": case "trigger.dryrun": case "trigger.correct":
           case "time.schedule": case "time.update": case "time.cancel":
           case "remind": case "watch.add": case "watch.update": case "watch.remove": case "watch.check": {
@@ -3364,9 +3364,10 @@ ${JSON.stringify(shown, null, 1)}
     switch (a.type) {
       case "source.list": case "trigger.list":
         return `## The event pipeline now\n${JSON.stringify(this.pipelineSummary(), null, 1).slice(0, 8000)}`;
-      case "source.create": {
-        const r = p.createSource(a, by);
-        if (!r.value) return no(`source.create ${name}`, r);
+      case "source.create": case "port.claim": {
+        // Every URL the brain makes is a claimed port: why it's wanted and what calls it are written down with it.
+        const r = p.claimPort({ ...a, reason: a.reason || a.why || a.description || `(no reason given; made by ${by})`, publisher: a.publisher || a.service || "webhook" }, { by, jobId: where.jobId ?? null, threadId: where.threadId ?? null, teammateId: where.teammateId ?? null });
+        if (!r.value) return no(`${a.type} ${name}`, r);
         done.push({ kind: "hook", label: `Source: ${r.value.source.name}` });
         return `## source.create ${r.value.source.name}: done\nIts push URL is on the source in Triggers (Menu → Triggers). Tell the user to copy it from there; don't repeat it. Variables: ${r.value.source.variables.map((v) => v.name).join(", ")}.`;
       }
@@ -3539,7 +3540,24 @@ ${JSON.stringify(shown, null, 1)}
       const r = await this.turn("hook", `${t.title}\n${fillTemplate(a.prompt, vars)}`, `trigger: ${t.name}`, { teammate, threadId: t.threadId ?? undefined, extra });
       text = r.text; did = r.did;
     } else if (a.type === "script") {
-      const out = await this.scripts.run(a.script, a.args.map((x) => fillTemplate(x, vars)));
+      // The script gets the whole event (stdin and HEARTH_EVENT), so it can work on the object itself.
+      const event = { id: e.id, source: e.sourceName, variables: e.variables, payload: e.payload, receivedAt: e.receivedAt, test: e.test };
+      const out = await this.scripts.run(a.script, a.args.map((x) => fillTemplate(x, vars)), { event, ...(a.then === "publish" ? { cap: 200_000, timeoutMs: 120_000 } : {}) });
+      if (!out.needsApproval && out.ok && a.then === "publish") {
+        // Each JSON object it printed (one per line) is an event on `into`; anything else it printed is ignored.
+        let n = 0, bad = 0;
+        for (const raw of out.output.split("\n")) {
+          const l = raw.trim();
+          if (!l.startsWith("{")) continue;
+          let obj: unknown;
+          try { obj = JSON.parse(l); } catch { bad++; continue; }
+          if (n >= 100) { bad++; continue; }
+          const r = this.pipeline.publish(a.into!, obj, {}, e.test);
+          if (r.value) n++; else { bad++; if (r.conflict?.kind === "loop") throw new Error(r.error); }
+        }
+        // Quiet: the events it made are what speak (through their own triggers). The text is for the event's log.
+        return { quiet: true, text: `${a.script} published ${n} event${n === 1 ? "" : "s"} into ${a.into}${bad ? ` (${bad} line(s) skipped)` : ""}` };
+      }
       if (out.needsApproval) {
         const ap = await this.requestApproval({ summary: `${t.title}: run ${a.script}`, script: a.script, args: a.args }, { threadId: t.threadId ?? undefined });
         text = `${t.title} wants to ${ap.value?.summary ?? `run ${a.script}`}. Tap Approve to let it.`;

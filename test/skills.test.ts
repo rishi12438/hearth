@@ -3,8 +3,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describeSkillStep, hubSkills as allSkills, installSkills, skillCatalog, skillFlags } from "../src/brains/skills.ts";
-// hearth-lead and hearth-mcp are registered by any hub another test started (a global registry, like the hub's): left out of these lists.
-const hubSkills = (...a: Parameters<typeof allSkills>) => allSkills(...a).filter((s) => s.name !== "hearth-lead" && s.name !== "hearth-mcp");
+// hearth-lead, hearth-mcp and hearth-trigger-port are registered by any hub another test started (a global registry, like the hub's): left out of these lists.
+const HUB_ADDED = ["hearth-lead", "hearth-mcp", "hearth-trigger-port"];
+const hubSkills = (...a: Parameters<typeof allSkills>) => allSkills(...a).filter((s) => !HUB_ADDED.includes(s.name));
 
 /** A home with fake enkidu-browser / enkidu-cua that print a skill, and a data dir with one skill of your own. */
 function hub() {
