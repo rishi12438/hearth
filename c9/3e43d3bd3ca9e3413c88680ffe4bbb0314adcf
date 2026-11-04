@@ -1,0 +1,31 @@
+src/brain.ts
+  s_31ccc96039f267::t_a700e7d5706438 294,296
+  s_31ccc96039f267::t_9a380c7ae10e82 28,40,53-56,58-59,342,681-686,912
+  s_31ccc96039f267::t_07b8ce3b4a073a 295
+  s_31ccc96039f267::t_8823085df2f1b4 57
+test/parallel.test.ts
+  s_31ccc96039f267::t_44327b9f986334 265-297
+test/fixtures/fake-agent.ts
+  s_31ccc96039f267::t_ce6ed4818d295c 6-7
+src/hub.ts
+  s_31ccc96039f267::t_4aaa7683a4a1ce 670
+  s_31ccc96039f267::t_f78b1d1f674858 799-815,1006,1971
+  s_31ccc96039f267::t_625617dd91af74 675-676
+  s_31ccc96039f267::t_a066308c748023 673-674
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "c93e43d3bd3ca9e3413c88680ffe4bbb0314adcf",
+  "prompts": {},
+  "sessions": {
+    "s_31ccc96039f267": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "767c6610-cf3b-49db-a9bd-2dd2a22a1ae5",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
