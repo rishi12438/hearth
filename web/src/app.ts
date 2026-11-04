@@ -1918,6 +1918,9 @@ const MCP_STATE: Record<string, [string, string]> = {
   pending: ["warn", "Waiting for you"], connected: ["ok", "Connected"], signin: ["warn", "Needs sign-in"], failed: ["danger", "Failed"], off: ["muted", "Off"], checking: ["muted", "Checking…"],
 };
 
+/** Which servers' tool lists are open, so a redraw (a check finishing) doesn't close them. */
+const mcpOpen = new Set<string>();
+
 async function drawMcp() {
   const root = document.getElementById("mcp");
   if (!root) return;
@@ -1935,14 +1938,15 @@ async function drawMcp() {
     const chip = (t: string) => {
       const on = ask.has(t);
       const b = h("button", { class: `mcpchip${on ? " ask" : ""}`, "aria-pressed": String(on),
-        title: on ? `${t} waits for your Approve. Tap to let it run without asking.` : `${t} runs without asking. Tap to make it ask first.` }, t) as HTMLButtonElement;
+        title: `${s.why?.[t] ? `${s.why[t]} ` : ""}${on ? "Asks for your Approve. Tap to let it run without asking." : "Runs without asking. Tap to make it ask first."}` }, t) as HTMLButtonElement;
       b.addEventListener("click", busy(b, () => call(`/api/mcp/${encodeURIComponent(s.name)}`, { method: "PATCH", body: { tool: t, ask: !on } }).then(() => {})));
       return b;
     };
-    return h("details", { class: "mcpgates" },
-      h("summary", { class: "sub" }, `${ask.size ? `${ask.size} of ${s.tools.length} ask for your Approve` : "None ask for your Approve"}`),
-      h("small", { class: "muted" }, "Highlighted tools wait for your Approve before they run. Tap one to change it."),
+    const d = h("details", { class: "mcpgates", open: mcpOpen.has(s.name) || undefined, on: { toggle: () => { (d as HTMLDetailsElement).open ? mcpOpen.add(s.name) : mcpOpen.delete(s.name); } } },
+      h("summary", { class: "sub" }, `${s.checking ? "Hearth is checking its tools… " : ""}${ask.size ? `${ask.size} of ${s.tools.length} ask for your Approve` : "None ask for your Approve"}`),
+      h("small", { class: "muted" }, "Hearth reads each tool and decides: ones that could change something (highlighted) wait for your Approve. Hold or hover for why. Tap one to change it."),
       h("div", { class: "mcpchips" }, ...s.tools.map(chip)));
+    return d;
   };
   const btn = (label: string, cls: string, fn: () => Promise<void>) => { const b = h("button", { class: `sbtn ${cls}` }, label) as HTMLButtonElement; b.addEventListener("click", busy(b, fn)); return b; };
   const row = (s: any) => {

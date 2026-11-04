@@ -85,6 +85,8 @@ export class Connect {
       },
       // A call to a tool that asks first: an Approve card in the job's thread; the hub makes the call after the tap.
       onAsk: (c) => hub.requestMcp(c),
+      // Hearth decides which tools change things (the quick model reads each one), not the server.
+      classify: (server, tools) => hub.classifyMcpTools(server, tools),
     });
     registerSkills(() => [mcpSkill(base, this.agentKey)]);
     hub.brain.mcpServers = (jobId) => this.mcp.forRun(base, this.agentKey, jobId);

@@ -19,22 +19,32 @@ import type { Vault } from "./vault.ts";
 //
 // Tools that change things ask first. Every call goes through the hub (the proxy, or hearth-mcp call), so a call to a tool
 // that asks isn't sent on: it becomes an Approve card (onAsk), and the agent is told it's waiting. Approve runs that
-// exact call; "Always allow" switches the tool to allowed. Which tools ask: what you chose in /mcp, else the server's own
-// read-only label (MCP tool annotations), else the tool's name (list_…, get_…, read_… only read).
+// exact call; "Always allow" switches the tool to allowed.
+//
+// Which tools ask is Hearth's call, not the server's. When a server connects (or a tool's description or inputs change),
+// Hearth has a model read each tool and decide: only looks, or changes something (classify). A server's own labels are
+// only a hint, and can make a tool ask but never let it run free. Until a tool is checked it asks. What you chose in /mcp
+// beats all of it. With no model at all (offline), the tool's name decides (list_…, get_…, read_… only look).
 
 /** pending: an agent added it and you haven't approved it. The hub doesn't contact it, and no run or command can use it. */
 export type McpServer = { name: string; url: string; enabled: boolean; addedBy: string; addedAt: string; pending?: boolean;
   /** Your choice per tool in /mcp: "ask" waits for Approve, "allow" runs straight away. Tools not here use the default. */
-  gates?: Record<string, "ask" | "allow"> };
+  gates?: Record<string, "ask" | "allow">;
+  /** Hearth's own check of each tool: sig is the tool as it was checked (name, description, inputs, labels). */
+  checked?: Record<string, ToolVerdict> };
+export type ToolVerdict = { ask: boolean; why: string; sig: string };
 export type McpState = "connected" | "signin" | "failed" | "off" | "checking" | "pending";
 export type McpStatus = { state: McpState; tools: string[]; error?: string; checkedAt?: string };
-/** ask: the tools that wait for your Approve. */
-export type McpView = McpServer & McpStatus & { auth: "oauth" | "key" | "none"; ask: string[] };
+/** ask: the tools that wait for your Approve. why: why, per tool (Hearth's reason, or that you chose). checking: Hearth is reading its tools now. */
+export type McpView = Omit<McpServer, "checked"> & McpStatus & { auth: "oauth" | "key" | "none"; ask: string[]; why: Record<string, string>; checking: boolean };
+/** readOnly: what the server says (a hint only). */
 export type McpTool = { name: string; description?: string; inputSchema?: unknown; readOnly?: boolean };
+/** Hearth's model, reading tools: for each name it's sure of, whether it changes anything and why. */
+export type Classify = (server: string, tools: McpTool[]) => Promise<Record<string, { ask: boolean; why: string }>>;
 /** A call held for your Approve. jobId: the job whose run made it, when the run said. */
 export type McpAsk = { server: string; tool: string; args: unknown; jobId?: string };
 
-/** Names of tools that only look: list_x, get_x, read_x, search_x, x_status… Anything else asks unless the server says it's read-only. */
+/** With no model to check them: names of tools that only look (list_x, get_x, read_x, x_status…). Anything else asks. */
 const LOOKS = /^(list|get|read|search|find|fetch|load|query|describe|view|show|lookup|count|check|whoami|me)([_-]|$)|[_-](status|info|details)$/i;
 
 type OAuthCreds = {
@@ -80,6 +90,8 @@ export type McpOptions = {
   onPending?: (s: McpServer) => void;
   /** A call to a tool that asks: make the Approve card. Returns what the agent is told. Without it, nothing is held. */
   onAsk?: (c: McpAsk) => Promise<string>;
+  /** Hearth's check of a server's tools. Without it, the tool's name decides. */
+  classify?: Classify;
   fetch?: typeof fetch;
   now?: () => number;
 };
@@ -88,8 +100,10 @@ export class Mcp {
   private file: string;
   private servers: McpServer[] = [];
   private status = new Map<string, McpStatus>();
-  /** What each server says about its tools: true read-only, false changes things (from tools/list annotations). */
-  private readOnly = new Map<string, Map<string, boolean>>();
+  /** Each server's tools as last listed, for checking them. */
+  private defs = new Map<string, McpTool[]>();
+  /** Servers whose tools Hearth is reading right now. */
+  private classifying = new Map<string, Promise<void>>();
   private pending = new Map<string, Pending>();
   private refreshing = new Map<string, Promise<boolean>>();
   private timers: ReturnType<typeof setInterval>[] = [];
@@ -116,20 +130,74 @@ export class Mcp {
   list(): McpView[] {
     return this.servers.map((s) => {
       const c = this.creds(s.name);
+      const { checked: _, ...shown } = s;
       const st = s.pending ? { state: "pending" as const, tools: [] }
         : !s.enabled ? { state: "off" as const, tools: this.status.get(s.name)?.tools || [] } : this.status.get(s.name) ?? { state: "checking" as const, tools: [] };
-      return { ...s, ...st, auth: c?.kind === "key" ? "key" : c?.kind === "oauth" || this.status.get(s.name)?.state === "signin" ? "oauth" : "none",
-        ask: st.tools.filter((t) => this.asks(s.name, t)) };
+      return { ...shown, ...st, auth: c?.kind === "key" ? "key" : c?.kind === "oauth" || this.status.get(s.name)?.state === "signin" ? "oauth" : "none",
+        ask: st.tools.filter((t) => this.asks(s.name, t)),
+        why: Object.fromEntries(st.tools.map((t) => [t, this.reason(s.name, t)])), checking: this.classifying.has(s.name) };
     });
   }
 
-  /** Does this tool wait for your Approve? Your choice, else the server's read-only label, else its name. */
+  /** Does this tool wait for your Approve? Your choice, else Hearth's check of it, else (not checked yet) yes. */
   asks(name: string, tool: string): boolean {
-    const chosen = this.get(name)?.gates?.[tool];
+    const s = this.get(name);
+    const chosen = s?.gates?.[tool];
     if (chosen) return chosen === "ask";
-    const ro = this.readOnly.get(name)?.get(tool);
-    if (ro !== undefined) return !ro;
-    return !LOOKS.test(tool);
+    const v = this.verdict(name, tool);
+    if (v) return v.ask;
+    if (this.o.classify) return true; // not checked yet (or the check failed): ask
+    const def = this.defs.get(name)?.find((t) => t.name === tool);
+    return def?.readOnly === false || !LOOKS.test(tool);
+  }
+
+  /** Hearth's check of this tool, if it's still for the tool the server lists now (a changed description is checked again). */
+  private verdict(name: string, tool: string): ToolVerdict | null {
+    const v = this.get(name)?.checked?.[tool];
+    if (!v) return null;
+    const def = this.defs.get(name)?.find((t) => t.name === tool);
+    return !def || v.sig === toolSig(def) ? v : null;
+  }
+
+  private reason(name: string, tool: string): string {
+    const chosen = this.get(name)?.gates?.[tool];
+    if (chosen) return chosen === "ask" ? "You chose: ask first." : "You chose: runs without asking.";
+    const v = this.verdict(name, tool);
+    if (v) return v.why;
+    if (this.o.classify) return this.classifying.has(name) ? "Hearth is checking it; it asks until then." : "Not checked yet, so it asks.";
+    return this.asks(name, tool) ? "Its name doesn't say it only looks." : "Its name says it only looks.";
+  }
+
+  /**
+   * Hearth reads the tools it hasn't checked (new ones, and any whose description or inputs changed) and decides for
+   * each. A tool the model isn't sure of, or can't answer for, keeps asking. Runs in the background after a check.
+   */
+  classifyTools(name: string): Promise<void> {
+    const busy = this.classifying.get(name);
+    if (busy) return busy;
+    const s = this.get(name), defs = this.defs.get(name) || [];
+    const todo = defs.filter((t) => !s?.checked?.[t.name] || s.checked[t.name].sig !== toolSig(t));
+    if (!s || !this.o.classify || !todo.length) return Promise.resolve();
+    const run = (async () => {
+      for (let i = 0; i < todo.length; i += 25) {
+        const part = todo.slice(i, i + 25);
+        let got: Record<string, { ask: boolean; why: string }> = {};
+        try { got = await this.o.classify!(name, part); } catch (e: any) { console.warn(`mcp: couldn't check ${name}'s tools: ${String(e?.message || e).slice(0, 200)}`); continue; }
+        const cur = this.get(name);
+        if (!cur) return;
+        for (const t of part) {
+          const g = got[t.name];
+          if (!g || typeof g.ask !== "boolean") continue;
+          // The server saying it changes things always counts; it saying it only looks never lets it off.
+          const ask = g.ask || t.readOnly === false;
+          cur.checked = { ...cur.checked, [t.name]: { ask, why: String(g.why || "").slice(0, 200) || (ask ? "It changes something." : "It only looks."), sig: toolSig(t) } };
+        }
+        this.save();
+      }
+    })().finally(() => { this.classifying.delete(name); this.changed(); });
+    this.classifying.set(name, run);
+    this.changed();
+    return run;
   }
 
   /** /mcp: make one tool ask first, or let it run (also "Always allow" on its Approve card). */
@@ -184,7 +252,9 @@ export class Mcp {
     const old = this.get(name);
     if (old && old.url !== url.href && !input.key) this.forget(name); // a new address: the old sign-in isn't for it
     // You adding it (yourself, or again over one an agent asked for) is your approval.
-    const s: McpServer = { name, url: url.href, enabled: true, addedBy: old?.addedBy || by, addedAt: old?.addedAt || new Date(this.now()).toISOString() };
+    const s: McpServer = { name, url: url.href, enabled: true, addedBy: old?.addedBy || by, addedAt: old?.addedAt || new Date(this.now()).toISOString(),
+      // The same server again keeps your choices and Hearth's checks; a new address starts over.
+      ...(old && old.url === url.href ? { gates: old.gates, checked: old.checked } : {}) };
     this.servers = [...this.servers.filter((x) => x.name !== name), s].sort((a, b) => a.name.localeCompare(b.name));
     this.save();
     await this.check(name);
@@ -329,8 +399,10 @@ export class Mcp {
     if (!s.enabled) return { state: "off", tools: [] };
     try {
       const tools = await this.tools(name);
-      this.readOnly.set(name, new Map(tools.filter((t) => t.readOnly !== undefined).map((t) => [t.name, t.readOnly!])));
-      return this.setStatus(name, { state: "connected", tools: tools.map((t) => t.name) });
+      this.defs.set(name, tools);
+      const st = this.setStatus(name, { state: "connected", tools: tools.map((t) => t.name) });
+      void this.classifyTools(name);
+      return st;
     } catch (e: any) {
       if (e instanceof NeedsSignIn) return this.setStatus(name, { state: "signin", tools: [], error: this.creds(name)?.kind === "key" ? "The server refused the key." : undefined });
       return this.setStatus(name, { state: "failed", tools: [], error: String(e?.message || e).slice(0, 300) });
@@ -344,7 +416,7 @@ export class Mcp {
       for (let page = 0; page < 20; page++) {
         const r = await rpc("tools/list", cursor ? { cursor } : {});
         out.push(...(Array.isArray(r?.tools) ? r.tools : []).map((t: any) => ({ name: String(t?.name || ""), description: t?.description ? String(t.description) : undefined, inputSchema: t?.inputSchema,
-          // readOnlyHint true: it only looks. destructiveHint true (or readOnlyHint false): it changes things.
+          // What the server says: readOnlyHint true, it only looks; destructiveHint true (or readOnlyHint false), it changes things. A hint only.
           readOnly: t?.annotations?.readOnlyHint === true ? true : t?.annotations?.readOnlyHint === false || t?.annotations?.destructiveHint === true ? false : undefined })).filter((t: McpTool) => t.name));
         cursor = typeof r?.nextCursor === "string" && r.nextCursor ? r.nextCursor : undefined;
         if (!cursor) break;
@@ -548,6 +620,11 @@ export class Mcp {
 type TokenResponse = { access_token?: string; refresh_token?: string; expires_in?: number | string; scope?: string };
 class NeedsSignIn extends Error {}
 class Refused extends Error {}
+
+/** A tool as the server describes it: when this changes, Hearth checks it again. */
+export function toolSig(t: McpTool): string {
+  return createHash("sha256").update(JSON.stringify([t.name, t.description || "", t.inputSchema ?? null, t.readOnly ?? null])).digest("base64url").slice(0, 22);
+}
 
 const rpcReply = (m: unknown) => new Response(JSON.stringify(m), { status: 200, headers: { "Content-Type": "application/json" } });
 
