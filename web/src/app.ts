@@ -3465,7 +3465,8 @@ async function openWelcome() {
 async function openDevices() {
   try {
     const primary = !!S.state?.device.primary;
-    const [devices, waiting, cloud] = await Promise.all([call("/api/devices"), call("/api/access"), primary ? call("/api/machines").catch(() => null) : Promise.resolve(null)]);
+    const [devices, waiting, cloud, hubInfo] = await Promise.all([call("/api/devices"), call("/api/access"), primary ? call("/api/machines").catch(() => null) : Promise.resolve(null),
+      call("/api/devices/hub").catch(() => null)]);
     const codeBox = h("div");
     const decide = async (r: any, verb: "approve" | "deny") => {
       try {
@@ -3492,6 +3493,12 @@ async function openDevices() {
         primary && !d.primary ? h("button", { class: "btn small ghost", on: { click: () => confirmSheet(`Make ${d.name} primary?`, "It will be the one that lets new devices in. This device stays paired.", "Make primary", async () => { await call(`/api/devices/${d.id}/primary`, { body: {} }); toast(`${d.name} is primary`); refreshState(); }) } }, "Make primary") : null,
         primary || d.current ? h("button", { class: "btn small danger-ghost", on: { click: () => confirmSheet(`Sign out ${d.name}?`, "It will need to be let in again to come back.", "Sign out", async () => { await call(`/api/devices/${d.id}`, { method: "DELETE" }); if (d.current) { removeHub(activeHub()!.id); location.reload(); } toast("Signed out"); }) } }, "Sign out") : null))),
       codeBox,
+      hubInfo?.tools?.length ? h("div", null, h("h4", null, "Hub"),
+        h("div", { class: "ccard online" }, h("div", { class: "cchead" },
+          h("span", { class: "ccicon" }, icon("server", 20)),
+          h("span", { class: "grow" }, h("b", null, hubInfo.name || "Hearth", h("span", { class: "tag soft" }, hubInfo.target === "lightsail" ? "Server" : "This computer")),
+            h("small", { class: "cstate online" }, "Work runs here when no computer is online"))),
+          toolTags(hubInfo.tools))) : null,
       computersSection(devices.filter((d: any) => d.role === "computer"), primary, cloud),
       h("button", { class: "btn ghost", on: { click: () => showPairCode(codeBox) } }, icon("plus", 16), "Add a device (phone, iPad, another computer)"),
     ]);
@@ -3499,6 +3506,15 @@ async function openDevices() {
 }
 
 // ---- Linked computers: where work runs ----
+
+/** The brain's tools on one machine (enkidu-browser, enkidu-cua): ready, or what's wrong, with the reason on hover/tap. */
+const TOOL_WORD: Record<string, string> = { ok: "ready", off: "off", down: "not working", missing: "not installed" };
+function toolTags(tools: any[] | undefined, label = "Tools here") {
+  if (!tools?.length) return null;
+  return h("div", { class: "ccbrains tools" }, h("small", null, label),
+    tools.map((t: any) => h("span", { class: `tag soft tool ${t.state}`, title: t.detail || "", on: { click: () => t.detail && toast(`${t.label}: ${t.detail}`) } },
+      h("i", { class: `tdot ${t.state}` }), `${t.label} · ${TOOL_WORD[t.state] || t.state}`)));
+}
 
 /** Four bars, like a phone's signal. */
 function bars(level: number, state: string) {
@@ -3582,6 +3598,7 @@ function computersSection(list: any[], primary: boolean, cloud: any) {
         busy ? h("i", { class: "spin" }) : bars(l.level, l.state)),
       h("p", { class: `ccsub ${mc?.state === "error" && l.state !== "online" ? "err" : ""}` }, detail),
       l.harnesses.filter((x: string) => x !== "echo").length ? h("div", { class: "ccbrains" }, h("small", null, "Brains here"), l.harnesses.filter((x: string) => x !== "echo").map((x: string) => h("span", { class: "tag soft" }, x))) : null,
+      l.state === "online" ? toolTags(l.tools) : null,
       accept && !mc ? h("div", { class: "cccopy" }, h("small", { class: "cclabel" }, "Copy to the cloud"),
         h("div", { class: "list" }, copyRow("claude", "Claude login"), copyRow("codex", "Codex login"))) : null,
       mc ? h("p", { class: "muted small" }, cloud.logins.length ? `Uses the ${cloud.logins.map((i: string) => (i === "claude" ? "Claude" : "Codex")).join(" and ")} login this hub holds.` : "No login to hand it yet: turn on Copy to the cloud on your Mac, or log in on the server.") : null,
@@ -3790,9 +3807,9 @@ async function openConnectedDevices() {
     const ipLine = (ip?: string | null) => (ip ? ip.replace(/^::ffff:/, "") : "IP not seen yet");
     const mine = devices.filter((d: any) => d.role !== "computer");
     const comps = devices.filter((d: any) => d.role === "computer");
-    const row = (ic: string, title: any[], sub: string, dot?: string) => h("div", { class: "item" },
+    const row = (ic: string, title: any[], sub: string, dot?: string, extra?: any) => h("div", { class: "item" },
       h("div", { class: "hicon" }, icon(ic, 16)),
-      h("div", { class: "grow" }, h("div", { class: "title" }, ...title), h("div", { class: "sub" }, sub)),
+      h("div", { class: "grow" }, h("div", { class: "title" }, ...title), h("div", { class: "sub" }, sub), extra || null),
       dot ? h("i", { class: `status ${dot}` }) : null);
     const tag = (t: string) => h("span", { class: "tag soft" }, t);
     openSheet("Connected devices", [
@@ -3801,6 +3818,7 @@ async function openConnectedDevices() {
         [hubInfo?.name || S.state?.hub?.name || "Hearth", tag(hubInfo?.target === "lightsail" ? "Server" : "This computer")],
         [hubInfo?.address || (activeHub()?.url || location.origin).replace(/^https?:\/\//, ""), hubInfo ? ipLine(hubInfo.ip) : null,
           hubInfo?.upSince ? `up ${relTime(hubInfo.upSince).replace(/ ago$/, "")}` : null].filter(Boolean).join(" · "), S.conn)),
+      toolTags(hubInfo?.tools, "Tools on the hub"),
       waiting.length ? h("button", { class: "btn ghost", on: { click: openDevices } }, `${waiting.length} waiting to join · review`) : null,
       h("h4", null, `Your devices (${mine.length})`),
       h("div", { class: "list" }, mine.map((d: any) => row(d.passkey ? "lock" : isComputerName(d.name) ? "laptop" : "phone",
@@ -3810,7 +3828,7 @@ async function openConnectedDevices() {
       comps.length
         ? h("div", { class: "list" }, comps.map((d: any) => row(d.machine ? "cloud" : "laptop", [d.name],
           `${STATE_LABEL[d.link?.state] || "Offline"} · ${ipLine(d.ip)} · ${d.link?.state === "online" ? "can read your browser logins and run work" : `last seen ${relTime(d.link?.lastAliveAt || d.lastSeenAt)}`}`,
-          d.link?.state || "offline")))
+          d.link?.state || "offline", d.link?.state === "online" ? toolTags(d.link?.tools) : null)))
         : h("p", { class: "muted small" }, "No computer linked yet. Link your Mac so teammates can use your browser logins (AliExpress, LinkedIn…) and run work there."),
       codeBox,
       h("button", { class: "btn primary big", on: { click: () => showPairCode(codeBox) } }, icon("plus", 16), "Connect another device"),

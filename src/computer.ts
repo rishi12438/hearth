@@ -8,6 +8,7 @@ import { readSiteCookiesAnywhere, canReadBrowser, chromeFingerprint } from "./ch
 import { requiredFor, labelFor, isValidDomain } from "./cookie-sites.ts";
 import type { Config } from "./config.ts";
 import { TOKEN_RE } from "./tokenmint.ts";
+import { checkTools, type ToolStatus } from "./brains/tools.ts";
 
 // The computer side of a link (run on your Mac): join a hub once, then keep a line open to it and run the work it sends,
 // with this computer's own Claude/Codex login. The hub never gets a shell here: it can only ask for a brain call, which
@@ -123,6 +124,8 @@ export function hasLogin(item: CopyItem): boolean {
 }
 
 type Opts = { config: Config; link: Link; brain?: Brain; readCopy?: (item: CopyItem) => string | null; log?: (s: string) => void; copyEveryMs?: number; home?: string;
+  /** How this computer's tools are (enkidu-browser, enkidu-cua), told to the hub for Settings. Swapped in tests. */
+  tools?: () => Promise<ToolStatus[]>;
   /** The hub signed this computer out for good. */
   onSignedOut?: () => void };
 
@@ -155,7 +158,7 @@ export function connect(opts: Opts) {
   const readCopy = opts.readCopy || readLogin;
   const runs = new Map<string, AbortController>();
   let ws: WebSocket | null = null;
-  let stopped = false, backoff = 1000, alive: ReturnType<typeof setInterval> | null = null, copyTimer: ReturnType<typeof setInterval> | null = null;
+  let stopped = false, backoff = 1000, alive: ReturnType<typeof setInterval> | null = null, copyTimer: ReturnType<typeof setInterval> | null = null, toolsTimer: ReturnType<typeof setInterval> | null = null;
   let want: { items: CopyItem[]; have: Record<string, string> } = { items: [], have: {} };
   let cookieWant: { sites: string[]; have: Record<string, string> } = { sites: [], have: {} };
   const send = (m: unknown) => { try { ws?.send(JSON.stringify(m)); } catch {} };
@@ -224,6 +227,10 @@ export function connect(opts: Opts) {
       send({ t: "hello", harnesses: availableHarnesses(config), platform: platform() });
       alive = setInterval(() => send({ t: "alive" }), ALIVE_EVERY_MS);
       copyTimer = setInterval(copyUp, opts.copyEveryMs ?? 5 * 60_000);
+      // Its tools' health for Settings, now and every few minutes (a daemon can stop or come back).
+      const tellTools = () => { (opts.tools ?? (() => checkTools()))().then((tools) => send({ t: "tools", tools })).catch(() => {}); };
+      tellTools();
+      toolsTimer = setInterval(tellTools, 5 * 60_000);
     };
     ws.onmessage = (ev) => {
       let m: any;
@@ -241,6 +248,7 @@ export function connect(opts: Opts) {
     ws.onclose = (ev) => {
       if (alive) clearInterval(alive);
       if (copyTimer) clearInterval(copyTimer);
+      if (toolsTimer) clearInterval(toolsTimer);
       for (const c of runs.values()) c.abort();
       if (stopped) return;
       if (ev.code === 4001) return signedOut();

@@ -815,6 +815,12 @@ p.err { color: var(--danger); margin: 6px 2px 0; }
 .ccard.offline .ccsub { color: var(--muted); }
 .ccbrains { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .ccbrains small, .cclabel { font-size: 11px; font-weight: var(--fw-semibold); text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.ccbrains.tools { margin-top: 6px; }
+.tag.tool { cursor: default; }
+.tdot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); display: inline-block; }
+.tdot.ok { background: var(--ok); }
+.tdot.down { background: var(--danger); }
+.tdot.off, .tdot.missing { background: var(--warn); }
 .cccopy { display: flex; flex-direction: column; gap: 6px; }
 .cccopy .list { margin: 0; }
 .copyrow { width: 100%; text-align: left; }
