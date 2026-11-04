@@ -1,9 +1,13 @@
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Brain, inFolder, type Meter } from "../src/brain.ts";
-import { Sessions } from "../src/brains/sessions.ts";
+import { Sessions, channelWorkspace, workspaceName } from "../src/brains/sessions.ts";
+import { createStore, COLLECTIONS } from "../src/store/index.ts";
+import { Hub } from "../src/hub.ts";
+import { Scripts } from "../src/scripts.ts";
+import type { Job, Project, Thread } from "../src/types.ts";
 import { loadConfig } from "../src/config.ts";
 import { fakeCodex } from "./fixtures/codex.ts";
 
@@ -179,4 +183,62 @@ test("a thread's working runs are told their folder is kept, to look before redo
   expect(buildPrompt(job, "claude", false)).toContain("nothing there is kept");
   expect(buildPrompt(job, "claude", false)).not.toContain("YOUR WORKSPACE");
   expect(buildPrompt(job, null, true)).not.toContain("YOUR WORKSPACE");
+  // In a project's workspace: told which, and that its other workspaces are next door.
+  const inProject = buildPrompt(job, "claude", { project: "lego-zero", workspace: "aliexpress-orders" });
+  expect(inProject).toContain(`"aliexpress-orders" workspace of the user's "lego-zero" project`);
+  expect(inProject).toContain("The folder above it (..) is the project");
+  expect(buildPrompt(job, "claude", { workspace: "portfolio" })).not.toContain("The folder above it");
+});
+
+test("threads on one subject share a workspace, a project holds its workspaces, and a thread stays where it started", () => {
+  const dir = mkdtempSync(join(tmpdir(), "hearth-ws-"));
+  const brain = join(dir, "brain");
+  const s = new Sessions(join(dir, "brain-sessions.json"), brain);
+  const orders = { project: "lego-zero", workspace: "aliexpress-orders" };
+  expect(s.folder("thread-aaa", orders)).toBe(join(brain, "projects/lego-zero/aliexpress-orders"));
+  expect(s.folder("thread-bbb", orders)).toBe(join(brain, "projects/lego-zero/aliexpress-orders")); // a later thread, same subject
+  expect(s.folder("thread-ccc", { workspace: "portfolio" })).toBe(join(brain, "workspaces/portfolio"));
+  expect(s.placeOf("thread-aaa")).toEqual(orders);
+  // Pinned: asked for somewhere else later (the ramble was moved), it stays, so its sessions still resume.
+  expect(s.folder("thread-aaa", { workspace: "elsewhere" })).toBe(join(brain, "projects/lego-zero/aliexpress-orders"));
+  // A thread that already has its own folder (from before workspaces) keeps it.
+  mkdirSync(join(brain, "threads/thread-old"), { recursive: true });
+  expect(s.folder("thread-old", orders)).toBe(join(brain, "threads/thread-old"));
+  expect(s.placeOf("thread-old")).toBeUndefined();
+  // No name: a folder of its own. A bad name is ignored.
+  expect(s.folder("thread-ddd")).toBe(join(brain, "threads/thread-ddd"));
+  expect(s.folder("thread-eee", { project: "../x", workspace: "y" })).toBe(join(brain, "threads/thread-eee"));
+  // What the planner sees: the project's workspaces with their notes, or the ones outside any project.
+  writeFileSync(join(brain, "projects/lego-zero/aliexpress-orders/NOTES.md"), "# Orders\n85 items, 5 shipments; tracking via scripts/track.py");
+  mkdirSync(join(brain, "projects/lego-zero/customs"), { recursive: true });
+  expect(s.workspaces("lego-zero").map((w) => w.name).sort()).toEqual(["aliexpress-orders", "customs"]);
+  expect(s.workspaces("lego-zero").find((w) => w.name === "aliexpress-orders")!.notes).toContain("85 items, 5 shipments");
+  expect(s.workspaces().map((w) => w.name)).toEqual(["portfolio"]);
+  expect(s.workspaces("nope")).toEqual([]);
+  expect(workspaceName("Lego Zero!")).toBe("lego-zero");
+  expect(workspaceName("🔥")).toBeUndefined();
+  expect(channelWorkspace("aliexpress-orders-3")).toBe("aliexpress-orders");
+});
+
+test("the hub puts a job in its ramble's project, in the planner's workspace, else the channel's; follow-ups go where their thread is", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "hearth-wsh-"));
+  const store = await createStore("sqlite::memory:", dir);
+  for (const c of COLLECTIONS) await store.clear(c);
+  const config = { ...loadConfig({ HEARTH_AGENT: "echo" }), dataDir: dir };
+  const hub = new Hub(config, store, new Brain(config), new Scripts(store, dir, join(import.meta.dir, "../scripts")), null);
+  const now = new Date().toISOString();
+  const doc = (id: string) => ({ id, createdAt: now });
+  await store.put<Project>("projects", { ...doc("p1"), name: "lego zero", notebook: "lego" } as Project);
+  await store.put<Thread>("threads", { ...doc("t-proj"), title: "x", updatedAt: now, channel: "ramble-15", projectId: "p1" } as Thread);
+  await store.put<Thread>("threads", { ...doc("t-free"), title: "x", updatedAt: now, channel: "aliexpress-orders-3" } as Thread);
+  await store.put<Thread>("threads", { ...doc("t-anon"), title: "x", updatedAt: now, channel: "ramble-2" } as Thread);
+  const job = (id: string, threadId: string, extra: Partial<Job> = {}) => ({ ...doc(id), threadId, messageId: "m", task: "t", teammateId: "hearth", status: "queued", ...extra } as Job);
+  const place = (j: Job) => (hub as any).placeFor(j);
+  const root = await store.put<Job>("jobs", job("j-root", "t-proj", { workspace: "aliexpress-orders" }));
+  expect(await place(root)).toEqual({ project: "lego-zero", workspace: "aliexpress-orders" });
+  expect(await place(job("j-follow", "t-proj", { followsUp: root.id }))).toEqual({ project: "lego-zero", workspace: "aliexpress-orders" });
+  expect(await place(job("j-plain", "t-proj"))).toEqual({ project: "lego-zero", workspace: "general" });
+  expect(await place(job("j-free", "t-free"))).toEqual({ workspace: "aliexpress-orders" });
+  expect(await place(job("j-anon", "t-anon"))).toBeUndefined();
+  await store.close();
 });
