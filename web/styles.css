@@ -1170,3 +1170,4 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 .judgepick .btn.cur { background: var(--surface-2); color: var(--ink); }
 =======
 .composer.drop { outline: 1.5px dashed var(--muted); outline-offset: -1.5px; }
+.item .sub.warn { color: var(--danger); }

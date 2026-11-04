@@ -12,7 +12,7 @@ import { Vault } from "../src/vault.ts";
 import { zonedToUtc } from "../src/time.ts";
 import { chromePath, readPage, parseCookies } from "../src/browser.ts";
 import { readList, stableText, SignedOut } from "../src/sources/pages.ts";
-import type { Hook, Message } from "../src/types.ts";
+import type { Message } from "../src/types.ts";
 
 // LinkedIn and X: cookies kept in the vault, pages read in headless Chrome, items that only count as new when their
 // words change, and a single "reconnect" message when a site signs Hearth out.
@@ -40,7 +40,14 @@ beforeEach(async () => {
 afterEach(async () => { hub.stop(); await hub.idle(20_000); await store.close(); });
 
 const sent = async () => (await store.all<Message>("messages")).filter((m) => m.proactive);
-const get = (id: string) => store.get<Hook>("hooks", id) as Promise<Hook>;
+/** A watcher looks now (instead of at its next interval). */
+const lookNow = async (name: string) => { hub.pipeline.checkNow((w) => w.name === name); await hub.pipeline.tick(); };
+/** An app watcher and a trigger that says `text` with each new item's title. */
+async function watchApp(name: string, app: string, config: unknown, text: string, teammateId?: string) {
+  const w = await hub.pipeline.addWatcher({ name, kind: "app", app, config }, "Hearth");
+  await hub.pipeline.addTrigger({ name, source: name, formula: "true", action: { type: "notify", text: `${text} {{title}}` }, teammateId }, "Hearth");
+  return w.value!;
+}
 const conv = (name: string, msg: string, when = "5m", unread = false) => ({ text: `${name}\n${when}\n${msg}`, unread, href: `https://www.linkedin.com/messaging/thread/${name}/` });
 
 test("cookies: pasted as a header or an extension export, checked for the ones that matter, kept encrypted", () => {
@@ -67,22 +74,22 @@ test("an item's id ignores times, so only new words count as new", () => {
 test("a LinkedIn trigger remembers the inbox, then speaks for a new message, and only once", async () => {
   hub.connections.saveCookies("linkedin", "li_at=abc; JSESSIONID=\"ajax:1\"");
   page.data = [conv("Sarah Chen", "Thanks!"), conv("Dev Patel", "See you then")];
-  const r = await hub.addHook({ title: "LinkedIn messages", trigger: { type: "source", source: "linkedin", config: { what: "messages" } }, action: { type: "notify", text: "New on LinkedIn:" } }, "assistant");
-  expect(r.value!.trigger).toMatchObject({ minutes: 30 });
-  await hub.fire(await get(r.value!.id), "check");
+  const w = await watchApp("linkedin-messages", "linkedin", { what: "messages" }, "New on LinkedIn:");
+  expect(w.everyMin).toBe(30);
+  await lookNow("linkedin-messages");
   expect(reads[0]).toEqual({ url: "https://www.linkedin.com/messaging/", cookies: ["li_at", "JSESSIONID"] });
   page.data = [conv("Sarah Chen", "Are you free Thursday for a call?", "now", true), conv("Dev Patel", "See you then", "2h")];
-  await hub.fire(await get(r.value!.id), "check");
-  await hub.fire(await get(r.value!.id), "check");
-  expect((await sent()).map((m) => m.text)).toEqual(["New on LinkedIn:\n• ● Sarah Chen"]);
+  await lookNow("linkedin-messages");
+  await lookNow("linkedin-messages");
+  expect((await sent()).map((m) => m.text)).toEqual(["New on LinkedIn: ● Sarah Chen"]);
 });
 
 test("when a site signs Hearth out, you're told once, and Connectors shows it", async () => {
   hub.connections.saveCookies("x", "auth_token=a; ct0=b");
   page = { url: "https://x.com/i/flow/login?redirect_after_login=%2Fnotifications", data: null };
-  const r = await hub.addHook({ title: "X mentions", trigger: { type: "source", source: "x", config: { what: "mentions" } }, action: { type: "notify", text: "x" } }, "assistant");
-  await hub.fire(await get(r.value!.id), "check");
-  await hub.fire(await get(r.value!.id), "check");
+  await watchApp("x-mentions", "x", { what: "mentions" }, "x");
+  await lookNow("x-mentions");
+  await lookNow("x-mentions");
   const msgs = (await store.all<Message>("messages")).filter((m) => m.text.includes("signed Hearth out"));
   expect(msgs.length).toBe(1);
   expect(hub.connections.status().find((s) => s.id === "x")!.problem).toContain("signed Hearth out");
@@ -162,8 +169,8 @@ test("a Mac copies a login up over the link; the hub stores it and re-asks on si
   // When the session dies, the hub only flags it (no auto-pull from the Mac — that was flaky). A teammate pulls on demand.
   sent.length = 0;
   page = { url: "https://www.linkedin.com/login", data: null };
-  const r = await hub.addHook({ title: "LinkedIn", trigger: { type: "source", source: "linkedin", config: { what: "messages" } }, action: { type: "notify", text: "x" } }, "assistant");
-  await hub.fire(await get(r.value!.id), "check");
+  await watchApp("linkedin", "linkedin", { what: "messages" }, "x");
+  await lookNow("linkedin");
   expect(sent.find((m) => m.t === "wantCookies")).toBeUndefined(); // no automatic re-ask
   expect(hub.connections.status().find((s) => s.id === "linkedin")!.problem).toContain("signed Hearth out");
 
@@ -262,12 +269,11 @@ test("any domain works, not just presets: save, read a logged-in page, and watch
   // A generic "site" trigger watches it: one item = the page text, so a change makes it new.
   page = { url: "https://shop.example.com/orders", data: null };
   hub.readPage = (async () => ({ url: "https://shop.example.com/orders", text: "Order #1 shipped\nArrives Tuesday", data: null })) as any;
-  const r = await hub.addHook({ title: "My orders", trigger: { type: "source", source: "site", config: { url: "https://shop.example.com/orders", label: "My orders" } }, action: { type: "notify", text: "Orders changed:" } }, "assistant");
-  const id = r.value!.id;
-  await hub.fire(await get(id), "check"); // first look, silent
+  await watchApp("my-orders", "site", { url: "https://shop.example.com/orders", label: "My orders" }, "Orders changed:");
+  await lookNow("my-orders"); // first look, silent
   expect((await sent()).length).toBe(0);
   hub.readPage = (async () => ({ url: "https://shop.example.com/orders", text: "Order #1 delivered\nOrder #2 shipped", data: null })) as any;
-  await hub.fire(await get(id), "check");
+  await lookNow("my-orders");
   const out = await sent();
   expect(out.length).toBe(1);
   expect(out[0].text).toContain("Orders changed:");
@@ -293,8 +299,8 @@ test("every access to a connected account is audited: who, which site, when", as
   // A teammate reads it on demand (source.read) — audited with the teammate's name.
   await hub.readSource({ source: "linkedin", config: { what: "messages" } }, "Research");
   // A trigger owned by a teammate reads it — audited with that teammate.
-  const r = await hub.addHook({ title: "LI", trigger: { type: "source", source: "linkedin", config: { what: "messages" } }, action: { type: "notify", text: "x" }, teammate: "Research" } as any, "assistant", { teammateId: "scout" });
-  await hub.fire(await get(r.value!.id), "check");
+  await watchApp("li", "linkedin", { what: "messages" }, "x", "scout");
+  await lookNow("li");
 
   const log = await hub.connAudit();
   const reads = log.filter((e) => e.action === "read" && e.site === "linkedin.com");

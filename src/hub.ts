@@ -8,7 +8,6 @@ import { QUIET, ESCALATE, escalateWhy, HAND_BACK, REDO, HARNESSES, MODEL_RE, ava
 import type { Scripts } from "./scripts.ts";
 import type { Push } from "./push.ts";
 import { parseReply } from "./reply.ts";
-import { validateHook, computeNextAt, describeTrigger, isUserReminder } from "./hooks.ts";
 import { look, lineDiff } from "./watch.ts";
 import { Google } from "./google.ts";
 import { Connections } from "./connections.ts";
@@ -23,8 +22,8 @@ import { badChatLink } from "./connectors/web-senders.ts";
 import { googleAgent, CHANGE_KINDS, type GoogleChange } from "./connectors/google-agent.ts";
 import type { Project } from "./types.ts";
 import { channelWorkspace, workspaceName, type Place as WorkPlace } from "./brains/sessions.ts";
-import type { ConnAudit, TriggerRecipe, Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
-import { Library, validateSkill, validateWorkflow, validateTriggerRecipe, fillDeep, fill, type LibraryItem } from "./library.ts";
+import type { ConnAudit, Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
+import { Library, validateSkill, validateWorkflow, fillDeep, fill, type LibraryItem } from "./library.ts";
 import { cleanTile, cleanOptions, extractTiles, type Tile } from "./tiles.ts";
 import { Files, extractFiles } from "./files.ts";
 import { Apps, appSize } from "./apps.ts";
@@ -33,7 +32,8 @@ import { Narrator } from "./brains/narrate.ts";
 import { syncBrowserLogins } from "./brains/browser-logins.ts";
 import type { FreshLogin } from "./computers.ts";
 import { labelFor } from "./cookie-sites.ts";
-import { EventPipeline, fillTemplate, type EventTrigger, type PipelineEvent } from "./events/pipeline.ts";
+import { EventPipeline, fillTemplate, TIME_SOURCE, type EventTrigger, type PipelineEvent, type RunResult, type TimerSchedule, type Watcher, type WatchResult } from "./events/pipeline.ts";
+import { describeWatch } from "./events/watchers.ts";
 import { judgePrompt, parseValue, describeOutput, type Judge, type JudgeExample, type JudgeValue } from "./events/judge.ts";
 
 const DEFAULT_PREFS: Prefs = {
@@ -45,7 +45,7 @@ export const DEFAULT_TEAMMATES: Pick<Teammate, "id" | "name" | "color" | "descri
   { id: "hearth", name: "Hearth", emoji: "🔥", color: "#F5A524", description: "Your front desk. Handles anything and remembers everything.",
     prompt: "You are Hearth, the user's main assistant. Handle anything; be brief and warm." },
   { id: "planner", name: "Reminders", emoji: "🔔", color: "#5B8CFF", description: "Reminders, routines, your day and week.",
-    prompt: "You are Reminders. You own the user's time: reminders, routines, follow-ups, planning the day and week. Prefer creating hooks." },
+    prompt: "You are Reminders. You own the user's time: reminders, routines, follow-ups, planning the day and week. Prefer the remind tool for anything at a time, and watchers for \"tell me when…\"." },
   { id: "scout", name: "Research", emoji: "🔍", color: "#2FBF71", description: "Looks things up: places, products, prices, answers from the web.",
     prompt: "You are Research. You find things: places to eat, products, facts, prices. Search the web, give 3 good options with one line each." },
   { id: "money", name: "Bills", emoji: "💸", color: "#E36BD6", description: "Bills, subscriptions, spending, saving.",
@@ -101,7 +101,6 @@ const HIDDEN_LABEL = /^(\.\s|open the options list|status is|active now|press re
 export class Hub {
   clock = () => new Date();
   private listeners = new Set<(e: HubEvent) => void>();
-  private firing = new Set<string>();
   private _google: Google | null = null;
   /** The encrypted key vault (vault.ts), set by the server. Connections keep their sign-ins in it. */
   vault: Vault | null = null;
@@ -135,8 +134,6 @@ export class Hub {
   private sourceCtx = async () => ({ google: this.google, cookies: (domain: string) => this.connections.cookies(domain),
     readPage: ((url, o = {}) => this.readPage(url, { fingerprint: this.connections.fingerprintFor(url), ...o })) as typeof readPage,
     now: this.clock(), tz: (await this.prefs()).tz });
-  /** Webhook calls that arrived while their hook was still busy with the last one; handled together right after. */
-  private webhookQueue = new Map<string, string[]>();
   private _pipeline: EventPipeline | null = null;
   /**
    * The event pipeline (events/pipeline.ts): sources push events, plain-code formulas pick triggers, triggers run.
@@ -145,11 +142,14 @@ export class Hub {
   get pipeline() {
     if (!this._pipeline) {
       const p = new EventPipeline(join(this.config.dataDir, "events.db"), () => this.clock(), async () => (await this.prefs()).tz);
-      p.run = (t, e, v) => this.runEventTrigger(t, e, v);
+      p.run = (t, e, v, released) => this.runEventTrigger(t, e, v, released);
+      p.watchFn = (w, seen) => this.watchOnce(w, seen);
+      p.note = (kind, text) => { void this.log(kind, text).catch(() => {}); };
       p.judgeFn = (jd, e, ex) => this.judgeEvent(jd, e, ex);
       p.checkAction = async (a) => a.type !== "workflow" || (await this.store.all<Workflow>("workflows")).some((w) => w.name === a.name && w.status === "active")
         ? null : `No switched-on workflow called "${a.name}". Workflows: ${(await this.store.all<Workflow>("workflows")).filter((w) => w.status === "active").map((w) => w.name).join(", ") || "none yet"}.`;
-      p.onChange = (what, detail) => this.emit("pipeline", { what, ...(detail || {}) });
+      // The hub's own (nightly jobs) don't fly in.
+      p.onChange = (what, detail) => this.emit("pipeline", { what, ...(detail && detail.by !== "system" ? detail : {}) });
       this._pipeline = p;
     }
     return this._pipeline;
@@ -215,11 +215,8 @@ export class Hub {
   }
 
   /** Wall-clock schedules follow you to a new time zone. */
-  private async retime(tz: string) {
-    for (const h of await this.store.all<Hook>("hooks")) {
-      if (h.status !== "active" || h.trigger.type !== "schedule") continue;
-      await this.store.put<Hook>("hooks", { ...h, nextAt: computeNextAt(h.trigger, tz, this.clock()) });
-    }
+  private async retime(_tz: string) {
+    await this.pipeline.retime();
   }
 
   async log(kind: string, text: string) {
@@ -268,7 +265,6 @@ export class Hub {
     const own = project ? facts.filter((f) => f.notebook === project.notebook && isActive(f, now)).slice(-30) : [];
     const memory = mode === "review" ? facts.filter((f) => isActive(f, now))
       : [...own, ...recall(facts.filter((f) => !own.includes(f)), query, 40 - own.length, now)];
-    const hooks = (await this.store.all<Hook>("hooks")).filter((h) => h.status !== "done" && h.source !== "system");
     const places = await this.store.all<Place>("places");
     const fix = (await this.store.recent<LocationFix>("locations", 1))[0];
     const history = await this.store.recent<Message>("messages", 14);
@@ -301,9 +297,6 @@ export class Hub {
         rambles: (await this.store.all<Thread>("threads")).filter((t) => t.projectId === project.id).map((t) => channelOf(t)).slice(0, 20) } } : {}),
       memory: memory.map((f) => ({ id: f.id, fact: f.fact, notebook: f.notebook, importance: f.importance, ...(f.expiresAt ? { expiresAt: f.expiresAt } : {}) })),
       notebooks: (await this.store.all<Notebook>("notebooks")).map((n) => ({ name: n.name, summary: n.summary })),
-      // Every plan while there are few; with many, the ones that match this request plus the newest (search finds the rest).
-      hooks: (hooks.length <= 30 ? hooks : await this.relevantHooks(hooks, query)).map((h) => ({ id: h.id, title: h.title, when: describeTrigger(h.trigger, prefs.tz), does: h.action.type, why: h.why, status: h.status, ...(h.teammateId ? { teammate: h.teammateId } : {}) })),
-      ...(hooks.length > 30 ? { hooksTotal: hooks.length } : {}),
       scripts: (await this.scripts.list()).filter((s) => s.status !== "rejected").map((s) => ({ name: s.name, description: s.description, status: s.status })),
       recentMessages: history.map((m) => ({ role: m.role, at: m.createdAt, text: m.text.slice(0, 600) })),
       library: mode === "review" ? undefined : await this.searchLibrary(query),
@@ -1375,38 +1368,14 @@ export class Hub {
     return this.library.search(query, skills, workflows, scripts, 8, components, await this.triggerItems());
   }
 
-  /** Your live triggers and saved trigger setups, as library entries: searched before a new one is made. */
+  /** Your live triggers, as library entries: searched before a new one is made. */
   private async triggerItems(): Promise<Omit<LibraryItem, "score">[]> {
     const tz = (await this.prefs()).tz;
-    const hooks = (await this.store.all<Hook>("hooks")).filter((h) => h.status !== "done" && h.source !== "system");
-    const recipes = await this.store.all<TriggerRecipe>("triggerRecipes");
-    const does = (h: Hook) => h.action.type === "think" ? h.action.prompt.slice(0, 160) : h.action.type === "notify" ? h.action.text.slice(0, 160) : `runs ${h.action.script}`;
-    return [
-      ...hooks.map((h) => ({ kind: "trigger" as const, id: h.id, name: h.title, description: `${describeTrigger(h.trigger, tz)}. ${h.why} ${does(h)}`.trim(), how: h.status })),
-      ...recipes.map((r) => ({ kind: "trigger-recipe" as const, name: r.name, description: r.description, inputs: r.inputs.map((i) => i.name), how: `${(r.hook.trigger as any)?.type || "?"} trigger, used ${r.uses}×` })),
-    ];
+    return this.pipeline.triggers().filter((t) => t.status !== "done" && t.createdBy !== "system").map((t) => ({
+      kind: "trigger" as const, id: t.name, name: t.title,
+      description: `${t.timer ? scheduleWords(t.timer.schedule, tz) : `on ${t.sourceName} when ${t.formula}`}. ${t.why} ${actionWords(t.action)}`.trim().slice(0, 400), how: t.status,
+    }));
   }
-
-  private async relevantHooks(hooks: Hook[], query: string) {
-    const hits = new Set((await this.searchLibrary(query)).filter((x) => x.kind === "trigger").map((x) => x.id));
-    const newest = [...hooks].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 20);
-    return [...hooks.filter((h) => hits.has(h.id)), ...newest.filter((h) => !hits.has(h.id))];
-  }
-
-  /** hook.add and trigger.use: route to a named teammate, add, and report it. */
-  private async addHookFrom(a: any, where: { teammateId?: string; threadId?: string }, done: Done[]) {
-    // "teammate": hand the hook to another teammate (by name), who then speaks when it fires.
-    const named = typeof a.teammate === "string" && a.teammate.trim()
-      ? (await this.store.all<Teammate>("teammates")).find((t) => t.name.toLowerCase() === a.teammate.trim().toLowerCase()) : undefined;
-    const r = await this.addHook(a, a.requestedByUser === true ? "you" : "assistant", named ? { ...where, teammateId: named.id } : where);
-    const t = r.value?.trigger.type;
-    const kind = t === "at" ? "Reminder" : t === "webhook" ? "Webhook" : t === "watch" || t === "check" || t === "source" ? "Watching" : "Hook";
-    if (r.value) done.push({ kind: "hook", label: `${kind}: ${r.value.title}`, id: r.value.id });
-    return r;
-  }
-
-  async listTriggerRecipes() { return this.store.all<TriggerRecipe>("triggerRecipes"); }
-  async removeTriggerRecipe(id: string) { const ok = await this.store.remove("triggerRecipes", id); if (ok) this.emit("hooks"); return ok; }
 
   async skillByName(name: string) {
     return (await this.store.all<Skill>("skills")).find((s) => s.name === name.toLowerCase()) || null;
@@ -1849,67 +1818,10 @@ export class Hub {
       if (!a || typeof a !== "object") continue;
       try {
         switch (a.type) {
-          case "hook.add": {
-            const r = await this.addHookFrom(a, where, done);
-            if (!r.value) await this.log("action.rejected", `hook.add: ${r.error}`);
-            break;
-          }
-          case "hook.update": {
-            // Change a plan instead of adding a near-copy (a wider Gmail search, a new time, another teammate).
-            const cur = await this.store.get<Hook>("hooks", String(a.id));
-            if (!cur || cur.source === "system") break;
-            const patch: any = {};
-            for (const k of ["title", "trigger", "action", "why"]) if (a[k] !== undefined) patch[k] = a[k];
-            const h = await this.updateHook(cur.id, patch);
-            if (h && typeof a.teammate === "string") {
-              const t = (await this.store.all<Teammate>("teammates")).find((x) => x.name.toLowerCase() === a.teammate.trim().toLowerCase());
-              if (t) await this.store.put<Hook>("hooks", { ...h, teammateId: t.id });
-            }
-            if (h) done.push({ kind: "hook", label: `Updated: ${h.title}`, id: h.id });
-            else await this.log("action.rejected", `hook.update: couldn't apply to ${cur.title}`);
-            break;
-          }
-          case "trigger.save": {
-            if (where.recipe) break;
-            const v = validateTriggerRecipe(a);
-            if (!v.value) { await this.log("action.rejected", `trigger.save: ${v.error}`); break; }
-            // Check the setup works by filling every blank with a stand-in.
-            const sample = fillDeep(v.value.hook, Object.fromEntries(v.value.inputs.map((i) => [i.name, "x"])));
-            const ok = validateHook(sample);
-            if (ok.error) { await this.log("action.rejected", `trigger.save: ${ok.error}`); break; }
-            const prev = (await this.store.all<TriggerRecipe>("triggerRecipes")).find((r) => r.name === v.value.name);
-            await this.store.put<TriggerRecipe>("triggerRecipes", prev ? { ...prev, ...v.value, updatedAt: this.clock().toISOString() } : this.doc({ ...v.value, uses: 0 }));
-            done.push({ kind: "skill", label: `Saved setup: ${v.value.name}` });
-            this.emit("hooks");
-            break;
-          }
-          case "trigger.use": {
-            const rec = (await this.store.all<TriggerRecipe>("triggerRecipes")).find((r) => r.name === String(a.name || "").toLowerCase());
-            if (!rec) { await this.log("action.rejected", `trigger.use: no setup called ${a.name}`); break; }
-            const inputs = Object.fromEntries(Object.entries(a.inputs && typeof a.inputs === "object" ? a.inputs : {}).map(([k, x]) => [k, String(x).slice(0, 300)]));
-            const r = await this.addHookFrom({ ...fillDeep(rec.hook, inputs), requestedByUser: false }, where, done);
-            if (r.value) await this.store.put<TriggerRecipe>("triggerRecipes", { ...rec, uses: (rec.uses || 0) + 1, lastUsedAt: this.clock().toISOString() });
-            else await this.log("action.rejected", `trigger.use ${rec.name}: ${r.error}`);
-            break;
-          }
-          case "trigger.forget": {
-            const rec = (await this.store.all<TriggerRecipe>("triggerRecipes")).find((r) => r.name === String(a.name || "").toLowerCase());
-            if (rec && (await this.removeTriggerRecipe(rec.id))) done.push({ kind: "skill", label: `Forgot setup: ${rec.name}` });
-            break;
-          }
-          case "hook.remove": {
-            const h = await this.store.get<Hook>("hooks", String(a.id));
-            if (h && h.source !== "system" && (await this.removeHook(h.id))) done.push({ kind: "hook", label: `Removed: ${h.title}` });
-            break;
-          }
-          case "hook.pause": {
-            const h = await this.updateHook(String(a.id), { status: "paused" });
-            if (h) done.push({ kind: "hook", label: `Paused: ${h.title}` });
-            break;
-          }
           case "source.list": case "source.create": case "source.update": case "source.remove": case "source.test":
           case "trigger.add": case "trigger.update": case "trigger.remove": case "trigger.list": case "trigger.dryrun": case "trigger.correct":
-          case "time.schedule": case "time.update": case "time.cancel": {
+          case "time.schedule": case "time.update": case "time.cancel":
+          case "remind": case "watch.add": case "watch.update": case "watch.remove": case "watch.check": {
             if (where.recipe) break;
             const note = await this.pipelineAction(a, where, done);
             if (note) runs.push({ name: "@pipeline", args: [note] });
@@ -2113,56 +2025,13 @@ export class Hub {
     return { done, used, runs, split, tiles, fileIds };
   }
 
-  // ---------- hooks ----------
-
-  async listHooks() {
-    const prefs = await this.prefs();
-    return (await this.store.all<Hook>("hooks")).map((h) => ({ ...h, when: describeTrigger(h.trigger, prefs.tz) }));
-  }
-
-  async addHook(input: any, source: Hook["source"], where: { teammateId?: string; threadId?: string } = {}) {
-    const v = validateHook(input);
-    if (!v.value) return { error: v.error! };
-    const prefs = await this.prefs();
-    const nextAt = computeNextAt(v.value.trigger, prefs.tz, this.clock());
-    const h = await this.store.put<Hook>("hooks", this.doc({ ...v.value, status: "active" as const, nextAt, fireCount: 0, source, teammateId: where.teammateId, threadId: where.threadId }));
-    await this.log("hook.added", `${h.title} (${describeTrigger(h.trigger, prefs.tz)})`);
-    this.emit("hooks");
-    return { value: h };
-  }
-
-  async updateHook(id: string, patch: any) {
-    const h = await this.store.get<Hook>("hooks", id);
-    if (!h) return null;
-    const next: Hook = { ...h, updatedAt: this.clock().toISOString() };
-    const prefs = await this.prefs();
-    if (patch.status === "active" || patch.status === "paused") next.status = patch.status;
-    if (typeof patch.title === "string" && patch.title.trim()) next.title = patch.title.trim().slice(0, 80);
-    if (patch.trigger || patch.action) {
-      const v = validateHook({ ...h, ...patch });
-      if (!v.value) return null;
-      Object.assign(next, v.value);
-      // Editing a webhook hook keeps its URL working.
-      if (h.trigger.type === "webhook" && next.trigger.type === "webhook") next.trigger = h.trigger;
-      if (JSON.stringify(next.trigger) !== JSON.stringify(h.trigger)) delete next.seen;
-      next.nextAt = computeNextAt(next.trigger, prefs.tz, this.clock());
-    }
-    if (patch.snoozeMin) {
-      next.nextAt = new Date(this.clock().getTime() + Math.min(10080, Math.max(1, Number(patch.snoozeMin))) * 60000).toISOString();
-      next.status = "active";
-    }
-    if (next.status === "active" && h.status === "paused" && !patch.snoozeMin && ["schedule", "every"].includes(next.trigger.type)) {
-      next.nextAt = computeNextAt(next.trigger, prefs.tz, this.clock());
-    }
-    await this.store.put("hooks", next);
-    this.emit("hooks");
-    return next;
-  }
-
-  async removeHook(id: string) {
-    const ok = await this.store.remove("hooks", id);
-    if (ok) this.emit("hooks");
-    return ok;
+  /** What's coming up, soonest first: each timer with the reminder that listens to it (for Home, Today and DMs). */
+  upcomingPlans(tz: string) {
+    return this.pipeline.upcoming().filter((u) => u.timer.createdBy !== "system" && u.trigger?.createdBy !== "system").map((u) => ({
+      id: u.trigger?.id || u.timer.id, title: u.trigger?.title || u.timer.name, nextAt: u.timer.nextAt!,
+      teammateId: u.trigger?.teammateId || undefined, threadId: u.trigger?.threadId || undefined,
+      when: scheduleWords(u.timer.schedule, tz), once: "at" in u.timer.schedule && (u.timer.schedule.repeat || "none") === "none",
+    }));
   }
 
   // ---------- memory ----------
@@ -2307,7 +2176,7 @@ export class Hub {
     const jobs = all.filter((j) => !j.parentId && !stale.has(j.id)).sort((a, b) => (b.updatedAt || b.createdAt).localeCompare(a.updatedAt || a.createdAt));
     const approvals = await this.store.all<Approval>("approvals");
     const prefs = await this.prefs();
-    const hooks = (await this.store.all<Hook>("hooks")).filter((h) => h.status === "active" && h.nextAt && h.source !== "system").sort((a, b) => a.nextAt!.localeCompare(b.nextAt!));
+    const hooks = this.upcomingPlans(prefs.tz);
     const first = (t: string) => t.split("\n").map((x) => x.replace(/^[-*•#\s]+/, "").trim()).find(Boolean) || "";
     const clip = (t: string, n = 90) => (t.length > n ? t.slice(0, n - 1) + "…" : t);
     // When each teammate last wrote in your DM, so the app can show an unread dot.
@@ -2407,7 +2276,8 @@ export class Hub {
     const jobs = (await this.store.all<Job>("jobs")).filter((j) => j.teammateId === id && !j.parentId).slice(-40);
     const messages = (await this.store.all<Message>("messages")).filter((m) => m.threadId === `tm-${id}`).slice(-60);
     const prefs = await this.prefs();
-    const routines = (await this.store.all<Hook>("hooks")).filter((h) => h.teammateId === id && h.status !== "done").map((h) => ({ ...h, when: describeTrigger(h.trigger, prefs.tz) }));
+    const routines = this.pipeline.triggers().filter((t) => t.teammateId === id && t.status !== "done" && t.createdBy !== "system")
+      .map((t) => ({ id: t.id, name: t.name, title: t.title, status: t.status, timed: !!t.timer, when: t.timer ? scheduleWords(t.timer.schedule, prefs.tz) : `on ${t.sourceName}: ${t.formula}` }));
     const approvals = (await this.store.all<Approval>("approvals")).filter((a) => jobs.some((j) => j.id === a.jobId));
     return { teammate, jobs, messages, routines, approvals };
   }
@@ -2587,9 +2457,8 @@ export class Hub {
       status: j.status, at: j.finishedAt || j.startedAt || j.createdAt, startedAt: j.startedAt, need: j.blocked?.need });
     const by = (st: Job["status"][]) => jobs.filter((j) => st.includes(j.status));
     const recent = (a: { at: string }, b: { at: string }) => b.at.localeCompare(a.at);
-    const plans = (await this.store.all<Hook>("hooks")).filter((h) => h.status === "active" && h.nextAt && h.source !== "system" && mine(h.teammateId || "hearth"))
-      .sort((a, b) => a.nextAt!.localeCompare(b.nextAt!)).slice(0, 15)
-      .map((h) => ({ kind: "plan" as const, id: h.id, title: h.title, teammateId: h.teammateId || "hearth", threadId: h.threadId, where: h.trigger.type === "at" ? "Reminder" : describeTrigger(h.trigger, prefs.tz), status: "planned", at: h.nextAt! }));
+    const plans = this.upcomingPlans(prefs.tz).filter((h) => mine(h.teammateId || "hearth")).slice(0, 15)
+      .map((h) => ({ kind: "plan" as const, id: h.id, title: h.title, teammateId: h.teammateId || "hearth", threadId: h.threadId, where: h.once ? "Reminder" : h.when, status: "planned", at: h.nextAt }));
     return {
       next: [...by(["queued"]).map(card), ...plans],
       working: by(["working"]).map(card).sort(recent),
@@ -2750,16 +2619,9 @@ export class Hub {
     }
     await this.setPrefs({ placeState: state });
     this.emit("location", fix);
-    if (changes.length) {
-      const hooks = (await this.store.all<Hook>("hooks")).filter((h) => h.status === "active" && h.trigger.type === "place");
-      for (const c of changes) {
-        await this.log("place", `${c.event === "arrive" ? "Arrived at" : "Left"} ${c.place.name}`);
-        for (const h of hooks) {
-          if (h.trigger.type === "place" && h.trigger.place === c.place.name && h.trigger.event === c.event) {
-            this.fire(h, `${c.event === "arrive" ? "You arrived at" : "You left"} ${c.place.name}`);
-          }
-        }
-      }
+    for (const c of changes) {
+      await this.log("place", `${c.event === "arrive" ? "Arrived at" : "Left"} ${c.place.name}`);
+      this.pipeline.arrived(c.place.name, c.event, fix.lat, fix.lon); // triggers on the place source pick it up
     }
     return { value: fix };
   }
@@ -2768,7 +2630,8 @@ export class Hub {
 
   async start(intervalMs = 15_000) {
     await this.ensureTeammates();
-    await this.ensureSystemHooks();
+    await this.migrateHooks();
+    await this.ensureBuiltIns();
     await this.ensureStarterComponents();
     // Rambles from before they had names: name them from their titles (Hearth refines it on the next message).
     for (const t of await this.store.all<Thread>("threads")) if (t.num && !t.channel && t.title) await this.renameThread(t.id, nameFrom(t.title), false);
@@ -2861,26 +2724,74 @@ export class Hub {
     while (Date.now() < end && (this.started.size || this.brain.running || this.thinking || this.inflight)) await Bun.sleep(25);
   }
 
-  private async ensureSystemHooks() {
-    const hooks = await this.store.all<Hook>("hooks");
-    if (!hooks.some((h) => h.source === "system" && h.action.type === "think" && h.action.prompt === REVIEW_MARKER)) {
-      await this.addHook({
-        title: "Nightly memory review", why: "Keeps memory tidy: merges duplicates, expires stale facts.",
-        trigger: { type: "schedule", time: "03:30", days: [] }, action: { type: "think", prompt: REVIEW_MARKER },
-      }, "system");
+  /** The hub's own jobs, as timers with a trigger each: shown in Triggers, can be paused, can't be changed or deleted. */
+  private async ensureBuiltIns() {
+    const p = this.pipeline;
+    const jobs: { name: string; title: string; why: string; schedule: TimerSchedule; job: string }[] = [
+      { name: "memory-review", title: "Nightly memory review", why: "Keeps memory tidy: merges duplicates, expires stale facts.", schedule: { time: "03:30", days: [] }, job: "review" },
+      { name: "ideas", title: "Ideas", why: "Every few hours the team looks for something useful it could do for you, and suggests it on Home.", schedule: { everyMin: 240 }, job: "ideas" },
+      { name: "library-cleanup", title: "Nightly library cleanup", why: "Removes skills, workflows and scripts that stopped being useful. Pinned ones stay.", schedule: { time: "04:00", days: [] }, job: "purge" },
+    ];
+    for (const j of jobs) {
+      if (p.findTrigger(j.name)) continue;
+      const r = await p.remind({ name: j.name, title: j.title, why: j.why, schedule: j.schedule, action: { type: "system", job: j.job } }, "system", { system: true });
+      if (!r.value) console.warn(`couldn't set up ${j.name}: ${r.error}`);
     }
-    if (!hooks.some((h) => h.source === "system" && h.action.type === "think" && h.action.prompt === IDEAS_MARKER)) {
-      await this.addHook({
-        title: "Ideas", why: "Every few hours the team looks for something useful it could do for you, and suggests it on Home.",
-        trigger: { type: "every", minutes: 240 }, action: { type: "think", prompt: IDEAS_MARKER },
-      }, "system");
+  }
+
+  /**
+   * Hooks were the old way to speak first. Each one left (from a hub made before the event pipeline) becomes the same
+   * thing in the pipeline, once, at start: a reminder, a watcher with its trigger, a place trigger or a push source
+   * (whose secret is the old webhook token, so the old URL keeps working). Then the hook is gone.
+   */
+  private async migrateHooks() {
+    const hooks = await this.store.all<any>("hooks").catch(() => [] as any[]);
+    if (!hooks.length) return;
+    let moved = 0;
+    for (const h of hooks) {
+      try {
+        if (h.source !== "system" && h.status !== "done") { const r = await this.moveHook(h); if (r) moved++; else await this.log("hooks.moved", `${h.title}: couldn't be moved over`); }
+      } catch (e: any) { await this.log("hooks.moved", `${h.title}: couldn't be moved over (${String(e?.message || e).slice(0, 160)})`); }
+      await this.store.remove("hooks", h.id);
     }
-    if (!hooks.some((h) => h.source === "system" && h.action.type === "think" && h.action.prompt === PURGE_MARKER)) {
-      await this.addHook({
-        title: "Nightly library cleanup", why: "Removes skills, workflows and scripts that stopped being useful. Pinned ones stay.",
-        trigger: { type: "schedule", time: "04:00", days: [] }, action: { type: "think", prompt: PURGE_MARKER },
-      }, "system");
+    if (moved) await this.log("hooks.moved", `Moved ${moved} plan${moved === 1 ? "" : "s"} into Triggers`);
+  }
+
+  private async moveHook(h: any): Promise<boolean> {
+    const p = this.pipeline;
+    const by = h.source === "you" ? "you" : (await this.teammate(h.teammateId))?.name || "Hearth";
+    const t = h.trigger || {}, a = h.action || {};
+    const tail = t.type === "watch" ? "\n{{url}}" : t.type === "source" ? "\n{{title}}" : t.type === "check" ? "\n{{output}}" : "";
+    const action = a.type === "notify" ? { type: "notify", text: `${a.text}${tail}` } : a;
+    const common = { title: h.title, why: h.why, teammateId: h.teammateId, threadId: h.threadId, cooldownMin: h.cooldownMin, action, force: true };
+    const paused = h.status === "paused";
+    const after = async (r: { value?: { name: string } }) => { if (r.value && paused) await p.updateTrigger(r.value.name, { status: "paused" }); return !!r.value; };
+    switch (t.type) {
+      case "at": case "schedule": case "every": {
+        const schedule = t.type === "at" ? { at: t.at, repeat: t.repeat } : t.type === "schedule" ? { time: t.time, days: t.days } : { everyMin: Math.max(5, t.minutes) };
+        const r = await p.remind({ ...common, schedule, nextAt: h.nextAt ?? undefined }, by, { allowPast: true });
+        if (r.value && paused) await p.updateTimer(r.value.timer!.name, { status: "paused" });
+        return !!r.value;
+      }
+      case "place":
+        return after(await p.addTrigger({ ...common, name: p.freeName(h.title, "triggers"), source: "place", formula: `place == ${JSON.stringify(t.place)} and event == ${JSON.stringify(t.event)}` }, by));
+      case "webhook": {
+        const name = p.freeName(h.title, "sources");
+        const src = p.createSource({ name, description: `${h.title} (was a webhook)`, variables: [{ name: "text", description: "the text sent, when it wasn't JSON" }], service: "webhook", scope: h.id }, by);
+        if (!src.value) return false;
+        p.db.query("UPDATE sources SET secret = ? WHERE id = ?").run(t.token, src.value.source.id);
+        return after(await p.addTrigger({ ...common, name, source: name, formula: "true" }, by));
+      }
+      case "watch": case "check": case "source": case "silence": {
+        const name = p.freeName(h.title, "sources");
+        const kind = t.type === "watch" ? "page" : t.type === "check" ? "script" : t.type === "source" ? "app" : "silence";
+        const seen = !h.seen ? undefined : t.type === "source" ? { ids: String(h.seen.text || "").split("\n").filter(Boolean) } : h.seen;
+        const w = await p.addWatcher({ name, kind, url: t.url, script: t.script, args: t.args, when: t.when, app: t.source, config: t.config, hours: t.hours, everyMin: t.minutes, seen }, by);
+        if (!w.value) return false;
+        return after(await p.addTrigger({ ...common, name, source: name, formula: "true" }, by));
+      }
     }
+    return false;
   }
 
   /** When workspaces were last tidied (see brains/archive.ts): once a day, starting soon after the hub starts. */
@@ -2895,117 +2806,7 @@ export class Hub {
         if (r.packed.length || r.notes.length || r.files) await this.log("workspaces.tidied", `packed ${r.packed.length} unused (${r.packed.join(", ").slice(0, 200)}), trimmed notes in ${r.notes.length}, archived ${r.files} old files`);
       } catch (e: any) { console.warn(`couldn't tidy workspaces: ${String(e?.message || e).slice(0, 200)}`); }
     }
-    const now = this.clock();
-    const prefs = await this.prefs();
-    for (const h of await this.store.all<Hook>("hooks")) {
-      if (h.status !== "active" || this.firing.has(h.id)) continue;
-      if (h.nextAt && new Date(h.nextAt) <= now) {
-        const lateMin = (now.getTime() - new Date(h.nextAt).getTime()) / 60000;
-        if (lateMin > 360 && h.trigger.type !== "at") {
-          await this.reschedule(h, now);
-          await this.log("hook.missed", `${h.title}: missed while the hub was off`);
-          continue;
-        }
-        if (h.held) await this.fire({ ...h, held: undefined }, h.held.reason, false, h.held.extra);
-        else await this.fire(h, describeTrigger(h.trigger, prefs.tz), lateMin > 10);
-      } else if (h.trigger.type === "silence") {
-        const since = prefs.lastUserAt || h.createdAt;
-        const quietFor = (now.getTime() - new Date(since).getTime()) / 3.6e6;
-        if (quietFor >= h.trigger.hours && (!h.lastFiredAt || h.lastFiredAt < since)) {
-          await this.fire(h, `${Math.floor(quietFor)}h without hearing from you`);
-        }
-      }
-    }
     try { await this.pipeline.tick(); } catch (e: any) { console.error("event pipeline tick failed", e); }
-  }
-
-  private async reschedule(h: Hook, now: Date) {
-    const prefs = await this.prefs();
-    const nextAt = computeNextAt(h.trigger, prefs.tz, now, true);
-    const done = h.trigger.type === "at" && !nextAt;
-    const cur = (await this.store.get<Hook>("hooks", h.id)) || h;
-    await this.store.put<Hook>("hooks", { ...cur, nextAt, status: done ? "done" : cur.status });
-    this.emit("hooks");
-  }
-
-  /** Decides whether a hook may message you right now. */
-  private async gate(h: Hook, now: Date): Promise<"ok" | "quiet" | "cap" | "cooldown"> {
-    if (isUserReminder(h)) return "ok";
-    const prefs = await this.prefs();
-    if (h.cooldownMin && h.lastFiredAt && now.getTime() - new Date(h.lastFiredAt).getTime() < h.cooldownMin * 60000) return "cooldown";
-    if (inQuietHours(now, prefs.tz, prefs.quietStart, prefs.quietEnd)) return "quiet";
-    const today = localDate(now, prefs.tz);
-    const n = prefs.proactiveToday.date === today ? prefs.proactiveToday.n : 0;
-    if (n >= prefs.maxProactivePerDay) return "cap";
-    return "ok";
-  }
-
-  private async countProactive(h: Hook) {
-    if (isUserReminder(h)) return;
-    const prefs = await this.prefs();
-    const today = localDate(this.clock(), prefs.tz);
-    const n = prefs.proactiveToday.date === today ? prefs.proactiveToday.n : 0;
-    await this.setPrefs({ proactiveToday: { date: today, n: n + 1 } });
-  }
-
-  /** Something POSTed to a webhook hook's secret URL: wake its teammate with what was sent. */
-  async webhook(token: string, payload: string) {
-    const h = (await this.store.all<Hook>("hooks")).find((x) => x.trigger.type === "webhook" && x.trigger.token === token);
-    if (!h || h.status !== "active") return false;
-    await this.log("hook.webhook", `${h.title}: called (${payload.length} bytes)`);
-    const sent = `## What the webhook sent\n<untrusted>\n${payload.slice(0, 20_000) || "(empty)"}\n</untrusted>`;
-    if (this.firing.has(h.id) || this.webhookQueue.has(h.id)) {
-      const q = this.webhookQueue.get(h.id) || [];
-      if (q.length < 20) q.push(sent);
-      this.webhookQueue.set(h.id, q);
-      if (!this.firing.has(h.id)) this.drainWebhook(h.id);
-      return true;
-    }
-    this.fireWebhook(h, sent);
-    return true;
-  }
-
-  private fireWebhook(h: Hook, sent: string) {
-    this.inflight++;
-    this.fire(h, "its webhook was called", false, sent).catch(() => {}).finally(() => { this.inflight--; this.drainWebhook(h.id); });
-  }
-
-  /** Calls that came in while the hook was busy go to it in one batch, so none are dropped. */
-  private async drainWebhook(id: string) {
-    const q = this.webhookQueue.get(id);
-    if (!q?.length || this.firing.has(id)) return;
-    this.webhookQueue.delete(id);
-    const h = await this.store.get<Hook>("hooks", id);
-    if (!h || h.status !== "active") return;
-    this.fireWebhook(h, q.length === 1 ? q[0] : `${q.length} calls came in:\n\n${q.join("\n\n")}`);
-  }
-
-  /** A watch hook's look at its page: what changed since last time, or null (first look, no change, or an error). */
-  private async lookAt(h: Hook & { trigger: { type: "watch" } }) {
-    const r = await look(h.trigger.url, this.clock());
-    const cur = (await this.store.get<Hook>("hooks", h.id)) || h;
-    if (!r.value) { await this.log("hook.watch", `${h.title}: couldn't read the page (${r.error})`); return null; }
-    await this.store.put<Hook>("hooks", { ...cur, seen: r.value });
-    if (!cur.seen) { await this.log("hook.watch", `${h.title}: first look saved`); return null; }
-    if (cur.seen.hash === r.value.hash) return null;
-    const d = lineDiff(cur.seen.text, r.value.text);
-    if (!d.added && !d.removed) return null;
-    return `## ${h.trigger.url} changed since ${cur.seen.at} (${d.added} lines added, ${d.removed} removed)\n<untrusted>\n${d.text}\n</untrusted>`;
-  }
-
-  /** A check hook's run of its script, with no model: its output if it should speak, else null. */
-  private async runCheck(h: Hook & { trigger: { type: "check" } }) {
-    const t = h.trigger;
-    const cur = (await this.store.get<Hook>("hooks", h.id)) || h;
-    // Unattended, so only scripts that just read: one that sends or changes things never runs from a check.
-    const out = await this.scripts.run(t.script, t.args, { last: cur.seen?.text ?? "" });
-    if (out.needsApproval) { await this.log("hook.check", `${h.title}: ${t.script} can change things, so it can't run on its own`); return null; }
-    if (!out.ok) { await this.log("hook.check", `${h.title}: ${out.output.slice(0, 200)}`); return null; }
-    const text = out.output === "(no output)" ? "" : out.output;
-    const seen = { hash: sha256(text), text, at: this.clock().toISOString() };
-    await this.store.put<Hook>("hooks", { ...cur, seen });
-    if (t.when === "output" ? !text : !cur.seen || cur.seen.hash === seen.hash || !text) return null;
-    return text;
   }
 
   /** source.read: what a trigger module sees right now, for a teammate answering a question. */
@@ -3028,35 +2829,73 @@ export class Hub {
     }
   }
 
-  /** A source hook's check: items it hasn't seen before, or null. The first check only remembers what's there. */
-  /** A source says something changed (a Plaid webhook): check its hooks now instead of waiting for their timer. */
+  /** An app says something changed (a Plaid webhook): its watchers look now instead of waiting for their interval. */
   async pollNow(sourceId: string, why: string) {
-    for (const h of await this.store.all<Hook>("hooks"))
-      if (h.status === "active" && h.trigger.type === "source" && h.trigger.source === sourceId && !this.firing.has(h.id)) await this.fire(h, why);
-  }
-  private async pollSource(h: Hook & { trigger: { type: "source" } }) {
-    const t = h.trigger, src = sourceById(t.source);
-    if (!src) { await this.log("hook.source", `${h.title}: unknown source ${t.source}`); return null; }
-    const need = needOf(src, t.config);
-    if (!this.connections.connected(need)) { await this.log("hook.source", `${h.title}: ${src.label} isn't connected`); return null; }
-    let items;
-    const by = await this.actorName(h.teammateId, "Hearth");
-    try { items = await src.items(t.config as never, await this.sourceCtx()); this.connections.problem(need, null); await this.audit("read", need, by, { ok: true, detail: `${h.title} (${items.length})` }); }
-    catch (e: any) {
-      await this.log("hook.source", `${h.title}: ${String(e.message).slice(0, 200)}`);
-      await this.audit("read", need, by, { ok: false, detail: String(e.message).slice(0, 120) });
-      if (e instanceof SignedOut) await this.signedOut(need, e.message);
-      return null;
+    if (this.pipeline.checkNow((w) => w.kind === "app" && (w.config as any).app === sourceId)) {
+      await this.log("watcher.now", `${sourceId}: ${why}`);
+      await this.pipeline.tick();
     }
-    const cur = (await this.store.get<Hook>("hooks", h.id)) || h;
-    const known = new Set((cur.seen?.text || "").split("\n").filter(Boolean));
-    const fresh = cur.seen ? items.filter((i) => !known.has(i.id)) : [];
-    // Remember what we've seen, newest first, capped so the list doesn't grow forever.
-    const ids = [...new Set([...items.map((i) => i.id), ...known])].slice(0, 1000);
-    await this.store.put<Hook>("hooks", { ...cur, seen: { hash: sha256(ids.join("\n")), text: ids.join("\n"), at: this.clock().toISOString() } });
-    if (!cur.seen) { await this.log("hook.source", `${h.title}: first look saved (${items.length} already there)`); return null; }
-    return fresh.length ? { count: fresh.length, text: `## ${fresh.length} new from ${src.label}\n<untrusted>\n${formatItems(fresh)}\n</untrusted>`, items: fresh } : null;
   }
+
+  /** How many messages you've had today without asking (the daily limit counts these). */
+  private async proactiveLeft() {
+    const prefs = await this.prefs();
+    const today = localDate(this.clock(), prefs.tz);
+    return { prefs, today, n: prefs.proactiveToday.date === today ? prefs.proactiveToday.n : 0 };
+  }
+
+  /** One look by a watcher: what's new since `seen`, and what to remember. The first look only remembers. */
+  private async watchOnce(w: Watcher, seen: any): Promise<WatchResult> {
+    const c = w.config as any;
+    switch (w.kind) {
+      case "page": {
+        const r = await look(c.url, this.clock());
+        if (!r.value) return { items: [], error: `couldn't read the page (${r.error})` };
+        if (!seen || seen.hash === r.value.hash) return { items: [], seen: r.value };
+        const d = lineDiff(seen.text, r.value.text);
+        if (!d.added && !d.removed) return { items: [], seen: r.value };
+        return { seen: r.value, items: [{ url: c.url, changes: d.text, added: d.addedLines.join("\n").slice(0, 4000), removed: d.removedLines.join("\n").slice(0, 4000), text: r.value.text.slice(0, 4000), since: seen.at }] };
+      }
+      case "script": {
+        // Unattended, so only scripts that just read: one that sends or changes things never runs from a watcher.
+        const out = await this.scripts.run(c.script, c.args, { last: seen?.text ?? "" });
+        if (out.needsApproval) return { items: [], error: `${c.script} can change things, so it can't run on its own` };
+        if (!out.ok) return { items: [], error: out.output.slice(0, 200) };
+        const text = out.output === "(no output)" ? "" : out.output;
+        const next = { hash: sha256(text), text, at: this.clock().toISOString() };
+        const say = c.when === "output" ? !!text : !!seen && seen.hash !== next.hash && !!text;
+        return { seen: next, items: say ? [{ output: text.slice(0, 8000), previous: String(seen?.text ?? "").slice(0, 4000) }] : [] };
+      }
+      case "app": {
+        const src = sourceById(c.app);
+        if (!src) return { items: [], error: `unknown app ${c.app}` };
+        const need = needOf(src, c.config);
+        if (!this.connections.connected(need)) return { items: [], error: `${src.label} isn't connected` };
+        const by = await this.actorName(this.pipeline.triggers(w.sourceId)[0]?.teammateId ?? undefined, "Hearth");
+        let items: Item[];
+        try { items = await src.items(c.config as never, await this.sourceCtx()); this.connections.problem(need, null); await this.audit("read", need, by, { ok: true, detail: `${w.name} (${items.length})` }); }
+        catch (e: any) {
+          await this.audit("read", need, by, { ok: false, detail: String(e.message).slice(0, 120) });
+          if (e instanceof SignedOut) await this.signedOut(need, e.message);
+          return { items: [], error: String(e.message).slice(0, 200) };
+        }
+        const known = new Set<string>(seen?.ids || []);
+        const fresh = seen ? items.filter((i) => !known.has(i.id)) : [];
+        // Remember what we've seen, newest first, capped so the list doesn't grow forever.
+        const ids = [...new Set([...items.map((i) => i.id), ...known])].slice(0, 1000);
+        return { seen: { ids, at: this.clock().toISOString() }, items: fresh.map((i) => ({ app: c.app, id: i.id, title: i.title, text: i.text, url: i.url ?? null, at: i.at ?? null, when: i.when ?? null, unread: i.unread ?? null })) };
+      }
+      case "silence": {
+        const prefs = await this.prefs();
+        const since = prefs.lastUserAt || w.createdAt;
+        const hours = (this.clock().getTime() - new Date(since).getTime()) / 3.6e6;
+        if (hours < c.hours || seen?.firedFor === since) return { items: [], seen };
+        return { seen: { firedFor: since }, items: [{ hours: Math.floor(hours), last_message_at: since }] };
+      }
+    }
+    return { items: [] };
+  }
+
 
   /** A site signed Hearth out: say so once (not on every check), until it's connected again. */
   private async signedOut(id: string, message: string) {
@@ -3198,107 +3037,6 @@ export class Hub {
     return this.readConnection(id, sourceById(id)!.validate({}));
   }
 
-  async fire(h: Hook, reason: string, late = false, extra?: string) {
-    if (this.firing.has(h.id)) return;
-    this.firing.add(h.id);
-    const now = this.clock();
-    try {
-      const isReview = h.source === "system" && h.action.type === "think" && h.action.prompt === REVIEW_MARKER;
-      if (h.source === "system" && h.action.type === "think" && h.action.prompt === PURGE_MARKER) {
-        await this.reschedule(h, now);
-        await this.purgeLibrary();
-        return;
-      }
-      const gate = isReview ? "ok" : await this.gate(h, now);
-      if (gate !== "ok") {
-        const prefs = await this.prefs();
-        if (gate === "quiet" && (h.nextAt || extra !== undefined)) {
-          // A webhook call keeps what it sent (calls during the night pile up, newest last) and is handled in the morning.
-          const cur = (await this.store.get<Hook>("hooks", h.id)) || h;
-          const held = extra === undefined ? cur.held : { reason, extra: [cur.held?.extra, extra].filter(Boolean).join("\n\n").slice(-30_000) };
-          await this.store.put<Hook>("hooks", { ...cur, held, nextAt: quietEndsAt(now, prefs.tz, prefs.quietEnd).toISOString() });
-          await this.log("hook.held", `${h.title}: held until quiet hours end`);
-        } else {
-          await this.reschedule(h, now);
-          await this.log("hook.held", `${h.title}: skipped (${gate === "cap" ? "daily limit reached" : gate})`);
-        }
-        return;
-      }
-      await this.reschedule(h, now); // before running, so a slow brain can't double-fire
-      { const c = await this.store.get<Hook>("hooks", h.id); if (c?.held) await this.store.put<Hook>("hooks", { ...c, held: undefined }); }
-      // A watch speaks only when its page changed. Looked at after the gate, so a change in quiet hours isn't lost.
-      if (h.trigger.type === "watch" && extra === undefined) {
-        const changed = await this.lookAt(h as Hook & { trigger: { type: "watch" } });
-        if (!changed) return;
-        extra = changed;
-      }
-      let checked = "";
-      if (h.trigger.type === "source" && extra === undefined) {
-        const found = await this.pollSource(h as Hook & { trigger: { type: "source" } });
-        if (!found) return;
-        extra = found.text;
-        checked = found.items.slice(0, 5).map((i) => `• ${i.title}`).join("\n") + (found.count > 5 ? `\n…and ${found.count - 5} more` : "");
-      }
-      if (h.trigger.type === "check" && extra === undefined) {
-        checked = (await this.runCheck(h as Hook & { trigger: { type: "check" } })) || "";
-        if (!checked) return;
-        extra = `## ${h.trigger.script} printed\n<untrusted>\n${checked}\n</untrusted>`;
-      }
-      const fresh = (await this.store.get<Hook>("hooks", h.id)) || h;
-      await this.store.put<Hook>("hooks", { ...fresh, lastFiredAt: now.toISOString(), fireCount: (h.fireCount || 0) + 1 });
-
-      if (h.source === "system" && h.action.type === "think" && h.action.prompt === IDEAS_MARKER) {
-        const prefs = await this.prefs();
-        if (!inQuietHours(now, prefs.tz, prefs.quietStart, prefs.quietEnd)) await this.thinkOfIdeas();
-        return;
-      }
-      if (isReview) {
-        const r = await this.turn("review", "Review memory.", "nightly review", { profile: (await this.brains()).heavy });
-        if (r.text && r.text !== QUIET) await this.log("memory.review", r.text);
-        return;
-      }
-
-      let text = "";
-      let did: Done[] = [];
-      const teammate = await this.teammate(h.teammateId);
-      const a = h.action;
-      if (a.type === "notify") {
-        text = h.trigger.type === "watch" ? `${a.text}\n${h.trigger.url}` : checked ? `${a.text}\n${checked.slice(0, 1200)}` : a.text;
-      } else if (a.type === "think") {
-        const r = await this.turn("hook", `${h.title}\n${a.prompt}`, `hook: ${h.title}`, { teammate, threadId: h.threadId, extra });
-        text = r.text; did = r.did;
-      } else if (a.type === "script") {
-        const out = await this.scripts.run(a.script, a.args);
-        if (out.needsApproval) {
-          const ap = await this.requestApproval({ summary: `${h.title}: run ${a.script}`, script: a.script, args: a.args }, { threadId: h.threadId });
-          text = `${h.title} wants to ${ap.value?.summary ?? `run ${a.script}`}. Tap Approve to let it.`;
-        } else if (a.then === "notify" || !out.ok) text = out.ok ? out.output.slice(0, 1500) : `${h.title}: ${out.output}`;
-        else { const r = await this.turn("hook", `${h.title}\nInterpret the output of script ${a.script} for the user.`, `hook: ${h.title}`, { teammate, threadId: h.threadId, extra: `## ${a.script}\n${out.output}` }); text = r.text; did = r.did; }
-      }
-
-      if (!text || text.trim() === QUIET || text.includes(QUIET)) {
-        await this.log("hook.quiet", `${h.title}: checked, nothing worth saying`);
-        return;
-      }
-      await this.countProactive(h);
-      // A hook made in a ramble talks there while the ramble is open. Once it's archived, it talks in the
-      // teammate's DM instead, so a background watch doesn't keep pulling an old ramble back into Active.
-      const home = h.threadId ? await this.store.get<Thread>("threads", h.threadId) : null;
-      const threadId = home && !home.archivedAt ? home.id : teammate ? (await this.dmThread(teammate.id)).id : await this.updatesThread();
-      const msg = await this.addMessage({
-        role: "assistant", teammateId: teammate?.id, threadId, fromThreadId: home && home.id !== threadId ? home.id : undefined, text: late ? `${text}\n\n(Late: the hub was offline when this was due.)` : text,
-        proactive: { hookId: h.id, title: h.title, trigger: reason, why: h.why }, did: did.length ? did : undefined,
-      });
-      await this.touchThread(msg.threadId!, { preview: msg.text.slice(0, 120) });
-      await this.log("hook.fired", `${h.title}: sent`);
-      await this.push?.send({ title: h.title, body: msg.text.slice(0, 180), tag: h.id, url: threadLink(msg.threadId!) });
-    } catch (err: any) {
-      await this.log("hook.failed", `${h.title}: ${err.message}`);
-    } finally {
-      this.firing.delete(h.id);
-    }
-  }
-
   // ---------- the event pipeline ----------
 
   /** What the brain sees of the pipeline: sources with their variables, the rules, the timers. */
@@ -3306,10 +3044,13 @@ export class Hub {
     const p = this.pipeline;
     return {
       sources: p.sources().slice(0, 40).map((s) => ({ name: s.name, kind: s.kind, ...(s.service ? { service: s.service, scope: s.scope } : {}), variables: s.variables.map((v) => v.name), status: s.status, events: s.eventCount })),
-      triggers: p.triggers().slice(0, 60).map((t) => ({ name: t.name, source: t.sourceName, formula: t.formula,
+      watchers: p.watchers().slice(0, 40).map((w) => ({ name: w.name, kind: w.kind, watches: w.describe, status: w.status, ...(w.lastError ? { problem: w.lastError } : {}) })),
+      triggers: p.triggers().filter((t) => t.status !== "done" && t.createdBy !== "system").slice(0, 60).map((t) => ({ name: t.name, ...(t.title !== t.name ? { title: t.title } : {}), source: t.sourceName, formula: t.formula,
+        ...(t.timer ? { reminder: { schedule: t.timer.schedule, next: t.timer.nextAt } } : {}), ...(t.teammateId ? { teammate: t.teammateId } : {}),
         ...(t.judge ? { judge: { prompt: t.judge.prompt, answers: describeOutput(t.judge.output), pass: t.judge.pass, corrections: t.examples } } : {}),
         does: t.action.type === "workflow" ? `workflow ${t.action.name}` : t.action.type, status: t.status })),
-      timers: p.timers().filter((t) => t.status !== "done").slice(0, 40).map((t) => ({ name: t.name, schedule: t.schedule, next: t.nextAt })),
+      // Timers no reminder owns (a reminder's timer shows on its trigger).
+      timers: p.timers().filter((t) => t.status !== "done" && t.createdBy !== "system" && !p.triggers(TIME_SOURCE).some((x) => x.timerId === t.id)).slice(0, 40).map((t) => ({ name: t.name, schedule: t.schedule, next: t.nextAt })),
     };
   }
 
@@ -3319,7 +3060,12 @@ export class Hub {
    */
   private async pipelineAction(a: any, where: { teammateId?: string; threadId?: string }, done: Done[]): Promise<string | null> {
     const p = this.pipeline;
-    const by = (await this.teammate(where.teammateId))?.name || "Hearth";
+    // "teammate": hand it to another teammate by name, who then speaks when it fires.
+    const named = typeof a.teammate === "string" && a.teammate.trim()
+      ? (await this.store.all<Teammate>("teammates")).find((t) => t.name.toLowerCase() === a.teammate.trim().toLowerCase()) : undefined;
+    if (named) where = { ...where, teammateId: named.id };
+    // Your own reminders ("remind me…") ring even in quiet hours; that's what requestedByUser says.
+    const by = a.requestedByUser === true && (a.type === "remind" || a.type === "trigger.add") ? "you" : (await this.teammate(where.teammateId))?.name || "Hearth";
     const no = (what: string, r: { error?: string }) => `## ${what}: not done\n${r.error}\nPick one of the options and try again, or ask the user if it's their call.`;
     const name = String(a.name ?? a.source ?? "");
     switch (a.type) {
@@ -3356,6 +3102,38 @@ export class Hub {
         const v = r.value;
         return `## trigger.dryrun on ${a.source}\nchecked ${v.checked} recent events, ${v.matched} matched.${v.alsoMatchedBy.length ? ` Already caught by: ${v.alsoMatchedBy.map((x) => `${x.name} (${x.count})`).join(", ")}.` : ""}\n${v.examples.map((e) => `- ${e.receivedAt}: ${JSON.stringify(e.variables).slice(0, 300)}`).join("\n")}`;
       }
+      case "remind": {
+        const r = await p.remind({ ...a, teammateId: where.teammateId, threadId: where.threadId }, by);
+        if (!r.value) return no(`remind ${a.title ?? a.name ?? ""}`, r);
+        done.push({ kind: "hook", label: `Reminder: ${r.value.title}`, id: r.value.id });
+        return null;
+      }
+      case "watch.add": {
+        const r = await p.addWatcher(a, by);
+        if (!r.value) return no(`watch.add ${name}`, r);
+        // With an action, its trigger is made too ("tell me when this page changes" in one step).
+        if (a.action) {
+          const t = await p.addTrigger({ ...a, name: r.value.name, source: r.value.name, formula: a.formula ?? "true", teammateId: where.teammateId, threadId: where.threadId }, by);
+          if (!t.value) { p.removeWatcher(r.value.name); return no(`watch.add ${name} (its trigger)`, t); }
+        }
+        done.push({ kind: "hook", label: `Watching: ${r.value.describe}`, id: r.value.id });
+        return a.action ? null : `## watch.add ${r.value.name}: done\nIts source "${r.value.name}" sends: ${(p.findSource(r.value.sourceId)?.variables || []).map((v) => v.name).join(", ")}. Add a trigger on it (trigger.add source "${r.value.name}") to act on what it finds.`;
+      }
+      case "watch.update": {
+        const r = await p.updateWatcher(name, a);
+        if (!r.value) return no(`watch.update ${name}`, r);
+        done.push({ kind: "hook", label: `Updated watcher: ${r.value.name}` });
+        return null;
+      }
+      case "watch.remove":
+        if (p.removeWatcher(name)) done.push({ kind: "hook", label: `Stopped watching: ${name}` });
+        return null;
+      case "watch.check": {
+        if (!p.checkNow((w) => w.name === name.toLowerCase())) return `## watch.check ${name}\nNo active watcher called ${name}.`;
+        await p.tick();
+        const w = p.findWatcher(name);
+        return `## watch.check ${name}\n${w?.lastError ? `It couldn't look: ${w.lastError}` : w?.looked ? "Looked. Anything new went to its triggers." : "First look saved; it tells you about what's new from now on."}`;
+      }
       case "trigger.add": {
         const r = await p.addTrigger({ ...a, teammateId: where.teammateId, threadId: where.threadId }, by);
         if (!r.value) return no(`trigger.add ${name}`, r);
@@ -3363,7 +3141,7 @@ export class Hub {
         return null;
       }
       case "trigger.update": {
-        const r = await p.updateTrigger(name, a);
+        const r = await p.updateTrigger(name, named ? { ...a, teammateId: named.id } : a);
         if (!r.value) return no(`trigger.update ${name}`, r);
         done.push({ kind: "hook", label: `Updated trigger: ${r.value.name}` });
         return null;
@@ -3384,13 +3162,14 @@ export class Hub {
         return null;
       }
       case "time.update": {
-        const r = await p.updateTimer(name, a);
+        // A reminder can be moved by its trigger's name too.
+        const r = await p.updateTimer(p.findTrigger(name)?.timer?.name ?? name, a);
         if (!r.value) return no(`time.update ${name}`, r);
         done.push({ kind: "hook", label: `Moved timer: ${r.value.name}` });
         return null;
       }
       case "time.cancel":
-        if (p.removeTimer(name)) done.push({ kind: "hook", label: `Cancelled timer: ${name}` });
+        if (p.removeTimer(p.findTrigger(name)?.timer?.name ?? name)) done.push({ kind: "hook", label: `Cancelled: ${name}` });
         return null;
     }
     return null;
@@ -3413,17 +3192,43 @@ export class Hub {
     throw new Error(`the judge answered "${reply.trim().slice(0, 60)}", not ${describeOutput(jd.output)}`);
   }
 
-  private async runEventTrigger(t: EventTrigger, e: PipelineEvent, judge?: JudgeValue): Promise<{ text?: string; quiet?: boolean }> {
+  /**
+   * A trigger matched: notify, think, run a workflow or a script, and say it where the trigger was made.
+   * Your own reminders ring any time. Anything else waits out quiet hours (held, then run when they end) and counts
+   * toward the daily limit of messages you didn't ask for.
+   */
+  private async runEventTrigger(t: EventTrigger, e: PipelineEvent, judge?: JudgeValue, released = false): Promise<RunResult> {
+    const a = t.action;
+    if (a.type === "system") return this.runSystemJob(a.job);
+    const now = this.clock();
+    const mine = t.createdBy === "you" && a.type === "notify" && e.sourceName === TIME_SOURCE;
+    const gated = !mine && !e.test;
+    if (gated) {
+      const { prefs, n } = await this.proactiveLeft();
+      if (!released && inQuietHours(now, prefs.tz, prefs.quietStart, prefs.quietEnd)) return { hold: quietEndsAt(now, prefs.tz, prefs.quietEnd).toISOString() };
+      if (n >= prefs.maxProactivePerDay) return { skipped: `not sent: today's limit of ${prefs.maxProactivePerDay} messages is reached` };
+    }
     const vars = { ...e.variables, source: e.sourceName, ...(judge !== undefined ? { judge } : {}) };
     const teammate = await this.teammate(t.teammateId);
-    const extra = `## The event (from ${e.sourceName})\n<untrusted>\n${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 20_000)}\n</untrusted>`
+    // A timer's event says nothing a routine needs (it knows the time), unless the timer carries data.
+    const bare = e.sourceName === TIME_SOURCE && !Object.keys((e.variables.data as object) || {}).length && judge === undefined;
+    const extra = bare ? undefined : `## The event (from ${e.sourceName})\n<untrusted>\n${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 20_000)}\n</untrusted>`
       + (judge !== undefined && t.judge ? `\n\n## The trigger's judge\nAsked "${t.judge.prompt}", it answered ${judge} (acts when ${t.judge.pass}).` : "");
     let text = "", did: Done[] = [];
-    const a = t.action;
     if (a.type === "notify") text = fillTemplate(a.text, vars);
     else if (a.type === "think") {
-      const r = await this.turn("hook", `${t.name}\n${fillTemplate(a.prompt, vars)}`, `trigger: ${t.name}`, { teammate, threadId: t.threadId ?? undefined, extra });
+      const r = await this.turn("hook", `${t.title}\n${fillTemplate(a.prompt, vars)}`, `trigger: ${t.name}`, { teammate, threadId: t.threadId ?? undefined, extra });
       text = r.text; did = r.did;
+    } else if (a.type === "script") {
+      const out = await this.scripts.run(a.script, a.args.map((x) => fillTemplate(x, vars)));
+      if (out.needsApproval) {
+        const ap = await this.requestApproval({ summary: `${t.title}: run ${a.script}`, script: a.script, args: a.args }, { threadId: t.threadId ?? undefined });
+        text = `${t.title} wants to ${ap.value?.summary ?? `run ${a.script}`}. Tap Approve to let it.`;
+      } else if (a.then === "notify" || !out.ok) text = out.ok ? out.output.slice(0, 1500) : `${t.title}: ${out.output}`;
+      else {
+        const r = await this.turn("hook", `${t.title}\nInterpret the output of script ${a.script} for the user.`, `trigger: ${t.name}`, { teammate, threadId: t.threadId ?? undefined, extra: `${extra ? `${extra}\n\n` : ""}## ${a.script}\n${out.output}` });
+        text = r.text; did = r.did;
+      }
     } else {
       const wf = (await this.store.all<Workflow>("workflows")).find((w) => w.name === a.name && w.status === "active");
       if (!wf) throw new Error(`The workflow "${a.name}" isn't switched on any more.`);
@@ -3432,36 +3237,65 @@ export class Hub {
       text = r.output; did = r.did;
     }
     if (!text.trim() || text.includes(QUIET)) return { quiet: true };
-    const prefs = await this.prefs();
+    if (gated) { const { today, n } = await this.proactiveLeft(); await this.setPrefs({ proactiveToday: { date: today, n: n + 1 } }); }
+    const late = e.sourceName === TIME_SOURCE && Number(e.variables.late_by_min) > 10;
+    // Made in a ramble: it talks there while the ramble is open; once it's archived, in the teammate's DM, so a
+    // background watch doesn't keep pulling an old ramble back into Active.
     const home = t.threadId ? await this.store.get<Thread>("threads", t.threadId) : null;
     const threadId = home && !home.archivedAt ? home.id : teammate ? (await this.dmThread(teammate.id)).id : await this.updatesThread();
+    const what = e.sourceName === TIME_SOURCE ? (t.timer ? scheduleWords(t.timer.schedule, (await this.prefs()).tz) : `timer ${e.variables.time_to_run}`)
+      : e.sourceName === "place" ? `you ${e.variables.event === "leave" ? "left" : "arrived at"} ${e.variables.place}` : `event from ${e.sourceName}`;
     const msg = await this.addMessage({
-      role: "assistant", teammateId: teammate?.id, threadId, fromThreadId: home && home.id !== threadId ? home.id : undefined, text: e.test ? `(Test) ${text}` : text,
-      proactive: { hookId: t.id, title: t.name, trigger: (e.sourceName === "time" ? `timer ${e.variables.time_to_run}` : `event from ${e.sourceName}`) + (judge !== undefined ? ` · judge said ${judge}` : ""), why: t.why || `Trigger ${t.name}: ${t.formula}` },
+      role: "assistant", teammateId: teammate?.id, threadId, fromThreadId: home && home.id !== threadId ? home.id : undefined,
+      text: (e.test ? `(Test) ${text}` : text) + (late ? "\n\n(Late: the hub was offline when this was due.)" : ""),
+      proactive: { hookId: t.id, title: t.title, trigger: what + (judge !== undefined ? ` · judge said ${judge}` : ""), why: t.why || `Trigger ${t.name}: ${t.formula}` },
       did: did.length ? did : undefined,
     });
     await this.touchThread(msg.threadId!, { preview: msg.text.slice(0, 120) });
-    // Said in quiet hours without a buzz: the message is there in the morning.
-    if (!inQuietHours(this.clock(), prefs.tz, prefs.quietStart, prefs.quietEnd)) await this.push?.send({ title: t.name, body: msg.text.slice(0, 180), tag: t.id, url: threadLink(msg.threadId!) });
+    await this.push?.send({ title: t.title, body: msg.text.slice(0, 180), tag: t.id, url: threadLink(msg.threadId!) });
     return { text };
+  }
+
+  /** The hub's own jobs, run by their built-in triggers. */
+  private async runSystemJob(job: string): Promise<RunResult> {
+    if (job === "purge") { await this.purgeLibrary(); return { text: "library tidied" }; }
+    if (job === "ideas") {
+      const prefs = await this.prefs();
+      if (inQuietHours(this.clock(), prefs.tz, prefs.quietStart, prefs.quietEnd)) return { quiet: true };
+      await this.thinkOfIdeas();
+      return { text: "looked for ideas" };
+    }
+    if (job === "review") {
+      const r = await this.turn("review", "Review memory.", "nightly review", { profile: (await this.brains()).heavy });
+      if (r.text && r.text !== QUIET) await this.log("memory.review", r.text);
+      return { text: "memory reviewed" };
+    }
+    return { quiet: true };
   }
 
   // ---------- your data ----------
 
   async exportAll() {
     const out: Record<string, unknown> = { exportedAt: this.clock().toISOString(), hub: this.config.name, storage: this.store.kind };
-    for (const col of ["threads", "messages", "jobs", "teammates", "skills", "workflows", "approvals", "hooks", "memory", "notebooks", "places", "locations", "activity", "scripts", "apps", "appState", "ideas", "days", "people", "components"] as const) out[col] = await this.store.all(col);
+    for (const col of ["threads", "messages", "jobs", "teammates", "skills", "workflows", "approvals", "memory", "notebooks", "places", "locations", "activity", "scripts", "apps", "appState", "ideas", "days", "people", "components"] as const) out[col] = await this.store.all(col);
     out.devices = (await this.store.all<any>("devices")).map(({ tokenHash, ...d }) => d);
     out.prefs = await this.prefs();
+    const p = this.pipeline;
+    out.pipeline = { sources: p.sources(), triggers: p.triggers(), timers: p.timers(), watchers: p.watchers() };
     return out;
   }
 
   async wipePersonal() {
     this.pipeline.clearEvents(); // events carry message text; sources, triggers and timers are setup, like scripts
     for (const f of await this.store.all<StoredFile>("files")) await this.files.remove(f.id);
-    for (const col of ["threads", "messages", "jobs", "approvals", "hooks", "memory", "notebooks", "places", "locations", "activity", "apps", "appState", "ideas", "days", "people"] as const) await this.store.clear(col);
+    for (const col of ["threads", "messages", "jobs", "approvals", "memory", "notebooks", "places", "locations", "activity", "apps", "appState", "ideas", "days", "people"] as const) await this.store.clear(col);
     await this.setPrefs({ about: undefined, aboutUpdatedAt: undefined });
-    await this.ensureSystemHooks();
+    // Plans go too: every reminder and trigger you or the team made (the hub's own jobs stay).
+    const p = this.pipeline;
+    for (const t of p.triggers()) if (t.createdBy !== "system") p.removeTrigger(t.id);
+    for (const t of p.timers()) if (t.createdBy !== "system") p.removeTimer(t.id);
+    for (const s of p.sources()) if (s.kind === "push" || s.kind === "watch") p.removeSource(s.id);
+    await this.ensureBuiltIns();
     await this.ensureTeammates();
     await this.log("data.wiped", "All personal data deleted from this hub.");
     this.emit("reset");
@@ -3480,6 +3314,22 @@ export function supersededJobs(jobs: Job[]): Set<string> {
     if ((newest.get(root) || "") < j.createdAt) newest.set(root, j.createdAt);
   }
   return new Set(jobs.filter((j) => !j.parentId && j.status === "blocked" && (newest.get(j.followsUp || j.id) || "") > j.createdAt).map((j) => j.id));
+}
+
+const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+/** A timer's schedule in words: "weekdays at 09:00", "every 4h", "Fri 6:00 PM". */
+export function scheduleWords(sc: TimerSchedule, tz: string) {
+  if ("everyMin" in sc) return sc.everyMin % 60 === 0 ? `every ${sc.everyMin / 60}h` : `every ${sc.everyMin} min`;
+  if ("time" in sc) {
+    const d = (sc.days.length ? sc.days : [0, 1, 2, 3, 4, 5, 6]).join(",");
+    return `${d === "0,1,2,3,4,5,6" ? "every day" : d === "1,2,3,4,5" ? "weekdays" : d === "0,6" ? "weekends" : sc.days.map((x) => DAY_NAMES[x]).join(", ")} at ${sc.time}`;
+  }
+  const when = describeLocal(new Date(sc.at), tz);
+  return sc.repeat && sc.repeat !== "none" ? `${sc.repeat}, from ${when}` : when;
+}
+/** What a trigger does, in a few words. */
+export function actionWords(a: EventTrigger["action"]) {
+  return a.type === "notify" ? `says: ${a.text.slice(0, 160)}` : a.type === "think" ? `thinks: ${a.prompt.slice(0, 160)}` : a.type === "workflow" ? `runs workflow ${a.name}` : a.type === "script" ? `runs ${a.script}` : `the hub's ${a.job}`;
 }
 
 /** You've seen this job stuck since it last got stuck. */

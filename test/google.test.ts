@@ -11,8 +11,8 @@ import { Scripts } from "../src/scripts.ts";
 import { loadConfig } from "../src/config.ts";
 import { zonedToUtc } from "../src/time.ts";
 import { Google, mailText } from "../src/google.ts";
-import { validateHook, describeTrigger } from "../src/hooks.ts";
-import type { Hook, Message } from "../src/types.ts";
+import { cleanWatch, describeWatch } from "../src/events/watchers.ts";
+import type { Message } from "../src/types.ts";
 
 // Google with your own OAuth client, and the Gmail and Calendar trigger modules, against a fake Google.
 
@@ -75,7 +75,14 @@ beforeEach(async () => {
 afterEach(async () => { hub.stop(); await hub.idle(20_000); await store.close(); });
 
 const sent = async () => (await store.all<Message>("messages")).filter((m) => m.proactive);
-const get = (id: string) => store.get<Hook>("hooks", id) as Promise<Hook>;
+/** A watcher looks now (instead of at its next interval). */
+const lookNow = async (name: string) => { hub.pipeline.checkNow((w) => w.name === name); await hub.pipeline.tick(); };
+/** An app watcher and a trigger that says `text` with each new item's title. */
+async function watchApp(name: string, app: string, config: unknown, text: string) {
+  const w = await hub.pipeline.addWatcher({ name, kind: "app", app, config }, "Hearth");
+  await hub.pipeline.addTrigger({ name, source: name, formula: "true", action: { type: "notify", text: `${text} {{title}}` } }, "Hearth");
+  return w.value!;
+}
 
 async function connect(g: Google = hub.google) {
   expect(g.setClient(CLIENT, "GOCSPX-secret-value").value).toBeTruthy();
@@ -116,41 +123,39 @@ test("email text: the plain part, else the HTML without tags", () => {
   expect(mailText({ mimeType: "text/html", body: { data: b64("<style>x{}</style><p>Due <b>Friday</b></p>") } })).toBe("Due Friday");
 });
 
-test("source triggers: unknown sources and bad config are refused; descriptions read well", () => {
-  expect(validateHook({ title: "x", trigger: { type: "source", source: "myspace" }, action: { type: "notify", text: "x" } }).error).toContain("gmail");
-  expect(validateHook({ title: "x", trigger: { type: "source", source: "gmail", config: {} }, action: { type: "notify", text: "x" } }).error).toContain("search");
-  const v = validateHook({ title: "x", trigger: { type: "source", source: "gmail", config: { query: "from:linkedin.com" }, minutes: 30 }, action: { type: "notify", text: "x" } }).value!;
-  expect(describeTrigger(v.trigger, TZ)).toBe("new email matching “from:linkedin.com” (checked every 30 min)");
+test("app watchers: unknown apps and bad config are refused; descriptions read well", () => {
+  expect(cleanWatch("app", { app: "myspace" })).toContain("gmail");
+  expect(cleanWatch("app", { app: "gmail", config: {} })).toContain("search");
+  const v = cleanWatch("app", { app: "gmail", config: { query: "from:linkedin.com" }, everyMin: 30 }) as any;
+  expect(describeWatch("app", v.config, v.everyMin)).toBe("new email matching “from:linkedin.com” (checked every 30 min)");
 });
 
-test("a Gmail trigger stays quiet until Google is connected, remembers what's there, then speaks for new mail only", async () => {
-  const r = await hub.addHook({ title: "School email", trigger: { type: "source", source: "gmail", config: { query: "from:k12.ca.us" } }, action: { type: "notify", text: "New school email:" } }, "assistant");
-  const id = r.value!.id;
-  await hub.fire(await get(id), "check");
-  expect((await get(id)).seen).toBeUndefined(); // not connected: nothing read
+test("a Gmail watcher waits until Google is connected, remembers what's there, then pushes new mail only", async () => {
+  await watchApp("school", "gmail", { query: "from:k12.ca.us" }, "New school email:");
+  await lookNow("school");
+  expect(hub.pipeline.findWatcher("school")).toMatchObject({ looked: false, lastError: "Gmail isn't connected" }); // nothing read
   await connect();
-  await hub.fire(await get(id), "check");
+  await lookNow("school");
   expect((await sent()).length).toBe(0); // first look
   inbox.unshift({ id: "m2", from: "office@lincoln.k12.ca.us", subject: "Field trip slips due Tuesday", body: "Slips and $15 due Tue 8am." });
   inbox.unshift({ id: "m3", from: "deals@shoes.example.com", subject: "Sale", body: "40% off" });
-  await hub.fire(await get(id), "check");
+  await lookNow("school");
   const msgs = await sent();
-  expect(msgs.length).toBe(1);
-  expect(msgs[0].text).toBe("New school email:\n• office@lincoln.k12.ca.us — Field trip slips due Tuesday");
-  await hub.fire(await get(id), "check");
+  expect(msgs.map((m) => m.text)).toEqual(["New school email: office@lincoln.k12.ca.us — Field trip slips due Tuesday"]);
+  await lookNow("school");
   expect((await sent()).length).toBe(1); // already seen
   expect(calls.filter((c) => c.endsWith("/token")).length).toBe(1); // the access token is reused
 });
 
-test("a calendar trigger speaks before an event starts, once", async () => {
+test("a calendar watcher speaks before an event starts, once", async () => {
   await connect();
-  const r = await hub.addHook({ title: "Heads-up", trigger: { type: "source", source: "calendar", config: { when: "starting", minutesBefore: 30 } }, action: { type: "notify", text: "Starting soon:" } }, "assistant");
-  expect(r.value!.trigger).toMatchObject({ minutes: 5 });
-  await hub.fire(await get(r.value!.id), "check"); // first look: nothing in the next 30 min
+  const w = await watchApp("heads-up", "calendar", { when: "starting", minutesBefore: 30 }, "Starting soon:");
+  expect(w.everyMin).toBe(5);
+  await lookNow("heads-up"); // first look: nothing in the next 30 min
   now = new Date(now.getTime() + (3 * 60 - 20) * 60_000); // 20 min before the dentist
-  await hub.fire(await get(r.value!.id), "check");
-  await hub.fire(await get(r.value!.id), "check");
-  expect((await sent()).map((m) => m.text)).toEqual(["Starting soon:\n• Dentist"]);
+  await lookNow("heads-up");
+  await lookNow("heads-up");
+  expect((await sent()).map((m) => m.text)).toEqual(["Starting soon: Dentist"]);
 });
 
 test("source.read lets a teammate look things up", async () => {
@@ -299,8 +304,8 @@ test("Drive: asked for read-only, searched across accounts that allowed it, Docs
   expect(driveQs[0]).toContain("modifiedTime >");
   await expect(hub.google.files("x", 5, "rishi@example.com")).rejects.toThrow("Reconnect rishi@example.com");
 
-  // As a trigger: a file edited again counts again.
-  const r = await hub.addHook({ title: "Lease", trigger: { type: "source", source: "drive", config: { search: "lease" } }, action: { type: "notify", text: "Drive:" } }, "assistant");
-  expect(r.value!.trigger).toMatchObject({ minutes: 30 });
-  expect(describeTrigger(r.value!.trigger, TZ)).toContain("a Drive file matching “lease” added or changed");
+  // As a watcher: a file edited again counts again.
+  const w = (await hub.pipeline.addWatcher({ name: "lease", kind: "app", app: "drive", config: { search: "lease" } })).value!;
+  expect(w.everyMin).toBe(30);
+  expect(w.describe).toContain("a Drive file matching “lease” added or changed");
 });

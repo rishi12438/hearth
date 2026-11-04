@@ -11,7 +11,7 @@ import { parseReply } from "../src/reply.ts";
 import { nextOccurrence, nextScheduledRun, inQuietHours, zonedToUtc } from "../src/time.ts";
 import { recall } from "../src/memory.ts";
 import { newPairingCode, redeemPairingCode, deviceForToken } from "../src/auth.ts";
-import type { Fact, Hook, Job, Message, Thread } from "../src/types.ts";
+import type { Fact, Job, Message, Thread } from "../src/types.ts";
 
 const TZ = "America/Los_Angeles";
 let dir: string, store: Store, hub: Hub, now: Date;
@@ -59,9 +59,11 @@ test("a ramble becomes jobs for teammates; a reminder job fires proactively with
   expect(jobs.map((j) => j.teammateId).sort()).toEqual(["planner", "scout"]);
   const threads = await store.all<Thread>("threads");
   expect(threads.length).toBe(1);
-  const [hook] = (await store.all<Hook>("hooks"));
+  // A reminder is a timer and its trigger, in the event pipeline.
+  const [hook] = hub.pipeline.triggers();
   expect(hook.title).toBe("stretch");
-  expect(hook.source).toBe("you");
+  expect(hook.createdBy).toBe("you");
+  expect(hook.timer?.nextAt).toBeTruthy();
 
   const before = (await messages()).length;
   await hub.tick();
@@ -73,54 +75,65 @@ test("a ramble becomes jobs for teammates; a reminder job fires proactively with
   expect(last.proactive?.why).toContain("You asked me");
   expect(last.threadId).toBe(threads[0].id);
   expect(last.teammateId).toBe("planner");
-  expect((await store.get<Hook>("hooks", hook.id))!.status).toBe("done");
+  expect(hub.pipeline.findTrigger(hook.id)!.status).toBe("done"); // a one-time reminder is done once it rang
 });
 
-test("quiet hours hold assistant hooks but not your own reminders", async () => {
+test("quiet hours hold the team's reminders until they end, but not your own", async () => {
   now = zonedToUtc(2026, 10, 30, 23, 30, TZ);
-  const mine = await hub.addHook({ title: "Pills", trigger: { type: "at", at: now.toISOString() }, action: { type: "notify", text: "Pills" } }, "you");
-  const theirs = await hub.addHook({ title: "Nudge", trigger: { type: "at", at: now.toISOString() }, action: { type: "notify", text: "Nudge" } }, "assistant");
+  const mine = await hub.pipeline.remind({ title: "Pills", schedule: { at: now.toISOString() } }, "you");
+  await hub.pipeline.remind({ title: "Nudge", schedule: { at: now.toISOString() } }, "Reminders");
   await hub.tick();
-  const texts = (await messages()).map((m) => m.text);
+  let texts = (await messages()).map((m) => m.text);
   expect(texts).toContain("Pills");
   expect(texts).not.toContain("Nudge");
-  const held = (await store.get<Hook>("hooks", theirs.value!.id))!;
-  expect(held.nextAt).toBe(zonedToUtc(2026, 10, 31, 7, 30, TZ).toISOString());
+  expect(hub.pipeline.heldCount()).toBe(1);
   expect(mine.value).toBeTruthy();
+  now = zonedToUtc(2026, 10, 31, 7, 31, TZ); // quiet hours are over
+  await hub.tick();
+  texts = (await messages()).map((m) => m.text);
+  expect(texts.filter((t) => t === "Nudge").length).toBe(1);
+  expect(hub.pipeline.heldCount()).toBe(0);
+  await hub.tick();
+  expect((await messages()).filter((m) => m.text === "Nudge").length).toBe(1); // once
 });
 
 test("daily cap limits unprompted messages", async () => {
   await hub.setPrefs({ maxProactivePerDay: 1 });
-  for (const t of ["A", "B"]) await hub.addHook({ title: t, trigger: { type: "at", at: now.toISOString() }, action: { type: "notify", text: t } }, "assistant");
+  for (const t of ["A", "B"]) await hub.pipeline.remind({ title: t, schedule: { at: now.toISOString() } }, "Reminders");
   await hub.tick();
   expect((await messages()).filter((m) => m.proactive).length).toBe(1);
+  expect(hub.pipeline.events({ limit: 5 }).flatMap((e) => e.log!).some((l) => l.step === "skipped" && l.detail.includes("limit"))).toBe(true);
 });
 
-test("watch hooks can stay quiet", async () => {
-  const h = await hub.addHook({ title: "Check", trigger: { type: "every", minutes: 30 }, action: { type: "think", prompt: "[[quiet]]" } }, "assistant");
+test("a routine that finds nothing worth saying stays quiet", async () => {
+  const r = await hub.pipeline.remind({ title: "Check", schedule: { everyMin: 30 }, prompt: "[[quiet]]" }, "Reminders");
   now = new Date(now.getTime() + 31 * 60000);
   await hub.tick();
   expect((await messages()).length).toBe(0);
-  expect((await store.get<Hook>("hooks", h.value!.id))!.fireCount).toBe(1);
+  expect(hub.pipeline.findTrigger(r.value!.id)!.fireCount).toBe(1);
 });
 
-test("place hooks fire on arrival, once", async () => {
+test("place triggers fire on arrival, once", async () => {
   await hub.recordLocation(37.0, -122.0, 10, "test");
   await hub.addPlace({ name: "Office", here: true });
   await hub.recordLocation(37.1, -122.0, 10, "test"); // leave
-  await hub.addHook({ title: "Charger", trigger: { type: "place", place: "office", event: "arrive" }, action: { type: "notify", text: "Grab the charger" } }, "you");
+  await hub.pipeline.addTrigger({ name: "charger", title: "Charger", source: "place", formula: 'place == "office" and event == "arrive"', action: { type: "notify", text: "Grab the charger" } }, "you");
   await hub.recordLocation(37.0, -122.0, 10, "test");
   await hub.recordLocation(37.0001, -122.0, 10, "test");
   await until(async () => (await messages()).length >= 1);
   expect((await messages()).filter((m) => m.text === "Grab the charger").length).toBe(1);
 });
 
-test("silence hook checks in once after N hours", async () => {
+test("a silence watcher checks in once after N hours", async () => {
   await hub.setPrefs({ lastUserAt: now.toISOString() });
-  await hub.addHook({ title: "Check-in", trigger: { type: "silence", hours: 48 }, action: { type: "notify", text: "Anything to track this week?" } }, "assistant");
+  const w = await hub.pipeline.addWatcher({ name: "check-in", kind: "silence", hours: 48 }, "Reminders");
+  await hub.pipeline.addTrigger({ name: "check-in", source: "check-in", formula: "hours >= 48", action: { type: "notify", text: "Anything to track this week?" } }, "Reminders");
+  await hub.tick();
+  expect((await messages()).length).toBe(0);
   now = new Date(now.getTime() + 49 * 3.6e6);
-  await hub.tick(); await hub.tick();
+  await hub.tick(); now = new Date(now.getTime() + 20 * 60000); await hub.tick();
   expect((await messages()).length).toBe(1);
+  expect(w.value).toBeTruthy();
 });
 
 test("memory: update keeps history, forget removes the chain, recall keeps core", async () => {
@@ -164,9 +177,10 @@ test("assistant scripts need approval and re-approval after any change", async (
 });
 
 test("brain cannot act outside the action list", async () => {
-  const r = await hub.applyActions([{ type: "shell.exec", cmd: "rm -rf /" }, { type: "hook.add", title: "x", trigger: { type: "every", minutes: 1 }, action: { type: "notify", text: "spam" } }], "");
+  const r = await hub.applyActions([{ type: "shell.exec", cmd: "rm -rf /" }, { type: "hook.add", title: "x", trigger: { type: "every", minutes: 1 }, action: { type: "notify", text: "spam" } },
+    { type: "remind", title: "spam", schedule: { everyMin: 1 } }, { type: "trigger.add", name: "x", source: "time", formula: "true", action: { type: "system", job: "purge" } }], "");
   expect(r.done).toEqual([]);
-  expect((await store.all<Hook>("hooks")).length).toBe(0);
+  expect(hub.pipeline.triggers().length).toBe(0);
 });
 
 test("orchestrator creates a new teammate when nobody fits", async () => {

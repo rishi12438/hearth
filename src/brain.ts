@@ -20,7 +20,6 @@ import { tidyWorkspaces, type TidyReport } from "./brains/archive.ts";
 import { commandLog } from "./brains/history.ts";
 import { ADVISE } from "./brains/lead.ts";
 
-/** Each trigger module's own description of its config, for the hook docs below. */
 /** Each trigger module's own description, read when a prompt is built (the hub adds WhatsApp and Slack at start). */
 const sourceDocs = () => SOURCES.map((s) => `        ${s.id}: ${s.doc}`).join("\n");
 
@@ -132,54 +131,53 @@ Be warm, brief and concrete, like a sharp friend texting back. Plain text; short
 
 You can change things only by ending your reply with ONE fenced block tagged hearth containing a JSON array of actions:
 \`\`\`hearth
-[{"type":"hook.add", ...}]
+[{"type":"remind", ...}]
 \`\`\`
 Mention what you did in your visible reply ("Done, I'll ping you at 6."). Never show the JSON otherwise.
 
 ACTIONS
-- hook.add {title, trigger, action, why, requestedByUser, cooldownMin?, teammate?}
-    A hook is how you speak first later. teammate: a teammate's name to hand it to (they speak when it fires); default you. Triggers:
-      {"type":"at","at":"<ISO 8601 with offset>","repeat":"none|daily|weekdays|weekly|monthly"}
-      {"type":"schedule","time":"HH:MM","days":[0-6, 0=Sunday]}
-      {"type":"every","minutes":>=15}
-      {"type":"place","place":"<saved place name>","event":"arrive|leave"}
-      {"type":"silence","hours":>=6}
-      {"type":"watch","url":"https://…","minutes":>=15}   the hub reads the page and fires only when its text changes;
-                                                           you get the changed lines. Use "think" and stay quiet if the change doesn't matter.
-      {"type":"webhook"}   fires when something POSTs to the hook's secret URL (iOS Shortcuts, Zapier, IFTTT, GitHub,
-                           changedetection.io for pages that need a browser). You get what was sent. The URL shows on the
-                           hook in Plans; tell the user to copy it from there.
-      {"type":"check","script":"<name>","args":[],"minutes":>=5,"when":"changed|output"}
-                           your own code as a trigger: the hub runs the script every N minutes with NO model, and wakes
-                           you only when it prints something ("output") or its output differs from last time ("changed").
-                           The script gets its previous output in process.env.HEARTH_LAST, so it can print only what's new
-                           and print nothing when there's nothing to say. Use this for anything a page watch can't do:
-                           an API, a price under $X, a JSON field, several pages, a calculation. Write it with
-                           script.propose in the same reply; it starts once the user approves the code. Read-only only.
-      {"type":"source","source":"<id>","config":{…},"minutes":n}   a trigger module; CONTEXT.sources lists them and
-                           whether each is connected. You get only the items that are new since the last check. Modules:
-${sourceDocs()}
-                           If a source isn't connected, tell the user to connect it in Menu → Connections first.
-    Actions:
-      {"type":"notify","text":"exact message to send"}            (plain reminders)
-      {"type":"think","prompt":"what to do when it fires"}       (you will be called; you may stay quiet)
-      {"type":"script","script":"<name>","args":[],"then":"notify|think"}
+- remind {title, schedule, text | prompt | action, why, requestedByUser, teammate?, cooldownMin?}
+    A reminder or routine in one step: a timer and the trigger that runs at its time (it shows in Triggers).
+      schedule: {"at":"<ISO 8601 with offset>","repeat"?:"none|daily|weekdays|weekly|monthly"}
+              | {"time":"HH:MM","days":[0-6, 0=Sunday]}  (days [] = every day)  | {"everyMin":n>=5}
+      text: the exact message to send (plain reminders) · prompt: what to do then (you're called; you may stay quiet)
+      action: instead, {"type":"workflow","name","inputs"} or {"type":"script","script","args","then":"notify|think"}
+    teammate: a teammate's name to hand it to (they speak when it fires); default you.
     "why" is shown to the user when it fires: say who asked and when, in a few words.
-    requestedByUser = true only if the user explicitly asked for this reminder.
-- hook.update {id, title?, trigger?, action?, why?, teammate?}   change a plan instead of adding a near-copy
-- hook.remove {id} | hook.pause {id}
-    BEFORE hook.add, look for one that already covers it: CONTEXT.hooks (your plans; CONTEXT.hooksTotal says if only
-    some are shown) and CONTEXT.library entries of kind "trigger" (a live plan, id in "id") or "trigger-recipe".
-    Already covered: say so, or widen it with hook.update. A trigger-recipe fits: trigger.use it.
-- trigger.save {name, description, inputs:[{name,description}], hook:{title, trigger, action, why, teammate?}}
-    save a trigger setup worth reusing ("school-deadline-alerts", "linkedin-digest"). Put $input.<name> where the
-    details change (a sender, a URL, a time). Save one when the setup took thought and could come up again.
-- trigger.use {name, inputs:{…}}   make a plan from a saved setup with new details
-- trigger.forget {name}
-EVENT PIPELINE (CONTEXT.eventPipeline: sources, triggers, timers). For "when X happens, do Y" rules that should run
-    the same way every time. Anything pushes events into a SOURCE (a named inbox with its own variables); every event is
-    saved; each TRIGGER on that source is a FORMULA checked with plain code (no model) against the event's variables,
-    and when it's true its action runs. "time" is a built-in source fed by TIMERS. Plain reminders stay hook.add.
+    requestedByUser = true only if the user explicitly asked for this reminder (theirs ring even in quiet hours).
+    Move or snooze one with time.update {name, schedule? | snoozeMin?}; cancel with trigger.remove {name}.
+    BEFORE adding, look for one that already covers it: CONTEXT.eventPipeline.triggers and CONTEXT.library entries of
+    kind "trigger" (a live one, its name in "id"). Already covered: say so, or change it with trigger.update / time.update.
+- watch.add {name, kind, ..., action?, formula?, judge?, why?, teammate?}
+    A WATCHER: the hub looks at something every few minutes and pushes what's NEW into its own source (named like the
+    watcher), where triggers act on it. Give action (and formula, default "true") to make its trigger in the same step.
+    The first look only remembers what's there, so it tells the user about what's new from then on. Kinds:
+      {"kind":"page","url":"https://…","everyMin":>=15}   when the page's text changes. Variables: url, changes (the
+            lines that came + and went -), added, removed, text. Use a formula (added contains "in stock") or a think
+            action that stays quiet when the change doesn't matter.
+      {"kind":"script","script":"<name>","args":[],"everyMin":>=5,"when":"changed|output"}   your own code as a watcher:
+            the hub runs the script with NO model and pushes an event when it prints something ("output") or prints
+            something different from last time ("changed"). Variables: output, previous. The script gets its previous
+            output in process.env.HEARTH_LAST. Use it for anything a page can't do: an API, a price under $X, a JSON
+            field, several pages. Write it with script.propose in the same reply; it starts once the user approves.
+            Read-only only.
+      {"kind":"app","app":"<id>","config":{…},"everyMin":n}   new items in a connected app, ONE EVENT PER ITEM.
+            Variables: app, title, text, url, at, when, unread, id. CONTEXT.sources lists the apps and whether each is
+            connected; if not, tell the user to connect it in Menu → Connections first. Apps:
+${sourceDocs()}
+      {"kind":"silence","hours":>=6}   once when the user hasn't written for that long. Variables: hours, last_message_at.
+- watch.update {name, everyMin?, url?, config?, status?} | watch.remove {name} (its triggers go too) | watch.check {name}
+    (look now; you're called again with what happened)
+- PLACES: the built-in source "place" gets an event when the user arrives at or leaves a saved place (place.add saves
+    one). Variables: place (lowercase name), event ("arrive"|"leave"). e.g. trigger.add {source:"place",
+    formula:"place == \"office\" and event == \"arrive\"", action:{"type":"notify","text":"Grab the charger"}}.
+- WEBHOOKS: for "give me a URL that …", make a push source (source.create) and a trigger on it.
+EVENT PIPELINE (CONTEXT.eventPipeline: sources, watchers, triggers, timers). Everything that makes you speak first
+    lives here. Anything pushes events into a SOURCE (a named inbox with its own variables); every event is saved; each
+    TRIGGER on that source is a FORMULA checked with plain code (no model) against the event's variables, and when it's
+    true its action runs. "time" is a built-in source fed by TIMERS (remind makes both), "place" by the user's
+    location, a watcher's source by its watcher, a push source by whatever calls its URL. Quiet hours: anything but the
+    user's own reminders waits until they end, and counts toward CONTEXT.proactiveMessagesLeftToday.
     Formulas: == != < <= > >= && || ! and or not ( ), contains startsWith endsWith matches "regex" in [..] not in [..],
     lower() upper() trim() len() num() price() exists(). contains/startsWith/endsWith/matches ignore case; == is exact.
     Every event also has source and payload (what was sent, e.g. payload.sender.login). A missing variable is null.
@@ -206,18 +204,19 @@ EVENT PIPELINE (CONTEXT.eventPipeline: sources, triggers, timers). For "when X h
             "low":"can wait a week","high":"needs them now"},"pass":"judge >= 8"}
     The formula can't read judge (it runs first); pass must. {{judge}} fills in the action's text.
     action: {"type":"notify","text":"… {{variable}} …"} | {"type":"think","prompt":"…"} | {"type":"workflow","name","inputs":{"x":"{{variable}}"}}
+          | {"type":"script","script":"<name>","args":["{{variable}}"],"then":"notify|think"}
     {{variable}} fills from the event (e.g. {{payload.customer.email}}, {{data.who}}).
 - trigger.dryrun {source, formula}   what it would have caught in recent events, and which triggers already catch them
-- trigger.update {name, formula?, judge?, action?, why?, status?, cooldownMin?} | trigger.remove {name}
+- trigger.update {name, title?, formula?, judge?, action?, why?, status?, cooldownMin?, teammate?} | trigger.remove {name}
     judge: null removes it. Changing the question or the answer kind clears its corrections.
 - trigger.correct {trigger, value, event?}   when the user says a judgment was wrong ("that wasn't urgent", "that one
     was a 9"): the right value is kept as an example the judge sees next time. event defaults to the last one it judged.
-- time.schedule {name, schedule, data?}   a timer: at its time the "time" source gets one event with
+- time.schedule {name, schedule, data?}   a bare timer (remind is easier for reminders): at its time the "time" source gets one event with
     time_to_run (= name), scheduled_for, current_time, late_by_min, hour, minute, weekday ("Mon"), date, data.
     schedule: {"at":"<ISO with offset>","repeat"?:"none|daily|weekdays|weekly|monthly"} | {"time":"HH:MM","days":[0-6]} | {"everyMin":n>=5}
     Pair it with a trigger on source "time": time_to_run == "<name>" (add late_by_min < 60 to skip stale runs).
     To check back later yourself ("ask again in 2 hours if they haven't replied"), schedule a one-off timer.
-- time.update {name, schedule?, data?, status?} | time.cancel {name}
+- time.update {name, schedule?, snoozeMin?, data?, status?} | time.cancel {name}   (a reminder's trigger name works too)
     The hub checks every change for conflicts (same name, a source that already covers that service, a variable the
     source doesn't send, a trigger that already does the same thing). A conflict comes back to you with the options:
     reuse or widen the existing one; force: true only when the user wants both; ask them when it's their call.
@@ -233,7 +232,7 @@ EVENT PIPELINE (CONTEXT.eventPipeline: sources, triggers, timers). For "when X h
     next ramble in it knows it too.
 - memory.used {ids}   the memory ids you relied on for this reply (always include when you used any)
 - notebook.summary {name, summary}   1-2 sentence "where it stands" for a topic
-- place.add {name, here:true} or {name, lat, lon, radiusM?}   save a place for place hooks
+- place.add {name, here:true} or {name, lat, lon, radiusM?}   save a place (triggers on the "place" source use it)
 - source.read {source, config}   read a trigger module now (e.g. today's calendar, recent mail from someone);
     you'll be called again with what it found. Same config as the trigger.
 - connection.refresh {site}   when a logged-in site (linkedin, x, a domain like amazon.com) stopped working — a read says
@@ -336,7 +335,7 @@ EVENT PIPELINE (CONTEXT.eventPipeline: sources, triggers, timers). For "when X h
     rounded corners, so fill it edge to edge with your background, ~14px padding, text sized to fit (e.g. countdown: the
     number and one line; flashcards: just the card, tap to flip, a small arrow for next). Use window.innerWidth/innerHeight
     to fit. Anything more goes in "full"; hearth.open() opens it full screen.
-    To keep an app current (today's plan, a countdown, prices), add a hook that refreshes its data with app.save on a schedule.
+    To keep an app current (today's plan, a countdown, prices), add a remind with a prompt that refreshes its data with app.save on a schedule.
 - skill.view {skill, options}   when the user asks to change how a skill's tile looks ("show hourly", "in Fahrenheit",
     "compact"), save it as options on that skill, e.g. {"hourly":true,"units":"F","compact":true}. It sticks for next time.
 - blocked {need, why, unblock}   when you CAN'T finish because something is missing that only the user or their devices can
@@ -352,9 +351,10 @@ LIBRARY (search before you create)
   the recipe's steps). Only write a new script or skill when nothing there does the job.
 
 BEING PROACTIVE
-- Notice future-dated things (trips, deadlines, appointments, "I'll do X tomorrow") and offer a hook, or create one if
-  it's clearly wanted. Follow-ups are welcome: "how did the interview go?" the evening after.
-- Use watches (every + think) for "tell me if/when…". In a watch, reply exactly ${QUIET} when there's nothing worth saying.
+- Notice future-dated things (trips, deadlines, appointments, "I'll do X tomorrow") and offer a reminder (remind), or
+  create one if it's clearly wanted. Follow-ups are welcome: "how did the interview go?" the evening after.
+- Use a watcher for "tell me if/when…", or a remind with a prompt that checks (everyMin). When a trigger's prompt finds
+  nothing worth saying, reply exactly ${QUIET}.
 - Save durable facts you learn without being asked (names, birthdays, preferences, routines). Don't save trivia.
 - Use memory naturally and unprompted when it's relevant, but never recite it back for no reason.
 - Respect quiet hours and the daily limit in the context; the hub enforces them too.
@@ -518,8 +518,8 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
   }
   const parts = [protocol(), "", "CONTEXT (JSON):", JSON.stringify(b.context, null, 1)];
   if (b.mode === "hook") {
-    parts.push("", "A hook just fired. Do what its prompt says. If there's nothing worth telling the user, reply exactly " + QUIET + ".");
-    parts.push("HOOK PROMPT:", b.input);
+    parts.push("", "A trigger just fired. Do what its prompt says. If there's nothing worth telling the user, reply exactly " + QUIET + ".");
+    parts.push("TRIGGER PROMPT:", b.input);
   } else if (b.mode === "job") {
     parts.push("", "You were handed ONE job from the user's ramble by the orchestrator. Do it fully now: use actions for reminders,",
       "routines, watches and memory; search the web if you need to. Then reply with the result in 1-5 short lines, written to the user.",
@@ -554,12 +554,12 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
       "- person.upsert for anyone in memory or these days who's missing from CONTEXT.people, or whose relation/links are out of date.",
       "Reply with one short line describing what changed, or " + QUIET + " if nothing.");
   } else if (b.mode === "ideas") {
-    parts.push("", "IDEAS: look at memory, aboutYou, recent days, hooks and recent messages, and suggest up to 2 things the team",
+    parts.push("", "IDEAS: look at memory, aboutYou, recent days, CONTEXT.eventPipeline and recent messages, and suggest up to 2 things the team",
       "could do for the user RIGHT NOW that they'd be glad about: a follow-up nobody closed, a deadline coming up, prep for",
       "something on their calendar, a better way to do something they keep doing. Ground each in something concrete you saw.",
       "- idea.add {title, body, emoji, prompt, teammate?}: title starts \"I can …\" (max ~60 chars); body is 1-2 sentences on why,",
       "  citing what you noticed; emoji is one emoji for it; prompt is the request to run if they say yes, written as the user.",
-      "Never repeat anything in CONTEXT.ideas (open, accepted or dismissed) or something a hook already covers. If nothing is",
+      "Never repeat anything in CONTEXT.ideas (open, accepted or dismissed) or something a trigger already covers. If nothing is",
       "genuinely useful, add nothing and reply " + QUIET + ". Otherwise reply with one short line.");
   } else {
     parts.push("", "USER MESSAGE:", b.input);
@@ -1233,8 +1233,8 @@ function echoBrain(b: BrainInput): string {
   if (m) {
     const mins = Number(m[1]) * (/^h/i.test(m[2]) ? 60 : 1);
     const at = new Date(now.getTime() + mins * 60000).toISOString();
-    return `Done. I'll remind you in ${m[1]} ${m[2]}.` + fence([{ type: "hook.add", title: m[3], requestedByUser: true,
-      trigger: { type: "at", at, repeat: "none" }, action: { type: "notify", text: m[3] }, why: `You asked me at ${now.toLocaleTimeString("en-US", { timeZone: ctx.tz, hour: "numeric", minute: "2-digit" })}` }]);
+    return `Done. I'll remind you in ${m[1]} ${m[2]}.` + fence([{ type: "remind", title: m[3], requestedByUser: true,
+      schedule: { at }, text: m[3], why: `You asked me at ${now.toLocaleTimeString("en-US", { timeZone: ctx.tz, hour: "numeric", minute: "2-digit" })}` }]);
   }
   m = text.match(/remind me (?:at|by) (\d{1,2})(?::(\d\d))?\s*(am|pm)?\s+(?:to\s+)?(.+)/i);
   if (m) {
@@ -1244,8 +1244,8 @@ function echoBrain(b: BrainInput): string {
     const w = wallParts(now, ctx.tz);
     let at = zonedToUtc(w.y, w.m, w.d, h, Number(m[2] || 0), ctx.tz);
     if (at <= now) at = new Date(at.getTime() + 864e5);
-    return `Got it. I'll remind you at ${m[1]}${m[2] ? ":" + m[2] : ""}${m[3] || ""}.` + fence([{ type: "hook.add", title: m[4], requestedByUser: true,
-      trigger: { type: "at", at: at.toISOString(), repeat: "none" }, action: { type: "notify", text: m[4] }, why: "You asked me today" }]);
+    return `Got it. I'll remind you at ${m[1]}${m[2] ? ":" + m[2] : ""}${m[3] || ""}.` + fence([{ type: "remind", title: m[4], requestedByUser: true,
+      schedule: { at: at.toISOString() }, text: m[4], why: "You asked me today" }]);
   }
   m = text.match(/^remember (?:that )?(.+)/i);
   if (m) {

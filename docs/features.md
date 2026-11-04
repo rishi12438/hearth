@@ -33,7 +33,7 @@ Ask for something you'll *use* and a teammate builds it right there: "make me a 
 - **Code and content are separate.** An app is one HTML file plus its data (the cards). "Add 8 food words" changes only the data; your progress (which cards you know) is saved separately and kept.
 - **Make one from anything.** Tap **Make an app** under a teammate's answer, or **+** next to Apps on Home.
 - **Change it by asking.** Inside the app, tap the title: ask for a change, undo the last code change (the last 10 versions are kept), pin, reset progress or delete.
-- **Your Home is theirs to shape.** Teammates can pin apps to Home, where they run live: "pin my flashcards", "put a countdown to Lisbon up top", "show my week at the top". There's no fixed list of widgets; they build what fits and pin it. A hook can refresh an app's data on a schedule to keep it current. Apps know whether they're full screen or a small/tall Home widget (`hearth.view`) and draw to fit.
+- **Your Home is theirs to shape.** Teammates can pin apps to Home, where they run live: "pin my flashcards", "put a countdown to Lisbon up top", "show my week at the top". There's no fixed list of widgets; they build what fits and pin it. A routine can refresh an app's data on a schedule to keep it current. Apps know whether they're full screen or a small/tall Home widget (`hearth.view`) and draw to fit.
 - **Apps can talk back.** `hearth.ask("quiz me")` messages the teammate who made it (shown in your DM with them, rate-limited).
 - **Sandboxed.** Apps run in a frame with no network and no access to your hub; see [SECURITY.md](../SECURITY.md).
 
@@ -51,7 +51,7 @@ Teammates make files (an itinerary `.md`, a calendar invite `.ics`, a `.csv`) wi
 
 ## Approve before send
 
-Anything that would send, post, pay, book, delete or change something outside the hub stops at an **Approve** card, and the hub enforces it, not the model. Each script is classified when it's saved: an `// effects: external` header, write-style HTTP calls or known senders mark it *external*. External scripts refuse to run unless you tapped Approve for that specific run. That holds even after you've approved the script's code, inside recipes and workflows, and when a hook fires.
+Anything that would send, post, pay, book, delete or change something outside the hub stops at an **Approve** card, and the hub enforces it, not the model. Each script is classified when it's saved: an `// effects: external` header, write-style HTTP calls or known senders mark it *external*. External scripts refuse to run unless you tapped Approve for that specific run. That holds even after you've approved the script's code, inside recipes and workflows, and when a trigger fires.
 
 ## Skills: don't work it out twice
 
@@ -61,17 +61,18 @@ Anything that would send, post, pay, book, delete or change something outside th
 - **Self-repair.** If a skill fails, the job is solved fresh and the teammate saves a fixed version. A fixed recipe can't use any script the old one didn't; fixed code goes back through your approval.
 - **Blocked, not stuck.** If a job needs something only you can give (a login, your laptop, a permission), it parks with an "Unblock me" card and a push notification, and never pretends it worked.
 
-## Hooks: how it speaks first
+## Triggers: how it speaks first
 
-| Trigger | Example |
+Everything that makes a teammate speak first is in one event pipeline, and you see all of it in **Triggers** (sidebar). Anything pushes events into a **source**; every event is saved; each **trigger** on that source is a formula checked with plain code (and, when a rule needs judgment, a one-value LLM judge), and when it matches its action runs.
+
+| Source | Example |
 |---|---|
-| `at`, optionally repeating | "Remind me at 6 to call mom", "ask me how the interview went tomorrow evening" |
-| `schedule` (cron-like) | "Every weekday at 8, brief me" |
-| `every` N minutes | "Every 2h, check if tickets are on sale; only tell me if they are" |
-| `place` arrive/leave | "When I get to the office, remind me to grab the charger" |
-| `silence` | "If I haven't said anything in 48h, check in" |
+| `time` (timers; `remind` makes a timer and its trigger together) | "Remind me at 6 to call mom", "every weekday at 8, brief me", "every 2h, check if tickets are on sale" |
+| `place` (arrive/leave a saved place) | "When I get to the office, remind me to grab the charger" |
+| a **watcher**: page, script, app (Gmail, Calendar, LinkedIn…) or silence | "Tell me when this page changes", "tell me when the school emails", "if I haven't said anything in 48h, check in" |
+| a **push source** with a secret URL | "Give me a webhook for my door camera", GitHub, Stripe, Zapier, iOS Shortcuts |
 
-A hook does one of three things: **notify** (send fixed text), **think** (run the brain, which can decide to stay quiet), or **script** (run an approved script, then send or interpret its output). Every proactive message carries a *why* you can tap. Quiet hours and the daily cap are enforced by the hub, not left to the model. Reminders you asked for yourself always come through.
+A trigger does one of four things: **notify** (send text, with `{{variables}}` from the event), **think** (run the brain, which can stay quiet), **workflow**, or **script**. Every proactive message carries a *why* you can tap. Quiet hours (held, then run when they end) and the daily cap are enforced by the hub, not left to the model. Reminders you asked for yourself always come through. The hub's own nightly jobs (memory review, ideas, library cleanup) are built-in triggers you can pause.
 
 ## Memory
 
@@ -80,7 +81,7 @@ Inspired by Enkidu's notebooks, Letta's core memory, Zep's temporal facts and me
 - Each fact is one sentence in a notebook (people, health, work…), with its source and your original words.
 - **Core** facts (importance 3) are always in context. The rest are recalled by relevance to the current message.
 - When a fact changes it is *superseded*, so you can see what it used to believe. Temporary facts expire.
-- A nightly review hook merges duplicates and refreshes each notebook's summary.
+- A nightly review (a built-in trigger) merges duplicates and refreshes each notebook's summary.
 - You can see, star, edit and delete everything in the Memory tab.
 
 ## Scripts

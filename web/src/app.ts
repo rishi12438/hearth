@@ -32,24 +32,22 @@ const S = {
   frames: new Map<string, { n: number; src: string }>(), // jobId -> the latest live-view picture of its browser or app
   skills: [] as any[],
   workflows: [] as any[],
-  hooks: [] as any[],
-  triggerRecipes: [] as any[],
-  plansQuery: "",
   memory: null as any,
   memoryQuery: "",
-  plansFilter: "",
   today: null as any,
   conn: "connecting" as "live" | "connecting" | "offline",
   planning: null as null | string, // chat id the orchestrator is reading
   updateReady: false,
   sheetOpen: false,
-  panel: null as null | "plans" | "memory" | "skills" | "people" | "shares" | "triggers" | `share:${string}`,
+  panel: null as null | "memory" | "skills" | "people" | "shares" | "triggers" | `share:${string}`,
   /** The event pipeline: sources, triggers (formula rules), timers, and recent events. */
-  pipe: { sources: [], triggers: [], timers: [] } as { sources: any[]; triggers: any[]; timers: any[] },
+  pipe: { sources: [], triggers: [], timers: [], watchers: [], held: 0 } as { sources: any[]; triggers: any[]; timers: any[]; watchers: any[]; held: number },
   pipeEvents: [] as any[],
   pipeTab: "triggers" as "triggers" | "timers" | "sources" | "events",
   /** Just made by a teammate: highlighted as it lands. */
   pipeFresh: new Set<string>(),
+  /** Until when a change is one you just made on the Triggers screen (so it doesn't fly in at you). */
+  pipeSelfUntil: 0,
 };
 
 let live: ReturnType<typeof stream> | null = null;
@@ -303,7 +301,9 @@ function onEvent(e: { type: string; data?: any }) {
     case "pipeline": {
       // A teammate made a trigger, timer or source: it flies into Triggers.
       const d = e.data || {};
-      loadPipeline().then(() => { if (d.created && d.by !== "you") landInTriggers(d.what, d.created); });
+      // Everything made in a chat flies in, even a reminder you asked for; what you just made on this screen doesn't.
+      loadPipeline().then(() => { if (d.created && Date.now() > S.pipeSelfUntil) landInTriggers(d.what, d.created); });
+      if (r.view === "dm" && (d.what === "triggers" || d.what === "timers")) loadDm(r.id); // its routines
       return;
     }
     case "ideas": loadIdeas().then(() => { if (route().view === "home") drawHome(); }); return;
@@ -311,7 +311,6 @@ function onEvent(e: { type: string; data?: any }) {
     case "about": if (S.panel === "memory") loadAbout(); return;
     case "apps": loadApps().then(() => { const r2 = route(); if (r2.view === "app") { toast("Updated"); renderApp(r2.id); } else if (r2.view === "home") { drawPins(); drawHome(); } else if (r2.view === "chat") drawChat(false); else if (r2.view === "dm") drawDm(false); }); return;
     case "files": loadFiles().then(() => { const r2 = route(); if (r2.view === "chat") drawChat(false); else if (r2.view === "dm") drawDm(false); }); return;
-    case "hooks": if (S.panel === "plans") loadHooks(); if (r.view === "dm") loadDm(r.id); return;
     case "memory": if (S.panel === "memory") loadMemory(); return;
     case "shares":
       if (document.activeElement?.tagName === "INPUT" || document.activeElement?.tagName === "TEXTAREA") return; // don't wipe what you're typing
@@ -586,7 +585,7 @@ function drawSide() {
       nav("users", "People", false, openPeople),
       nav("sparkle", "Skills", false, openSkills),
       h("button", { class: `snav ${S.panel === "triggers" ? "on" : ""}`, id: "snav-triggers", on: { click: () => openTriggers() } }, icon("zap", 18), h("span", { class: "grow" }, "Triggers"),
-        S.pipe.triggers.length ? h("small", { class: "scount" }, String(S.pipe.triggers.filter((t) => t.status === "active").length)) : null)),
+        liveTriggers().length ? h("small", { class: "scount" }, String(liveTriggers().filter((t) => t.status === "active").length)) : null)),
     h("div", { class: "sfoot" },
       nav("settings", "Settings", false, openSettings)),
   );
@@ -937,7 +936,7 @@ function drawBoard(b: any, teammateId?: string) {
   if (!el) return;
   drawHeader();
   const open = (c: any) => {
-    if (c.kind === "plan") return openPlans();
+    if (c.kind === "plan") return openTriggers("triggers");
     location.hash = c.threadId?.startsWith("tm-") ? `#t/${c.teammateId}` : `#c/${c.threadId}/${c.root}`;
   };
   const card = (c: any) => {
@@ -1624,7 +1623,7 @@ function drawDm(stick = true) {
     h("div", { class: "dmhero" }, face(t, 72, t.state), h("h2", null, t.name), h("p", null, t.description || role(t)),
       S.state?.device.primary ? h("button", { class: "btn small ghost sharebtn", on: { click: () => shareTeammate(t.id) } }, icon("share", 15), "Share") : null,
       d.routines.length ? h("div", { class: "routines" }, h("small", null, "Routines"), d.routines.map((r: any) =>
-        h("button", { class: `routine ${r.status}`, on: { click: () => openHook(r) } }, icon(r.trigger.type === "at" ? "clock" : "repeat", 14), h("span", null, r.title), h("small", null, r.status === "paused" ? "paused" : r.when)))) : null,
+        h("button", { class: `routine ${r.status}`, on: { click: () => openTriggers("triggers") } }, icon(r.timed ? "clock" : "zap", 14), h("span", null, r.title), h("small", null, r.status === "paused" ? "paused" : r.when)))) : null,
       elsewhere.length ? h("div", { class: "routines" }, h("small", null, "In rambles"), elsewhere.map((j: any) =>
         h("button", { class: "routine", on: { click: () => { location.hash = `#c/${j.threadId}/${j.id}`; } } }, face(t, 18, jobState(j)), h("span", null, j.task), h("small", null, j.status === "done" ? shortAgo(j.finishedAt || j.updatedAt) : j.status)))) : null),
     items.flatMap((x) => x.nodes),
@@ -2384,7 +2383,7 @@ async function openGoogleSetup() {
     h("div", { class: "phero" }, h("span", { class: "ctile-pair" }, connectorTile(CONNECTORS[0], 48), connectorTile(CONNECTORS[1], 48), connectorTile(CONNECTORS.find((c) => c.id === "drive")!, 48)), h("b", null, g.connected ? (accounts.length > 1 ? `${accounts.length} Google accounts connected` : "Google is connected") : "Gmail, Calendar and Drive"),
       h("small", null, g.connected ? "Teammates read every account below unless you ask for one." : "Teammates can watch your inbox, calendar and files and tell you what matters.")),
     g.connected ? [
-      h("p", { class: "muted" }, "Ask for things like “tell me when the school emails”, “LinkedIn digest every 30 min” or “what's on tomorrow?”. They show up under Triggers in Plans."),
+      h("p", { class: "muted" }, "Ask for things like “tell me when the school emails”, “LinkedIn digest every 30 min” or “what's on tomorrow?”. They show up in Triggers."),
       needBox,
       h("div", { class: "list" }, accounts.map(accountRow)),
       err,
@@ -2588,13 +2587,12 @@ function openMenu() {
       h("i", { class: `status ${S.conn}` })),
     h("nav", null,
       item("search", "Jump to…", "Find a teammate, chat or task (⌘K)", openJump),
-      item("bell", "Plans", "Reminders, routines, triggers", openPlans),
       item("clip", "Connectors", st?.connectorWarnings?.length ? st.connectorWarnings[0] : "Gmail, Calendar and more for your teammates", () => openConnections(), st?.connectorWarnings?.length ? "!" : undefined),
       item("brain", "Memory", "What I know about you", openMemory),
       item("dms", "People", "Your relationship map", openPeople),
       item("users", "Teammates", "Who the orchestrator can hand work to", openTeammates),
       item("sparkle", "Skills", "What the team already knows how to do", openSkills),
-      item("zap", "Triggers", "Rules that act when something happens", () => openTriggers()),
+      item("zap", "Triggers", "Reminders, routines and rules that act when something happens", () => openTriggers()),
       item("brain", "Brains", "Which harness and model does what", openBrains),
       item("download", "Files", "Attached and made, ready to download", openFiles),
       item("settings", "Settings", "Notifications, location, data", openSettings)),
@@ -2836,13 +2834,23 @@ function actionText(a: any) {
   return `says: ${a.text}`;
 }
 
+/** Your triggers and reminders (not the hub's own jobs, not ones that are done). */
+const liveTriggers = () => S.pipe.triggers.filter((t: any) => t.status !== "done" && t.createdBy !== "system");
+
 function drawTriggers() {
   // The open sheet's list: a sheet being replaced is still in the page for a moment, with the same id inside.
   const el = document.querySelector<HTMLElement>("#scrim #triggers");
   if (!el) return;
-  const { sources, triggers, timers } = S.pipe;
+  const { sources, triggers, watchers } = S.pipe;
+  // Reminders first, soonest first; then rules, oldest first.
+  const next = (t: any) => (t.timer?.nextAt && t.status === "active" ? t.timer.nextAt : "\uffff");
+  const live = liveTriggers().sort((a: any, b: any) => (next(a) < next(b) ? -1 : next(a) > next(b) ? 1 : 0));
+  const builtIn = triggers.filter((t: any) => t.createdBy === "system");
+  const done = triggers.filter((t: any) => t.status === "done" && t.createdBy !== "system").slice(-5).reverse();
+  // A reminder's timer shows on its trigger; this tab is for timers on their own.
+  const timers = S.pipe.timers.filter((t: any) => !triggers.some((x: any) => x.timerId === t.id));
   const owner = !!S.state?.device?.primary;
-  const tabs: [typeof S.pipeTab, string, number][] = [["triggers", "Triggers", triggers.length], ["timers", "Timers", timers.filter((t) => t.status !== "done").length], ["sources", "Sources", sources.length], ["events", "Events", 0]];
+  const tabs: [typeof S.pipeTab, string, number][] = [["triggers", "Triggers", live.length], ["timers", "Timers", timers.filter((t) => t.status !== "done").length], ["sources", "Sources", sources.length], ["events", "Events", 0]];
   const fresh = (id: string) => (S.pipeFresh.has(id) ? "fresh" : "");
   // confirmSheet closes itself after the action, so Triggers opens again just after.
   const reopen = (tab?: typeof S.pipeTab) => setTimeout(() => openTriggers(tab), 0);
@@ -2850,18 +2858,29 @@ function drawTriggers() {
   const pause = (t: any, path: string) => owner ? h("button", { class: "iconbtn", "aria-label": t.status === "paused" ? "Resume" : "Pause",
     on: { click: () => pipeDo(() => call(path, { method: "PATCH", body: { status: t.status === "paused" ? "active" : "paused" } }), t.status === "paused" ? "Resumed" : "Paused") } }, icon(t.status === "paused" ? "play" : "pause", 16)) : null;
   const by = (who: string) => (who && who !== "you" ? `made by ${who}` : "made by you");
+  // A reminder pauses with its timer, so a paused routine doesn't keep ringing into the log.
+  const pauseTrigger = (t: any) => owner ? h("button", { class: "iconbtn", "aria-label": t.status === "paused" ? "Resume" : "Pause",
+    on: { click: () => pipeDo(async () => {
+      const status = t.status === "paused" ? "active" : "paused";
+      await call(`/api/pipeline/triggers/${t.id}`, { method: "PATCH", body: { status } });
+      if (t.timer && t.timer.status !== "done") await call(`/api/pipeline/timers/${encodeURIComponent(t.timer.name)}`, { method: "PATCH", body: { status } });
+    }, t.status === "paused" ? "Resumed" : "Paused") } }, icon(t.status === "paused" ? "play" : "pause", 16)) : null;
 
+  const sys = (t: any) => t.createdBy === "system";
   const triggerRow = (t: any) => h("div", { class: `item pipe ${t.status} ${fresh(t.id)}`, "data-pipe": t.id },
-    h("span", { class: "hicon" }, icon("zap", 16)),
+    h("span", { class: "dotwrap" }, t.timer ? h("span", { class: "hicon" }, icon(t.timer.schedule.at && (t.timer.schedule.repeat || "none") === "none" ? "clock" : "repeat", 16)) : t.teammateId ? face(mate(t.teammateId), 30, "idle") : h("span", { class: "hicon" }, icon(t.sourceName === "place" ? "pin" : "zap", 16))),
     h("span", { class: "grow" },
-      h("b", null, t.name, t.status === "paused" ? h("span", { class: "tag" }, "Paused") : null),
-      h("small", { class: "sub" }, h("span", { class: "srcchip" }, t.sourceName), " when ", h("code", { class: "formula" }, t.formula)),
+      h("b", null, t.title, t.status === "paused" ? h("span", { class: "tag" }, "Paused") : t.status === "done" ? h("span", { class: "tag" }, "Done") : null, sys(t) ? h("span", { class: "tag" }, "built in") : null),
+      t.timer
+        ? h("small", { class: "sub" }, scheduleText(t.timer.schedule), t.timer.nextAt && t.status === "active" && !(t.timer.schedule.at && (t.timer.schedule.repeat || "none") === "none") ? ` · next ${dayLabel(t.timer.nextAt)} ${clockTime(t.timer.nextAt)}` : "")
+        : h("small", { class: "sub" }, h("span", { class: "srcchip" }, t.sourceName), " when ", h("code", { class: "formula" }, t.formula)),
       t.judge ? h("small", { class: "sub judgeline" }, h("span", { class: "judgetag" }, "judge"), ` “${t.judge.prompt}” → ${answersText(t.judge.output)}, acts when `, h("code", { class: "formula" }, t.judge.pass),
         t.examples ? h("button", { class: "link", on: { click: () => openExamples(t) } }, ` · ${t.examples} correction${t.examples === 1 ? "" : "s"}`) : null) : null,
-      h("small", { class: "sub" }, actionText(t.action)),
-      h("small", { class: "sub" }, [t.fireCount ? `ran ${t.fireCount}×` : "hasn't run yet", t.lastFiredAt ? `last ${shortAgo(t.lastFiredAt)}` : null, t.cooldownMin ? `at most every ${t.cooldownMin} min` : null, by(t.createdBy)].filter(Boolean).join(" · "))),
-    pause(t, `/api/pipeline/triggers/${t.id}`),
-    del(t.name, "It stops acting on new events. Past events stay in the log.", () => call(`/api/pipeline/triggers/${t.id}`, { method: "DELETE" })));
+      sys(t) ? h("small", { class: "sub" }, t.why) : h("small", { class: "sub" }, actionText(t.action)),
+      h("small", { class: "sub" }, [t.fireCount ? `ran ${t.fireCount}×` : "hasn't run yet", t.lastFiredAt ? `last ${shortAgo(t.lastFiredAt)}` : null, t.cooldownMin ? `at most every ${t.cooldownMin} min` : null, sys(t) ? null : by(t.createdBy)].filter(Boolean).join(" · "))),
+    owner && t.timer && t.status !== "done" && !sys(t) ? h("button", { class: "iconbtn", "aria-label": "Run now", title: "Run now", on: { click: () => pipeDo(() => call(`/api/pipeline/timers/${encodeURIComponent(t.timer.name)}/run`, { body: {} }), "Running it now") } }, icon("play", 16)) : null,
+    t.status !== "done" ? pauseTrigger(t) : null,
+    sys(t) ? null : del(t.title, t.timer ? "It won't ring again." : "It stops acting on new events. Past events stay in the log.", () => call(`/api/pipeline/triggers/${t.id}`, { method: "DELETE" })));
 
   const timerRow = (t: any) => h("div", { class: `item pipe ${t.status} ${fresh(t.id)}`, "data-pipe": t.id },
     h("span", { class: "hicon" }, icon("clock", 16)),
@@ -2875,15 +2894,20 @@ function drawTriggers() {
 
   const sourceRow = (s: any) => {
     const url = s.pushPath ? `${activeHub()?.url?.replace(/\/$/, "") || location.origin}${s.pushPath}` : null;
-    return h("div", { class: `item pipe col ${s.status} ${fresh(s.id)}`, "data-pipe": s.id },
+    const w = s.kind === "watch" ? watchers.find((x: any) => x.sourceId === s.id) : null;
+    const builtin = s.kind === "time" || s.kind === "place";
+    return h("div", { class: `item pipe col ${s.status} ${fresh(s.id)} ${w ? fresh(w.id) : ""}`, "data-pipe": w ? w.id : s.id },
       h("div", { class: "row gap" },
-        h("span", { class: "hicon" }, icon(s.kind === "time" ? "clock" : "plug", 16)),
+        h("span", { class: "hicon" }, icon(s.kind === "time" ? "clock" : s.kind === "place" ? "pin" : w ? "eye" : "plug", 16)),
         h("span", { class: "grow" },
-          h("b", null, s.name, s.kind === "time" ? h("span", { class: "tag" }, "built in") : null, s.status === "paused" ? h("span", { class: "tag" }, "Paused") : null),
-          s.description ? h("small", { class: "sub" }, s.description) : null,
-          h("small", { class: "sub" }, [s.service ? `${s.service}${s.scope ? ` · ${s.scope}` : ""}` : null, `${s.eventCount} event${s.eventCount === 1 ? "" : "s"}`, s.lastEventAt ? `last ${shortAgo(s.lastEventAt)}` : null, s.kind === "push" ? by(s.createdBy) : null].filter(Boolean).join(" · "))),
-        s.kind === "push" ? pause(s, `/api/pipeline/sources/${s.id}`) : null,
-        s.kind === "push" ? del(s.name, "Its triggers go too, and its URL stops working. Past events stay in the log.", () => call(`/api/pipeline/sources/${s.id}`, { method: "DELETE" })) : null),
+          h("b", null, s.name, builtin ? h("span", { class: "tag" }, "built in") : w ? h("span", { class: "tag" }, "watcher") : null, s.status === "paused" ? h("span", { class: "tag" }, "Paused") : null),
+          w ? h("small", { class: "sub" }, `Watches ${w.describe}`) : s.description ? h("small", { class: "sub" }, s.description) : null,
+          w ? h("small", { class: `sub ${w.lastError ? "warn" : ""}` }, w.lastError ? `Couldn't look: ${w.lastError}` : w.lastRunAt ? `looked ${shortAgo(w.lastRunAt)}${w.looked ? "" : " (first look saved)"}` : "first look soon") : null,
+          h("small", { class: "sub" }, [!w && s.service ? `${s.service}${s.scope ? ` · ${s.scope}` : ""}` : null, `${s.eventCount} event${s.eventCount === 1 ? "" : "s"}`, s.lastEventAt ? `last ${shortAgo(s.lastEventAt)}` : null, builtin ? null : by(s.createdBy)].filter(Boolean).join(" · "))),
+        w && owner ? h("button", { class: "iconbtn", "aria-label": "Check now", title: "Check now", on: { click: () => pipeDo(() => call(`/api/pipeline/watchers/${w.id}/check`, { body: {} }), "Looked") } }, icon("refresh", 16)) : null,
+        w ? pause(w, `/api/pipeline/watchers/${w.id}`) : s.kind === "push" ? pause(s, `/api/pipeline/sources/${s.id}`) : null,
+        w ? del(s.name, "It stops looking, and its triggers go too. Past events stay in the log.", () => call(`/api/pipeline/watchers/${w.id}`, { method: "DELETE" }))
+          : s.kind === "push" ? del(s.name, "Its triggers go too, and its URL stops working. Past events stay in the log.", () => call(`/api/pipeline/sources/${s.id}`, { method: "DELETE" })) : null),
       h("div", { class: "vars" }, s.variables.map((v: any) => h("span", { class: "varchip", title: v.description || "" }, v.name))),
       url ? h("div", { class: "row gap" },
         h("button", { class: "codeline grow", title: "Copy", on: { click: () => { navigator.clipboard?.writeText(url); toast("URL copied"); } } }, url),
@@ -2917,12 +2941,18 @@ function drawTriggers() {
   };
 
   const tab = S.pipeTab;
-  const active = triggers.filter((t) => t.status === "active").length;
+  const active = live.filter((t: any) => t.status === "active").length;
   clear(el,
-    h("p", { class: "muted" }, "Anything can push events into a source. Every event is saved, and each trigger's formula decides, with plain code, whether it acts."),
+    h("p", { class: "muted" }, "Reminders, routines and rules. Anything can push events into a source (a clock, a watcher, a webhook, your location). Every event is saved, and each trigger's formula decides, with plain code, whether it acts."),
+    S.pipe.held ? h("p", { class: "muted small" }, `${S.pipe.held} waiting for quiet hours to end.`) : null,
     h("div", { class: "pipeflow" }, h("span", null, `${sources.length} source${sources.length === 1 ? "" : "s"}`), "→", h("span", null, "events"), "→", h("span", { id: "pipe-drop" }, `${active} trigger${active === 1 ? "" : "s"}`), "→", h("span", null, "actions")),
     h("div", { class: "seg" }, tabs.map(([k, label, n]) => h("button", { class: tab === k ? "on" : "", on: { click: () => { S.pipeTab = k; if (k === "events") loadPipelineEvents(); drawTriggers(); } } }, label, n ? h("small", null, ` ${n}`) : null))),
-    tab === "triggers" ? (triggers.length ? h("div", { class: "list" }, triggers.map(triggerRow)) : h("p", { class: "empty" }, "No triggers yet. Say “when Mom texts about dinner, tell me” or “when a GitHub PR is opened on my repo, summarize it”.")) : null,
+    tab === "triggers" ? [
+      live.length ? h("div", { class: "list" }, live.map(triggerRow)) : h("p", { class: "empty" }, "Nothing yet. Say “remind me Friday at 6 to call mom”, “tell me when this page changes” or “when a GitHub PR is opened on my repo, summarize it”."),
+      owner ? h("button", { class: "btn ghost", on: { click: openNewReminder } }, icon("plus", 16), "Add a reminder or routine") : null,
+      done.length ? [h("h4", null, "Done"), h("div", { class: "list" }, done.map(triggerRow))] : null,
+      builtIn.length ? [h("h4", null, "The hub's own"), h("div", { class: "list" }, builtIn.map(triggerRow))] : null,
+    ] : null,
     tab === "timers" ? (timers.length ? h("div", { class: "list" }, timers.map(timerRow)) : h("p", { class: "empty" }, "No timers. A timer pushes one event to the time source when it's due, and triggers on “time” pick it up.")) : null,
     tab === "sources" ? h("div", { class: "list" }, sources.map(sourceRow)) : null,
     tab === "events" ? [
@@ -2946,17 +2976,22 @@ function landInTriggers(what: string, id: string) {
 }
 
 function flyIn(what: string, id: string, next: () => void) {
-  const item = what === "triggers" ? S.pipe.triggers.find((t) => t.id === id) : what === "timers" ? S.pipe.timers.find((t) => t.id === id) : S.pipe.sources.find((s) => s.id === id);
+  const item = what === "triggers" ? S.pipe.triggers.find((t) => t.id === id) : what === "timers" ? S.pipe.timers.find((t) => t.id === id)
+    : what === "watchers" ? S.pipe.watchers.find((w) => w.id === id) : S.pipe.sources.find((s) => s.id === id);
   if (!item) return next();
   S.pipeFresh.add(id);
   setTimeout(() => { S.pipeFresh.delete(id); if (S.panel === "triggers") drawTriggers(); }, 4500);
   const tab = what === "triggers" ? "triggers" : what === "timers" ? "timers" : "sources";
   if (S.panel === "triggers") { S.pipeTab = tab; drawTriggers(); document.querySelector(`#scrim [data-pipe="${id}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }); }
-  const label = what === "triggers" ? "New trigger" : what === "timers" ? "New timer" : "New source";
-  const detail = what === "triggers" ? `${item.formula}${item.judge ? `  → judge: ${item.judge.pass}` : ""}` : what === "timers" ? scheduleText(item.schedule) : item.variables.map((v: any) => v.name).join(", ");
+  const reminder = what === "triggers" && item.timer;
+  const label = reminder ? "New reminder" : what === "triggers" ? "New trigger" : what === "timers" ? "New timer" : what === "watchers" ? "Now watching" : "New source";
+  const once = reminder && item.timer.schedule.at && (item.timer.schedule.repeat || "none") === "none";
+  const detail = reminder ? `${scheduleText(item.timer.schedule)}${item.timer.nextAt && !once ? ` · next ${dayLabel(item.timer.nextAt)} ${clockTime(item.timer.nextAt)}` : ""}`
+    : what === "triggers" ? `${item.formula}${item.judge ? `  → judge: ${item.judge.pass}` : ""}` : what === "timers" ? scheduleText(item.schedule)
+    : what === "watchers" ? item.describe : item.variables.map((v: any) => v.name).join(", ");
   const card = h("button", { class: "flycard", on: { click: () => { card.remove(); openTriggers(tab); } } },
-    h("span", { class: "flyicon" }, icon(what === "timers" ? "clock" : what === "sources" ? "plug" : "zap", 18)),
-    h("span", { class: "grow" }, h("small", null, `${label} · ${item.createdBy || "a teammate"}`), h("b", null, item.name), h("code", null, detail)));
+    h("span", { class: "flyicon" }, icon(reminder || what === "timers" ? "clock" : what === "watchers" ? "eye" : what === "sources" ? "plug" : "zap", 18)),
+    h("span", { class: "grow" }, h("small", null, `${label} · ${item.teammateId ? mate(item.teammateId).name : item.createdBy === "you" ? "for you" : item.createdBy || "a teammate"}`), h("b", null, item.title || item.name), h("code", null, detail)));
   document.body.appendChild(card);
   // Looked up when it flies (and again when it lands): the sidebar may have been redrawn in between.
   const findTarget = () => (S.panel === "triggers" ? document.querySelector<HTMLElement>("#scrim #pipe-drop") : null) || document.getElementById("snav-triggers");
@@ -2981,56 +3016,6 @@ function flyIn(what: string, id: string, next: () => void) {
 }
 
 // ---------------- plans & memory panels ----------------
-
-async function loadHooks() {
-  try {
-    [S.hooks, S.triggerRecipes] = await Promise.all([call("/api/hooks"), call("/api/trigger-recipes")]);
-    if (S.panel === "plans") drawPlans();
-  } catch (e) { handleError(e); }
-}
-
-function openPlans() {
-  S.panel = "plans";
-  openSheet("Plans", h("div", { id: "plans" }), { onClose: () => { S.panel = null; } });
-  drawPlans();
-  loadHooks();
-}
-
-function drawPlans() {
-  const el = document.getElementById("plans");
-  if (!el) return;
-  // Triggers wait for something to happen (a page change, a webhook call, a script finding something, a place, a silence).
-  const EVENT = ["watch", "webhook", "check", "source", "place", "silence"];
-  // The search box filters every list here: title, when, why and what it does.
-  const q = S.plansQuery.trim().toLowerCase();
-  const hit = (...parts: unknown[]) => !q || parts.map((p) => (typeof p === "string" ? p : JSON.stringify(p ?? ""))).join(" ").toLowerCase().includes(q);
-  const live = S.hooks.filter((x) => x.status !== "done" && x.source !== "system" && hit(x.title, x.when, x.why, x.action, mate(x.teammateId).name));
-  const recipes = (S.triggerRecipes || []).filter((r: any) => hit(r.name, r.description, r.hook));
-  const triggers = live.filter((x) => EVENT.includes(x.trigger.type));
-  const active = live.filter((x) => !EVENT.includes(x.trigger.type)).sort((a, b) => (a.nextAt || "~").localeCompare(b.nextAt || "~"));
-  const done = S.hooks.filter((x) => x.status === "done" && hit(x.title, x.when, x.why)).slice(-5).reverse();
-  const row = (hk: any) => h("button", { class: `item ${hk.status}`, on: { click: () => openHook(hk) } },
-    h("span", { class: "dotwrap" }, face(mate(hk.teammateId), 30, "idle")),
-    h("span", { class: "grow" },
-      h("b", null, hk.title, hk.status === "paused" ? h("span", { class: "tag" }, "Paused") : null),
-      h("small", { class: "sub" }, EVENT.includes(hk.trigger.type) ? triggerStatus(hk) : hk.nextAt && hk.status === "active" ? `${dayLabel(hk.nextAt)} ${clockTime(hk.nextAt)} · ${hk.when}` : hk.when)));
-  const typing = document.activeElement === el.querySelector(".plansearch input");
-  clear(el,
-    h("p", { class: "muted" }, "When your teammates will speak up, and why."),
-    S.hooks.filter((x) => x.source !== "system").length > 3 || q ? h("div", { class: "search plansearch" }, icon("search", 18), h("input", { placeholder: "Search plans and triggers", type: "search", value: S.plansQuery,
-      on: { input: (e: Event) => { S.plansQuery = (e.target as HTMLInputElement).value; drawPlans(); } } })) : null,
-    active.length ? h("div", { class: "list" }, active.map(row)) : h("p", { class: "empty" }, q ? "No plans match." : "Nothing planned. Just say “remind me…” or “every morning…”."),
-    h("h4", null, "Triggers"),
-    triggers.length ? h("div", { class: "list" }, triggers.map(row))
-      : h("p", { class: "empty" }, q ? "No triggers match." : "Nothing watching yet. Say “tell me when this page changes…”, “give me a webhook for…” or “check every hour if…”."),
-    recipes.length ? [h("h4", null, "Saved setups"), h("p", { class: "muted small" }, "Trigger setups your teammates saved to reuse, like skills. Say “same as the school one, but for soccer club”."),
-      h("div", { class: "list" }, recipes.map((r: any) => h("div", { class: "item" },
-        h("span", { class: "grow" }, h("b", null, r.name), h("small", { class: "sub" }, `${r.description}${r.uses ? ` · used ${r.uses}×` : ""}`)),
-        h("button", { class: "iconbtn", "aria-label": `Forget ${r.name}`, on: { click: () => confirmSheet("Forget this setup?", `“${r.name}” won't be reused. Plans made from it keep running.`, "Forget", async () => { await call(`/api/trigger-recipes/${r.id}`, { method: "DELETE" }); toast("Forgotten"); loadHooks(); }) } }, icon("trash", 16)))))] : null,
-    done.length ? [h("h4", null, "Done"), h("div", { class: "list" }, done.map(row))] : null,
-    h("button", { class: "btn ghost", on: { click: openNewPlan } }, icon("plus", 16), "Add a reminder or routine"));
-  if (typing) { const box = el.querySelector<HTMLInputElement>(".plansearch input"); box?.focus(); box?.setSelectionRange(box.value.length, box.value.length); }
-}
 
 async function loadMemory() {
   try { S.memory = await call(`/api/memory?q=${encodeURIComponent(S.memoryQuery)}`); if (S.panel === "memory") drawMemory(); } catch (e) { handleError(e); }
@@ -3561,82 +3546,39 @@ function renderPairing(code: string) {
 }
 
 
-/** One line on what a trigger has been doing: when it last looked or was called, and when it last spoke. */
-function triggerStatus(hk: any) {
-  const t = hk.trigger.type;
-  const looked = t === "watch" || t === "check" || t === "source" ? (hk.seen ? `checked ${relTime(hk.seen.at)}` : "not checked yet") : t === "webhook" ? (hk.lastFiredAt ? `called ${relTime(hk.lastFiredAt)}` : "never called") : null;
-  const spoke = hk.fireCount ? `spoke ${hk.fireCount}×` : t === "webhook" ? null : "quiet so far";
-  return [hk.when, looked, t === "webhook" ? null : spoke].filter(Boolean).join(" · ");
-}
-
-function hookIcon(hk: any) {
-  const t = hk.trigger?.type;
-  return t === "at" ? (hk.trigger.repeat !== "none" ? "repeat" : "clock") : t === "schedule" ? "repeat" : t === "place" ? "pin" : t === "silence" ? "moon" : t === "webhook" ? "clip" : "eye";
-}
-
-
-function openHook(hk: any) {
-  const actionText = hk.action.type === "notify" ? `Send: “${hk.action.text}”` : hk.action.type === "think" ? (hk.action.prompt === "[[memory-review]]" ? "Review and tidy memory" : `Think: ${hk.action.prompt}`) : `Run script ${hk.action.script}${hk.action.then === "think" ? " and interpret it" : ""}`;
-  const patch = async (body: any, msg: string) => { try { await call(`/api/hooks/${hk.id}`, { method: "PATCH", body }); toast(msg); closeSheet(); loadHooks(); } catch (e) { handleError(e); } };
-  const isAt = hk.trigger.type === "at";
-  openSheet(hk.title, [
-    h("dl", { class: "facts" },
-      h("dt", null, "When"), h("dd", null, hk.when),
-      hk.trigger.type === "watch" ? [h("dt", null, "Page"), h("dd", null, h("a", { href: hk.trigger.url, target: "_blank", rel: "noopener noreferrer" }, hk.trigger.url)),
-        h("dt", null, "Looked"), h("dd", null, hk.seen ? relTime(hk.seen.at) : "Not yet")] : null,
-      hk.trigger.type === "webhook" ? (() => {
-        const hookUrl = `${activeHub()!.url}/api/webhook/${hk.trigger.token}`;
-        return [h("dt", null, "URL"), h("dd", { class: "hookurl" }, h("button", { class: "codeline", title: "Copy", on: { click: () => navigator.clipboard?.writeText(hookUrl).then(() => toast("Copied. POST anything to it to wake this plan"), () => toast("Couldn't copy", "err")) } }, h("code", null, hookUrl), icon("clip", 14)),
-          h("small", { class: "muted" }, "Keep it secret: anyone with it can wake this plan."))];
-      })() : null,
-      hk.nextAt && hk.status === "active" ? [h("dt", null, "Next"), h("dd", null, `${dayLabel(hk.nextAt)} ${clockTime(hk.nextAt)} (${relTime(hk.nextAt)})`)] : null,
-      h("dt", null, "Does"), h("dd", null, actionText),
-      h("dt", null, "Why"), h("dd", null, hk.why),
-      h("dt", null, "Set by"), h("dd", null, hk.source === "you" ? "You" : hk.source === "system" ? "The hub" : "Your assistant"),
-      hk.fireCount ? [h("dt", null, "Fired"), h("dd", null, `${hk.fireCount}× · last ${relTime(hk.lastFiredAt)}`)] : null),
-    hk.status !== "done" && isAt ? h("div", { class: "snoozes" }, h("span", { class: "muted small" }, "Snooze"),
-      [["10 min", 10], ["1 hour", 60], ["3 hours", 180], ["Tomorrow", 24 * 60]].map(([l, m]) =>
-        h("button", { class: "chip", on: { click: () => patch({ snoozeMin: m }, `Snoozed ${l}`) } }, String(l)))) : null,
-    h("div", { class: "stack" },
-      hk.status !== "done" ? h("button", { class: "btn ghost", on: { click: async () => { await call(`/api/hooks/${hk.id}/run`, { body: {} }); toast("Running it now"); closeSheet(); } } }, icon("play", 16), "Run now") : null,
-      hk.status === "active" ? h("button", { class: "btn ghost", on: { click: () => patch({ status: "paused" }, "Paused") } }, icon("pause", 16), "Pause") : null,
-      hk.status === "paused" ? h("button", { class: "btn ghost", on: { click: () => patch({ status: "active" }, "Resumed") } }, icon("play", 16), "Resume") : null,
-      hk.source !== "system" ? h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet("Delete this?", `“${hk.title}” will stop for good.`, "Delete", async () => { await call(`/api/hooks/${hk.id}`, { method: "DELETE" }); toast("Deleted"); loadHooks(); }) } }, icon("trash", 16), "Delete") : null),
-  ]);
-}
-
 function localInputValue(d: Date) {
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-function openNewPlan() {
+/** A reminder or routine you set yourself: a timer and its trigger, made together. */
+function openNewReminder() {
   let kind: "reminder" | "routine" = "reminder";
   const body = h("div");
+  const save = async (input: any, msg: string) => {
+    try { S.pipeSelfUntil = Date.now() + 3000; await call("/api/pipeline/reminders", { body: input }); toast(msg); closeSheet(); setTimeout(() => openTriggers("triggers"), 0); } catch (e) { handleError(e); }
+  };
   const draw = () => {
     const seg = h("div", { class: "segmented" },
       h("button", { class: kind === "reminder" ? "on" : "", on: { click: () => { kind = "reminder"; draw(); } } }, "Reminder"),
       h("button", { class: kind === "routine" ? "on" : "", on: { click: () => { kind = "routine"; draw(); } } }, "Routine"));
     if (kind === "reminder") {
       const d = new Date(Date.now() + 3.6e6); d.setMinutes(0, 0, 0);
-      const text = h("input", { class: "field", placeholder: "Call mom", maxLength: 300 });
-      const when = h("input", { class: "field", type: "datetime-local", value: localInputValue(d) });
-      const repeat = h("select", { class: "field" }, ["none", "daily", "weekdays", "weekly", "monthly"].map((r) => h("option", { value: r }, r === "none" ? "Doesn't repeat" : r[0].toUpperCase() + r.slice(1))));
+      const text = h("input", { class: "field", placeholder: "Call mom", maxLength: 300 }) as HTMLInputElement;
+      const when = h("input", { class: "field", type: "datetime-local", value: localInputValue(d) }) as HTMLInputElement;
+      const repeat = h("select", { class: "field" }, ["none", "daily", "weekdays", "weekly", "monthly"].map((r) => h("option", { value: r }, r === "none" ? "Doesn't repeat" : r[0].toUpperCase() + r.slice(1)))) as HTMLSelectElement;
       clear(body, seg,
         h("label", null, h("span", null, "Remind me to"), text),
         h("label", null, h("span", null, "When"), when),
         h("label", null, h("span", null, "Repeat"), repeat),
-        h("button", { class: "btn primary big", on: { click: async () => {
+        h("button", { class: "btn primary big", on: { click: () => {
           if (!text.value.trim()) return text.focus();
-          try {
-            await call("/api/hooks", { body: { title: text.value, why: `You set this on ${new Date().toLocaleDateString()}`, trigger: { type: "at", at: new Date(when.value).toISOString(), repeat: repeat.value }, action: { type: "notify", text: text.value } } });
-            toast("Reminder set"); closeSheet(); loadHooks();
-          } catch (e) { handleError(e); }
+          save({ title: text.value, text: text.value, why: `You set this on ${new Date().toLocaleDateString()}`, schedule: { at: new Date(when.value).toISOString(), repeat: repeat.value } }, "Reminder set");
         } } }, "Set reminder"));
     } else {
-      const title = h("input", { class: "field", placeholder: "Morning brief", maxLength: 80 });
-      const prompt = h("textarea", { class: "field", rows: 3, placeholder: "Tell me today's weather, what's coming up, and one thing I said I'd do." });
-      const time = h("input", { class: "field", type: "time", value: "08:00" });
+      const title = h("input", { class: "field", placeholder: "Morning brief", maxLength: 80 }) as HTMLInputElement;
+      const prompt = h("textarea", { class: "field", rows: 3, placeholder: "Tell me today's weather, what's coming up, and one thing I said I'd do." }) as HTMLTextAreaElement;
+      const time = h("input", { class: "field", type: "time", value: "08:00" }) as HTMLInputElement;
       const days = new Set([1, 2, 3, 4, 5]);
       const dayRow = h("div", { class: "days" }, ["S", "M", "T", "W", "T", "F", "S"].map((l, i) => {
         const b = h("button", { class: `day ${days.has(i) ? "on" : ""}`, type: "button", on: { click: () => { days.has(i) ? days.delete(i) : days.add(i); b.classList.toggle("on"); } } }, l);
@@ -3648,17 +3590,14 @@ function openNewPlan() {
         h("label", null, h("span", null, "At"), time),
         h("div", { class: "label" }, h("span", null, "On"), dayRow),
         h("p", { class: "muted small" }, "Your assistant runs this on schedule and messages you with the result. It can stay quiet when there's nothing worth saying."),
-        h("button", { class: "btn primary big", on: { click: async () => {
+        h("button", { class: "btn primary big", on: { click: () => {
           if (!title.value.trim() || !prompt.value.trim()) return;
-          try {
-            await call("/api/hooks", { body: { title: title.value, why: "A routine you set up", trigger: { type: "schedule", time: time.value, days: [...days] }, action: { type: "think", prompt: prompt.value } } });
-            toast("Routine added"); closeSheet(); loadHooks();
-          } catch (e) { handleError(e); }
+          save({ title: title.value, prompt: prompt.value, why: "A routine you set up", schedule: { time: time.value, days: [...days] } }, "Routine added");
         } } }, "Add routine"));
     }
   };
   draw();
-  openSheet("New plan", body);
+  openSheet("New reminder", body);
 }
 
 

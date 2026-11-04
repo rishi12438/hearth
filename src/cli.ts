@@ -20,7 +20,8 @@ import { setupCli } from "./setup/cli.ts";
 import { loadLocalEnv } from "./setup/local.ts";
 import { Shares } from "./shares.ts";
 import { DockerSandbox, E2bSandbox, type Sandbox, type SandboxKind } from "./sandboxes.ts";
-import type { Device, Hook, Share, Teammate } from "./types.ts";
+import type { Device, Share, Teammate } from "./types.ts";
+import { EventPipeline } from "./events/pipeline.ts";
 
 const cmd = process.argv[2] || "start";
 
@@ -130,10 +131,12 @@ if (cmd === "setup" || cmd === "pair") {
   await store.close();
 } else if (cmd === "status") {
   const devices = await store.all<Device>("devices");
-  const hooks = (await store.all<Hook>("hooks")).filter((h) => h.status === "active");
+  const pipe = new EventPipeline(join(config.dataDir, "events.db"));
+  const triggers = pipe.triggers().filter((t) => t.status === "active");
   console.log(`hub: ${config.name} (${config.target})\nstorage: ${store.kind} (${redactUrl(config.dbUrl)})\nbrain: ${config.agent}`);
-  console.log(`devices: ${devices.length}\nactive hooks: ${hooks.length}`);
-  for (const h of hooks) console.log(`  - ${h.title}  next: ${h.nextAt ?? "on event"}`);
+  console.log(`devices: ${devices.length}\nactive triggers: ${triggers.length}`);
+  for (const t of triggers) console.log(`  - ${t.title}  ${t.timer ? `next: ${t.timer.nextAt ?? "-"}` : `on ${t.sourceName}: ${t.formula}`}`);
+  pipe.close();
   await store.close();
 } else if (cmd === "share" || cmd === "shares" || cmd === "unshare") {
   // Share a teammate from the server's terminal. The running hub starts the box within a few seconds.

@@ -1,5 +1,4 @@
 import type { Doc } from "./store/types.ts";
-import type { Repeat } from "./time.ts";
 
 /** The primary device (role "owner") lets other devices in, like the admin of a router. */
 export type Passkey = { credId: string; spki: string; alg: number };
@@ -54,48 +53,6 @@ export type Message = Doc & {
 };
 
 // ---- Hooks: the rules for when the assistant speaks first ----
-
-export type Trigger =
-  | { type: "at"; at: string; repeat: Repeat }
-  | { type: "schedule"; time: string; days: number[] }
-  | { type: "every"; minutes: number }
-  | { type: "place"; place: string; event: "arrive" | "leave" }
-  | { type: "silence"; hours: number }
-  /** Checks a web page every N minutes and fires only when its text changes. */
-  | { type: "watch"; url: string; minutes: number }
-  /** Fires when something POSTs to the hook's secret URL (/api/webhook/<token>). */
-  | { type: "webhook"; token: string }
-  /** Runs an approved script every N minutes (no model). Fires when it prints something, or when its output changes. */
-  | { type: "check"; script: string; args: string[]; minutes: number; when: "output" | "changed" }
-  /** A trigger module (src/sources/): Gmail, Calendar… polled every N minutes; fires on items it hasn't seen. */
-  | { type: "source"; source: string; config: Record<string, unknown>; minutes: number };
-
-export type HookAction =
-  | { type: "notify"; text: string }
-  | { type: "think"; prompt: string }
-  | { type: "script"; script: string; args: string[]; then: "notify" | "think" };
-
-export type Hook = Doc & {
-  title: string;
-  trigger: Trigger;
-  action: HookAction;
-  why: string;
-  status: "active" | "paused" | "done";
-  nextAt: string | null;
-  lastFiredAt?: string;
-  fireCount: number;
-  source: "you" | "assistant" | "system";
-  /** Minimum minutes between two firings. */
-  cooldownMin?: number;
-  /** The teammate who set it up and speaks when it fires. */
-  teammateId?: string;
-  /** The chat it was created in; it reports back there. */
-  threadId?: string;
-  /** Watch and check hooks: what the page or script said last time. */
-  seen?: { hash: string; text: string; at: string };
-  /** A webhook call that came in during quiet hours, waiting to be handled when they end. */
-  held?: { reason: string; extra: string };
-};
 
 // ---- Rambles: each chat is a thread; the orchestrator splits what you say into jobs for teammates. ----
 /** A ramble is a temporary channel (#ramble-N). It archives itself an hour after everything in it is done. */
@@ -284,16 +241,6 @@ export type DayLog = Doc & { summary: string };
 // ---- Skills: things the team already knows how to do, so it doesn't work them out again. ----
 
 export type SkillInput = { name: string; description: string };
-
-/** A trigger setup worth reusing ("school deadline alerts"): a hook with $input.x blanks, found by search like a skill. */
-export type TriggerRecipe = Doc & {
-  name: string;
-  description: string;
-  inputs: SkillInput[];
-  hook: { title: string; trigger: unknown; action: unknown; why: string; teammate?: string; cooldownMin?: number };
-  uses: number;
-  lastUsedAt?: string;
-};
 
 export type Skill = Doc & {
   name: string;
