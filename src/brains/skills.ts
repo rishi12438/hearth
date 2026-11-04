@@ -107,6 +107,49 @@ export const GUIDES: Skill[] = [{
 - Say what you automated, the counts, what you checked by hand, and what's still uncertain.
 - Keep it: the script in scripts/, a skills/<name>.md in your workspace (how to run it, inputs, what breaks it), and
   skill.save if it will come back outside this subject. Next time, rerun it and only check what changed.`,
+}, {
+  name: "write-trigger-judges", common: false, commands: [], reads: [],
+  description: "A trigger that needs judgment (urgent? a good lead? angry? worth my time?): how to write its judge so the model answers with one value code can compare.",
+  body: `# Writing a trigger judge
+
+A judge is one question the quick model answers about an event with ONE value. That value is \`judge\`, and the
+trigger's \`pass\` formula compares it with plain code. The model never decides whether the trigger acts; code does.
+
+## First: does it need a judge at all?
+- Facts you can read off the event (who sent it, a word in it, a price, a status, a time) are a FORMULA. No judge.
+- Only meaning needs a judge: urgency, intent, tone, quality, relevance, "is this about X" when X has no fixed words.
+- Usually both: the formula narrows (from == "Mom", source facts, text contains "invoice"), the judge weighs only those.
+  Every judged event is a model call, so filter first. With nothing to filter on, the formula is "true".
+
+## Pick the answer kind (prefer rating)
+- rating {"type":"rating","min":1,"max":10,"low":"…","high":"…"}: anything with a degree. Best default. You can
+  move the threshold later (pass "judge >= 7" -> "judge >= 8") without re-asking, and corrections teach the scale.
+  Always give low and high anchors in the user's terms ("can wait a week" / "needs them in the next hour").
+- choice {"type":"choice","options":["urgent","normal","ignore"]}: distinct categories that lead to different handling.
+  2-5 short, mutually exclusive labels; include a catch-all ("other", "ignore") so it's never forced into a wrong one.
+- yesno {"type":"yesno"}: only for a truly binary fact the formula can't see ("is this a meeting invite?").
+
+## Write the prompt
+- ONE question, about the event, from the user's point of view: "How urgent is this message for Rishi?", not
+  "Analyze this message". No "and" questions; make two triggers if you need two judgments.
+- Say what counts, briefly, in the user's own words when they gave them ("urgent = needs a reply today or money is at stake").
+- Don't ask for reasons or explanations: the answer must be the value alone.
+
+## Write pass
+- rating: judge >= N. Start strict (8 of 10) for things that interrupt the user; looser (6) for things that go in a digest.
+- choice: judge == "urgent" or judge in ["urgent", "normal"]. Only labels that are in options.
+- yesno: judge == "yes" (the default).
+- pass may also read event variables: judge >= 7 || from == "Boss".
+
+## Use the value
+- {{judge}} fills in the action: "Urgent ({{judge}}/10) from {{from}}: {{text}}".
+- A think action is told what the judge answered.
+
+## After
+- trigger.dryrun the formula to see how many recent events the judge would be asked about. Too many: narrow the formula.
+- When the user says one was wrong ("that wasn't urgent", "that's a 9"), trigger.correct {trigger, value}: it's kept as
+  an example the judge sees next time. Corrections beat rewording the prompt; reword only when it's wrong in a pattern.
+- Each judge is asked at most 60 times an hour; past that, events are logged as skipped.`,
 }];
 
 /** Where a tool lives: ~/.enkidu/bin (what install-tools.sh does), else PATH. */

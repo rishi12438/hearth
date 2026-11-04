@@ -31,7 +31,7 @@ const sourceDocs = () => SOURCES.map((s) => `        ${s.id}: ${s.doc}`).join("\
 // with; elsewhere it gets the web tools only, in an empty folder.
 
 export type BrainInput = {
-  mode: "chat" | "hook" | "review" | "job" | "orchestrate" | "ideas" | "legwork" | "voice" | "clean" | "describe" | "narrate" | "coach" | "advise";
+  mode: "chat" | "hook" | "review" | "job" | "orchestrate" | "ideas" | "legwork" | "voice" | "clean" | "describe" | "narrate" | "coach" | "advise" | "judge";
   context: Record<string, unknown>;
   input: string;
   toolResults?: string;
@@ -85,7 +85,7 @@ const handUp = (who: string) => `If the job is clearly beyond you or you can't d
 export const HAND_BACK = "[[hand-back]]";
 export const REDO = "[[redo]]";
 /** Calls that only read and write text: no web tools. */
-const NO_TOOLS = new Set<BrainInput["mode"]>(["orchestrate", "voice", "review", "ideas", "clean", "describe", "narrate", "coach", "advise"]);
+const NO_TOOLS = new Set<BrainInput["mode"]>(["orchestrate", "voice", "review", "ideas", "clean", "describe", "narrate", "coach", "advise", "judge"]);
 /** Claude's tools for calls that can run code (in the jail). */
 const CODE_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent"];
 /** A helper on the small model that Claude fans wide searches out to. */
@@ -176,6 +176,51 @@ ${sourceDocs()}
     details change (a sender, a URL, a time). Save one when the setup took thought and could come up again.
 - trigger.use {name, inputs:{…}}   make a plan from a saved setup with new details
 - trigger.forget {name}
+EVENT PIPELINE (CONTEXT.eventPipeline: sources, triggers, timers). For "when X happens, do Y" rules that should run
+    the same way every time. Anything pushes events into a SOURCE (a named inbox with its own variables); every event is
+    saved; each TRIGGER on that source is a FORMULA checked with plain code (no model) against the event's variables,
+    and when it's true its action runs. "time" is a built-in source fed by TIMERS. Plain reminders stay hook.add.
+    Formulas: == != < <= > >= && || ! and or not ( ), contains startsWith endsWith matches "regex" in [..] not in [..],
+    lower() upper() trim() len() num() price() exists(). contains/startsWith/endsWith/matches ignore case; == is exact.
+    Every event also has source and payload (what was sent, e.g. payload.sender.login). A missing variable is null.
+    e.g. from == "Mom" && text contains "call"   ·   payload.type == "payment_failed"   ·   price(added) < 500
+    Use a formula for facts you can check. When the rule needs JUDGMENT ("is it urgent?", "is this a good lead?", "is
+    the tone angry?"), add a JUDGE: the quick model is asked one question about the event and must answer with ONE value
+    of a fixed kind; that value is the variable judge, and the judge's pass formula compares it with code. The model
+    gives a value, code decides. See the write-trigger-judges skill. In short:
+      rating {"type":"rating","min":1,"max":10,"low":"…","high":"…"} for a degree (urgency, quality, fit). Best default.
+      choice {"type":"choice","options":["urgent","normal","ignore"]} for a category (2-8 short labels).
+      yesno  {"type":"yesno"} only for a truly binary question.
+    Keep the formula as the cheap filter (which events to ask about: from == "Mom", source facts); the judge runs only
+    on those. Ask about ONE thing, plainly, with the event's own words in mind; give low/high anchors for a rating.
+- source.list   see every source, trigger and timer (you'll be called again with them). Look BEFORE creating.
+- source.create {name, description, variables:[{name,description}], service?, scope?, mapping?}
+    a push source with a secret URL (/api/events/<name>/<secret>) anything can POST JSON to: GitHub, Stripe, Zapier,
+    iOS Shortcuts, a script. service+scope say what it's for ("github", "rishi/hearth"), so it's never made twice.
+    mapping: variable -> where it is in what's sent ({"title":"pull_request.title","kind":"headers.x-github-event"});
+    without one, a variable is read from the top level. The URL shows in Triggers; tell the user to copy it from there.
+- source.update {name, description?, variables?, mapping?, status?} | source.remove {name, purgeEvents?}
+- source.test {name, payload}   push a test event through every trigger; you'll be called again with what happened
+- trigger.add {name, source, formula, judge?, action, why, cooldownMin?, force?}
+    judge: {"prompt":"How urgent is this message for the user?","output":{"type":"rating","min":1,"max":10,
+            "low":"can wait a week","high":"needs them now"},"pass":"judge >= 8"}
+    The formula can't read judge (it runs first); pass must. {{judge}} fills in the action's text.
+    action: {"type":"notify","text":"… {{variable}} …"} | {"type":"think","prompt":"…"} | {"type":"workflow","name","inputs":{"x":"{{variable}}"}}
+    {{variable}} fills from the event (e.g. {{payload.customer.email}}, {{data.who}}).
+- trigger.dryrun {source, formula}   what it would have caught in recent events, and which triggers already catch them
+- trigger.update {name, formula?, judge?, action?, why?, status?, cooldownMin?} | trigger.remove {name}
+    judge: null removes it. Changing the question or the answer kind clears its corrections.
+- trigger.correct {trigger, value, event?}   when the user says a judgment was wrong ("that wasn't urgent", "that one
+    was a 9"): the right value is kept as an example the judge sees next time. event defaults to the last one it judged.
+- time.schedule {name, schedule, data?}   a timer: at its time the "time" source gets one event with
+    time_to_run (= name), scheduled_for, current_time, late_by_min, hour, minute, weekday ("Mon"), date, data.
+    schedule: {"at":"<ISO with offset>","repeat"?:"none|daily|weekdays|weekly|monthly"} | {"time":"HH:MM","days":[0-6]} | {"everyMin":n>=5}
+    Pair it with a trigger on source "time": time_to_run == "<name>" (add late_by_min < 60 to skip stale runs).
+    To check back later yourself ("ask again in 2 hours if they haven't replied"), schedule a one-off timer.
+- time.update {name, schedule?, data?, status?} | time.cancel {name}
+    The hub checks every change for conflicts (same name, a source that already covers that service, a variable the
+    source doesn't send, a trigger that already does the same thing). A conflict comes back to you with the options:
+    reuse or widen the existing one; force: true only when the user wants both; ask them when it's their call.
 - memory.add {fact, notebook, importance, evidence, expiresAt?}
     One fact per entry, written as a standalone sentence. notebook: a short topic (people, health, work, food, home, travel, money, preferences…).
     importance: 3 = core identity or something they'd be upset you forgot (always loaded), 2 = useful, 1 = minor.
@@ -462,6 +507,7 @@ function atScale(code: "claude" | "codex" | null | undefined, workspace: Place |
 export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = null, workspace: Place | boolean = false, lead = false) {
   if (b.mode === "clean") return [CLEAN, "", "DICTATED:", b.input].join("\n");
   if (b.mode === "narrate") return b.input; // built by narratePrompt (brains/narrate.ts)
+  if (b.mode === "judge") return b.input; // built by judgePrompt (events/judge.ts): one question, one value back
   if (b.mode === "coach") return [COACH, "", b.input].join("\n");
   if (b.mode === "advise") return [ADVISE, "", "THEIR QUESTION:", "<untrusted>", b.input, "</untrusted>"].join("\n");
   if (b.mode === "describe") return ["Write ONE sentence describing this reusable UI component for a library: what it shows and when to use it, so a",
@@ -1150,6 +1196,16 @@ function echoBrain(b: BrainInput): string {
   if (b.mode === "describe") return `Shows ${(b.input.match(/^Title: (.*)$/m)?.[1] || "a view").trim()}.`;
   if (b.mode === "clean") return b.input.replace(/\b(um+|uh+|you know),?\s*/gi, "").replace(/\s+/g, " ").trim();
   if (b.mode === "narrate") return "";
+  if (b.mode === "judge") {
+    // Offline stand-in: "urgent"/"asap"/"!!" in the event reads as high; otherwise the low end.
+    const ask = b.input.match(/^ANSWER WITH: (.*)$/m)?.[1] || "";
+    const event = b.input.split("<untrusted>")[1] || "";
+    const hot = /urgent|asap|emergency|!!/i.test(event);
+    const range = ask.match(/from (-?\d+)[^\d-]*?to (-?\d+)/);
+    if (range) return String(hot ? range[2] : range[1]);
+    const opts = ask.startsWith("one of: ") ? ask.slice(8).split(", ") : ["yes", "no"];
+    return hot ? opts[0] : opts[opts.length - 1];
+  }
   if (b.mode === "coach") return "";
   if (b.mode === "advise") return "Try the export first, and count rows before and after.";
   if (b.mode === "voice") return (b.input.split("NOTES FROM THE LEGWORK:")[1] || b.input).replace(/<\/?untrusted>/g, "").trim();
@@ -1197,6 +1253,14 @@ function echoBrain(b: BrainInput): string {
   }
   m = text.match(/^save (?:this place|here) as (.+)/i);
   if (m) return `Saved this spot as ${m[1]}.` + fence([{ type: "place.add", name: m[1], here: true }]);
+  // The event pipeline, offline: a timer five minutes out and a trigger on the time source that picks it up.
+  if (/\bmake a test trigger\b/i.test(text)) {
+    const name = `test-${Date.now().toString(36).slice(-4)}`;
+    return `Done: a timer in 5 minutes and a trigger that says hi when it fires.` + fence([
+      { type: "time.schedule", name, schedule: { at: new Date(Date.now() + 5 * 60_000).toISOString() } },
+      { type: "trigger.add", name: `${name}-hi`, source: "time", formula: `time_to_run == "${name}"`, action: { type: "notify", text: "Hi from {{time_to_run}}" }, why: "A test trigger" },
+    ]);
+  }
   if (/weather/i.test(text)) {
     const loc = (b.context as any).location;
     return "Let me check." + fence([{ type: "script.run", name: "weather", args: loc ? [String(loc.lat), String(loc.lon)] : [] }]);

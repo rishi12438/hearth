@@ -457,8 +457,7 @@ textarea.field { resize: vertical; line-height: 1.4; }
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 
-/* ======================================================================
-   Faces: simple shapes, expressive eyes. The face acts out the state:
+/* ===============================================================   Faces: simple shapes, expressive eyes. The face acts out the state:
    idle (blinks), thinking (glances around), working (busy bob + scanning),
    waiting (looks at you, warm ring), blocked (sleepy, faded), done (happy).
    ====================================================================== */
@@ -1120,4 +1119,54 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 .devtools { display: grid; gap: 6px; }
 .devtool { display: flex; align-items: center; gap: 8px; font-size: 14px; }
 .devtool b { font-weight: var(--fw-semibold); }
+
+/* ---------- Triggers (the event pipeline) ---------- */
+.pipeflow { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 4px 0 12px; color: var(--muted); font-size: 13px; }
+.pipeflow span { background: var(--surface); color: var(--ink-2); padding: 3px 9px; border-radius: 999px; font-weight: var(--fw-medium); }
+#triggers .seg { display: flex; gap: 4px; padding: 3px; background: var(--surface); border-radius: 10px; margin-bottom: 10px; }
+#triggers .seg button { flex: 1; padding: 7px 6px; border-radius: 8px; font-size: 13.5px; font-weight: var(--fw-medium); color: var(--ink-2); }
+#triggers .seg button.on { background: var(--card); color: var(--ink); box-shadow: 0 1px 2px rgba(40, 30, 20, .08); }
+#triggers .seg small { color: var(--muted); font-size: 12px; }
+.item.pipe.col { flex-direction: column; align-items: stretch; gap: 8px; }
+.item.pipe .row.gap { display: flex; align-items: center; gap: 12px; }
+.item.pipe code.formula { font: 12.5px var(--mono); background: var(--surface); color: #b5532d; padding: 1px 6px; border-radius: 5px; word-break: break-word; }
+.srcchip { font-weight: var(--fw-semibold); color: var(--ink-2); }
+.vars { display: flex; flex-wrap: wrap; gap: 5px; padding-left: 46px; }
+.varchip { font: 12px var(--mono); background: var(--surface); color: var(--ink-2); padding: 2px 7px; border-radius: 5px; }
+.item.pipe .codeline { font: 12px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item.ev .evhead { width: 100%; text-align: left; }
+.item.ev pre.output.hidden { display: none; }
+.evdot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--muted); }
+.evdot.matched { background: var(--ok); }
+.evdot.failed { background: var(--danger); }
+.evdot.new, .evdot.processing { background: var(--warn); animation: pulse 1.2s infinite; }
+/* A teammate's new trigger: it slides into the list and glows for a moment. */
+.item.pipe.fresh { animation: pipein .6s cubic-bezier(.2, .9, .3, 1.2) both, pipeglow 3.5s ease-out .2s both; }
+@keyframes pipein { from { opacity: 0; transform: translateY(-14px) scale(.97); } }
+@keyframes pipeglow { 0%, 30% { background: rgba(47, 111, 235, .1); box-shadow: inset 3px 0 0 var(--blue); } 100% { background: transparent; box-shadow: inset 3px 0 0 transparent; } }
+/* The card that flies into Triggers. */
+.flycard { position: fixed; z-index: 1000; left: 0; right: 0; margin: 0 auto; bottom: calc(28px + var(--safe-b)); display: flex; align-items: center; gap: 12px;
+  width: min(420px, calc(100vw - 32px)); padding: 12px 14px; border-radius: 14px; background: var(--card); border: 1px solid var(--line); box-shadow: var(--shadow), 0 16px 40px rgba(40, 30, 20, .14);
+  text-align: left; animation: flyup .45s cubic-bezier(.2, .9, .3, 1.25) both; }
+.flycard .grow { min-width: 0; }
+.flycard small { display: block; font-size: 12px; color: var(--muted); }
+.flycard b { display: block; font-size: 15px; }
+.flycard code { display: block; margin-top: 3px; font: 12px var(--mono); color: #b5532d; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flyicon { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: rgba(47, 111, 235, .12); color: var(--blue); flex: none; }
+@keyframes flyup { from { opacity: 0; transform: translateY(24px) scale(.94); } to { opacity: 1; transform: none; } }
+.landed { animation: landed .7s ease-out; }
+@keyframes landed { 0% { box-shadow: 0 0 0 0 rgba(47, 111, 235, .45); background: rgba(47, 111, 235, .14); } 100% { box-shadow: 0 0 0 10px rgba(47, 111, 235, 0); } }
+@media (prefers-reduced-motion: reduce) { .item.pipe.fresh, .flycard, .landed { animation: none; } }
+/* Trigger judges */
+.judgetag { display: inline-block; font-size: 10.5px; font-weight: var(--fw-semibold); text-transform: uppercase; letter-spacing: .04em; color: #7a4fd0; background: rgba(122, 79, 208, .1); padding: 1px 6px; border-radius: 4px; margin-right: 4px; }
+.item .judgeline .link { font-size: 13px; padding: 0; }
+.judgedlist { display: flex; flex-direction: column; gap: 6px; padding-left: 21px; }
+.judged { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--ink-2); }
+.judged .tag { margin-left: 6px; }
+.judgepick { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.judgepick .btn { min-width: 48px; }
+.judged b { display: inline; font-weight: var(--fw-semibold); color: var(--ink); }
+.judgepick .btn { width: auto; flex: none; }
+.judgepick .btn.cur { background: var(--surface-2); color: var(--ink); }
+=======
 .composer.drop { outline: 1.5px dashed var(--muted); outline-offset: -1.5px; }

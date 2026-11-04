@@ -24,14 +24,14 @@ function hub() {
 test("the hub's skills: Enkidu's tools with Hearth's rules on top, then your own", () => {
   const { home, data } = hub();
   const skills = hubSkills(data, {}, home);
-  expect(skills.map((s) => s.name)).toEqual(["enkidu-browser", "enkidu-cua", "automate-repetitive-work", "weekly-report"]);
+  expect(skills.map((s) => s.name)).toEqual(["enkidu-browser", "enkidu-cua", "automate-repetitive-work", "write-trigger-judges", "weekly-report"]);
   const browser = skills[0];
   expect(browser.body).toContain("# Enkidu browser (CLI)");
   expect(browser.body).not.toContain("name: enkidu-browser");
   expect(browser.body).toContain("so the user can Approve it");
   expect(skills[1].commands).toEqual(["enkidu-cua", "hearth-open"]);
   expect(skills[2].commands).toEqual([]);
-  expect(hubSkills(data, { HEARTH_CUA: "off" }, home).map((s) => s.name)).toEqual(["enkidu-browser", "automate-repetitive-work", "weekly-report"]);
+  expect(hubSkills(data, { HEARTH_CUA: "off" }, home).map((s) => s.name)).toEqual(["enkidu-browser", "automate-repetitive-work", "write-trigger-judges", "weekly-report"]);
   expect(hubSkills(data, { HEARTH_SKILLS: "off" }, home)).toEqual([]);
 });
 
@@ -44,7 +44,8 @@ test("the catalog names the common skills and how to search; flags allow only th
   expect(cat).toContain("- enkidu-cua: Control a desktop app");
   expect(cat).not.toContain("weekly-report");
   expect(cat).toContain("- automate-repetitive-work: Doing the same thing many times");
-  expect(cat).toContain("4 skill(s)");
+  expect(cat).toContain("5 skill(s)");
+  expect(cat).not.toContain("write-trigger-judges"); // not common: found by search
   const f = skillFlags(skills);
   expect(f.tools).toEqual(["Skill", "Bash", "Read"]);
   expect(f.allowed).toEqual(["Skill", "Bash(hearth-skill:*)", "Bash(enkidu-browser:*)", "Bash(enkidu-cua:*)", "Bash(hearth-open:*)", `Read(/${join(home, ".enkidu", "evidence")}/**)`]);
@@ -63,7 +64,8 @@ test("installed skills are where Claude Code looks, and hearth-skill searches an
   expect(run("search", "zzzqqq").out).toContain("No skill matches");
   expect(run("show", "weekly-report").out).toContain("List what got done.");
   expect(run("show", "../etc").ok).toBe(false);
-  expect(run("list").out.trim().split("\n")).toHaveLength(4);
+  expect(run("list").out.trim().split("\n")).toHaveLength(5);
+  expect(run("search", "judge", "urgent").out.split("\n")[0]).toStartWith("write-trigger-judges:");
   expect(run("search", "automate", "repetitive").out.split("\n")[0]).toStartWith("automate-repetitive-work:");
   expect(run("show", "automate-repetitive-work").out).toContain("Spot-check by hand");
   // A re-install drops skills that are gone.
