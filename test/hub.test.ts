@@ -657,3 +657,18 @@ test("models are told a page read or their own code never needs the user's permi
   expect(p).toContain("Not for permission to use your own tools");
   expect(p).toContain("never to later work, even if NOTES.md says otherwise");
 });
+
+test("a write-up that fails posts the finished legwork instead of failing the job", async () => {
+  await hub.ensureTeammates();
+  (hub.brain as any).think = async (b: any) => {
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "List my orders", teammate: "Research", effort: "light" }] });
+    if (b.mode === "legwork") return "NOTES: 93 items; CSV uploaded to Drive.";
+    if (b.mode === "voice") throw new Error("codex took longer than 3 min.");
+    return "tips";
+  };
+  await hub.setBrains({ workhorse: { harness: "echo", model: "small" }, heavy: { harness: "echo", model: "big" } });
+  await hub.ramble("list my orders");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done" || j.status === "failed"));
+  const [job] = await store.all<Job>("jobs");
+  expect([job.status, job.result]).toEqual(["done", "NOTES: 93 items; CSV uploaded to Drive."]);
+});

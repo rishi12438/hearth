@@ -966,8 +966,9 @@ export class Brain {
     const history = thread && folder ? commandLog(folder, thread) : null;
     let timedOut = false;
     // Planning and chat should answer fast. Real jobs (browsing, logging in, research) run until done, unless
-    // HEARTH_JOB_TIMEOUT_SEC sets a cap; a new message from the user still stops them.
-    const limitMs = web ? this.config.jobTimeoutMs : this.config.agentTimeoutMs;
+    // HEARTH_JOB_TIMEOUT_SEC sets a cap; a new message from the user still stops them. A job's write-up (voice) is part
+    // of the job: it has no tools, but a big table or app can take the lead minutes to write.
+    const limitMs = web || b.mode === "voice" ? this.config.jobTimeoutMs : this.config.agentTimeoutMs;
     const timer = limitMs > 0 ? setTimeout(() => { timedOut = true; proc.kill(); }, limitMs) : undefined;
     const stop = () => proc.kill();
     meter?.signal?.addEventListener("abort", stop);

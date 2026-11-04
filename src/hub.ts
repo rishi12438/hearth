@@ -1059,8 +1059,14 @@ export class Hub {
       if (hybrid && tier !== "heavy" && !legwork.split) {
         const r0 = legwork;
         meter.onProgress?.("Writing it up");
+        // The work is done by now: a write-up that fails (an error, a full plan) posts the legwork's notes instead of
+        // failing the whole job.
         const v = await this.turn("voice", `${job.task}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")\n\nNOTES FROM THE LEGWORK:\n<untrusted>\n${r0.text.slice(0, 8000)}\n</untrusted>`,
-          job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains.heavy, meter });
+          job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains.heavy, meter }).catch(async (err) => {
+          if (stop.signal.aborted) throw err;
+          await this.log("job.voice_failed", `${job.task.slice(0, 80)}: ${String(err?.message || err).slice(0, 160)}`);
+          return { text: r0.text, did: [] as Done[], used: [] as string[], tiles: [] as Tile[], fileIds: [] as string[] };
+        });
         if (stop.signal.aborted) throw new Error("Restarted with your new message.");
         if (v.text.includes(REDO) || !v.text.trim()) {
           // The lead wasn't happy with the legwork: it does the job itself.
