@@ -345,6 +345,47 @@ test("scripts that send or post can't run without a per-run Approve, even when a
   expect((await hub.decideApproval(ap.id, true)).error).toBeTruthy(); // can't flip a decision
 });
 
+test("Approve on a run card for a new script approves its code too; a failed run goes back to the agent", async () => {
+  await hub.ensureTeammates();
+  const code = '// effects: external\nconsole.error("parley: bad media url"); process.exit(1)';
+  const seen: string[] = [];
+  (hub.brain as any).think = async (b: any) => {
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "Send Ramitha the GIF", teammate: "Hearth", effort: "light" }] });
+    seen.push(String(b.input));
+    if (seen.length > 1) return "The media URL was wrong. Fixing it.";
+    return `Wrote it.\n\`\`\`hearth\n${JSON.stringify([{ type: "script.propose", name: "send-gif", code }, { type: "approval.request", script: "send-gif", summary: "Send Ramitha the GIF" }])}\n\`\`\``;
+  };
+  await hub.ramble("send ramitha a gif");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "waiting"));
+  const [ap] = await store.all<any>("approvals");
+  expect(ap.action.sha256).toBeTruthy(); // the card carries the code it approves
+
+  const done = (await hub.decideApproval(ap.id, true)).value!;
+  expect((await hub.scripts.byName("send-gif"))!.status).toBe("approved"); // no second card to find
+  expect(done.status).toBe("failed");
+  expect(done.result).toContain("bad media url"); // it ran: the failure is the script's own, not "waiting for approval"
+
+  // The agent hears it failed and carries on in the same thread.
+  await until(async () => seen.length === 2 && (await store.all<Job>("jobs")).every((j) => j.status === "done"));
+  expect(seen[1]).toContain("failed: Send Ramitha the GIF");
+  expect(seen[1]).toContain("bad media url");
+  const note = (await messages()).find((m) => m.fromApproval)!;
+  expect(note.fromApproval!.id).toBe(ap.id);
+  const jobs = await store.all<Job>("jobs");
+  const root = jobs.find((j) => !j.followsUp && !j.parentId)!;
+  expect(jobs.find((j) => j.followsUp === root.id)?.result).toContain("Fixing it");
+});
+
+test("a run card doesn't approve script code that changed after it was made", async () => {
+  await hub.scripts.propose({ name: "send-gif", code: '// effects: external\nconsole.log("v1")' });
+  const ap = (await hub.requestApproval({ script: "send-gif", summary: "Send it" }, {})).value!;
+  await hub.scripts.propose({ name: "send-gif", code: '// effects: external\nconsole.log("v2")' });
+  const done = (await hub.decideApproval(ap.id, true)).value!;
+  expect(done.status).toBe("failed");
+  expect(done.result).toContain("changed after this card was made");
+  expect((await hub.scripts.byName("send-gif"))!.status).toBe("proposed");
+});
+
 test("a refused ask says so in the reply instead of leaving 'Tap Approve' with no card", async () => {
   await hub.ensureTeammates();
   (hub.brain as any).think = async (b: any) => b.mode === "orchestrate"

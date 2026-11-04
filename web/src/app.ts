@@ -1362,6 +1362,33 @@ function withMentions(text: string) {
   return h("div", { class: "mtext" }, out);
 }
 
+/** You talking, or the hub passing back something you approved that failed (that isn't you, so it isn't shown as you). */
+function userRow(m: any, extra: any[] = [], grouped = false) {
+  if (m.fromApproval) {
+    const back = /<untrusted>\n?([\s\S]*?)\n?<\/untrusted>/.exec(String(m.text))?.[1] || "";
+    return row({ face: h("span", { class: "trigav" }, icon("lock", 18)), name: "Hearth", badge: h("span", { class: "apptag" }, "APPROVAL") }, m.createdAt,
+      [h("div", { class: "mtext" }, `You approved "${m.fromApproval.summary}", but it failed. Handed back to be fixed.`),
+        back ? h("details", { class: "trigdata", open: true }, h("summary", null, "What came back"), h("pre", { class: "output" }, back)) : null, ...extra], grouped);
+  }
+  return row(youWho(), m.createdAt, [h("div", { class: "mtext" }, m.text), ...extra], grouped);
+}
+
+/** A run card for a script whose code you haven't approved yet: Approve covers that exact code too, so it's here to read. */
+function codeToApprove(a: any) {
+  if (a.status !== "pending" || a.action?.type !== "script" || !a.action.sha256) return null;
+  const pre = h("pre", { class: "code" }, "Loading…") as HTMLElement;
+  const box = h("details", { class: "trigdata" }, h("summary", null, `Approve also approves the code of ${a.action.script}. Read it`), pre) as HTMLDetailsElement;
+  box.addEventListener("toggle", async () => {
+    if (!box.open || pre.dataset.loaded) return;
+    pre.dataset.loaded = "1";
+    try {
+      const sc = (await call("/api/scripts")).find((x: any) => x.name === a.action.script);
+      pre.textContent = !sc ? "(script missing)" : sc.codeSha256 !== a.action.sha256 ? "This script changed after the card was made, so Approve won't run it. Ask again." : sc.code;
+    } catch { pre.textContent = "Couldn't load the code."; delete pre.dataset.loaded; }
+  });
+  return box;
+}
+
 function plainMessage(m: any, grouped = false) {
   // Carried on in a task's thread: one tap to it.
   const goes = (m.continues || []).map((id: string) => { const j = S.chat?.jobs.find((x: any) => x.id === id);
@@ -1373,7 +1400,7 @@ function plainMessage(m: any, grouped = false) {
     return row({ face: h("span", { class: "trigav" }, icon("zap", 18)), name: m.fromTrigger.title, badge: h("span", { class: "apptag" }, "TRIGGER") }, m.createdAt,
       [h("div", { class: "mtext" }, ask), data, ...goes], grouped);
   }
-  if (m.role === "user") return row(youWho(), m.createdAt, [h("div", { class: "mtext" }, m.text), (m.fileIds || []).map(fileCard), ...goes], grouped);
+  if (m.role === "user") return userRow(m, [(m.fileIds || []).map(fileCard), ...goes], grouped);
   const from = m.fromThreadId ? S.threads.find((t) => t.id === m.fromThreadId) : null;
   const body: (Node | null)[] = [m.proactive ? h("div", { class: "proline" }, icon("bell", 13), m.proactive.title) : null, richText(m.text),
     from ? h("button", { class: "fromchip", on: { click: () => { location.hash = `#c/${from.id}`; } } }, `From #${channelName(from)}`, icon("chevron", 13)) : null, ...goes,
@@ -1415,6 +1442,7 @@ function taskMessage(m: any) {
       st === "working" && latest.startedAt ? h("time", { "data-since": latest.startedAt }, elapsed(latest.startedAt)) : null));
   } else if (st === "waiting") {
     body.push(h("div", { class: "block" }, h("div", { class: "blockhead" }, icon("lock", 15), h("b", null, aps[0]?.summary || "Needs your OK")),
+      aps.length ? codeToApprove(aps[0]) : null,
       aps.length ? h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => decide(aps[0].id, true) } }, "Approve"), alwaysBtn(aps[0]), h("button", { class: "sbtn", on: { click: () => decide(aps[0].id, false) } }, "No")) : null));
   } else if (st === "blocked") {
     body.push(h("div", { class: "block" }, h("div", { class: "blockhead" }, h("b", null, `Stuck: ${latest.blocked?.need || ""}`)), latest.blocked?.unblock ? h("p", null, latest.blocked.unblock) : null,
@@ -1530,7 +1558,7 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
   const live = (x: any) => x.status === "queued" || x.status === "working";
   const when = (x: any) => (live(x) ? Infinity : Date.parse(x.finishedAt || x.updatedAt || x.createdAt) || 0);
   const items = [
-    ...yours.map((m: any) => ({ at: Date.parse(m.createdAt) || 0, node: () => row(youWho(), m.createdAt, [h("div", { class: "mtext" }, m.text)]) })),
+    ...yours.map((m: any) => ({ at: Date.parse(m.createdAt) || 0, node: () => userRow(m) })),
     ...[j, ...follow].map((x: any) => ({ at: when(x), node: () => answer(x) })),
   ].sort((a, b) => a.at - b.at);
   const n = items.filter((x) => x.at !== Infinity).length;
@@ -1560,7 +1588,7 @@ function answer(j: any) {
   if (j.status === "waiting") {
     const aps = (S.chat.approvals || []).filter((a: any) => a.jobId === j.id);
     return row(who, at, [j.result ? richText(j.result) : null, aps.map((a: any) => h("div", { class: "block" },
-      h("div", { class: "blockhead" }, icon("lock", 15), h("b", null, a.summary)), a.details ? h("p", null, a.details) : null,
+      h("div", { class: "blockhead" }, icon("lock", 15), h("b", null, a.summary)), a.details ? h("p", null, a.details) : null, codeToApprove(a),
       a.status === "pending" ? h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => decide(a.id, true) } }, "Approve"), alwaysBtn(a), h("button", { class: "sbtn", on: { click: () => decide(a.id, false) } }, "No"))
         : h("small", { class: "muted" }, a.status === "done" ? "Approved and done" : a.status === "rejected" ? "You said no" : a.status)))]);
   }
@@ -1699,7 +1727,7 @@ function drawDm(stick = true) {
   for (const m of d.messages) if (!m.queued && !d.jobs.some((j: any) => j.messageId === m.id)) items.push({ at: m.createdAt, nodes: [plainMessage(m)] });
   for (const j of d.jobs.filter((j: any) => direct.has(j.messageId))) {
     const m = d.messages.find((x: any) => x.id === j.messageId);
-    items.push({ at: j.createdAt, nodes: [row(youWho(), m.createdAt, [h("div", { class: "mtext" }, m.text)]), answer(j)] });
+    items.push({ at: j.createdAt, nodes: [userRow(m), answer(j)] });
   }
   S.chat = saved;
   items.sort((a, b) => a.at.localeCompare(b.at));
