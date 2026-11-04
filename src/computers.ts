@@ -15,6 +15,7 @@ import { ComputerGone, MODEL_RE, type BrainInput, type BrainProfile, type Meter,
 //                   error {id, message}   copy {item, data, hash}
 // hub -> computer   ping {ts}   run {id, input, profile}   stop {id}   want {items, have}   wantCookies {sites, have}
 // computer -> hub   cookies {site, data, hash}   (browser cookies the owner asked this Mac to copy up)
+//                   noCookies {site, why}   (asked for a site fresh — wantCookies {fresh} — and its Chrome has no login)
 //                   logins {items}   (only to computers the hub set up itself, never to your Mac)
 
 /** What a computer can copy up so the cloud can work while it's off. Each is a login file the harness reads. */
@@ -46,6 +47,8 @@ export type ComputerStatus = {
   rttMs: number | null; harnesses: string[]; platform: string; tools: ToolStatus[]; running: number; connectedAt: string | null; lastAliveAt: string | null;
 };
 type Copied = Record<string, { hash: string; at: string; from: string }>;
+/** What asking your Mac for a site's login came to (see freshLogin). */
+export type FreshLogin = { state: "fresh" | "missing" | "offline" | "timeout"; why?: "signed-out" | "same" | "unreadable"; from?: string };
 
 /** Signal bars from round-trip time, like a phone's: 4 is a good line, 1 is barely there. */
 export function levelFor(state: ComputerStatus["state"], rttMs: number | null): ComputerStatus["level"] {
@@ -137,6 +140,7 @@ export class Computers implements Remote {
       }
       case "copy": this.receiveCopy(link, m); return;
       case "cookies": this.receiveCookies(link, m); return;
+      case "noCookies": this.receiveNoCookies(link, m); return;
     }
   }
 
@@ -258,15 +262,47 @@ export class Computers implements Remote {
     this.send(link.deviceId, { t: "wantCookies", sites, have });
   }
 
-  /** Ask every online Mac to copy these logins up now (a fresh "want", so a changed login is re-sent). */
+  /** Ask every online Mac to copy these logins up now (a fresh "want", so a changed login is re-sent). Returns how many it asked. */
   refreshCookies(site?: string) {
+    let asked = 0;
     for (const link of this.links.values()) {
       if (link.cloud) continue;
       const sites = this.opts.acceptCopies ? (this.opts.cookieSites?.() || []) : [];
       const have: Record<string, string> = {};
       // Drop the hash for the site we want fresh, so the Mac re-reads and re-sends even if it thinks it's unchanged.
       for (const s of sites) { if (s === site) continue; const h = this.opts.cookieHave?.(s); if (h) have[s] = h; }
-      this.send(link.deviceId, { t: "wantCookies", sites, have });
+      this.send(link.deviceId, { t: "wantCookies", sites, have, ...(site && sites.includes(site) ? { fresh: site } : {}) });
+      asked++;
+    }
+    return asked;
+  }
+
+  /** Who's waiting on a fresh login per site, and how many Macs still owe an answer. */
+  private waiting = new Map<string, { left: number; done: (r: FreshLogin) => void }[]>();
+
+  /**
+   * Ask your Mac(s) for a site's login and wait for the answer: "fresh" (a new login came up), "missing" (its Chrome isn't
+   * signed in either, or has the same dead login), "offline" (no Mac online to ask) or "timeout" (an older Mac app that
+   * doesn't answer when it has nothing). The site must already be one the Macs are asked for (Connections.wantFromMac).
+   */
+  freshLogin(site: string, ms = 25_000): Promise<FreshLogin> {
+    if (!this.canCopyCookies()) return Promise.resolve({ state: "offline" });
+    const asked = this.refreshCookies(site);
+    if (!asked) return Promise.resolve({ state: "offline" });
+    return new Promise((resolve) => {
+      const list = this.waiting.get(site) || [];
+      const w = { left: asked, done: (r: FreshLogin) => { clearTimeout(timer); this.waiting.set(site, (this.waiting.get(site) || []).filter((x) => x !== w)); resolve(r); } };
+      const timer = setTimeout(() => w.done({ state: "timeout" }), ms);
+      (timer as any).unref?.();
+      list.push(w);
+      this.waiting.set(site, list);
+    });
+  }
+  /** One Mac answered for a site: a fresh login settles everyone waiting; "missing" only once every Mac asked said so. */
+  private answer(site: string, r: FreshLogin) {
+    for (const w of [...(this.waiting.get(site) || [])]) {
+      if (r.state === "fresh") w.done(r);
+      else if (--w.left <= 0) w.done(r);
     }
   }
 
@@ -280,7 +316,17 @@ export class Computers implements Remote {
     const data = typeof m.data === "string" ? m.data : "";
     if (!data || data.length > MAX_COPY) return;
     try { const j = JSON.parse(data); if (!Array.isArray(j.cookies)) return; } catch { return; }
+    const hash = sha256(data), before = this.opts.cookieHave?.(site);
     this.opts.onCookies?.(site, data);
+    // Kept only if it had the cookies the site needs. The same login the hub already had is the one that just died.
+    const kept = this.opts.cookieHave ? this.opts.cookieHave(site) === hash : true;
+    this.answer(site, !kept ? { state: "missing", why: "signed-out" } : before === hash ? { state: "missing", why: "same" } : { state: "fresh", from: link.name });
+  }
+
+  /** A Mac had nothing for a site it was asked for fresh (its Chrome isn't signed in, or can't be read). */
+  private receiveNoCookies(link: Link, m: any) {
+    if (link.cloud || typeof m.site !== "string") return;
+    this.answer(m.site, { state: "missing", why: m.why === "unreadable" ? "unreadable" : "signed-out", from: link.name });
   }
 
   private receiveCopy(link: Link, m: any) {

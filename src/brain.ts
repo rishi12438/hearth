@@ -148,8 +148,12 @@ ${sourceDocs()}
 - place.add {name, here:true} or {name, lat, lon, radiusM?}   save a place for place hooks
 - source.read {source, config}   read a trigger module now (e.g. today's calendar, recent mail from someone);
     you'll be called again with what it found. Same config as the trigger.
-- connection.refresh {site}   when a logged-in site (linkedin, x, a domain like amazon.com) stopped working, pull a
-    fresh login from the user's Mac (it reads the cookie there and copies it up). Use it if a read says "signed out".
+- connection.refresh {site}   when a logged-in site (linkedin, x, a domain like amazon.com) stopped working — a read says
+    "signed out", or a page shows Sign in / Register where the account should be — pull a fresh login from the user's Mac.
+    Hearth checks the Mac itself: online and signed in, it copies the login up and runs this job again on its own;
+    otherwise it tells the user exactly what's needed (open the Mac, or sign in to the site in Chrome there). So when you
+    use it, just say which site signed out and that you're getting a fresh login. Don't tell the user to reconnect it in
+    Connectors or to try again.
 - script.run {name, args}   run an approved script now; you'll be called again with its output
 - history.search {query}   search past conversations, answers and the daily log (exact wording, "what did I say about X");
     you'll be called again with what matched. Use it when memory doesn't have what you need.

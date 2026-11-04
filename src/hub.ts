@@ -31,6 +31,8 @@ import { Apps, appSize } from "./apps.ts";
 import { sha256 } from "./auth.ts";
 import { Narrator } from "./brains/narrate.ts";
 import { syncBrowserLogins } from "./brains/browser-logins.ts";
+import type { FreshLogin } from "./computers.ts";
+import { labelFor } from "./cookie-sites.ts";
 
 const DEFAULT_PREFS: Prefs = {
   userName: "", tz: "UTC", quietStart: "23:00", quietEnd: "07:30",
@@ -110,7 +112,11 @@ export class Hub {
   /** Headless Chrome for logged-in sites. Swapped in tests. */
   readPage = readPage;
   /** Linked computers (your Mac), set by the server. A Mac can copy browser logins up and be re-asked when one dies. */
-  computers: { refreshCookies(site?: string): void; canCopyCookies(): boolean } | null = null;
+  computers: { refreshCookies(site?: string): unknown; canCopyCookies(): boolean; freshLogin?(site: string, ms?: number): Promise<FreshLogin> } | null = null;
+  /** How long a job waits for your Mac to answer "do you have this login?" (shorter in tests). */
+  freshLoginWaitMs = 25_000;
+  /** Jobs that got a fresh login mid-run: they run again as soon as this turn finishes. */
+  private rerunAfterLogin = new Set<string>();
   /** Every logged-in read goes out as the browser its login came from (see Fingerprint), unless the caller set one. */
   private sourceCtx = async () => ({ google: this.google, cookies: (domain: string) => this.connections.cookies(domain),
     readPage: ((url, o = {}) => this.readPage(url, { fingerprint: this.connections.fingerprintFor(url), ...o })) as typeof readPage,
@@ -893,14 +899,17 @@ export class Hub {
         return;
       }
       const pending = (await this.store.all<Approval>("approvals")).some((a) => a.jobId === job.id && a.status === "pending");
-      const blocked = (await this.store.get<Job>("jobs", job.id))?.blocked;
+      const stored = await this.store.get<Job>("jobs", job.id);
+      const blocked = stored?.blocked;
       const status = patch.status === "failed" ? "failed" : blocked ? "blocked" : pending ? "waiting" : "done";
       await this.addSpend(job.messageId, meter.costUsd);
       cur = await this.saveJob({
-        ...cur, ...patch, blocked, status, ranOn: meter.ranOn,
+        ...cur, ...patch, blocked, relogged: stored?.relogged, status, ranOn: meter.ranOn,
         durationMs: Date.now() - started, costUsd: meter.unknown ? null : +meter.costUsd.toFixed(4),
         finishedAt: status === "done" || status === "failed" ? this.clock().toISOString() : undefined,
       });
+      // It pulled a fresh login from your Mac mid-run: go again with it, without you tapping anything.
+      if (this.rerunAfterLogin.delete(job.id) && status === "blocked") { await this.retryJob(job.id, { refreshed: true }); return; }
       // Tell the phone: "Fitness finished: Knee before volleyball". Tapping it opens the task's thread.
       if (!job.parentId && (status === "done" || status === "failed")) {
         const first = String(cur.result || "").split("\n").map((x) => x.replace(/^[-*#>\s]+|\*\*/g, "").trim()).find(Boolean) || "";
@@ -1111,7 +1120,8 @@ export class Hub {
   /** A linked computer came online: run every job that was parked waiting for one. */
   async resumeForComputer() {
     const all = await this.store.all<Job>("jobs"), stale = supersededJobs(all);
-    const parked = all.filter((j) => j.status === "blocked" && j.blocked?.needs === "computer" && !stale.has(j.id));
+    // Jobs stuck on a site's login go too: retrying checks the Mac for a fresh one first, and stays parked if there isn't.
+    const parked = all.filter((j) => j.status === "blocked" && (j.blocked?.needs === "computer" || (j.blocked?.needs === "login" && j.blocked.site)) && !stale.has(j.id));
     for (const j of parked) await this.retryJob(j.id);
     if (parked.length) await this.log("computer.resumed", `${parked.length} job(s) picked up by your computer`);
   }
@@ -1133,9 +1143,24 @@ export class Hub {
   }
 
   /** You unblocked it (opened the laptop, logged in, tapped Allow): run the job again from the top. */
-  async retryJob(id: string) {
-    const job = await this.store.get<Job>("jobs", id);
+  async retryJob(id: string, opts: { refreshed?: boolean } = {}) {
+    let job = await this.store.get<Job>("jobs", id);
     if (!job || !["blocked", "failed"].includes(job.status)) return { error: "Only blocked or failed jobs can be retried." };
+    // Stuck on a site's login: check your Mac for a fresh one first, so a run isn't spent on the same sign-out.
+    const site = job.blocked?.site;
+    if (site && !opts.refreshed) {
+      const r = await this.refreshConnection(site, "Try again");
+      if (r.state === "offline" || r.state === "missing") {
+        const name = labelFor(site);
+        const blocked = r.state === "offline"
+          ? { need: `Your Mac, for the ${name} login`, why: `${name} signed Hearth out, and your Mac is offline.`, unblock: "Open your Mac: this picks up again by itself", needs: "computer" as const, site }
+          : { need: `Sign in to ${name} on your Mac`, why: `Chrome on your Mac still isn't signed in to ${name}.`, unblock: `Sign in to ${name} in Chrome on your Mac, then tap Try again`, needs: "login" as const, site };
+        const kept = await this.saveJob({ ...job, status: "blocked", blocked });
+        return { value: kept };
+      }
+      // A fresh login came up: this run counts as the one retry with it.
+      job = await this.saveJob({ ...job, relogged: [...new Set([...(job.relogged || []), site])] });
+    }
     const msg = await this.store.get<Message>("messages", job.messageId);
     const fresh = await this.saveJob({ ...job, blocked: undefined, status: "queued", result: undefined, did: undefined });
     await this.log("job.retry", job.task.slice(0, 80));
@@ -1787,7 +1812,8 @@ export class Hub {
             const site = String(a.site || "").trim();
             if (!site) break;
             const r = await this.refreshConnection(site, await this.actorName(where.teammateId));
-            done.push({ kind: "memory", label: r.ok ? `Refreshed the ${site} login (${r.how})` : `Couldn't refresh ${site} — reconnect it in Connectors` });
+            if (where.jobId) done.push(await this.reloginForJob(where.jobId, site, r));
+            else done.push({ kind: "memory", label: r.ok ? `Refreshed the ${site} login (${r.how})` : r.state === "offline" ? `Couldn't refresh ${site}: your Mac is offline` : `Couldn't refresh ${site}: sign in to it in Chrome on your Mac` });
             break;
           }
           case "history.search":
@@ -2804,26 +2830,67 @@ export class Hub {
    * The agent's one tool to (re)load a logged-in site's cookies on demand, wherever the hub runs:
    * a server hub asks the linked Mac; a laptop hub reads its own browser. Logged every time.
    */
-  async refreshConnection(site: string, by = "a teammate"): Promise<{ ok: boolean; how: string }> {
+  async refreshConnection(site: string, by = "a teammate"): Promise<{ ok: boolean; how: string; state: FreshLogin["state"] | "asked"; why?: string }> {
     const domain = this.connections.domainFor(site) || site;
     if (this.computers?.canCopyCookies()) {
       this.connections.wantFromMac(site);
-      this.computers.refreshCookies(domain);
       this.emit("connections");
-      await this.log("connection.refresh", `${domain}: ${by} asked your Mac for a fresh login`);
-      await this.audit("refresh", domain, by, { ok: true, detail: "asked the Mac" });
-      return { ok: true, how: "mac" };
+      // An older hub wiring without freshLogin: ask and don't wait, as before.
+      if (!this.computers.freshLogin) {
+        this.computers.refreshCookies(domain);
+        await this.log("connection.refresh", `${domain}: ${by} asked your Mac for a fresh login`);
+        await this.audit("refresh", domain, by, { ok: true, detail: "asked the Mac" });
+        return { ok: true, how: "mac", state: "asked" };
+      }
+      const r = await this.computers.freshLogin(domain, this.freshLoginWaitMs);
+      const said = r.state === "fresh" ? `got a fresh login from ${r.from || "your Mac"}`
+        : r.state === "missing" ? (r.why === "unreadable" ? "your Mac couldn't read its browser" : r.why === "same" ? "your Mac has the same signed-out login" : "your Mac isn't signed in to it")
+        : r.state === "timeout" ? "asked your Mac (no answer yet)" : "no Mac online";
+      if (r.state === "fresh") { this.connections.problem(domain, null); this.emit("connections"); }
+      await this.log("connection.refresh", `${domain}: ${by} ${said}`);
+      await this.audit("refresh", domain, by, { ok: r.state === "fresh", detail: said });
+      return { ok: r.state === "fresh" || r.state === "timeout", how: "mac", state: r.state, why: r.why };
     }
     const opt = this.connections.browserOptions(site)[0];
     if (opt) {
       const r = this.importFromBrowser(site, opt.id);
       await this.log("connection.refresh", `${domain}: ${by} ${r.value ? `read from ${opt.label}` : `couldn't read it (${r.error})`}`);
       await this.audit("refresh", domain, by, { ok: !!r.value, detail: r.value ? `read from ${opt.label}` : r.error });
-      return { ok: !!r.value, how: "browser" };
+      return { ok: !!r.value, how: "browser", state: r.value ? "fresh" : "missing" };
     }
     await this.log("connection.refresh", `${domain}: no Mac online and no local browser to read`);
     await this.audit("refresh", domain, by, { ok: false, detail: "no Mac or local browser" });
-    return { ok: false, how: "none" };
+    return { ok: false, how: "none", state: "offline" };
+  }
+
+  /**
+   * A job hit a site that signed Hearth out and asked for a fresh login. Hearth checks your Mac itself instead of telling
+   * you to reconnect: a fresh login runs the job again (once); a Mac that isn't signed in either, or is offline, parks the
+   * job saying exactly that, and it picks up again when you sign in and tap Try again, or when the Mac comes online.
+   */
+  private async reloginForJob(jobId: string, site: string, r: Awaited<ReturnType<Hub["refreshConnection"]>>): Promise<Done> {
+    const job = await this.store.get<Job>("jobs", jobId);
+    const domain = this.connections.domainFor(site) || site, name = labelFor(domain);
+    if (!job) return { kind: "memory", label: r.ok ? `Refreshed the ${name} login` : `Couldn't refresh ${name}` };
+    const tried = (job.relogged || []).includes(domain);
+    const park = async (b: NonNullable<Job["blocked"]>, push = true) => {
+      await this.saveJob({ ...job, relogged: [...new Set([...(job.relogged || []), domain])], blocked: { ...b, site: domain } });
+      await this.log("job.blocked", `${b.need} (${b.unblock})`);
+      if (push) await this.push?.send({ title: "I'm stuck", body: `${b.need}. ${b.unblock}`, tag: jobId, url: threadLink(job.threadId) });
+      return { kind: "blocked" as const, label: `Blocked: ${b.need}` };
+    };
+    if ((r.state === "fresh" || r.state === "timeout") && !tried) {
+      // Got one (or a Mac that's still reading): run the job again with it as soon as this turn ends.
+      this.rerunAfterLogin.add(jobId);
+      await park({ need: `A fresh ${name} login`, why: r.state === "fresh" ? `${name} signed Hearth out, so I pulled a fresh login from your Mac.` : `${name} signed Hearth out; I asked your Mac for a fresh login.`, unblock: "Running it again by itself" }, false);
+      return { kind: "memory", label: `Refreshed the ${name} login from your Mac; running it again` };
+    }
+    if (r.state === "offline")
+      return park({ need: `Your Mac, for the ${name} login`, why: `${name} signed Hearth out, and your Mac is where the login lives. It's offline right now.`, unblock: "Open your Mac: this picks up again by itself", needs: "computer" });
+    const why = tried ? `${name} still shows Hearth signed out, even with the latest login from your Mac.`
+      : r.why === "unreadable" ? `${name} signed Hearth out, and Hearth couldn't read Chrome on your Mac.`
+      : `${name} signed Hearth out, and Chrome on your Mac isn't signed in to ${name} either.`;
+    return park({ need: `Sign in to ${name} on your Mac`, why, unblock: `Sign in to ${name} in Chrome on your Mac, then tap Try again`, needs: "login" });
   }
 
   importFromBrowser(site: string, profileId: string) {

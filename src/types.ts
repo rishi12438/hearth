@@ -119,7 +119,10 @@ export type Job = Doc & {
   status: "queued" | "working" | "waiting" | "blocked" | "done" | "failed";
   /** Set when the job can't go on without you (a login, your laptop, a permission). It parks until you unblock it. */
   /** needs "computer": parked until a linked computer is online, then it resumes on its own. */
-  blocked?: { need: string; why: string; unblock: string; needs?: "computer" | "brains"; until?: number | null };
+  /** site: a logged-in site signed Hearth out; trying again first pulls a fresh login for it from your Mac. */
+  blocked?: { need: string; why: string; unblock: string; needs?: "computer" | "brains" | "login"; until?: number | null; site?: string };
+  /** Sites this job already pulled a fresh login for and ran again, so a login that's still dead doesn't loop. */
+  relogged?: string[];
   /** When you saw it stuck (any device). Seen, it stops counting in the badges until it gets stuck again. */
   seenAt?: string;
   /** Where the model ran: a linked computer's name, or "cloud" for this hub. */

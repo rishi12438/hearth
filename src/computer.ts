@@ -162,7 +162,7 @@ export function connect(opts: Opts) {
   let ws: WebSocket | null = null;
   let stopped = false, backoff = 1000, alive: ReturnType<typeof setInterval> | null = null, copyTimer: ReturnType<typeof setInterval> | null = null, toolsTimer: ReturnType<typeof setInterval> | null = null;
   let want: { items: CopyItem[]; have: Record<string, string> } = { items: [], have: {} };
-  let cookieWant: { sites: string[]; have: Record<string, string> } = { sites: [], have: {} };
+  let cookieWant: { sites: string[]; have: Record<string, string>; fresh?: string } = { sites: [], have: {} };
   const send = (m: unknown) => { try { ws?.send(JSON.stringify(m)); } catch {} };
   const url = link.hub.replace(/^http/, "ws") + "/computer";
   // The hub's agent skills for jobs run here (Gmail, Drive, Calendar), pointed back at the hub with this connection's key.
@@ -183,12 +183,19 @@ export function connect(opts: Opts) {
   };
 
   // Browser cookies the hub asked for (on connect, on sign-out, or when a teammate asks): read them here, send once.
+  // The one it asked for fresh (a job hit a sign-out) always gets an answer: the login, or why there isn't one, so the
+  // hub can tell the user "sign in on your Mac" instead of waiting.
   const copyCookiesUp = () => {
     if (!cookieWant.sites.length) return;
-    if (!canReadBrowser()) { log("  the hub asked for a browser login, but this computer can't read the browser here"); return; }
+    const fresh = cookieWant.fresh;
+    if (!canReadBrowser()) {
+      log("  the hub asked for a browser login, but this computer can't read the browser here");
+      if (fresh) send({ t: "noCookies", site: fresh, why: "unreadable" });
+      return;
+    }
     for (const domain of cookieWant.sites) {
       const found = readSiteCookiesAnywhere(domain, requiredFor(domain));
-      if (!found) continue;
+      if (!found) { if (domain === fresh) { send({ t: "noCookies", site: domain, why: "signed-out" }); log(`  the hub asked for your ${labelFor(domain)} login, but Chrome here isn't signed in to it`); } continue; }
       const data = JSON.stringify({ cookies: found.cookies, fingerprint: chromeFingerprint() });
       const hash = sha256(data);
       if (cookieWant.have[domain] === hash) continue;
@@ -246,7 +253,7 @@ export function connect(opts: Opts) {
       else if (m.t === "stop") runs.get(m.id)?.abort();
       else if (m.t === "want") { want = { items: (m.items || []).filter(isCopyItem), have: m.have || {} }; copyUp(); }
       else if (m.t === "skills" && typeof m.key === "string") { agentSkills = { key: m.key, google: m.google === true }; brain.refreshSkills?.(); }
-      else if (m.t === "wantCookies") { cookieWant = { sites: (m.sites || []).filter(isValidDomain), have: m.have || {} }; copyCookiesUp(); }
+      else if (m.t === "wantCookies") { cookieWant = { sites: (m.sites || []).filter(isValidDomain), have: m.have || {}, fresh: isValidDomain(m.fresh) ? m.fresh : undefined }; copyCookiesUp(); }
       else if (m.t === "logins" && link.cloud && m.items && typeof m.items === "object") {
         const wrote = writeLogins(opts.home || homedir(), m.items);
         if (wrote.length) log(`  got ${wrote.map((i) => COPY_ITEMS[i as CopyItem].label).join(" and ")} from the hub`);
