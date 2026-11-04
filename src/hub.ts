@@ -420,6 +420,7 @@ export class Hub {
     const all = await this.store.all<Job>("jobs");
     const stale = supersededJobs(all);
     const jobs = all.filter((j) => !j.parentId && !stale.has(j.id));
+    const last = await this.lastReplies(all);
     return (await this.store.all<Thread>("threads"))
       .filter((t) => !t.id.startsWith("tm-") && t.id !== "main")
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
@@ -427,8 +428,45 @@ export class Hub {
         const mine = jobs.filter((j) => j.threadId === t.id);
         return { ...t, name: channelOf(t), archived: !!t.archivedAt, members: [...new Set(mine.map((j) => j.teammateId))],
           working: mine.filter((j) => j.status === "working" || j.status === "queued").length,
-          needsYou: mine.filter(needsYouBadge).length };
+          needsYou: mine.filter(needsYouBadge).length, lastReplyAt: last.get(t.id) };
       });
+  }
+
+  /** When something last came back in each chat (by thread id): a teammate's message or a finished run. For the unread dot. */
+  private async lastReplies(jobs?: Job[]) {
+    const last = new Map<string, string>();
+    const bump = (tid: string | undefined, at: string | undefined) => { if (tid && at && (last.get(tid) || "") < at) last.set(tid, at); };
+    for (const m of await this.store.all<Message>("messages")) if (m.role === "assistant") bump(m.threadId, m.createdAt);
+    for (const j of jobs || (await this.store.all<Job>("jobs"))) if (!j.parentId && (j.status === "done" || j.status === "failed")) bump(j.threadId, j.finishedAt);
+    return last;
+  }
+
+  /** When you last looked at each chat (by thread id; a DM is tm-<teammate>), on any device. Replies after it are unread. */
+  // since: when the hub started keeping these; anything older counts as read, so nothing old lights up at once.
+  chatSeen(): Promise<{ since: string; seen: Record<string, string> }> {
+    return this.seenChain = this.seenChain.catch(() => {}).then(() => this.readChatSeen()) as Promise<{ since: string; seen: Record<string, string> }>;
+  }
+  private async readChatSeen() {
+    const cur = await this.store.get<{ id: string; createdAt: string; since: string; seen: Record<string, string> }>("settings", "chatSeen");
+    if (cur) return { since: cur.since || cur.createdAt, seen: cur.seen || {} };
+    const since = this.clock().toISOString();
+    await this.store.put("settings", { id: "chatSeen", createdAt: since, since, seen: {} });
+    return { since, seen: {} };
+  }
+
+  private seenChain: Promise<unknown> = Promise.resolve();
+  /** You're looking at this chat: everything in it so far is read. Only moves forward; every device hears about it. */
+  markChatSeen(threadId: string): Promise<string> {
+    const next = this.seenChain.catch(() => {}).then(async () => {
+      const { since, seen } = await this.readChatSeen();
+      const at = this.clock().toISOString();
+      if ((seen[threadId] || "") >= at) return seen[threadId];
+      await this.store.put("settings", { id: "chatSeen", createdAt: since, since, seen: { ...seen, [threadId]: at } });
+      this.emit("seen", { threadId, at });
+      return at;
+    });
+    this.seenChain = next.catch(() => {});
+    return next;
   }
 
   /** A working job's latest live-view picture, or null. */
@@ -1206,6 +1244,31 @@ export class Hub {
     await this.store.remove("messages", id);
     this.emit("message", { ...m, deleted: true });
     return { value: { ok: true } };
+  }
+
+  /**
+   * A queued message you'd rather not hold for the run: "ramble" starts it as its own ramble (Hearth hands it out
+   * fresh), "run" starts it right away as a separate run in the same chat, next to the one that's going.
+   */
+  async startQueuedApart(id: string, how: "ramble" | "run"): Promise<{ error?: string; value?: { threadId: string; jobId?: string } }> {
+    const m = await this.store.get<Message>("messages", id);
+    if (!m?.queued) return { error: "That's already sent." };
+    if (how === "ramble") {
+      const from = m.threadId ? await this.store.get<Thread>("threads", m.threadId) : null;
+      await this.store.remove("messages", id);
+      this.emit("message", { ...m, deleted: true });
+      const r = await this.ramble(m.text, undefined, m.fileIds || [], from?.projectId);
+      if (r.error) return { error: r.error };
+      return { value: { threadId: r.value!.thread.id } };
+    }
+    const root = m.replyTo ? await this.store.get<Job>("jobs", m.replyTo) : null;
+    const teammateId = root?.teammateId || m.teammateId || "hearth";
+    const job = await this.store.put<Job>("jobs", { ...this.doc({}), threadId: m.threadId!, messageId: m.id, task: m.text, teammateId, status: "queued", effort: root?.effort || "light" } as Job);
+    const sent = await this.store.put<Message>("messages", { ...m, queued: undefined, replyTo: undefined, jobIds: [job.id] });
+    this.emit("message", sent);
+    this.emit("job", job);
+    this.pump(sent.id);
+    return { value: { threadId: m.threadId!, jobId: job.id } };
   }
 
   /** A run in a thread ended: whatever you queued for it goes out together as the next turn (unless another run there is still going). */
@@ -2189,13 +2252,10 @@ export class Hub {
     const hooks = this.upcomingPlans(prefs.tz);
     const first = (t: string) => t.split("\n").map((x) => x.replace(/^[-*•#\s]+/, "").trim()).find(Boolean) || "";
     const clip = (t: string, n = 90) => (t.length > n ? t.slice(0, n - 1) + "…" : t);
-    // When each teammate last wrote in your DM, so the app can show an unread dot.
+    // When each teammate last wrote (or finished something) in your DM, so the app can show an unread dot.
+    const replies = await this.lastReplies(all);
     const lastDm = new Map<string, string>();
-    for (const m of await this.store.all<Message>("messages")) {
-      if (m.role !== "assistant" || !m.threadId?.startsWith("tm-")) continue;
-      const id = m.threadId.slice(3);
-      if ((lastDm.get(id) || "") < m.createdAt) lastDm.set(id, m.createdAt);
-    }
+    for (const [tid, at] of replies) if (tid.startsWith("tm-")) lastDm.set(tid.slice(3), at);
     return team.map((t) => {
       const mine = jobs.filter((j) => j.teammateId === t.id);
       const pick = (...st: Job["status"][]) => mine.filter((j) => st.includes(j.status));
