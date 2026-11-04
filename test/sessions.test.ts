@@ -167,3 +167,16 @@ test("Codex: a thread's first job starts an app-server thread, follow-ups resume
     expect(reqs().find((r) => r.method === "thread/start").params).toMatchObject({ ephemeral: true, sandbox: "danger-full-access" });
   });
 });
+
+test("a thread's working runs are told their folder is kept, to look before redoing, to save data and scripts, and to parse with code", async () => {
+  const { buildPrompt } = await import("../src/brain.ts");
+  const job = { mode: "job" as const, context: {}, input: "check my orders" };
+  const kept = buildPrompt(job, "claude", true);
+  for (const s of ["YOUR WORKSPACE", "is KEPT", "read NOTES.md", "scripts/", "PARSE WITH CODE, NOT BY EYE", "test it on a"]) expect(kept).toContain(s);
+  expect(kept).not.toContain("nothing there is kept");
+  expect(buildPrompt({ ...job, mode: "legwork" }, "codex", true)).toContain("YOUR WORKSPACE");
+  // No thread: scratch space, as before. No shell (no jail): nothing about folders or code at all.
+  expect(buildPrompt(job, "claude", false)).toContain("nothing there is kept");
+  expect(buildPrompt(job, "claude", false)).not.toContain("YOUR WORKSPACE");
+  expect(buildPrompt(job, null, true)).not.toContain("YOUR WORKSPACE");
+});
