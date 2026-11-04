@@ -826,7 +826,9 @@ export class Hub {
     // When the label is stuck on "Working it out", the quick model reads the last few actions and says what's going on.
     const narrator = this.config.narrate === false ? null : new Narrator({ task: job.label || job.task, show,
       ask: async (prompt) => this.brain.narrate(prompt, (await this.brains()).quick) });
-    const meter: Meter = { costUsd: 0, unknown: false, signal: stop.signal,
+    // Its thread's runs are one session on the hub: a follow-up resumes where the last one left off. A part of a split
+    // job runs alongside its siblings, so it gets its own.
+    const meter: Meter = { costUsd: 0, unknown: false, signal: stop.signal, thread: job.parentId ? job.id : job.followsUp || job.id,
       onProgress: (what) => { narrator?.step(what); show(what); }, onAction: (raw) => narrator?.action(raw),
       // A picture of the page or window it's on: kept in memory; the app fetches it when told there's a new one.
       onFrame: (f) => {

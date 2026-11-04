@@ -262,10 +262,13 @@ test("end to end: the hub sets up a cloud computer that downloads Hearth from it
   expect(readFileSync(join(box, ".claude/.credentials.json"), "utf8")).toContain("from-the-hub");
   expect(JSON.parse(readFileSync(join(box, ".claude.json"), "utf8")).hasCompletedOnboarding).toBe(true);
 
-  // Work runs there.
+  // Work the hub can run stays on the hub (one place for a thread's sessions); the sandbox can run work sent to it.
   await hub.ramble("find a cheap dinner spot");
   await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done"), 10_000);
-  expect((await store.all<Job>("jobs"))[0].ranOn).toBe("Sandbox");
+  expect((await store.all<Job>("jobs"))[0].ranOn).toBe("cloud");
+  const there = computers.pick({ harness: "echo", model: "" })!;
+  expect(there.name).toBe("Sandbox");
+  expect(await there.run({ mode: "job", context: { tz: "UTC", nowIso: new Date().toISOString() }, input: "find dinner" } as any, { harness: "echo", model: "" })).toContain("demo brain");
 
   // The phone sees it as a computer that belongs to a machine.
   const devices = (await (await api("/api/devices")).json()) as any[];
