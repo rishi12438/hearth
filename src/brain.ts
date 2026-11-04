@@ -34,10 +34,23 @@ export type BrainInput = {
   context: Record<string, unknown>;
   input: string;
   toolResults?: string;
+  /** The strongest model on the team is doing it: there's no one to hand it up to. */
+  top?: boolean;
 };
 
 export const QUIET = "[[quiet]]";
 export const ESCALATE = "[[escalate]]";
+/** Why a model handed a job up: the line it wrote after the marker, or a stand-in when it gave none. */
+export function escalateWhy(text: string): string {
+  const why = text.replace(ESCALATE, " ").replace(/\s+/g, " ").trim().slice(0, 300);
+  return why || "it gave no reason";
+}
+/** What a model at the top of the ladder is told to do instead of handing the job up. */
+const AT_THE_TOP = "You are the strongest model on the team: nobody can take this over. Never reply " + ESCALATE + ". If you can't do all of it, "
+  + "do what you can, then tell the user plainly what you got done, what stopped you (a login, a site blocking you, a missing detail), "
+  + "and what they can do about it.";
+const handUp = (who: string) => `If the job is clearly beyond you or you can't do it well, reply ${ESCALATE} followed by one line on why `
+  + `(what you tried and what stopped you), and ${who} will take it.`;
 /** A teammate's answer to a message that came straight to its thread but isn't about it: plan it instead. */
 export const HAND_BACK = "[[hand-back]]";
 export const REDO = "[[redo]]";
@@ -431,7 +444,7 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
   } else if (b.mode === "job") {
     parts.push("", "You were handed ONE job from the user's ramble by the orchestrator. Do it fully now: use actions for reminders,",
       "routines, watches and memory; search the web if you need to. Then reply with the result in 1-5 short lines, written to the user.",
-      `If the job is clearly beyond you or you can't do it well, reply exactly ${ESCALATE} and a stronger model will take it.`,
+      b.top ? AT_THE_TOP : handUp("a stronger model"),
       ...atScale(code, workspace, lead), "JOB:", b.input);
   } else if (b.mode === "legwork") {
     parts.push("", "You were handed ONE job from the user's ramble. You do the LEGWORK; a stronger model on the team (the lead) will read",
@@ -440,7 +453,7 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
       "- what you found: concrete facts, names, prices, dates, addresses, with source links",
       "- what you did: actions taken and their results",
       "- anything uncertain or missing, and what you'd ask the user",
-      `Be complete and factual; the lead can't search again cheaply. If the job is beyond you, reply exactly ${ESCALATE}.`,
+      "Be complete and factual; the lead can't search again cheaply.", b.top ? AT_THE_TOP : handUp("a stronger model"),
       ...atScale(code, workspace, lead), "JOB:", b.input);
   } else if (b.mode === "voice") {
     parts.push("", "You are the lead on ONE job. A teammate on a cheaper model already did the legwork (searches, actions); their notes are",

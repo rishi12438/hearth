@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createStore, COLLECTIONS, type Store } from "../src/store/index.ts";
 import { Hub } from "../src/hub.ts";
-import { Brain } from "../src/brain.ts";
+import { Brain, buildPrompt } from "../src/brain.ts";
 import { Scripts } from "../src/scripts.ts";
 import { loadConfig } from "../src/config.ts";
 import { parseReply } from "../src/reply.ts";
@@ -193,6 +193,47 @@ test("light jobs escalate to the heavy model when the workhorse gives up", async
   expect(job.tier).toBe("heavy");
   expect(job.result).toBe("Here's your plan.");
   expect(calls.filter((c) => !c.startsWith("orchestrate"))).toEqual(["coach:big", "legwork:small", "job:big"]); // the lead's tips first; then heavy does it all, no extra voice step
+});
+
+test("a job keeps why it moved up, and only the top model is told nobody is above it", async () => {
+  await hub.ensureTeammates();
+  const tops: Record<string, boolean> = {};
+  (hub.brain as any).think = async (b: any, p: any) => {
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "Plan a trip", teammate: "Planner", effort: "light" }] });
+    if (b.mode === "legwork" || b.mode === "job") tops[`${b.mode}:${p.model}`] = !!b.top;
+    return p.model === "small" ? "[[escalate]] the booking site needs a login I don't have" : "Here's your plan.";
+  };
+  await hub.setBrains({ workhorse: { harness: "echo", model: "small" }, heavy: { harness: "echo", model: "big" } });
+  await hub.ramble("plan my trip");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done"));
+  const [job] = await store.all<Job>("jobs");
+  expect(job.escalations?.map(({ from, to, why }) => ({ from, to, why }))).toEqual([{ from: "echo small", to: "echo big", why: "the booking site needs a login I don't have" }]);
+  expect(tops).toEqual({ "legwork:small": false, "job:big": true });
+  expect((await store.all<any>("activity")).some((a) => a.kind === "job.escalated" && a.text.includes("needs a login"))).toBe(true);
+});
+
+test("the lead's redo that still can't do it fails with its reason, never posts [[escalate]]", async () => {
+  await hub.ensureTeammates();
+  (hub.brain as any).think = async (b: any) => {
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "List my orders", teammate: "Research", effort: "light" }] });
+    if (b.mode === "legwork") return "NOTES: found 12 of the orders.";
+    if (b.mode === "voice") return "[[redo]] missing most of the orders";
+    return "[[escalate]] AliExpress keeps asking for a captcha";
+  };
+  await hub.setBrains({ workhorse: { harness: "echo", model: "small" }, heavy: { harness: "echo", model: "big" } });
+  await hub.ramble("list my orders");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done" || j.status === "failed"));
+  const [job] = await store.all<Job>("jobs");
+  expect([job.status, job.result]).toEqual(["failed", "AliExpress keeps asking for a captcha"]);
+  expect(job.escalations?.map((e) => e.why)).toEqual(["the lead redid it: missing most of the orders"]);
+});
+
+test("the top model's prompt says nobody is above it; a lower one is asked for a reason", () => {
+  const low = buildPrompt({ mode: "job", context: {}, input: "x" });
+  const top = buildPrompt({ mode: "job", context: {}, input: "x", top: true });
+  expect(low).toContain("[[escalate]] followed by one line on why");
+  expect(top).toContain("strongest model on the team");
+  expect(top).not.toContain("a stronger model will take it");
 });
 
 test("hybrid: the cheap model does the legwork, the heavy model writes what you read (or redoes it)", async () => {

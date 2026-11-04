@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store, Collection } from "./store/index.ts";
 import type { Brain, BrainInput, BrainProfile, Brains, Meter } from "./brain.ts";
-import { QUIET, ESCALATE, HAND_BACK, REDO, HARNESSES, MODEL_RE, availableHarnesses, NeedsComputer, BrainsFull, POOL_HARNESSES } from "./brain.ts";
+import { QUIET, ESCALATE, escalateWhy, HAND_BACK, REDO, HARNESSES, MODEL_RE, availableHarnesses, NeedsComputer, BrainsFull, POOL_HARNESSES } from "./brain.ts";
 import type { Scripts } from "./scripts.ts";
 import type { Push } from "./push.ts";
 import { parseReply } from "./reply.ts";
@@ -58,7 +58,7 @@ const IDEAS_MARKER = "[[ideas]]";
 const MAX_OPEN_IDEAS = 4;
 const LOCATION_KEEP_DAYS = 7;
 
-type TurnOpts = { teammate?: Teammate | null; threadId?: string; jobId?: string; extra?: string; profile?: BrainProfile; meter?: Meter; allowedScripts?: string[] };
+type TurnOpts = { teammate?: Teammate | null; threadId?: string; jobId?: string; extra?: string; profile?: BrainProfile; meter?: Meter; allowedScripts?: string[]; top?: boolean };
 const label = (p: BrainProfile) => `${p.harness}${p.model ? `/${p.model}` : ""}`;
 /** A model in words for the app: "Claude opus", "Codex gpt-5.5", "Claude" (its default model). */
 export const brainName = (w: { harness: string; model?: string }) =>
@@ -294,8 +294,9 @@ export class Hub {
     const profile = opts.profile || (await this.brains()).workhorse;
     const where = { teammateId: teammate?.id, threadId: opts.threadId, jobId: opts.jobId, recipe: opts.allowedScripts };
     const ctx = await this.context(input, mode, teammate, opts.threadId);
-    const first = parseReply(await this.brain.think({ mode, context: ctx, input, toolResults: extra }, profile, opts.meter));
-    if (first.text.includes(ESCALATE)) return { text: ESCALATE, did: [] as Done[], used: [] as string[] };
+    const first = parseReply(await this.brain.think({ mode, context: ctx, input, toolResults: extra, top: opts.top }, profile, opts.meter));
+    // Keeps the model's reason with the marker: nothing it proposed is applied.
+    if (first.text.includes(ESCALATE)) return { text: `${ESCALATE} ${escalateWhy(first.text)}`, did: [] as Done[], used: [] as string[] };
     if (first.text.includes(HAND_BACK)) return { text: HAND_BACK, did: [] as Done[], used: [] as string[] }; // nothing it proposed is applied
     const applied = await this.applyActions(first.actions, evidence, where);
     if (!applied.runs.length) return { text: first.text, did: applied.done, used: applied.used, split: applied.split, tiles: applied.tiles, fileIds: applied.fileIds };
@@ -328,7 +329,7 @@ export class Hub {
       results.push(`## ${r.name}\n${ex.text}${ex.tiles.length ? `\n(${ex.tiles.length} tile(s) already shown to the user)` : ""}`);
     }
     const ctx2 = await this.context(input, mode, teammate, opts.threadId);
-    const second = parseReply(await this.brain.think({ mode, context: ctx2, input, toolResults: [extra, ...results].filter(Boolean).join("\n\n") }, profile, opts.meter));
+    const second = parseReply(await this.brain.think({ mode, context: ctx2, input, toolResults: [extra, ...results].filter(Boolean).join("\n\n"), top: opts.top }, profile, opts.meter));
     const applied2 = await this.applyActions(second.actions.filter((a: any) => a?.type !== "script.run"), evidence, where);
     const tiles = [...applied.tiles, ...applied2.tiles, ...scriptTiles].slice(0, 4);
     const fileIds = [...applied.fileIds, ...applied2.fileIds, ...scriptFiles];
@@ -972,12 +973,22 @@ export class Hub {
     const attempt = async (tier: Tier) => {
       cur = await this.saveJob({ ...cur, status: "working", tier });
       meter.lead = hybrid && tier !== "heavy" && label(brains[tier]) !== label(brains.heavy);
-      return this.turn(hybrid && tier !== "heavy" ? "legwork" : "job", input, job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains[tier], meter });
+      return this.turn(hybrid && tier !== "heavy" ? "legwork" : "job", input, job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains[tier], meter, top: tier === "heavy" });
     };
     // Start on the cheapest model the plan allows; move up a step when a model can't do it.
     const ladder: Tier[] = job.effort === "heavy" ? ["heavy"] : job.effort === "quick" ? ["quick", "workhorse", "heavy"] : ["workhorse", "heavy"];
     let tier: Tier = ladder[0];
     let escalated = false;
+    // Each step up, with why: kept on the job (the thread shows it) and in the log.
+    const escalations: NonNullable<Job["escalations"]> = [];
+    const moveUp = async (from: Tier, to: Tier, why: string) => {
+      escalated = true;
+      escalations.push({ from: brainName(brains[from]), to: brainName(brains[to]), why, at: this.clock().toISOString() });
+      cur = await this.saveJob({ ...cur, escalated, escalations });
+      await this.log("job.escalated", `${job.task.slice(0, 80)} → ${label(brains[to])}: ${why.slice(0, 160)}`);
+    };
+    // The strongest model said it can't: the job fails with why it stopped ("Couldn't do it: …"), never the marker.
+    const gaveUp = (text: string) => new Error(escalateWhy(text));
     if (await overCap()) return finish({ how: "fresh" });
     // The lead briefs a cheaper model before it starts: the approach, the traps, what to check (brains/lead.ts).
     // Only with hybrid on (Settings → Brains): off means one model does the job by itself.
@@ -987,16 +998,25 @@ export class Hub {
       if (tips) input += `\n\nTIPS FROM THE LEAD (a stronger model on your team, before you started):\n${tips}`;
     }
     try {
-      let r: Awaited<ReturnType<typeof attempt>> | null = await attempt(tier).catch((err) => (tier !== "heavy" ? null : Promise.reject(err)));
+      let failed = "";
+      const tryTier = (t: Tier) => attempt(t).catch((err) => {
+        if (t === "heavy") throw err;
+        failed = String(err?.message || err).slice(0, 300);
+        return null;
+      });
+      let r: Awaited<ReturnType<typeof attempt>> | null = await tryTier(tier);
       if (stop.signal.aborted) throw new Error("Restarted with your new message.");
       if (job.mayHandBack && r?.text.includes(HAND_BACK)) return await this.handBack(cur, meter);
       while (tier !== "heavy" && (!r || r.text.includes(ESCALATE) || !r.text.trim())) {
-        escalated = true; tier = ladder[ladder.indexOf(tier) + 1];
-        await this.log("job.escalated", `${job.task.slice(0, 80)} → ${label(brains[tier])}`);
-        r = await attempt(tier).catch((err) => (tier !== "heavy" ? null : Promise.reject(err)));
+        const why = !r ? `it hit an error: ${failed}` : r.text.includes(ESCALATE) ? escalateWhy(r.text) : "it replied with nothing";
+        const from = tier;
+        tier = ladder[ladder.indexOf(tier) + 1];
+        await moveUp(from, tier, why);
+        r = await tryTier(tier);
         if (stop.signal.aborted) throw new Error("Restarted with your new message.");
       }
-      if (!r || r.text.includes(ESCALATE)) throw new Error("Nobody could do this one.");
+      if (!r) throw new Error("Nobody could do this one.");
+      if (r.text.includes(ESCALATE)) throw gaveUp(r.text);
       let voiced = false;
       const legwork = r;
       if (hybrid && tier !== "heavy" && !legwork.split) {
@@ -1007,9 +1027,13 @@ export class Hub {
         if (stop.signal.aborted) throw new Error("Restarted with your new message.");
         if (v.text.includes(REDO) || !v.text.trim()) {
           // The lead wasn't happy with the legwork: it does the job itself.
-          await this.log("job.redo", `${job.task.slice(0, 80)}: ${v.text.replace(REDO, "").trim().slice(0, 120)}`);
-          escalated = true; tier = "heavy";
+          const note = v.text.replace(REDO, "").trim().slice(0, 300) || "the notes came back empty";
+          await this.log("job.redo", `${job.task.slice(0, 80)}: ${note.slice(0, 120)}`);
+          await moveUp(tier, "heavy", `the lead redid it: ${note}`);
+          tier = "heavy";
           const again = await attempt("heavy");
+          if (stop.signal.aborted) throw new Error("Restarted with your new message.");
+          if (again.text.includes(ESCALATE)) throw gaveUp(again.text);
           r = { ...again, split: again.split ?? null, did: [...r0.did, ...again.did], tiles: [...(r0.tiles || []), ...(again.tiles || [])].slice(0, 4), fileIds: [...(r0.fileIds || []), ...(again.fileIds || [])] };
         } else {
           r = { ...r0, split: r0.split ?? null, text: v.text, did: [...r0.did, ...v.did], tiles: [...(r0.tiles || []), ...(v.tiles || [])].slice(0, 4), fileIds: [...(r0.fileIds || []), ...(v.fileIds || [])] };
