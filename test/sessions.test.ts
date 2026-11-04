@@ -165,10 +165,16 @@ test("Codex: a thread's first job starts an app-server thread, follow-ups resume
     expect(m3.resumed).toBeUndefined();
     expect(brain.sessions.get("thread-orders", "codex")).not.toBe("thr-gone0000");
 
-    // A quick call: an ephemeral thread, nothing kept.
+    // A quick call: an ephemeral thread, nothing kept, and no shell (like Claude's --tools "").
     writeFileSync(log, "");
     await brain.think({ mode: "clean", context: {}, input: "hi" }, { harness: "codex", model: "" });
-    expect(reqs().find((r) => r.method === "thread/start").params).toMatchObject({ ephemeral: true, sandbox: "danger-full-access" });
+    expect(reqs().find((r) => r.method === "thread/start").params).toMatchObject({ ephemeral: true, sandbox: "read-only",
+      config: { "features.shell_tool": false, "features.unified_exec": false } });
+
+    // The lead writing up the legwork: no shell either, so it can't go back through the files and redo the job.
+    writeFileSync(log, "");
+    await brain.think({ mode: "voice", context: {}, input: "NOTES FROM THE LEGWORK: done" }, { harness: "codex", model: "" }, meter("thread-orders"));
+    expect(reqs().find((r) => r.method.startsWith("thread/")).params).toMatchObject({ sandbox: "read-only", config: { "features.shell_tool": false } });
   });
 });
 
