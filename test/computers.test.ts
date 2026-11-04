@@ -261,6 +261,7 @@ test("connected devices: the hub reports its address and IP; each device's last 
   const info = await (await api("/api/devices/hub", laptop.token)).json() as any;
   expect(info).toMatchObject({ address: expect.any(String), version: expect.any(String), upSince: expect.any(String) });
   expect(typeof info.ip === "string" || info.ip === null).toBe(true);
+  for (const k of ["cpu", "mem"]) { expect(Number.isInteger(info.load[k])).toBe(true); expect(info.load[k]).toBeGreaterThanOrEqual(0); expect(info.load[k]).toBeLessThanOrEqual(100); }
   const list = await (await api("/api/devices", laptop.token)).json() as any[];
   expect(list.find((d) => d.id === laptop.device.id)?.ip).toMatch(/127\.0\.0\.1|::1/);
   expect(list.some((d) => "tokenHash" in d)).toBe(false);

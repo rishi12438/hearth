@@ -4281,6 +4281,8 @@ async function openConnectedDevices() {
     const hubRow = row("server", hubInfo?.name || S.state?.hub?.name || "Hearth", "Hub",
       hubInfo?.address || (activeHub()?.url || location.origin).replace(/^https?:\/\//, ""), S.conn, () => [
         facts(hubInfo?.target === "lightsail" ? "A server" : "This computer", ip(hubInfo?.ip), hubInfo?.upSince && `up ${relTime(hubInfo.upSince).replace(/ ago$/, "")}`),
+        hubInfo?.load && h("p", { class: "muted small hubload" }, ...([["CPU", hubInfo.load.cpu], ["Memory", hubInfo.load.mem]] as [string, number][]).flatMap(([k, v], i) => [
+          i ? " · " : "", h("span", { class: v > 90 ? "hot" : v > 70 ? "warm" : "", title: v > 90 ? "Very high" : v > 70 ? "High" : "" }, `${k} ${v}%${v > 70 ? " !" : ""}`)])),
         h("small", { class: "cclabel" }, "Tools"),
         toolsBlock(hubInfo?.tools, "Couldn't check the hub's tools."),
       ]);
