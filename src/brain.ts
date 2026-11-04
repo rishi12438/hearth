@@ -757,7 +757,10 @@ export class Brain {
       stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe",
     });
     let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; proc.kill(); }, this.config.agentTimeoutMs);
+    // Planning and chat should answer fast. Real jobs (browsing, logging in, research) run until done, unless
+    // HEARTH_JOB_TIMEOUT_SEC sets a cap; a new message from the user still stops them.
+    const limitMs = web ? this.config.jobTimeoutMs : this.config.agentTimeoutMs;
+    const timer = limitMs > 0 ? setTimeout(() => { timedOut = true; proc.kill(); }, limitMs) : undefined;
     const stop = () => proc.kill();
     meter?.signal?.addEventListener("abort", stop);
     // Read stdout as it comes so a streaming harness (claude stream-json) can report progress along the way.
@@ -824,7 +827,7 @@ export class Brain {
     clearTimeout(timer);
     meter?.signal?.removeEventListener("abort", stop);
     if (meter?.signal?.aborted) throw new Error("Restarted with your new message.");
-    if (timedOut) throw new Error(`${name} took longer than ${this.config.agentTimeoutMs / 1000}s.`);
+    if (timedOut) throw new Error(`${name} took longer than ${limitMs >= 120_000 ? `${Math.round(limitMs / 60_000)} min` : `${limitMs / 1000}s`}.`);
     let reply = out;
     let failed = code !== 0;
     if (harness === "claude") {
