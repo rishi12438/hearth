@@ -78,7 +78,7 @@ export async function unlock() {
   setUnlock(activeHub()!, out.unlock);
 }
 
-/** A new device asks the hub to join. Returns the code to compare with the one on your primary phone. */
+/** A new device asks the hub to join. Returns the code to compare with the one on your other devices. */
 export async function requestAccess(url: string, deviceName: string) {
   const origin = normalizeUrl(url);
   const res = await fetch(origin + "/api/access/request", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deviceName }) });
@@ -87,14 +87,14 @@ export async function requestAccess(url: string, deviceName: string) {
   return { origin, poll: data.poll as string, code: data.code as string };
 }
 
-/** Wait for the primary phone to approve. Resolves with the new hub entry, or throws if denied or expired. */
+/** Wait for one of your devices to approve. Resolves with the new hub entry, or throws if denied or expired. */
 export async function waitForApproval(origin: string, poll: string, signal: AbortSignal): Promise<HubRef> {
   while (!signal.aborted) {
     await new Promise((r) => setTimeout(r, 2500));
     const res = await fetch(origin + "/api/access/poll", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ poll }), signal });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || "That request expired.");
-    if (data.status === "denied") throw new Error("Your primary device said no.");
+    if (data.status === "denied") throw new Error("One of your devices said no.");
     if (data.status === "approved" && data.token) {
       const ref: HubRef = { id: data.deviceId, url: origin, name: data.hub?.name || "Hub", token: data.token };
       saveHubs([...hubs().filter((h) => h.url !== origin), ref]);

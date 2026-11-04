@@ -17,6 +17,10 @@ let bun = resources.appendingPathComponent("bun").path
 let src = resources.appendingPathComponent("hearth-src").path
 let hubFile = appSupport.appendingPathComponent("app-hub.txt") // the hub this app opens after setup
 let wizardLog = appSupport.appendingPathComponent("wizard.log") // the setup process's output, for when it goes wrong
+// This Mac's link to the hub as a computer (so teammates can use its browser logins and run work here): made by itself.
+let computerDir = appSupport.appendingPathComponent("computer")
+let computerLink = computerDir.appendingPathComponent("computer.json") // what `hearth computer` reads (src/computer.ts)
+let computerLog = appSupport.appendingPathComponent("computer.log")
 
 /// The PATH your Terminal has, so Hearth finds Claude Code and Codex (apps start with a bare PATH).
 func loginPath() -> String {
@@ -35,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var window: NSWindow!
     var web: WKWebView!
     var wizard: Process?
+    var computer: Process?
     var statusItem: NSStatusItem?
     let path = loginPath()
 
@@ -61,9 +66,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         NSApp.activate(ignoringOtherApps: true)
         if let hub = try? String(contentsOf: hubFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), let url = URL(string: hub), !hub.isEmpty {
             web.load(URLRequest(url: url))
+            startComputer() // already linked: keep the line up from launch; the page links it if it isn't yet
         } else {
             startWizard()
         }
+    }
+
+    // ---------- this Mac as a computer for the hub ----------
+
+    /// The saved link, if it's for the hub this app opens.
+    func savedLink() -> [String: Any]? {
+        guard let data = try? Data(contentsOf: computerLink), let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let hub = j["hub"] as? String, let saved = try? String(contentsOf: hubFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+              let a = URL(string: hub), let b = URL(string: saved), a.host == b.host, a.scheme == b.scheme, a.port == b.port else { return nil }
+        return j
+    }
+
+    /// Run `hearth computer` in the background while the app is open. Exit 0 means the hub signed it out: forget the
+    /// link so the next launch links again. Any other stop: start it again shortly.
+    func startComputer() {
+        guard computer == nil, savedLink() != nil else { return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: bun)
+        p.arguments = ["\(src)/src/cli.ts", "computer"]
+        p.currentDirectoryURL = URL(fileURLWithPath: src)
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = path; env["HEARTH_APP"] = "1"; env["HEARTH_DATA"] = computerDir.path
+        p.environment = env
+        if !FileManager.default.fileExists(atPath: computerLog.path) { FileManager.default.createFile(atPath: computerLog.path, contents: nil) }
+        if let log = try? FileHandle(forWritingTo: computerLog) { log.seekToEndOfFile(); p.standardOutput = log; p.standardError = log }
+        p.terminationHandler = { [weak self] proc in
+            DispatchQueue.main.async {
+                guard let self, self.computer === proc else { return }
+                self.computer = nil
+                if proc.terminationStatus == 0 && proc.terminationReason == .exit { try? FileManager.default.removeItem(at: computerLink); return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { self.startComputer() }
+            }
+        }
+        do { try p.run(); computer = p } catch {}
+    }
+
+    func stopComputer() { let old = computer; computer = nil; old?.terminate() }
+
+    /// The page hands over a fresh link from the hub (POST /api/devices/link-self): save it (only you can read it), restart.
+    func saveLink(_ link: [String: Any]) -> Bool {
+        guard let hub = link["hub"] as? String, let url = URL(string: hub), isHubPage(url),
+              let token = link["token"] as? String, token.count >= 20, let deviceId = link["deviceId"] as? String,
+              let name = link["name"] as? String else { return false }
+        try? FileManager.default.createDirectory(at: computerDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        guard let data = try? JSONSerialization.data(withJSONObject: ["hub": hub, "token": token, "deviceId": deviceId, "name": name], options: [.prettyPrinted]) else { return false }
+        FileManager.default.createFile(atPath: computerLink.path, contents: data, attributes: [.posixPermissions: 0o600])
+        stopComputer()
+        startComputer()
+        return true
     }
 
     /// Run `hearth wizard` and open the address it prints.
@@ -192,6 +247,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             guard message.frameInfo.isMainFrame, let id = m["id"] as? String, isHubPage(message.frameInfo.request.url ?? web.url),
                   let brain = m["brain"] as? String, brain == "claude" || brain == "codex" else { return }
             chrome(brain == "claude" ? ["brains", "token", "claude", "--json"] : ["brains", "export", "codex", "--json"]) { [weak self] out in self?.reply(id, out) }
+        case "computer-link-status":
+            // Every launch the page asks: is this Mac linked to this hub? (It checks the hub still knows it, too.)
+            guard message.frameInfo.isMainFrame, let id = m["id"] as? String, isHubPage(message.frameInfo.request.url ?? web.url) else { return }
+            let l = savedLink()
+            let out: [String: Any] = ["linked": l != nil, "hub": (l?["hub"] as? String) ?? "", "deviceId": (l?["deviceId"] as? String) ?? "",
+                                      "running": computer?.isRunning == true, "name": Host.current().localizedName ?? "My Mac"]
+            if let d = try? JSONSerialization.data(withJSONObject: out), let s = String(data: d, encoding: .utf8) { reply(id, s) }
+        case "computer-link":
+            guard message.frameInfo.isMainFrame, let id = m["id"] as? String, isHubPage(message.frameInfo.request.url ?? web.url) else { return }
+            let ok = (m["link"] as? [String: Any]).map(saveLink) ?? false
+            reply(id, ok ? "{\"ok\":true}" : "{\"error\":\"That link isn't for this hub.\"}")
         default: break
         }
     }
@@ -340,7 +406,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     @objc func rerun() { try? FileManager.default.removeItem(at: hubFile); startWizard(fresh: true) }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { false }
-    func applicationWillTerminate(_ note: Notification) { let old = wizard; wizard = nil; old?.terminate() }
+    func applicationWillTerminate(_ note: Notification) { let old = wizard; wizard = nil; old?.terminate(); stopComputer() }
 }
 
 let app = NSApplication.shared

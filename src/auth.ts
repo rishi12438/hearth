@@ -65,6 +65,11 @@ export async function owners(store: Store) {
   return marked.length ? marked : all.filter((d) => d.role !== "computer").slice(0, 1);
 }
 
+/** Your own signed-in devices (phone, Mac app, laptop browser): any of them can let a new device or computer in. */
+export async function personalDevices(store: Store) {
+  return (await store.all<Device>("devices")).filter((d) => d.role !== "computer");
+}
+
 export const isOwner = async (store: Store, d: Device) => (await owners(store)).some((o) => o.id === d.id);
 
 export async function deviceForToken(store: Store, header: string | null) {

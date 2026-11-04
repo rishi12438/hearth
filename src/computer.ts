@@ -23,14 +23,14 @@ export function readLink(dataDir: string): Link | null {
   try { return JSON.parse(readFileSync(linkFile(dataDir), "utf8")); } catch { return null; }
 }
 
-/** Ask the hub to let this computer in. Your primary phone approves it, like any new device. */
+/** Ask the hub to let this computer in. Any of your signed-in devices approves it, like any new device. */
 export async function joinHub(hubUrl: string, dataDir: string, name = computerName(), log = console.log, opts: { offerShareKey?: boolean; onCode?: (code: string) => void } = {}) {
   const hub = new URL(hubUrl).origin;
   const res = await fetch(`${hub}/api/access/request`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deviceName: name, kind: "computer" }) });
   const r: any = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(r.error || `The hub answered ${res.status}`);
   opts.onCode?.(r.code);
-  log(`\n  On your primary phone, approve "${name}". It shows the code  ${r.code}  — only approve if it matches.\n  Waiting…`);
+  log(`\n  On any device signed in to Hearth (Settings → Devices), approve "${name}". It shows the code  ${r.code}  — only approve if it matches.\n  Waiting…`);
   const until = Date.now() + 10 * 60_000;
   while (Date.now() < until) {
     await Bun.sleep(2000);

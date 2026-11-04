@@ -224,6 +224,54 @@ test("end to end: a Mac links in, shows online on the phone, runs jobs on its ow
   expect(logs.some((l) => l.includes("signed out"))).toBe(true);
 });
 
+test("any of your signed-in devices (not just the primary) can approve a computer link; a computer key can't", async () => {
+  const { store, url, api } = await realHub({ HEARTH_AGENT: "custom" });
+  const laptop = await addDevice(store, "Laptop browser", "member");
+  const other = await addDevice(store, "Studio (Mac)", "computer");
+  const ask = await (await fetch(url + "/api/access/request", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deviceName: "Rishi's MacBook", kind: "computer" }) })).json() as any;
+  expect((await (await api("/api/state", laptop.token)).json()).pendingAccess).toBe(1);
+  const waiting = await (await api("/api/access", laptop.token)).json() as any[];
+  expect(waiting.map((r) => [r.name, r.kind, r.code])).toEqual([["Rishi's MacBook", "computer", ask.code]]);
+  // A linked computer's key never reaches /api, so it can't let anyone in.
+  expect((await api(`/api/access/${waiting[0].id}/approve`, other.token, { method: "POST", body: "{}" })).status).toBe(403);
+  expect((await api(`/api/access/${waiting[0].id}/approve`, laptop.token, { method: "POST", body: "{}" })).status).toBe(200);
+  const polled = await (await fetch(url + "/api/access/poll", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ poll: ask.poll }) })).json() as any;
+  expect(polled.status).toBe("approved");
+  expect((await store.all<any>("devices")).find((d) => d.id === polled.deviceId)?.role).toBe("computer");
+});
+
+test("connected devices: the hub reports its address and IP; each device's last IP is kept; any device can make a pair code", async () => {
+  const { store, api } = await realHub({ HEARTH_AGENT: "custom" });
+  const laptop = await addDevice(store, "Laptop browser", "member");
+  const info = await (await api("/api/devices/hub", laptop.token)).json() as any;
+  expect(info).toMatchObject({ address: expect.any(String), version: expect.any(String), upSince: expect.any(String) });
+  expect(typeof info.ip === "string" || info.ip === null).toBe(true);
+  const list = await (await api("/api/devices", laptop.token)).json() as any[];
+  expect(list.find((d) => d.id === laptop.device.id)?.ip).toMatch(/127\.0\.0\.1|::1/);
+  expect(list.some((d) => "tokenHash" in d)).toBe(false);
+  expect((await api("/api/devices/pair-code", laptop.token, { method: "POST", body: "{}" })).status).toBe(200);
+});
+
+test("the Mac app links its own Mac with its session: no approval, one computer per device, and the link works", async () => {
+  const { store, url, api } = await realHub({ HEARTH_AGENT: "custom" });
+  const macApp = await addDevice(store, "Mac app", "member");
+  const self = (token: string) => api("/api/devices/link-self", token, { method: "POST", body: JSON.stringify({ name: "Rishi's MacBook" }), headers: { Origin: url } });
+  const a = await (await self(macApp.token)).json() as any;
+  expect([a.hub, a.name, typeof a.deviceId, typeof a.token]).toEqual([url, "Rishi's MacBook", "string", "string"]);
+  // Asking again (the app lost its file) gives a new key for the same computer, and the old key stops working.
+  const b = await (await self(macApp.token)).json() as any;
+  expect(b.deviceId).toBe(a.deviceId);
+  expect(b.token).not.toBe(a.token);
+  expect((await store.all<any>("devices")).filter((d) => d.role === "computer").length).toBe(1);
+  expect((await fetch(url + "/computer", { headers: { Authorization: "Bearer " + a.token } })).status).toBe(401);
+  // The link it got really connects.
+  const stop = connect({ config: macBrain(), link: { hub: url, token: b.token, deviceId: b.deviceId, name: b.name }, log: () => {} });
+  cleanups.push(stop);
+  await until(async () => ((await (await api("/api/devices", macApp.token)).json()) as any[]).find((d) => d.id === b.deviceId)?.link?.state === "online");
+  // A computer key can't link more computers.
+  expect((await self(b.token)).status).toBe(403);
+});
+
 test("end to end: with the Mac off, a job parks as 'needs your Mac' and finishes by itself when it comes back", async () => {
   const { hub, store, url } = await realHub({ HEARTH_AGENT: "custom" });
   const { token, device } = await addDevice(store, "Studio (Mac)", "computer");

@@ -207,7 +207,7 @@ function draw(s) {
   }
   if (s.stage === "waiting") {
     app.append(step(1, true, "Asked " + s.hub),
-      step(2, false, "Approve it on your phone", el("p", { class: "muted small" }, "Your primary phone got a request for \\"" + s.name + "\\". Approve it only if it shows this code:"), el("div", { class: "code" }, s.code || "…")));
+      step(2, false, "Approve it on one of your devices", el("p", { class: "muted small" }, "Your signed-in devices got a request for \\"" + s.name + "\\" (Settings → Devices). Approve it only if it shows this code:"), el("div", { class: "code" }, s.code || "…")));
     return;
   }
   const brains = s.brains.length ? s.brains.map((b) => b === "claude" ? "Claude Code" : "Codex").join(" and ") : "none yet: install Claude Code and log in";
