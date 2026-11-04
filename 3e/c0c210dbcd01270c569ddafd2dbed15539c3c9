@@ -1,0 +1,24 @@
+test/triggers.test.ts
+  s_75f1435d84d94a::t_ba1e5875bb5218 223-231,233-237,241-244
+  s_75f1435d84d94a::t_f8b11dc5bb7467 232,238-240
+src/events/pipeline.ts
+  s_75f1435d84d94a::t_ec9bbde345c082 724-730
+src/hub.ts
+  s_75f1435d84d94a::t_ec9bbde345c082 354-355,357-359
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "3ec0c210dbcd01270c569ddafd2dbed15539c3c9",
+  "prompts": {},
+  "sessions": {
+    "s_75f1435d84d94a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3865f265-4f2e-4731-aa57-d8af1d6c0278",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
