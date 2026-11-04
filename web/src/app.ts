@@ -1326,6 +1326,13 @@ function plainMessage(m: any, grouped = false) {
   // Carried on in a task's thread: one tap to it.
   const goes = (m.continues || []).map((id: string) => { const j = S.chat?.jobs.find((x: any) => x.id === id);
     return j ? h("button", { class: "fromchip", on: { click: () => { location.hash = `#c/${S.chat.thread.id}/${id}`; } } }, face(mate(j.teammateId), 18, jobState(j)), `Continued in ${jobLabel(j)}`, icon("chevron", 13)) : null; });
+  // A trigger handing what happened to Hearth: shown as the trigger (it's not you talking). The event data stays folded.
+  if (m.role === "user" && m.fromTrigger) {
+    const [ask, rest] = String(m.text).split(/\n\nWhat happened \(/);
+    const data = rest ? h("details", { class: "trigdata" }, h("summary", null, "What happened"), h("pre", { class: "output" }, `(${rest}`.replace(/<\/?untrusted>/g, "").trim())) : null;
+    return row({ face: h("span", { class: "trigav" }, icon("zap", 18)), name: m.fromTrigger.title, badge: h("span", { class: "apptag" }, "TRIGGER") }, m.createdAt,
+      [h("div", { class: "mtext" }, ask), data, ...goes], grouped);
+  }
   if (m.role === "user") return row(youWho(), m.createdAt, [h("div", { class: "mtext" }, m.text), (m.fileIds || []).map(fileCard), ...goes], grouped);
   const from = m.fromThreadId ? S.threads.find((t) => t.id === m.fromThreadId) : null;
   const body: (Node | null)[] = [m.proactive ? h("div", { class: "proline" }, icon("bell", 13), m.proactive.title) : null, richText(m.text),
@@ -2863,6 +2870,14 @@ async function openExamples(t: any) {
   } catch (e) { handleError(e); }
 }
 
+/** Who handles a trigger and where it says so, in a few words. */
+function routeText(t: any) {
+  if (t.route?.who === "session") return `→ ${mate(t.teammateId || "hearth").name} carries on in the same task thread`;
+  const who = t.route?.who === "hearth" ? "Hearth picks who" : `${mate(t.teammateId || "hearth").name} handles it`;
+  const where = t.route?.where === "new" ? "in a new ramble each time" : t.route?.where === "dm" ? "in their DM" : t.threadId ? "in the ramble it came from" : "in their DM";
+  return `→ ${who}, ${where}`;
+}
+
 function actionText(a: any) {
   if (a.type === "workflow") return `runs workflow ${a.name}`;
   if (a.type === "think") return `thinks: ${a.prompt}`;
@@ -2912,6 +2927,7 @@ function drawTriggers() {
       t.judge ? h("small", { class: "sub judgeline" }, h("span", { class: "judgetag" }, "judge"), ` “${t.judge.prompt}” → ${answersText(t.judge.output)}, acts when `, h("code", { class: "formula" }, t.judge.pass),
         t.examples ? h("button", { class: "link", on: { click: () => openExamples(t) } }, ` · ${t.examples} correction${t.examples === 1 ? "" : "s"}`) : null) : null,
       sys(t) ? h("small", { class: "sub" }, t.why) : h("small", { class: "sub" }, actionText(t.action)),
+      sys(t) ? null : h("small", { class: "sub" }, routeText(t)),
       h("small", { class: "sub" }, [t.fireCount ? `ran ${t.fireCount}×` : "hasn't run yet", t.lastFiredAt ? `last ${shortAgo(t.lastFiredAt)}` : null, t.cooldownMin ? `at most every ${t.cooldownMin} min` : null, sys(t) ? null : by(t.createdBy)].filter(Boolean).join(" · "))),
     owner && t.timer && t.status !== "done" && !sys(t) ? h("button", { class: "iconbtn", "aria-label": "Run now", title: "Run now", on: { click: () => pipeDo(() => call(`/api/pipeline/timers/${encodeURIComponent(t.timer.name)}/run`, { body: {} }), "Running it now") } }, icon("play", 16)) : null,
     t.status !== "done" ? pauseTrigger(t) : null,
@@ -3614,6 +3630,10 @@ function openNewReminder() {
       const title = h("input", { class: "field", placeholder: "Morning brief", maxLength: 80 }) as HTMLInputElement;
       const prompt = h("textarea", { class: "field", rows: 3, placeholder: "Tell me today's weather, what's coming up, and one thing I said I'd do." }) as HTMLTextAreaElement;
       const time = h("input", { class: "field", type: "time", value: "08:00" }) as HTMLInputElement;
+      // Who does it when it's time: Hearth picks (it can split it or bring in a new teammate), or one teammate.
+      const who = h("select", { class: "field" }, h("option", { value: "hearth" }, "Hearth picks who"),
+        (S.teammates || []).map((m: any) => h("option", { value: m.id }, m.name))) as HTMLSelectElement;
+      const post = h("select", { class: "field" }, h("option", { value: "new" }, "In a new ramble each time"), h("option", { value: "dm" }, "In a DM")) as HTMLSelectElement;
       const days = new Set([1, 2, 3, 4, 5]);
       const dayRow = h("div", { class: "days" }, ["S", "M", "T", "W", "T", "F", "S"].map((l, i) => {
         const b = h("button", { class: `day ${days.has(i) ? "on" : ""}`, type: "button", on: { click: () => { days.has(i) ? days.delete(i) : days.add(i); b.classList.toggle("on"); } } }, l);
@@ -3624,10 +3644,13 @@ function openNewReminder() {
         h("label", null, h("span", null, "What should I do?"), prompt),
         h("label", null, h("span", null, "At"), time),
         h("div", { class: "label" }, h("span", null, "On"), dayRow),
+        h("label", null, h("span", null, "Who does it"), who),
+        h("label", null, h("span", null, "Post it"), post),
         h("p", { class: "muted small" }, "Your assistant runs this on schedule and messages you with the result. It can stay quiet when there's nothing worth saying."),
         h("button", { class: "btn primary big", on: { click: () => {
           if (!title.value.trim() || !prompt.value.trim()) return;
-          save({ title: title.value, prompt: prompt.value, why: "A routine you set up", schedule: { time: time.value, days: [...days] } }, "Routine added");
+          save({ title: title.value, prompt: prompt.value, why: "A routine you set up", schedule: { time: time.value, days: [...days] },
+            route: { who: who.value === "hearth" ? "hearth" : "self", where: post.value }, ...(who.value !== "hearth" ? { teammateId: who.value } : {}) }, "Routine added");
         } } }, "Add routine"));
     }
   };

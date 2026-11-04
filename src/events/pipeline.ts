@@ -44,6 +44,21 @@ export type TriggerAction =
   | { type: "script"; script: string; args: string[]; then: "notify" | "think" }
   /** The hub's own housekeeping (memory review, ideas, library cleanup). Only the hub makes these. */
   | { type: "system"; job: string };
+/**
+ * Who handles a trigger when it fires, and where it says so.
+ *  who: "self" = the teammate it belongs to (teammateId; Hearth when none) · "hearth" = Hearth reads what happened,
+ *       picks the right teammate(s) (or makes one) and hands it out, like a ramble · "session" = one task thread
+ *       (session = its root job id) goes on: same teammate, same conversation, everything said so far.
+ *  where: "here" = the ramble it was made in (its DM once that's archived) · "dm" = the teammate's DM · "new" = a new ramble on Home.
+ */
+export type TriggerRoute = { who: "self" | "hearth" | "session"; where: "here" | "dm" | "new"; session?: string };
+export const DEFAULT_ROUTE: TriggerRoute = { who: "self", where: "here" };
+export function cleanRoute(x: any, fallback: TriggerRoute = DEFAULT_ROUTE): TriggerRoute {
+  if (!x || typeof x !== "object") return fallback;
+  const session = typeof x.session === "string" && /^[\w-]{8,64}$/.test(x.session) ? x.session : undefined;
+  const who = x.who === "session" && session ? "session" : x.who === "hearth" ? "hearth" : x.who === "self" ? "self" : fallback.who;
+  return { who, where: ["here", "dm", "new"].includes(x.where) ? x.where : fallback.where, ...(who === "session" ? { session: session || fallback.session } : {}) };
+}
 export type EventTrigger = {
   id: string; name: string; sourceId: string; sourceName: string;
   /** What it's called in the app ("Call mom"); the name when not given. */
@@ -59,6 +74,8 @@ export type EventTrigger = {
   /** Corrections you gave this trigger's judge. */
   examples: number;
   action: TriggerAction; why: string;
+  /** Who handles it and where it posts. */
+  route: TriggerRoute;
   /** done: a one-time reminder that has rung. */
   status: "active" | "paused" | "done"; cooldownMin: number;
   lastFiredAt: string | null; fireCount: number;
@@ -212,7 +229,8 @@ export class EventPipeline {
         why TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active', cooldown_min INTEGER NOT NULL DEFAULT 0,
         last_fired_at TEXT, fire_count INTEGER NOT NULL DEFAULT 0,
         created_by TEXT NOT NULL, teammate_id TEXT, thread_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-        title TEXT, timer_id TEXT REFERENCES timers(id) ON DELETE CASCADE
+        title TEXT, timer_id TEXT REFERENCES timers(id) ON DELETE CASCADE,
+        route TEXT CHECK (route IS NULL OR json_valid(route))
       );
       CREATE INDEX IF NOT EXISTS triggers_source ON triggers (source_id, status);
       CREATE TABLE IF NOT EXISTS timers (
@@ -267,7 +285,7 @@ export class EventPipeline {
       CREATE INDEX IF NOT EXISTS held_until ON held (until);
     `);
     // Files made before judges and reminders existed get the new columns.
-    for (const [table, col, def] of [["triggers", "judge", "TEXT"], ["event_log", "value", "TEXT"], ["triggers", "title", "TEXT"], ["triggers", "timer_id", "TEXT REFERENCES timers(id) ON DELETE CASCADE"]]) {
+    for (const [table, col, def] of [["triggers", "judge", "TEXT"], ["event_log", "value", "TEXT"], ["triggers", "title", "TEXT"], ["triggers", "timer_id", "TEXT REFERENCES timers(id) ON DELETE CASCADE"], ["triggers", "route", "TEXT"]]) {
       const cols = this.db.query(`PRAGMA table_info(${table})`).all() as { name: string }[];
       if (!cols.some((c) => c.name === col)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
     }
@@ -305,7 +323,7 @@ export class EventPipeline {
     return { id: r.id, name: r.name, sourceId: r.source_id, sourceName: r.source_name, title: r.title || r.name, timerId: r.timer_id ?? null,
       timer: r.timer_id && r.timer_name ? { name: r.timer_name, schedule: JSON.parse(r.timer_schedule), nextAt: r.timer_next_at, status: r.timer_status } : null,
       formula: r.formula, judge: r.judge ? JSON.parse(r.judge) : null,
-      examples: r.examples ?? 0, action: JSON.parse(r.action),
+      examples: r.examples ?? 0, action: JSON.parse(r.action), route: cleanRoute(r.route ? JSON.parse(r.route) : null),
       why: r.why, status: r.status, cooldownMin: r.cooldown_min, lastFiredAt: r.last_fired_at, fireCount: r.fire_count,
       createdBy: r.created_by, teammateId: r.teammate_id, threadId: r.thread_id, createdAt: r.created_at, updatedAt: r.updated_at };
   }
@@ -559,9 +577,10 @@ export class EventPipeline {
     }
     const now = this.now(), id = randomUUID();
     const cooldown = Math.max(0, Math.min(10080, Math.round(Number(input?.cooldownMin) || 0)));
-    this.db.query(`INSERT INTO triggers (id, name, title, source_id, formula, judge, action, why, status, cooldown_min, created_by, teammate_id, thread_id, timer_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)`)
-      .run(id, name, str(input?.title, 80) || null, s.id, formula, judge ? j(judge) : null, j(action), str(input?.why, 300), cooldown, str(createdBy, 40) || "you", str(input?.teammateId, 64) || null, str(input?.threadId, 64) || null, o.timerId ?? null, now, now);
+    const route = cleanRoute(input?.route);
+    this.db.query(`INSERT INTO triggers (id, name, title, source_id, formula, judge, action, why, status, cooldown_min, created_by, teammate_id, thread_id, timer_id, route, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, name, str(input?.title, 80) || null, s.id, formula, judge ? j(judge) : null, j(action), str(input?.why, 300), cooldown, str(createdBy, 40) || "you", str(input?.teammateId, 64) || null, str(input?.threadId, 64) || null, o.timerId ?? null, j(route), now, now);
     this.onChange("triggers", { created: id, by: str(createdBy, 40) || "you" });
     return { value: this.findTrigger(id)! };
   }
@@ -598,10 +617,11 @@ export class EventPipeline {
     const why = input?.why !== undefined ? str(input.why, 300) : t.why;
     const title = input?.title !== undefined ? str(input.title, 80) || null : t.title === t.name ? null : t.title;
     const teammateId = input?.teammateId !== undefined ? str(input.teammateId, 64) || null : t.teammateId;
+    const route = input?.route !== undefined ? cleanRoute(input.route, t.route) : t.route;
     // A new question or answer kind makes old corrections meaningless.
     if (input?.judge !== undefined && j(judge?.prompt ?? null) + j(judge?.output ?? null) !== j(t.judge?.prompt ?? null) + j(t.judge?.output ?? null)) this.db.query("DELETE FROM judge_examples WHERE trigger_id = ?").run(t.id);
-    this.db.query("UPDATE triggers SET formula = ?, judge = ?, action = ?, status = ?, cooldown_min = ?, why = ?, title = ?, teammate_id = ?, updated_at = ? WHERE id = ?")
-      .run(formula, judge ? j(judge) : null, j(action), status, cooldown, why, title, teammateId, this.now(), t.id);
+    this.db.query("UPDATE triggers SET formula = ?, judge = ?, action = ?, status = ?, cooldown_min = ?, why = ?, title = ?, teammate_id = ?, route = ?, updated_at = ? WHERE id = ?")
+      .run(formula, judge ? j(judge) : null, j(action), status, cooldown, why, title, teammateId, j(route), this.now(), t.id);
     this.onChange("triggers");
     return { value: this.findTrigger(t.id)! };
   }
@@ -725,7 +745,7 @@ export class EventPipeline {
     if (!input?.force && !o.allowPast) {
       const act = this.cleanAction(action, o.system);
       const same = this.triggers(TIME_SOURCE).find((t) => t.status === "active" && t.timer && j(t.timer.schedule) === j(schedule)
-        && typeof act !== "string" && j(t.action) === j(act) && (t.teammateId || null) === (str(input?.teammateId, 64) || null));
+        && typeof act !== "string" && j(t.action) === j(act) && (t.teammateId || null) === (str(input?.teammateId, 64) || null) && j(t.route) === j(cleanRoute(input?.route)));
       if (same) return this.conflict({ kind: "duplicate", message: `"${same.title}" already does this at the same time.`, existing: same, options: [`keep "${same.name}"`, `time.update "${same.name}" to move it`, "force: true if they really want two"] });
     }
     const name = input?.name && !this.findTimer(slug(input.name)) && !this.findTrigger(slug(input.name)) ? slug(input.name) : this.freeName(input?.name || title, "triggers");

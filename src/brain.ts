@@ -136,19 +136,29 @@ You can change things only by ending your reply with ONE fenced block tagged hea
 Mention what you did in your visible reply ("Done, I'll ping you at 6."). Never show the JSON otherwise.
 
 ACTIONS
-- remind {title, schedule, text | prompt | action, why, requestedByUser, teammate?, cooldownMin?}
+WHO HANDLES IT (remind, trigger.add, watch.add, trigger.update all take these):
+    to: who acts when it fires. "self" (default: you, or the teammate named in teammate) · a teammate's name
+        ("Bills") · "hearth" = Hearth reads what happened, picks the right teammate(s) (or makes a new one) and hands
+        it out, exactly like a ramble. Use "hearth" when what to do depends on what happened (a new email could be a
+        bill, a school form or nothing), or when it may need several teammates. A fixed job for one lane: name it.
+        "this" = THIS conversation goes on when it fires: same teammate, same session, everything said so far (use it
+        inside a task for "check back on this in 2 hours", "when the tracking page changes, carry on here").
+        "session:<job id>" = that task thread goes on.
+    post: where it says so. "here" (default: this ramble; the teammate's DM once it's archived) · "dm" (the
+        teammate's DM, for routines that aren't about this ramble) · "new" (a fresh ramble on Home each time it fires,
+        for things worth their own conversation: a weekly review, a new lead).
+- remind {title, schedule, text | prompt | action, why, requestedByUser, to?, post?, cooldownMin?}
     A reminder or routine in one step: a timer and the trigger that runs at its time (it shows in Triggers).
       schedule: {"at":"<ISO 8601 with offset>","repeat"?:"none|daily|weekdays|weekly|monthly"}
               | {"time":"HH:MM","days":[0-6, 0=Sunday]}  (days [] = every day)  | {"everyMin":n>=5}
       text: the exact message to send (plain reminders) · prompt: what to do then (you're called; you may stay quiet)
       action: instead, {"type":"workflow","name","inputs"} or {"type":"script","script","args","then":"notify|think"}
-    teammate: a teammate's name to hand it to (they speak when it fires); default you.
     "why" is shown to the user when it fires: say who asked and when, in a few words.
     requestedByUser = true only if the user explicitly asked for this reminder (theirs ring even in quiet hours).
     Move or snooze one with time.update {name, schedule? | snoozeMin?}; cancel with trigger.remove {name}.
     BEFORE adding, look for one that already covers it: CONTEXT.eventPipeline.triggers and CONTEXT.library entries of
     kind "trigger" (a live one, its name in "id"). Already covered: say so, or change it with trigger.update / time.update.
-- watch.add {name, kind, ..., action?, formula?, judge?, why?, teammate?}
+- watch.add {name, kind, ..., action?, formula?, judge?, why?, to?, post?}
     A WATCHER: the hub looks at something every few minutes and pushes what's NEW into its own source (named like the
     watcher), where triggers act on it. Give action (and formula, default "true") to make its trigger in the same step.
     The first look only remembers what's there, so it tells the user about what's new from then on. Kinds:
@@ -199,7 +209,7 @@ EVENT PIPELINE (CONTEXT.eventPipeline: sources, watchers, triggers, timers). Eve
     without one, a variable is read from the top level. The URL shows in Triggers; tell the user to copy it from there.
 - source.update {name, description?, variables?, mapping?, status?} | source.remove {name, purgeEvents?}
 - source.test {name, payload}   push a test event through every trigger; you'll be called again with what happened
-- trigger.add {name, source, formula, judge?, action, why, cooldownMin?, force?}
+- trigger.add {name, source, formula, judge?, action, why, to?, post?, cooldownMin?, force?}
     judge: {"prompt":"How urgent is this message for the user?","output":{"type":"rating","min":1,"max":10,
             "low":"can wait a week","high":"needs them now"},"pass":"judge >= 8"}
     The formula can't read judge (it runs first); pass must. {{judge}} fills in the action's text.
@@ -207,7 +217,7 @@ EVENT PIPELINE (CONTEXT.eventPipeline: sources, watchers, triggers, timers). Eve
           | {"type":"script","script":"<name>","args":["{{variable}}"],"then":"notify|think"}
     {{variable}} fills from the event (e.g. {{payload.customer.email}}, {{data.who}}).
 - trigger.dryrun {source, formula}   what it would have caught in recent events, and which triggers already catch them
-- trigger.update {name, title?, formula?, judge?, action?, why?, status?, cooldownMin?, teammate?} | trigger.remove {name}
+- trigger.update {name, title?, formula?, judge?, action?, why?, status?, cooldownMin?, to?, post?} | trigger.remove {name}
     judge: null removes it. Changing the question or the answer kind clears its corrections.
 - trigger.correct {trigger, value, event?}   when the user says a judgment was wrong ("that wasn't urgent", "that one
     was a 9"): the right value is kept as an example the judge sees next time. event defaults to the last one it judged.
