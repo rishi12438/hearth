@@ -17,6 +17,7 @@ import { webhookOk } from "./connectors/plaid.ts";
 import { cleanFingerprint } from "./browser.ts";
 import { adminToken, isAdminRequest } from "./admin.ts";
 import { detectBrains } from "./brains/logins.ts";
+import { toolStatus } from "./brains/tools.ts";
 import { hasLogin, readLogin } from "./computer.ts";
 import { homedir, hostname, networkInterfaces } from "node:os";
 import { lookup } from "node:dns/promises";
@@ -916,7 +917,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (method === "GET" && id === "hub") {
           const address = process.env.HEARTH_PUBLIC_URL || pageOrigin || `http://${config.host}:${config.port}`;
           return json({ name: config.name, address: address.replace(/^https?:\/\//, ""), ip: await hubIp(address), host: hostname(),
-            target: config.target, version: pkg.version, upSince: new Date(Date.now() - process.uptime() * 1000).toISOString() });
+            target: config.target, version: pkg.version, upSince: new Date(Date.now() - process.uptime() * 1000).toISOString(),
+            tools: await toolStatus() });
         }
         if (method === "GET") return json((await store.all<Device>("devices")).map(({ tokenHash, passkey, ...d }) => ({
           ...d, primary: primaries.includes(d.id), passkey: !!passkey, current: d.id === device.id,

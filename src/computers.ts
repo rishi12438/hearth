@@ -3,13 +3,14 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { dirname, join } from "node:path";
 import { sha256 } from "./auth.ts";
 import { lastRefresh } from "./brains/logins.ts";
+import { cleanToolStatus, type ToolStatus } from "./brains/tools.ts";
 import { ComputerGone, MODEL_RE, type BrainInput, type BrainProfile, type Meter, type Remote, type RemoteRunner } from "./brain.ts";
 
 // Computers linked to this hub (a Mac at home, say). The hub has a public address and the computer doesn't, so the
 // computer dials in over a WebSocket and keeps the line open; the hub sends work down it. Like Enkidu's Mac and cloud
 // boxes, but the hub in the middle is your own server, not a third party.
 //
-// computer -> hub   hello {harnesses, platform}   alive   pong {ts}   step {id, text}   done {id, reply, costUsd?}
+// computer -> hub   hello {harnesses, platform}   tools {tools}   alive   pong {ts}   step {id, text}   done {id, reply, costUsd?}
 //                   error {id, message}   copy {item, data, hash}
 // hub -> computer   ping {ts}   run {id, input, profile}   stop {id}   want {items, have}   wantCookies {sites, have}
 // computer -> hub   cookies {site, data, hash}   (browser cookies the owner asked this Mac to copy up)
@@ -32,14 +33,14 @@ const MAX_COPY = 64 * 1024;
 type Socket = { send(data: string): unknown; close(code?: number, reason?: string): unknown };
 type Pending = { resolve: (s: string) => void; reject: (e: Error) => void; meter?: Meter };
 type Link = {
-  deviceId: string; name: string; ws: Socket; harnesses: string[]; platform: string;
+  deviceId: string; name: string; ws: Socket; harnesses: string[]; platform: string; tools: ToolStatus[];
   connectedAt: number; lastAlive: number; rttMs: number | null; running: Map<string, Pending>; want: CopyItem[];
   /** The hub set this computer up (a sandbox or your VM), so it gets the hub's logins. */
   cloud: boolean;
 };
 export type ComputerStatus = {
   deviceId: string; name: string; state: "online" | "asleep" | "offline"; level: 0 | 1 | 2 | 3 | 4;
-  rttMs: number | null; harnesses: string[]; platform: string; running: number; connectedAt: string | null; lastAliveAt: string | null;
+  rttMs: number | null; harnesses: string[]; platform: string; tools: ToolStatus[]; running: number; connectedAt: string | null; lastAliveAt: string | null;
 };
 type Copied = Record<string, { hash: string; at: string; from: string }>;
 
@@ -64,7 +65,7 @@ export class Computers implements Remote {
   /** Tell the app only when something it shows changed (state, bars, jobs running), not on every ping. */
   private shown = "";
   private changed() {
-    const sig = JSON.stringify([...this.links.keys()].sort().map((id) => { const x = this.status(id, ""); return [id, x.state, x.level, x.running, x.harnesses]; }));
+    const sig = JSON.stringify([...this.links.keys()].sort().map((id) => { const x = this.status(id, ""); return [id, x.state, x.level, x.running, x.harnesses, x.tools]; }));
     if (sig !== this.shown) { this.shown = sig; this.onChange(); }
   }
 
@@ -81,7 +82,7 @@ export class Computers implements Remote {
   attach(deviceId: string, name: string, ws: Socket, want: CopyItem[] = [], cloud = false) {
     if (this.links.has(deviceId)) this.drop(deviceId, "replaced by a new connection");
     const t = this.now();
-    this.links.set(deviceId, { deviceId, name, ws, harnesses: [], platform: "", connectedAt: t, lastAlive: t, rttMs: null, running: new Map(), want, cloud });
+    this.links.set(deviceId, { deviceId, name, ws, harnesses: [], platform: "", tools: [], connectedAt: t, lastAlive: t, rttMs: null, running: new Map(), want, cloud });
     this.seen.set(deviceId, t);
     this.send(deviceId, { t: "ping", ts: t });
   }
@@ -102,6 +103,10 @@ export class Computers implements Remote {
         if (link.cloud) this.sendLogins(link);
         this.changed();
         this.onOnline(deviceId);
+        return;
+      case "tools":
+        link.tools = cleanToolStatus(m.tools);
+        this.changed();
         return;
       case "alive": return;
       case "pong":
@@ -185,7 +190,7 @@ export class Computers implements Remote {
     const state = !link ? "offline" : t - link.lastAlive > ASLEEP_MS ? "asleep" : "online";
     return {
       deviceId, name: link?.name || name, state, level: levelFor(state, link?.rttMs ?? null), rttMs: link?.rttMs ?? null,
-      harnesses: link?.harnesses || [], platform: link?.platform || "", running: link?.running.size || 0,
+      harnesses: link?.harnesses || [], platform: link?.platform || "", tools: link?.tools || [], running: link?.running.size || 0,
       connectedAt: link ? new Date(link.connectedAt).toISOString() : null, lastAliveAt: last ? new Date(last).toISOString() : null,
     };
   }
