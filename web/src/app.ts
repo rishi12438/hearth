@@ -1677,7 +1677,11 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
   const canAttach = r.view !== "dm";
   const pending: any[] = [];
   const chips = h("div", { class: "attach-chips" });
-  const drawChips = () => clear(chips, pending.map((f) => h("span", { class: "chip" }, f.name, h("button", { "aria-label": `Remove ${f.name}`, on: { click: () => { pending.splice(pending.indexOf(f), 1); drawChips(); swap(); } } }, icon("x", 12)))));
+  const remove = (f: any) => h("button", { "aria-label": `Remove ${f.name}`, title: "Remove", on: { click: () => { pending.splice(pending.indexOf(f), 1); if (f.preview) URL.revokeObjectURL(f.preview); drawChips(); swap(); } } }, icon("x", 12));
+  // Pictures show as a small preview of themselves; other files as their name.
+  const drawChips = () => clear(chips, pending.map((f) => f.preview
+    ? h("span", { class: "chip thumb", title: f.name }, h("img", { src: f.preview, alt: f.name }), remove(f))
+    : h("span", { class: "chip" }, f.name, remove(f))));
   const upload = async (files: File[]) => {
     for (const raw of files.slice(0, Math.max(0, 5 - pending.length))) {
       try {
@@ -1686,13 +1690,15 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
         const res = await fetch(`${hub.url}/api/files`, { method: "POST", headers: { ...authHeaders(hub), "X-File-Name": encodeURIComponent(file.name), "Content-Type": file.type || "application/octet-stream" }, body: file });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Upload failed");
-        S.files.set(data.id, data); pending.push(data); drawChips(); swap();
+        S.files.set(data.id, data);
+        pending.push(file.type.startsWith("image/") ? { ...data, preview: URL.createObjectURL(file) } : data);
+        drawChips(); swap();
       } catch (e) { handleError(e); }
     }
   };
   const picker = h("input", { type: "file", multiple: true, hidden: true, on: { change: async () => { await upload(Array.from(picker.files || [])); picker.value = ""; } } }) as HTMLInputElement;
   const clip = h("button", { class: "plus", "aria-label": "Attach a file", title: "Attach a file", disabled: !canAttach, on: { click: () => picker.click() } }, icon("clip", 20));
-  attachments = () => pending.splice(0).map((f) => f.id);
+  attachments = () => pending.splice(0).map((f) => { if (f.preview) URL.revokeObjectURL(f.preview); return f.id; });
   const swap = () => {
     const hasText = !!box.value.trim() || pending.length > 0;
     action.classList.toggle("send", hasText);
