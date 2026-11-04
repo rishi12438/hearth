@@ -7,6 +7,7 @@ import { parse, test as testFormula, variablesOf, normalize, FormulaError, type 
 import { computeNextAt } from "../hooks.ts";
 import { wallParts } from "../time.ts";
 import type { Trigger as HookTrigger } from "../types.ts";
+import { cleanJudge, checkValue, eventText, type Judge, type JudgeExample, type JudgeValue } from "./judge.ts";
 
 // The event pipeline: anything pushes events into a source, every event is written down, and a consumer checks it
 // against every trigger on that source. A trigger is a formula (plain code, see formula.ts) plus what to do.
@@ -38,8 +39,12 @@ export type TriggerAction =
   | { type: "workflow"; name: string; inputs: Record<string, string> };
 export type EventTrigger = {
   id: string; name: string; sourceId: string; sourceName: string;
-  /** The rule, checked with plain code against each event's variables. */
+  /** The rule, checked with plain code against each event's variables. With a judge, it says which events to ask about. */
   formula: string;
+  /** Optional: one question for the quick model, answered with one value (judge), then compared by judge.pass. */
+  judge: Judge | null;
+  /** Corrections you gave this trigger's judge. */
+  examples: number;
   action: TriggerAction; why: string;
   status: "active" | "paused"; cooldownMin: number;
   lastFiredAt: string | null; fireCount: number;
@@ -56,7 +61,7 @@ export type Timer = {
   status: "active" | "paused" | "done"; createdBy: string; createdAt: string; updatedAt: string;
 };
 export type EventStatus = "new" | "processing" | "matched" | "unmatched" | "failed";
-export type LogLine = { at: string; triggerId: string | null; step: string; detail: string };
+export type LogLine = { at: string; triggerId: string | null; step: string; detail: string; value?: JudgeValue };
 export type PipelineEvent = {
   id: string; sourceId: string; sourceName: string; status: EventStatus;
   variables: Record<string, unknown>; payload: unknown; depth: number; test: boolean;
@@ -66,8 +71,12 @@ export type PipelineEvent = {
 export type Conflict = { kind: "name" | "duplicate" | "overlap" | "variables" | "protected" | "loop"; message: string; existing?: { id: string; name: string }; options: string[] };
 export type Result<T> = { value: T; error?: undefined; conflict?: undefined } | { value?: undefined; error: string; conflict?: Conflict };
 
-/** What the hub does when a trigger matches. `quiet` = it ran and chose not to speak. */
-export type Runner = (trigger: EventTrigger, event: PipelineEvent) => Promise<{ text?: string; quiet?: boolean }>;
+/** What the hub does when a trigger matches. `quiet` = it ran and chose not to speak. `judge` = the judge's value, if any. */
+export type Runner = (trigger: EventTrigger, event: PipelineEvent, judge?: JudgeValue) => Promise<{ text?: string; quiet?: boolean }>;
+/** Asks the quick model a trigger's judge question about an event; returns the one value (or throws). */
+export type JudgeFn = (judge: Judge, event: PipelineEvent, examples: JudgeExample[]) => Promise<JudgeValue>;
+/** At most this many judge calls per trigger per hour, so a busy source can't run up a bill. */
+export const JUDGE_PER_HOUR = 60;
 
 export const TIME_SOURCE = "time";
 export const TIME_VARIABLES: SourceVar[] = [
@@ -121,6 +130,8 @@ export class EventPipeline {
   private depth = new AsyncLocalStorage<number>();
   /** Set by the hub. */
   run: Runner = async () => ({ quiet: true });
+  /** Set by the hub: the quick model answers judge questions. */
+  judgeFn: JudgeFn = async () => { throw new Error("No model to judge with."); };
   /** Extra checks on an action (e.g. the workflow exists). Returns an error, or null. */
   checkAction: (a: TriggerAction) => Promise<string | null> = async () => null;
   /** Something changed: the hub tells open apps. */
@@ -143,6 +154,7 @@ export class EventPipeline {
         id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
         source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
         formula TEXT NOT NULL,
+        judge TEXT CHECK (judge IS NULL OR json_valid(judge)),
         action TEXT NOT NULL CHECK (json_valid(action)),
         why TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active', cooldown_min INTEGER NOT NULL DEFAULT 0,
         last_fired_at TEXT, fire_count INTEGER NOT NULL DEFAULT 0,
@@ -169,10 +181,26 @@ export class EventPipeline {
       CREATE TABLE IF NOT EXISTS event_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
-        trigger_id TEXT, at TEXT NOT NULL, step TEXT NOT NULL, detail TEXT NOT NULL DEFAULT ''
+        trigger_id TEXT, at TEXT NOT NULL, step TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
+        value TEXT CHECK (value IS NULL OR json_valid(value))
       );
       CREATE INDEX IF NOT EXISTS event_log_event ON event_log (event_id, id);
+      CREATE INDEX IF NOT EXISTS event_log_trigger ON event_log (trigger_id, step, at);
+      CREATE TABLE IF NOT EXISTS judge_examples (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trigger_id TEXT NOT NULL REFERENCES triggers(id) ON DELETE CASCADE,
+        event_id TEXT, input TEXT NOT NULL,
+        value TEXT NOT NULL CHECK (json_valid(value)),
+        judged TEXT CHECK (judged IS NULL OR json_valid(judged)),
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS judge_examples_trigger ON judge_examples (trigger_id, id);
     `);
+    // Files made before judges existed get the new columns.
+    for (const [table, col, def] of [["triggers", "judge", "TEXT"], ["event_log", "value", "TEXT"]]) {
+      const cols = this.db.query(`PRAGMA table_info(${table})`).all() as { name: string }[];
+      if (!cols.some((c) => c.name === col)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+    }
     // A run cut off by a restart isn't run again (it may have half-happened); it's marked so you can see it.
     this.db.query("UPDATE events SET status = 'failed', error = 'The hub stopped while this was running.' WHERE status = 'processing'").run();
     this.ensureTimeSource();
@@ -199,7 +227,8 @@ export class EventPipeline {
       createdAt: r.created_at, updatedAt: r.updated_at, lastEventAt: r.last_event_at, eventCount: r.event_count };
   }
   private trigger(r: any): EventTrigger {
-    return { id: r.id, name: r.name, sourceId: r.source_id, sourceName: r.source_name, formula: r.formula, action: JSON.parse(r.action),
+    return { id: r.id, name: r.name, sourceId: r.source_id, sourceName: r.source_name, formula: r.formula, judge: r.judge ? JSON.parse(r.judge) : null,
+      examples: r.examples ?? 0, action: JSON.parse(r.action),
       why: r.why, status: r.status, cooldownMin: r.cooldown_min, lastFiredAt: r.last_fired_at, fireCount: r.fire_count,
       createdBy: r.created_by, teammateId: r.teammate_id, threadId: r.thread_id, createdAt: r.created_at, updatedAt: r.updated_at };
   }
@@ -220,7 +249,7 @@ export class EventPipeline {
     const r = this.db.query("SELECT * FROM sources WHERE id = ? OR name = ?").get(idOrName, String(idOrName).toLowerCase());
     return r ? this.source(r) : null;
   }
-  private TRIGGERS = "SELECT t.*, s.name AS source_name FROM triggers t JOIN sources s ON s.id = t.source_id";
+  private TRIGGERS = "SELECT t.*, s.name AS source_name, (SELECT count(*) FROM judge_examples x WHERE x.trigger_id = t.id) AS examples FROM triggers t JOIN sources s ON s.id = t.source_id";
   triggers(source?: string): EventTrigger[] {
     const s = source ? this.findSource(source) : null;
     if (source && !s) return [];
@@ -255,11 +284,11 @@ export class EventPipeline {
     return e;
   }
   private logOf(eventId: string): LogLine[] {
-    return (this.db.query("SELECT at, trigger_id, step, detail FROM event_log WHERE event_id = ? ORDER BY id").all(eventId) as any[])
-      .map((r) => ({ at: r.at, triggerId: r.trigger_id, step: r.step, detail: r.detail }));
+    return (this.db.query("SELECT at, trigger_id, step, detail, value FROM event_log WHERE event_id = ? ORDER BY id").all(eventId) as any[])
+      .map((r) => ({ at: r.at, triggerId: r.trigger_id, step: r.step, detail: r.detail, ...(r.value != null ? { value: JSON.parse(r.value) } : {}) }));
   }
-  private log(eventId: string, step: string, detail = "", triggerId: string | null = null) {
-    this.db.query("INSERT INTO event_log (event_id, trigger_id, at, step, detail) VALUES (?, ?, ?, ?, ?)").run(eventId, triggerId, this.now(), step, detail.slice(0, 2000));
+  private log(eventId: string, step: string, detail = "", triggerId: string | null = null, value?: JudgeValue) {
+    this.db.query("INSERT INTO event_log (event_id, trigger_id, at, step, detail, value) VALUES (?, ?, ?, ?, ?, ?)").run(eventId, triggerId, this.now(), step, detail.slice(0, 2000), value === undefined ? null : j(value));
   }
 
   // ---------- sources ----------
@@ -397,12 +426,19 @@ export class EventPipeline {
     let tree: Node;
     try { tree = parse(formula); } catch (e) { return e instanceof FormulaError ? `The formula doesn't read: ${e.message}` : "The formula doesn't read."; }
     const known = this.known(s);
+    if (variablesOf(tree).some((p) => p.split(".")[0] === "judge")) return "The formula runs before the judge, so it can't read judge. Compare judge in judge.pass (e.g. \"judge >= 7\"); use the formula to pick which events to ask about (or \"true\").";
     const bad = variablesOf(tree).map((p) => p.split(".")[0]).filter((r) => !known.has(r));
     if (bad.length) return `"${s.name}" doesn't send ${[...new Set(bad)].join(", ")}. It sends: ${[...known].join(", ")}.`;
     return null;
   }
 
-  private actionKey(a: TriggerAction) { return a.type === "workflow" ? `workflow:${a.name}` : a.type === "notify" ? `notify:${a.text}` : `think:${a.prompt}`; }
+  private actionKey(a: TriggerAction, judge: Judge | null = null) {
+    return (a.type === "workflow" ? `workflow:${a.name}` : a.type === "notify" ? `notify:${a.text}` : `think:${a.prompt}`) + (judge ? `|judge:${j(judge)}` : "");
+  }
+  private cleanJudgeFor(x: any, s: EventSource): Judge | null | string {
+    if (x == null || x === false) return null;
+    return cleanJudge(x, this.known(s));
+  }
 
   async addTrigger(input: any, createdBy = "you"): Promise<Result<EventTrigger>> {
     const name = slug(input?.name);
@@ -414,19 +450,21 @@ export class EventPipeline {
     if (bad) return this.conflict({ kind: "variables", message: bad, options: ["fix the formula", `source.update "${s.name}" to add the variable`] });
     const action = this.cleanAction(input?.action);
     if (typeof action === "string") return { error: action };
+    const judge = this.cleanJudgeFor(input?.judge, s);
+    if (typeof judge === "string") return { error: judge };
     const extra = await this.checkAction(action);
     if (extra) return { error: extra };
     const clash = this.findTrigger(name);
     if (clash) return this.conflict({ kind: "name", message: `There's already a trigger called "${name}".`, existing: clash, options: [`trigger.update "${name}"`, "pick a different name"] });
     if (!input?.force) {
-      const over = this.overlapping(s, formula, action);
+      const over = this.overlapping(s, formula, action, judge);
       if (over) return this.conflict(over);
     }
     const now = this.now(), id = randomUUID();
     const cooldown = Math.max(0, Math.min(10080, Math.round(Number(input?.cooldownMin) || 0)));
-    this.db.query(`INSERT INTO triggers (id, name, source_id, formula, action, why, status, cooldown_min, created_by, teammate_id, thread_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`)
-      .run(id, name, s.id, formula, j(action), str(input?.why, 300), cooldown, str(createdBy, 40) || "you", str(input?.teammateId, 64) || null, str(input?.threadId, 64) || null, now, now);
+    this.db.query(`INSERT INTO triggers (id, name, source_id, formula, judge, action, why, status, cooldown_min, created_by, teammate_id, thread_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`)
+      .run(id, name, s.id, formula, judge ? j(judge) : null, j(action), str(input?.why, 300), cooldown, str(createdBy, 40) || "you", str(input?.teammateId, 64) || null, str(input?.threadId, 64) || null, now, now);
     this.onChange("triggers", { created: id, by: str(createdBy, 40) || "you" });
     return { value: this.findTrigger(id)! };
   }
@@ -446,15 +484,23 @@ export class EventPipeline {
       if (extra) return { error: extra };
       action = a;
     }
-    if (!input?.force && (formula !== t.formula || input?.action !== undefined)) {
-      const over = this.overlapping(s, formula, action, t.id);
+    let judge = t.judge;
+    if (input?.judge !== undefined) {
+      const jd = this.cleanJudgeFor(input.judge, s);
+      if (typeof jd === "string") return { error: jd };
+      judge = jd;
+    }
+    if (!input?.force && (formula !== t.formula || input?.action !== undefined || input?.judge !== undefined)) {
+      const over = this.overlapping(s, formula, action, judge, t.id);
       if (over) return this.conflict(over);
     }
     const status = input?.status === "paused" || input?.status === "active" ? input.status : t.status;
     const cooldown = input?.cooldownMin !== undefined ? Math.max(0, Math.min(10080, Math.round(Number(input.cooldownMin) || 0))) : t.cooldownMin;
     const why = input?.why !== undefined ? str(input.why, 300) : t.why;
-    this.db.query("UPDATE triggers SET formula = ?, action = ?, status = ?, cooldown_min = ?, why = ?, updated_at = ? WHERE id = ?")
-      .run(formula, j(action), status, cooldown, why, this.now(), t.id);
+    // A new question or answer kind makes old corrections meaningless.
+    if (input?.judge !== undefined && j(judge?.prompt ?? null) + j(judge?.output ?? null) !== j(t.judge?.prompt ?? null) + j(t.judge?.output ?? null)) this.db.query("DELETE FROM judge_examples WHERE trigger_id = ?").run(t.id);
+    this.db.query("UPDATE triggers SET formula = ?, judge = ?, action = ?, status = ?, cooldown_min = ?, why = ?, updated_at = ? WHERE id = ?")
+      .run(formula, judge ? j(judge) : null, j(action), status, cooldown, why, this.now(), t.id);
     this.onChange("triggers");
     return { value: this.findTrigger(t.id)! };
   }
@@ -471,10 +517,10 @@ export class EventPipeline {
    * Another trigger on the same source that does the same thing and would catch the same events: the same rule
    * written differently, or (from the recent events) everything this one catches is caught by it already.
    */
-  private overlapping(s: EventSource, formula: string, action: TriggerAction, except?: string): Conflict | null {
+  private overlapping(s: EventSource, formula: string, action: TriggerAction, judge: Judge | null, except?: string): Conflict | null {
     const tree = this.tree(formula)!;
-    const key = this.actionKey(action);
-    const same = this.triggers(s.id).filter((t) => t.id !== except && t.status === "active" && this.actionKey(t.action) === key);
+    const key = this.actionKey(action, judge);
+    const same = this.triggers(s.id).filter((t) => t.id !== except && t.status === "active" && this.actionKey(t.action, t.judge) === key);
     if (!same.length) return null;
     const recent = this.events({ source: s.id, limit: 200, log: false }).filter((e) => !e.test);
     const mine = recent.filter((e) => testFormula(tree, this.varsOf(e)));
@@ -494,7 +540,7 @@ export class EventPipeline {
   private varsOf(e: PipelineEvent) { return { ...e.variables, source: e.sourceName, payload: e.payload }; }
 
   /** What a rule would have caught among recent events, and which existing triggers also catch those. */
-  dryrun(sourceName: string, formula: string, limit = 200): Result<{ checked: number; matched: number; examples: PipelineEvent[]; alsoMatchedBy: { name: string; count: number }[] }> {
+  dryrun(sourceName: string, formula: string, limit = 200): Result<{ checked: number; matched: number; examples: PipelineEvent[]; alsoMatchedBy: { name: string; count: number }[]; note: string }> {
     const s = this.findSource(sourceName);
     if (!s) return { error: `No source called "${sourceName}".` };
     const bad = this.checkFormula(formula, s);
@@ -506,7 +552,7 @@ export class EventPipeline {
       const other = this.tree(t.formula);
       return { name: t.name, count: other ? hits.filter((e) => testFormula(other, this.varsOf(e))).length : 0 };
     }).filter((x) => x.count > 0);
-    return { value: { checked: recent.length, matched: hits.length, examples: hits.slice(0, 5), alsoMatchedBy: also } };
+    return { value: { checked: recent.length, matched: hits.length, examples: hits.slice(0, 5), alsoMatchedBy: also, note: "Judges aren't asked in a dry-run: matched = the events a judge would be asked about." } };
   }
 
   // ---------- timers (the time minter) ----------
@@ -699,10 +745,27 @@ export class EventPipeline {
         this.log(e.id, "cooldown", `${t.name}: matched, but it ran less than ${t.cooldownMin} min ago`, t.id);
         continue;
       }
-      this.log(e.id, "matched", `${t.name}: ${t.formula}`, t.id);
+      let value: JudgeValue | undefined;
+      if (t.judge) {
+        const hourAgo = new Date(now.getTime() - 3_600_000).toISOString();
+        const asked = (this.db.query("SELECT count(*) AS n FROM event_log WHERE trigger_id = ? AND step IN ('judged', 'judge-failed') AND at >= ?").get(t.id, hourAgo) as any).n;
+        if (asked >= JUDGE_PER_HOUR) { this.log(e.id, "skipped", `${t.name}: its judge was asked ${JUDGE_PER_HOUR} times in the last hour; not asking again yet`, t.id); continue; }
+        try {
+          value = await this.judgeFn(t.judge, e, this.examplesOf(t.id));
+        } catch (err: any) {
+          this.log(e.id, "judge-failed", `${t.name}: ${String(err?.message || err).slice(0, 300)}`, t.id);
+          failed++;
+          continue;
+        }
+        const passTree = this.tree(t.judge.pass);
+        const passes = !!passTree && testFormula(passTree, { ...vars, judge: value });
+        this.log(e.id, "judged", `${t.name}: judge = ${value} → ${passes ? "acts" : "doesn't act"} (${t.judge.pass})`, t.id, value);
+        if (!passes) continue;
+      }
+      this.log(e.id, "matched", `${t.name}: ${t.formula}${t.judge ? ` and ${t.judge.pass}` : ""}`, t.id);
       this.db.query("UPDATE triggers SET last_fired_at = ?, fire_count = fire_count + 1 WHERE id = ?").run(now.toISOString(), t.id);
       try {
-        const r = await this.depth.run(e.depth, () => this.run(t, e));
+        const r = await this.depth.run(e.depth, () => this.run(t, e, value));
         this.log(e.id, r.quiet ? "quiet" : "ran", r.quiet ? `${t.name}: nothing worth saying` : `${t.name}: ${(r.text || "done").slice(0, 500)}`, t.id);
         ran++;
       } catch (err: any) {
@@ -715,6 +778,47 @@ export class EventPipeline {
     this.db.query("UPDATE events SET status = ?, processed_at = ?, error = ? WHERE id = ?").run(status, this.now(), failed && !ran ? "a trigger failed" : null, e.id);
     this.onChange("events");
   }
+
+  // ---------- teaching the judges ----------
+
+  private examplesOf(triggerId: string): JudgeExample[] {
+    return (this.db.query("SELECT input, value FROM judge_examples WHERE trigger_id = ? ORDER BY id DESC LIMIT 8").all(triggerId) as any[])
+      .reverse().map((r) => ({ input: r.input, value: JSON.parse(r.value) }));
+  }
+
+  /** Every correction a trigger's judge has, newest first. */
+  examples(trigger: string) {
+    const t = this.findTrigger(trigger);
+    if (!t) return [];
+    return (this.db.query("SELECT id, event_id, input, value, judged, created_at FROM judge_examples WHERE trigger_id = ? ORDER BY id DESC").all(t.id) as any[])
+      .map((r) => ({ id: r.id, eventId: r.event_id, input: r.input, value: JSON.parse(r.value), judged: r.judged == null ? null : JSON.parse(r.judged), createdAt: r.created_at }));
+  }
+
+  /**
+   * "The judge got this one wrong: it should be <value>." Kept as an example the judge sees next time
+   * (the last 8 per trigger; at most 50 kept). Re-correcting the same event replaces its example.
+   */
+  correct(eventId: string | null, trigger: string, value: unknown): Result<{ value: JudgeValue; examples: number }> {
+    const t = this.findTrigger(trigger);
+    if (!t) return { error: `No trigger called "${trigger}".` };
+    if (!t.judge) return { error: `"${t.name}" has no judge to correct.` };
+    // No event named: the last one this trigger's judge answered.
+    const id = eventId || (this.db.query("SELECT event_id FROM event_log WHERE trigger_id = ? AND step = 'judged' ORDER BY id DESC LIMIT 1").get(t.id) as any)?.event_id;
+    const e = id ? this.getEvent(id) : null;
+    if (!e) return { error: "That event isn't in the log any more." };
+    const v = checkValue(value, t.judge.output);
+    if (v === null) return { error: `"${value}" isn't an answer this judge can give.` };
+    const judged = e.log?.filter((l) => l.triggerId === t.id && l.step === "judged").at(-1)?.value;
+    this.db.query("DELETE FROM judge_examples WHERE trigger_id = ? AND event_id = ?").run(t.id, e.id);
+    this.db.query("INSERT INTO judge_examples (trigger_id, event_id, input, value, judged, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(t.id, e.id, eventText(e).slice(0, 1500), j(v), judged === undefined ? null : j(judged), this.now());
+    this.db.query("DELETE FROM judge_examples WHERE trigger_id = ? AND id NOT IN (SELECT id FROM judge_examples WHERE trigger_id = ? ORDER BY id DESC LIMIT 50)").run(t.id, t.id);
+    this.log(e.id, "corrected", `${t.name}: you said ${v}${judged !== undefined ? ` (the judge said ${judged})` : ""}`, t.id, v);
+    this.onChange("triggers");
+    return { value: { value: v, examples: this.examples(t.id).length } };
+  }
+
+  forgetExample(id: number) { const ok = !!this.db.query("SELECT 1 FROM judge_examples WHERE id = ?").get(id); this.db.query("DELETE FROM judge_examples WHERE id = ?").run(id); if (ok) this.onChange("triggers"); return ok; }
 
   // ---------- housekeeping ----------
 

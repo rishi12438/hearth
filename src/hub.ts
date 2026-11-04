@@ -34,6 +34,7 @@ import { syncBrowserLogins } from "./brains/browser-logins.ts";
 import type { FreshLogin } from "./computers.ts";
 import { labelFor } from "./cookie-sites.ts";
 import { EventPipeline, fillTemplate, type EventTrigger, type PipelineEvent } from "./events/pipeline.ts";
+import { judgePrompt, parseValue, describeOutput, type Judge, type JudgeExample, type JudgeValue } from "./events/judge.ts";
 
 const DEFAULT_PREFS: Prefs = {
   userName: "", tz: "UTC", quietStart: "23:00", quietEnd: "07:30",
@@ -144,7 +145,8 @@ export class Hub {
   get pipeline() {
     if (!this._pipeline) {
       const p = new EventPipeline(join(this.config.dataDir, "events.db"), () => this.clock(), async () => (await this.prefs()).tz);
-      p.run = (t, e) => this.runEventTrigger(t, e);
+      p.run = (t, e, v) => this.runEventTrigger(t, e, v);
+      p.judgeFn = (jd, e, ex) => this.judgeEvent(jd, e, ex);
       p.checkAction = async (a) => a.type !== "workflow" || (await this.store.all<Workflow>("workflows")).some((w) => w.name === a.name && w.status === "active")
         ? null : `No switched-on workflow called "${a.name}". Workflows: ${(await this.store.all<Workflow>("workflows")).filter((w) => w.status === "active").map((w) => w.name).join(", ") || "none yet"}.`;
       p.onChange = (what, detail) => this.emit("pipeline", { what, ...(detail || {}) });
@@ -1814,7 +1816,7 @@ export class Hub {
             break;
           }
           case "source.list": case "source.create": case "source.update": case "source.remove": case "source.test":
-          case "trigger.add": case "trigger.update": case "trigger.remove": case "trigger.list": case "trigger.dryrun":
+          case "trigger.add": case "trigger.update": case "trigger.remove": case "trigger.list": case "trigger.dryrun": case "trigger.correct":
           case "time.schedule": case "time.update": case "time.cancel": {
             if (where.recipe) break;
             const note = await this.pipelineAction(a, where, done);
@@ -3207,7 +3209,9 @@ export class Hub {
     const p = this.pipeline;
     return {
       sources: p.sources().slice(0, 40).map((s) => ({ name: s.name, kind: s.kind, ...(s.service ? { service: s.service, scope: s.scope } : {}), variables: s.variables.map((v) => v.name), status: s.status, events: s.eventCount })),
-      triggers: p.triggers().slice(0, 60).map((t) => ({ name: t.name, source: t.sourceName, formula: t.formula, does: t.action.type === "workflow" ? `workflow ${t.action.name}` : t.action.type, status: t.status })),
+      triggers: p.triggers().slice(0, 60).map((t) => ({ name: t.name, source: t.sourceName, formula: t.formula,
+        ...(t.judge ? { judge: { prompt: t.judge.prompt, answers: describeOutput(t.judge.output), pass: t.judge.pass, corrections: t.examples } } : {}),
+        does: t.action.type === "workflow" ? `workflow ${t.action.name}` : t.action.type, status: t.status })),
       timers: p.timers().filter((t) => t.status !== "done").slice(0, 40).map((t) => ({ name: t.name, schedule: t.schedule, next: t.nextAt })),
     };
   }
@@ -3270,6 +3274,12 @@ export class Hub {
       case "trigger.remove":
         if (p.removeTrigger(name)) done.push({ kind: "hook", label: `Removed trigger: ${name}` });
         return null;
+      case "trigger.correct": {
+        const r = p.correct(typeof a.event === "string" ? a.event : null, String(a.trigger ?? a.name ?? ""), a.value);
+        if (!r.value) return no(`trigger.correct ${a.trigger ?? a.name}`, r);
+        done.push({ kind: "hook", label: `Taught ${a.trigger ?? a.name}: ${r.value.value}` });
+        return null;
+      }
       case "time.schedule": {
         const r = await p.addTimer({ ...a, name: a.name ?? a.time_to_run }, by);
         if (!r.value) return no(`time.schedule ${a.name ?? a.time_to_run}`, r);
@@ -3290,10 +3300,27 @@ export class Hub {
   }
 
   /** A trigger matched: notify, think, or run a workflow, and say it where the trigger was made. */
-  private async runEventTrigger(t: EventTrigger, e: PipelineEvent): Promise<{ text?: string; quiet?: boolean }> {
-    const vars = { ...e.variables, source: e.sourceName };
+  /**
+   * A trigger's judge: the quick model answers one question about the event with one value. A reply that isn't a
+   * valid value gets one more try, told what was wrong; then it fails (logged), never a guess.
+   */
+  private async judgeEvent(jd: Judge, e: PipelineEvent, examples: JudgeExample[]): Promise<JudgeValue> {
+    const profile = (await this.brains()).quick;
+    const event = { source: e.sourceName, variables: e.variables, payload: e.payload };
+    let reply = "";
+    for (const retry of [false, true]) {
+      reply = await this.brain.think({ mode: "judge", context: {}, input: judgePrompt(jd, event, examples, retry) }, profile);
+      const v = parseValue(reply, jd.output);
+      if (v !== null) return v;
+    }
+    throw new Error(`the judge answered "${reply.trim().slice(0, 60)}", not ${describeOutput(jd.output)}`);
+  }
+
+  private async runEventTrigger(t: EventTrigger, e: PipelineEvent, judge?: JudgeValue): Promise<{ text?: string; quiet?: boolean }> {
+    const vars = { ...e.variables, source: e.sourceName, ...(judge !== undefined ? { judge } : {}) };
     const teammate = await this.teammate(t.teammateId);
-    const extra = `## The event (from ${e.sourceName})\n<untrusted>\n${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 20_000)}\n</untrusted>`;
+    const extra = `## The event (from ${e.sourceName})\n<untrusted>\n${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 20_000)}\n</untrusted>`
+      + (judge !== undefined && t.judge ? `\n\n## The trigger's judge\nAsked "${t.judge.prompt}", it answered ${judge} (acts when ${t.judge.pass}).` : "");
     let text = "", did: Done[] = [];
     const a = t.action;
     if (a.type === "notify") text = fillTemplate(a.text, vars);
@@ -3313,7 +3340,7 @@ export class Hub {
     const threadId = home && !home.archivedAt ? home.id : teammate ? (await this.dmThread(teammate.id)).id : await this.updatesThread();
     const msg = await this.addMessage({
       role: "assistant", teammateId: teammate?.id, threadId, fromThreadId: home && home.id !== threadId ? home.id : undefined, text: e.test ? `(Test) ${text}` : text,
-      proactive: { hookId: t.id, title: t.name, trigger: e.sourceName === "time" ? `timer ${e.variables.time_to_run}` : `event from ${e.sourceName}`, why: t.why || `Trigger ${t.name}: ${t.formula}` },
+      proactive: { hookId: t.id, title: t.name, trigger: (e.sourceName === "time" ? `timer ${e.variables.time_to_run}` : `event from ${e.sourceName}`) + (judge !== undefined ? ` · judge said ${judge}` : ""), why: t.why || `Trigger ${t.name}: ${t.formula}` },
       did: did.length ? did : undefined,
     });
     await this.touchThread(msg.threadId!, { preview: msg.text.slice(0, 120) });

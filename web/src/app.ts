@@ -2714,6 +2714,48 @@ function scheduleText(sc: any) {
   return sc.everyMin % 60 === 0 ? `every ${sc.everyMin / 60}h` : `every ${sc.everyMin} min`;
 }
 
+function answersText(o: any) {
+  if (o.type === "yesno") return "yes / no";
+  if (o.type === "choice") return o.options.join(" / ");
+  return `${o.min}–${o.max}`;
+}
+
+/** "The judge got this one wrong": pick the right value; it's kept as an example the judge sees next time. */
+function openCorrect(ev: any, t: any, said: any) {
+  const o = t.judge.output;
+  const values: any[] = o.type === "yesno" ? ["yes", "no"] : o.type === "choice" ? o.options : Array.from({ length: o.max - o.min + 1 }, (_, i) => o.min + i);
+  const pick = async (v: any) => {
+    try {
+      const r = await call(`/api/pipeline/events/${ev.id}/correct`, { body: { trigger: t.id, value: v } });
+      toast(`Taught ${t.name}: it has ${r.examples} correction${r.examples === 1 ? "" : "s"} now`);
+      openTriggers("events");
+    } catch (e) { handleError(e); }
+  };
+  openSheet(`What should ${t.name} have said?`, [
+    h("p", { class: "muted" }, `It was asked “${t.judge.prompt}” and said `, h("b", null, String(said)), `. It acts when ${t.judge.pass}.`),
+    o.type === "rating" && (o.low || o.high) ? h("p", { class: "muted small" }, `${o.min} = ${o.low || "lowest"} · ${o.max} = ${o.high || "highest"}`) : null,
+    values.length <= 12
+      ? h("div", { class: "judgepick" }, values.map((v) => h("button", { class: `btn primary ${String(v) === String(said) ? "cur" : ""}`, title: String(v) === String(said) ? "What it said" : "", on: { click: () => pick(v) } }, String(v))))
+      : (() => { const n = h("input", { class: "field", type: "number", min: o.min, max: o.max, value: String(said) }) as HTMLInputElement;
+          return h("div", { class: "row gap" }, n, h("button", { class: "btn primary", on: { click: () => pick(Number(n.value)) } }, "Save")); })(),
+    h("p", { class: "muted small" }, "The judge sees your answer next time it's asked about a similar event."),
+  ]);
+}
+
+async function openExamples(t: any) {
+  try {
+    const list = await call(`/api/pipeline/triggers/${t.id}/examples`);
+    openSheet(`${t.name}: corrections`, [
+      h("p", { class: "muted" }, `What you told the judge. It sees the last 8 when it answers “${t.judge.prompt}”.`),
+      list.length ? h("div", { class: "list" }, list.map((x: any) => h("div", { class: "item" },
+        h("span", { class: "grow" }, h("b", null, `should be ${x.value}`, x.judged != null ? h("span", { class: "tag" }, `it said ${x.judged}`) : null),
+          h("small", { class: "sub" }, x.input.slice(0, 160)), h("small", { class: "sub" }, shortAgo(x.createdAt))),
+        h("button", { class: "iconbtn", "aria-label": "Forget this correction", on: { click: async () => { await call(`/api/pipeline/examples/${x.id}`, { method: "DELETE" }); openExamples(t); } } }, icon("trash", 16)))))
+        : h("p", { class: "empty" }, "No corrections yet. In Events, tap Wrong? on one it judged."),
+    ]);
+  } catch (e) { handleError(e); }
+}
+
 function actionText(a: any) {
   if (a.type === "workflow") return `runs workflow ${a.name}`;
   if (a.type === "think") return `thinks: ${a.prompt}`;
@@ -2721,13 +2763,16 @@ function actionText(a: any) {
 }
 
 function drawTriggers() {
-  const el = document.getElementById("triggers");
+  // The open sheet's list: a sheet being replaced is still in the page for a moment, with the same id inside.
+  const el = document.querySelector<HTMLElement>("#scrim #triggers");
   if (!el) return;
   const { sources, triggers, timers } = S.pipe;
   const owner = !!S.state?.device?.primary;
   const tabs: [typeof S.pipeTab, string, number][] = [["triggers", "Triggers", triggers.length], ["timers", "Timers", timers.filter((t) => t.status !== "done").length], ["sources", "Sources", sources.length], ["events", "Events", 0]];
   const fresh = (id: string) => (S.pipeFresh.has(id) ? "fresh" : "");
-  const del = (label: string, text: string, fn: () => Promise<unknown>) => owner ? h("button", { class: "iconbtn", "aria-label": `Delete ${label}`, on: { click: (e: Event) => { e.stopPropagation(); confirmSheet(`Delete ${label}?`, text, "Delete", async () => { await fn(); openTriggers(); }); } } }, icon("trash", 16)) : null;
+  // confirmSheet closes itself after the action, so Triggers opens again just after.
+  const reopen = (tab?: typeof S.pipeTab) => setTimeout(() => openTriggers(tab), 0);
+  const del = (label: string, text: string, fn: () => Promise<unknown>) => owner ? h("button", { class: "iconbtn", "aria-label": `Delete ${label}`, on: { click: (e: Event) => { e.stopPropagation(); confirmSheet(`Delete ${label}?`, text, "Delete", async () => { await fn(); reopen(); }); } } }, icon("trash", 16)) : null;
   const pause = (t: any, path: string) => owner ? h("button", { class: "iconbtn", "aria-label": t.status === "paused" ? "Resume" : "Pause",
     on: { click: () => pipeDo(() => call(path, { method: "PATCH", body: { status: t.status === "paused" ? "active" : "paused" } }), t.status === "paused" ? "Resumed" : "Paused") } }, icon(t.status === "paused" ? "play" : "pause", 16)) : null;
   const by = (who: string) => (who && who !== "you" ? `made by ${who}` : "made by you");
@@ -2737,6 +2782,8 @@ function drawTriggers() {
     h("span", { class: "grow" },
       h("b", null, t.name, t.status === "paused" ? h("span", { class: "tag" }, "Paused") : null),
       h("small", { class: "sub" }, h("span", { class: "srcchip" }, t.sourceName), " when ", h("code", { class: "formula" }, t.formula)),
+      t.judge ? h("small", { class: "sub judgeline" }, h("span", { class: "judgetag" }, "judge"), ` “${t.judge.prompt}” → ${answersText(t.judge.output)}, acts when `, h("code", { class: "formula" }, t.judge.pass),
+        t.examples ? h("button", { class: "link", on: { click: () => openExamples(t) } }, ` · ${t.examples} correction${t.examples === 1 ? "" : "s"}`) : null) : null,
       h("small", { class: "sub" }, actionText(t.action)),
       h("small", { class: "sub" }, [t.fireCount ? `ran ${t.fireCount}×` : "hasn't run yet", t.lastFiredAt ? `last ${shortAgo(t.lastFiredAt)}` : null, t.cooldownMin ? `at most every ${t.cooldownMin} min` : null, by(t.createdBy)].filter(Boolean).join(" · "))),
     pause(t, `/api/pipeline/triggers/${t.id}`),
@@ -2767,11 +2814,21 @@ function drawTriggers() {
       url ? h("div", { class: "row gap" },
         h("button", { class: "codeline grow", title: "Copy", on: { click: () => { navigator.clipboard?.writeText(url); toast("URL copied"); } } }, url),
         h("button", { class: "btn small ghost", on: { click: () => pipeDo(() => call(`/api/pipeline/sources/${s.id}/test`, { body: { payload: { test: true } } }), "Test event sent") } }, "Test"),
-        owner ? h("button", { class: "btn small ghost", on: { click: () => confirmSheet("New URL?", "The old URL stops working right away. Anything using it needs the new one.", "Make new URL", async () => { await call(`/api/pipeline/sources/${s.id}/rotate`, { body: {} }); openTriggers("sources"); }) } }, "New URL") : null) : null);
+        owner ? h("button", { class: "btn small ghost", on: { click: () => confirmSheet("New URL?", "The old URL stops working right away. Anything using it needs the new one.", "Make new URL", async () => { await call(`/api/pipeline/sources/${s.id}/rotate`, { body: {} }); reopen("sources"); }) } }, "New URL") : null) : null);
   };
 
   const eventRow = (e: any) => {
     const ran = (e.log || []).filter((l: any) => l.step === "matched").map((l: any) => l.detail.split(":")[0]);
+    // What each judge said about it, with a way to say it was wrong.
+    const judged = (e.log || []).filter((l: any) => l.step === "judged").map((l: any) => {
+      const t = triggers.find((x) => x.id === l.triggerId);
+      const fixed = (e.log || []).filter((c: any) => c.step === "corrected" && c.triggerId === l.triggerId).at(-1);
+      return h("div", { class: "judged" },
+        h("span", { class: "judgetag" }, "judge"),
+        h("span", { class: "grow" }, `${t?.name || "a trigger"} said `, h("b", null, String(l.value)), l.detail.includes("doesn't act") ? " · didn't act" : " · acted",
+          fixed ? h("span", { class: "tag" }, `you said ${fixed.value}`) : null),
+        t?.judge && owner ? h("button", { class: "btn small ghost", on: { click: (x: Event) => { x.stopPropagation(); openCorrect(e, t, fixed ? fixed.value : l.value); } } }, "Wrong?") : null);
+    });
     const body = h("pre", { class: "output hidden" }, JSON.stringify({ variables: e.variables, payload: e.payload }, null, 2) + "\n\n" + (e.log || []).map((l: any) => `${clockTime(l.at)}  ${l.step.padEnd(9)} ${l.detail}`).join("\n"));
     return h("div", { class: `item pipe col ev ${e.status}` },
       h("button", { class: "row gap evhead", on: { click: () => body.classList.toggle("hidden") } },
@@ -2779,8 +2836,9 @@ function drawTriggers() {
         h("span", { class: "grow" },
           h("b", null, e.sourceName, e.test ? h("span", { class: "tag" }, "test") : null),
           h("small", { class: "sub" }, e.sourceName === "time" ? `timer ${e.variables.time_to_run}` : Object.entries(e.variables).filter(([, v]) => v != null && v !== "").slice(0, 3).map(([k, v]) => `${k}: ${String(typeof v === "object" ? JSON.stringify(v) : v).slice(0, 40)}`).join(" · ") || "(nothing mapped)"),
-          h("small", { class: "sub" }, `${shortAgo(e.receivedAt)} · `, e.status === "matched" ? `→ ${ran.join(", ")}` : e.status === "unmatched" ? "no trigger matched" : e.status === "failed" ? "a trigger failed" : "waiting")),
+          h("small", { class: "sub" }, `${shortAgo(e.receivedAt)} · `, e.status === "matched" ? `→ ${ran.join(", ")}` : e.status === "unmatched" ? "no trigger acted" : e.status === "failed" ? "a trigger failed" : "waiting")),
         del("this event", "It's removed from the log.", () => call(`/api/pipeline/events/${e.id}`, { method: "DELETE" }))),
+      judged.length ? h("div", { class: "judgedlist" }, judged) : null,
       body);
   };
 
@@ -2795,7 +2853,7 @@ function drawTriggers() {
     tab === "sources" ? h("div", { class: "list" }, sources.map(sourceRow)) : null,
     tab === "events" ? [
       S.pipeEvents.length ? h("div", { class: "list" }, S.pipeEvents.map(eventRow)) : h("p", { class: "empty" }, "No events yet."),
-      S.pipeEvents.length && owner ? h("button", { class: "link", on: { click: () => confirmSheet("Clear the event log?", "Every saved event and its log goes. Sources, triggers and timers stay.", "Clear", async () => { await call("/api/pipeline/events", { method: "DELETE" }); S.pipeEvents = []; openTriggers("events"); }) } }, "Clear the log") : null,
+      S.pipeEvents.length && owner ? h("button", { class: "link", on: { click: () => confirmSheet("Clear the event log?", "Every saved event and its log goes. Sources, triggers and timers stay.", "Clear", async () => { await call("/api/pipeline/events", { method: "DELETE" }); S.pipeEvents = []; reopen("events"); }) } }, "Clear the log") : null,
     ] : null);
 }
 
@@ -2819,15 +2877,15 @@ function flyIn(what: string, id: string, next: () => void) {
   S.pipeFresh.add(id);
   setTimeout(() => { S.pipeFresh.delete(id); if (S.panel === "triggers") drawTriggers(); }, 4500);
   const tab = what === "triggers" ? "triggers" : what === "timers" ? "timers" : "sources";
-  if (S.panel === "triggers") { S.pipeTab = tab; drawTriggers(); document.querySelector(`[data-pipe="${id}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }); }
+  if (S.panel === "triggers") { S.pipeTab = tab; drawTriggers(); document.querySelector(`#scrim [data-pipe="${id}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }); }
   const label = what === "triggers" ? "New trigger" : what === "timers" ? "New timer" : "New source";
-  const detail = what === "triggers" ? item.formula : what === "timers" ? scheduleText(item.schedule) : item.variables.map((v: any) => v.name).join(", ");
+  const detail = what === "triggers" ? `${item.formula}${item.judge ? `  → judge: ${item.judge.pass}` : ""}` : what === "timers" ? scheduleText(item.schedule) : item.variables.map((v: any) => v.name).join(", ");
   const card = h("button", { class: "flycard", on: { click: () => { card.remove(); openTriggers(tab); } } },
     h("span", { class: "flyicon" }, icon(what === "timers" ? "clock" : what === "sources" ? "plug" : "zap", 18)),
     h("span", { class: "grow" }, h("small", null, `${label} · ${item.createdBy || "a teammate"}`), h("b", null, item.name), h("code", null, detail)));
   document.body.appendChild(card);
   // Looked up when it flies (and again when it lands): the sidebar may have been redrawn in between.
-  const findTarget = () => (S.panel === "triggers" ? document.getElementById("pipe-drop") : null) || document.getElementById("snav-triggers");
+  const findTarget = () => (S.panel === "triggers" ? document.querySelector<HTMLElement>("#scrim #pipe-drop") : null) || document.getElementById("snav-triggers");
   const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
   // Show it for a moment, then fly it into its place; the next card can come up as this one leaves.
   setTimeout(() => {

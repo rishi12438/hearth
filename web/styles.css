@@ -1148,3 +1148,14 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 .landed { animation: landed .7s ease-out; }
 @keyframes landed { 0% { box-shadow: 0 0 0 0 rgba(47, 111, 235, .45); background: rgba(47, 111, 235, .14); } 100% { box-shadow: 0 0 0 10px rgba(47, 111, 235, 0); } }
 @media (prefers-reduced-motion: reduce) { .item.pipe.fresh, .flycard, .landed { animation: none; } }
+/* Trigger judges */
+.judgetag { display: inline-block; font-size: 10.5px; font-weight: var(--fw-semibold); text-transform: uppercase; letter-spacing: .04em; color: #7a4fd0; background: rgba(122, 79, 208, .1); padding: 1px 6px; border-radius: 4px; margin-right: 4px; }
+.item .judgeline .link { font-size: 13px; padding: 0; }
+.judgedlist { display: flex; flex-direction: column; gap: 6px; padding-left: 21px; }
+.judged { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--ink-2); }
+.judged .tag { margin-left: 6px; }
+.judgepick { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.judgepick .btn { min-width: 48px; }
+.judged b { display: inline; font-weight: var(--fw-semibold); color: var(--ink); }
+.judgepick .btn { width: auto; flex: none; }
+.judgepick .btn.cur { background: var(--surface-2); color: var(--ink); }

@@ -914,6 +914,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         const withUrl = (src: ReturnType<typeof p.sources>[number]) => ({ ...src, pushPath: src.kind === "push" && owner ? `/api/events/${src.name}/${p.secretOf(src.id)}` : null });
         if (method === "GET" && !sub) return json({ sources: p.sources().map(withUrl), triggers: p.triggers(), timers: p.timers() });
         if (method === "GET" && sub === "events" && key) { const e = p.getEvent(key); if (!e) break; return json(e); }
+        if (method === "GET" && sub === "triggers" && key && seg[4] === "examples") return json(p.examples(key));
         if (method === "GET" && sub === "events") {
           const q = url.searchParams;
           return json(p.events({ source: q.get("source") || undefined, status: q.get("status") || undefined, limit: Number(q.get("limit")) || 50, before: q.get("before") || undefined }));
@@ -942,6 +943,9 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           if (method === "PATCH" && key) return ok(await p.updateTimer(key, await body(req)));
           if (method === "DELETE" && key) return json({ ok: p.removeTimer(key) });
         }
+        // "The judge got this one wrong": the right value becomes an example it sees next time.
+        if (sub === "events" && key && seg[4] === "correct" && method === "POST") { const b = await body(req); return ok(p.correct(key, String(b.trigger || ""), b.value)); }
+        if (sub === "examples" && key && method === "DELETE") return json({ ok: p.forgetExample(Number(key)) });
         if (sub === "events" && method === "DELETE") {
           if (key) return json({ ok: p.removeEvent(key) });
           return json({ removed: p.clearEvents({ source: url.searchParams.get("source") || undefined, status: url.searchParams.get("status") || undefined }) });
