@@ -97,6 +97,37 @@ test("Claude: a thread's first job starts a session in its folder, follow-ups re
   });
 });
 
+test("any brain you picked that works on the hub runs there before a call goes to your Mac", async () => {
+  const bin = mkdtempSync(join(tmpdir(), "hearth-any-"));
+  const calls = fakeClaude(bin);
+  fakeCodex(bin, { answer: "codex on the hub" });
+  const brain = new Brain(loadConfig({ HEARTH_DATA: mkdtempSync(join(tmpdir(), "hearth-any-data-")), HEARTH_AGENT: "claude", HEARTH_SKILLS: "off", HEARTH_BRAIN_JAIL: "off" }));
+  const mac: string[] = [];
+  brain.remote = { linked: () => true, pick: (p) => ({ name: "Mac", run: async (_b, q) => { mac.push(q.harness); return "from the mac"; } }) };
+  await withPath(bin, async () => {
+    // Codex is signed out on the hub, Claude isn't: Claude does it here, at the same tier.
+    brain.pool = async () => ["claude", "codex"];
+    brain.health.signedOut("codex", "401");
+    const m1 = meter("thread-any");
+    expect(await brain.think(JOB, { harness: "codex", model: "", role: "workhorse" }, m1)).toBe("done");
+    expect(m1.ranOn).toBe("cloud");
+    expect(calls().at(-1)).toContain("--model claude-sonnet-5-5");
+    expect(mac).toEqual([]);
+
+    // Both signed out here: now the Mac gets it.
+    brain.health.signedOut("claude", "401");
+    const m2 = meter("thread-any");
+    expect(await brain.think(JOB, { harness: "codex", model: "" }, m2)).toBe("from the mac");
+    expect(m2.ranOn).toBe("Mac");
+
+    // Only Codex picked: Claude isn't used even though it's on the hub.
+    brain.health.fine("claude");
+    brain.pool = async () => ["codex"];
+    expect(await brain.think(JOB, { harness: "codex", model: "" }, meter("thread-any"))).toBe("from the mac");
+    expect(mac).toEqual(["codex", "codex"]);
+  });
+});
+
 test("Codex: a thread's first job starts an app-server thread, follow-ups resume it, and a lost one starts over", async () => {
   const bin = mkdtempSync(join(tmpdir(), "hearth-cxs-"));
   const log = join(bin, "requests.log"), state = join(bin, "threads.json");

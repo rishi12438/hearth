@@ -708,18 +708,26 @@ export class Brain {
 
   /**
    * This hub first, always: a job's whole thread then lives in one place, with its sessions and its folder (see
-   * brains/sessions.ts). A linked computer only takes a call this hub can't run: that brain isn't installed here, or
-   * it's signed out here.
+   * brains/sessions.ts). If the brain asked for can't run here (not installed, or signed out) but another brain you
+   * picked can, that one does it here. A linked computer only gets the call when no picked brain works on this hub.
    */
   private async dispatch(b: BrainInput, p: BrainProfile, meter?: Meter): Promise<string> {
-    const here = availableHarnesses(this.config).includes(p.harness);
-    const away = () => this.remote?.pick(p) ?? null;
-    if (here && !(this.health.problem(p.harness) && away())) {
+    const installed = availableHarnesses(this.config);
+    const here = installed.includes(p.harness);
+    const works = (h: string) => installed.includes(h) && !this.health.problem(h);
+    // The brain asked for first, then the other brains you picked (same tier): any brain that works on this hub beats
+    // sending the call to a computer.
+    const picked = (await this.pool().catch(() => [] as string[])).filter((h) => h !== p.harness && (POOL_HARNESSES as readonly string[]).includes(h));
+    const local = [p, ...((POOL_HARNESSES as readonly string[]).includes(p.harness) ? picked.map((h) => this.onBrain(p, h)) : [])];
+    let signedOut: SignedOut | null = null;
+    for (const q of local) {
+      if (!works(q.harness)) continue;
       if (meter) meter.ranOn = this.remote?.linked() ? "cloud" : undefined;
-      try { return await this.run(b, p, meter); }
-      catch (e) { if (!(e instanceof SignedOut) || !away()) throw e; }
+      try { return await this.run(b, q, meter); }
+      catch (e) { if (!(e instanceof SignedOut)) throw e; signedOut = e; }
     }
-    const r = away();
+    // No brain works on this hub: a linked computer that has it.
+    const r = this.remote?.pick(p) ?? null;
     if (r) {
       if (meter) meter.ranOn = r.name;
       try { return await r.run(b, p, meter); }
@@ -728,6 +736,9 @@ export class Brain {
     if (!here && this.remote?.linked()) {
       throw new NeedsComputer(`No linked computer is online to run ${p.harness}, and this hub can't run it. Open your Mac, or copy your ${p.harness} login to the cloud.`);
     }
+    if (signedOut) throw signedOut;
+    // Every brain here is marked signed out and no computer can take it: try the one asked for anyway (a login fixed
+    // since then shows up this way).
     if (meter) meter.ranOn = this.remote?.linked() ? "cloud" : undefined;
     return this.run(b, p, meter);
   }
