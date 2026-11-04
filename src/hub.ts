@@ -814,6 +814,21 @@ export class Hub {
     return true;
   }
 
+  /** The lead's brief before a cheaper model starts a job: the task, what came before, and the workspace's notes. */
+  private async leadTips(job: Job, earlier: string, place?: WorkPlace): Promise<string> {
+    const notes = this.brain.sessions.notes(job.parentId ? job.id : job.followsUp || job.id, place);
+    const input = [`JOB: ${job.task}`, earlier ? `\nWHAT CAME BEFORE:\n<untrusted>\n${earlier.slice(0, 4000)}\n</untrusted>` : "",
+      notes ? `\nTHEIR WORKSPACE'S NOTES.md (what earlier work left):\n<untrusted>\n${notes}\n</untrusted>` : ""].join("\n");
+    const out = (await this.brain.think({ mode: "coach", context: {}, input }, (await this.brains()).heavy)).trim();
+    return out.slice(0, 3000);
+  }
+
+  /** A job asked the lead mid-run (hearth-lead): the heavy model answers. See brains/lead.ts. */
+  async askLead(question: string): Promise<string> {
+    await this.log("lead.asked", question.replace(/\s+/g, " ").slice(0, 160));
+    return (await this.brain.advise(question, (await this.brains()).heavy)).trim() || "No advice: go with your best judgement and say what you weren't sure of.";
+  }
+
   /**
    * Where a job's thread works (see brains/sessions.ts): inside the ramble's project, if it's filed in one; in the
    * workspace the planner picked for it (or for the job it follows up / is part of), else the ramble's channel
@@ -923,12 +938,13 @@ export class Hub {
     const ask = await this.store.get<Message>("messages", job.messageId);
     const attached = await this.attachmentNote(ask?.fileIds);
     const handNote = job.mayHandBack ? `\n\nFIRST, before any work or tools: the user sent this in the ramble's channel and it came straight to you because you had the latest thread. If it isn't a follow-up on that thread's subject (a new request, or partly about something else), don't do it: reply with only ${HAND_BACK} and Hearth will route it.` : "";
-    const input = `${job.task}${depNote}${handNote}${repairNote}${splitNote}${attached}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")`;
+    let input = `${job.task}${depNote}${handNote}${repairNote}${splitNote}${attached}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")`;
     type Tier = "quick" | "workhorse" | "heavy";
     // Hybrid (on by default): a cheaper model does the legwork and the heavy model writes what you read.
     const hybrid = (await this.prefs()).hybrid !== false && label(brains.heavy) !== label(brains.workhorse);
     const attempt = async (tier: Tier) => {
       cur = await this.saveJob({ ...cur, status: "working", tier });
+      meter.lead = hybrid && tier !== "heavy" && label(brains[tier]) !== label(brains.heavy);
       return this.turn(hybrid && tier !== "heavy" ? "legwork" : "job", input, job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains[tier], meter });
     };
     // Start on the cheapest model the plan allows; move up a step when a model can't do it.
@@ -936,6 +952,13 @@ export class Hub {
     let tier: Tier = ladder[0];
     let escalated = false;
     if (await overCap()) return finish({ how: "fresh" });
+    // The lead briefs a cheaper model before it starts: the approach, the traps, what to check (brains/lead.ts).
+    // Only with hybrid on (Settings → Brains): off means one model does the job by itself.
+    if (hybrid && ladder[0] !== "heavy" && job.effort !== "quick" && label(brains[ladder[0]]) !== label(brains.heavy) && !stop.signal.aborted) {
+      meter.onProgress?.("Getting tips from the lead");
+      const tips = await this.leadTips(job, earlier, meter.workspace).catch(() => "");
+      if (tips) input += `\n\nTIPS FROM THE LEAD (a stronger model on your team, before you started):\n${tips}`;
+    }
     try {
       let r: Awaited<ReturnType<typeof attempt>> | null = await attempt(tier).catch((err) => (tier !== "heavy" ? null : Promise.reject(err)));
       if (stop.signal.aborted) throw new Error("Restarted with your new message.");

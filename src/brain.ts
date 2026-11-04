@@ -17,6 +17,7 @@ import { Sessions, type Place, type SessionHarness } from "./brains/sessions.ts"
 import { CodexAppTurn } from "./brains/codex-app.ts";
 import { tidyWorkspaces, type TidyReport } from "./brains/archive.ts";
 import { commandLog } from "./brains/history.ts";
+import { ADVISE } from "./brains/lead.ts";
 
 /** Each trigger module's own description of its config, for the hook docs below. */
 /** Each trigger module's own description, read when a prompt is built (the hub adds WhatsApp and Slack at start). */
@@ -29,7 +30,7 @@ const sourceDocs = () => SOURCES.map((s) => `        ${s.id}: ${s.doc}`).join("\
 // with; elsewhere it gets the web tools only, in an empty folder.
 
 export type BrainInput = {
-  mode: "chat" | "hook" | "review" | "job" | "orchestrate" | "ideas" | "legwork" | "voice" | "clean" | "describe" | "narrate";
+  mode: "chat" | "hook" | "review" | "job" | "orchestrate" | "ideas" | "legwork" | "voice" | "clean" | "describe" | "narrate" | "coach" | "advise";
   context: Record<string, unknown>;
   input: string;
   toolResults?: string;
@@ -41,7 +42,7 @@ export const ESCALATE = "[[escalate]]";
 export const HAND_BACK = "[[hand-back]]";
 export const REDO = "[[redo]]";
 /** Calls that only read and write text: no web tools. */
-const NO_TOOLS = new Set<BrainInput["mode"]>(["orchestrate", "voice", "review", "ideas", "clean", "describe", "narrate"]);
+const NO_TOOLS = new Set<BrainInput["mode"]>(["orchestrate", "voice", "review", "ideas", "clean", "describe", "narrate", "coach", "advise"]);
 /** Claude's tools for calls that can run code (in the jail). */
 const CODE_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent"];
 /** A helper on the small model that Claude fans wide searches out to. */
@@ -53,6 +54,26 @@ const SCOUT = {
     tools: ["WebSearch", "WebFetch", "Bash", "Read"],
   },
 };
+/**
+ * The lead, on hand while a cheaper model does the work (Claude only: Codex has no sub-agents; it gets the lead's tips
+ * up front instead, see COACH). It advises; it doesn't take the job over.
+ */
+const LEAD = {
+  lead: {
+    description: "The lead: a stronger model on your team. Ask it when you're stuck after two tries, before you pick an approach for something big, tricky or hard to undo, or when results look off. Give it the specifics (what you tried, what happened, the files).",
+    prompt: "You are the lead on this team: a stronger model advising a teammate who is doing a job. Answer their question with a concrete recommendation: what to do next and why, the trap they're about to fall into, and what to check before trusting a result. You may read their files to see for yourself. Be brief and specific. Don't do the whole job for them.",
+    model: "opus",
+    tools: ["Read", "Grep", "Glob", "WebSearch", "WebFetch"],
+  },
+};
+/** The lead's brief before a cheaper model starts a job: how to go about it, from experience. */
+const COACH = `You are the lead on a team, a stronger model. A cheaper teammate is about to do the job below; you won't see it again
+until they report back. Give them the tips that make the difference, from experience: at most 8 short bullets, no preamble.
+- the best approach and source for it (an API, an export, a page's own data, a saved script in their workspace)
+- the traps here (logins, pagination, rate limits, look-alike data, stale results) and how to avoid them
+- what to check before trusting a result (counts, a spot-check, a cross-check with another source)
+- what "done" looks like for the user, and when to stop and say what's missing instead of guessing
+Use the workspace notes if there are any: tell them what to reuse. Don't do the job and don't repeat the task back.`;
 /** Dictation clean-up (like Wispr Flow): tidy what was said without changing what it means. */
 const CLEAN = `Clean up this dictated text so it reads as if typed. Remove filler (um, uh, like, you know), false starts and repeated
 words. When the speaker corrects themselves ("at 5, no, 6"), keep only the correction. Fix punctuation, capitals and obvious
@@ -368,7 +389,7 @@ export function workspaceNote(place?: Place): string[] {
     "the exact command, its inputs and output, what breaks it), new or updated; 3) today's log section is there. Then reply."];
 }
 
-function atScale(code: "claude" | "codex" | null | undefined, workspace: Place | boolean = false): string[] {
+function atScale(code: "claude" | "codex" | null | undefined, workspace: Place | boolean = false, lead = false): string[] {
   if (!code) return [];
   return ["", "WORKING AT SCALE: you have a shell, files and the open internet in a sandbox.",
     workspace ? "Your current folder is kept for this thread (see YOUR WORKSPACE)." : "Your current folder is scratch space; nothing there is kept.",
@@ -377,6 +398,9 @@ function atScale(code: "claude" | "codex" | null | undefined, workspace: Place |
     "automate-repetitive-work skill says how, and how to keep every item right: counts, spot-checks, no silent drops). Use the hub's tools (hearth-*) for the user's own data. Check what a script printed before relying on it.",
     ...(code === "claude" ? ["For wide searching, hand pieces to the scout agent (a small fast model), several at once in one message, and keep the",
       "judgement and the answer for yourself."] : []),
+    ...(lead ? ["THE LEAD (a stronger model on your team) is on hand: ask it when you're stuck after two tries, before you pick an",
+      "approach for something big, tricky or hard to undo, or when results look off. Say what you tried and what happened, then follow",
+      `its advice: ${code === "claude" ? "use the lead agent (it can read your files), or " : ""}run \`hearth-lead "<question>"\` (it can't see your files: paste what it needs).`] : []),
     "Well-known facts (a large company's sector, a capital city) you may state from knowledge; say so where it matters. Mark only",
     "what you truly couldn't find as missing, and never invent numbers.", ...(workspace ? workspaceNote(typeof workspace === "object" ? workspace : undefined) : [])];
 }
@@ -385,9 +409,11 @@ function atScale(code: "claude" | "codex" | null | undefined, workspace: Place |
  * code: which brain can run code in this call (in the jail), else null. workspace: it works in a job thread's kept folder
  * (true), or in the workspace (in a project or not) it shares with earlier threads on the subject.
  */
-export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = null, workspace: Place | boolean = false) {
+export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = null, workspace: Place | boolean = false, lead = false) {
   if (b.mode === "clean") return [CLEAN, "", "DICTATED:", b.input].join("\n");
   if (b.mode === "narrate") return b.input; // built by narratePrompt (brains/narrate.ts)
+  if (b.mode === "coach") return [COACH, "", b.input].join("\n");
+  if (b.mode === "advise") return [ADVISE, "", "THEIR QUESTION:", "<untrusted>", b.input, "</untrusted>"].join("\n");
   if (b.mode === "describe") return ["Write ONE sentence describing this reusable UI component for a library: what it shows and when to use it, so a",
     "teammate searching later can tell if it fits (e.g. \"Tabs per day with a zoomed map and a short list of things to do; use for any multi-day trip.\").",
     "Reply with only the sentence.", "", b.input].join("\n");
@@ -402,7 +428,7 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
     parts.push("", "You were handed ONE job from the user's ramble by the orchestrator. Do it fully now: use actions for reminders,",
       "routines, watches and memory; search the web if you need to. Then reply with the result in 1-5 short lines, written to the user.",
       `If the job is clearly beyond you or you can't do it well, reply exactly ${ESCALATE} and a stronger model will take it.`,
-      ...atScale(code, workspace), "JOB:", b.input);
+      ...atScale(code, workspace, lead), "JOB:", b.input);
   } else if (b.mode === "legwork") {
     parts.push("", "You were handed ONE job from the user's ramble. You do the LEGWORK; a stronger model on the team (the lead) will read",
       "your notes and write the reply the user sees. Do the job fully now: search the web, read pages, and take the actions it needs",
@@ -411,7 +437,7 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
       "- what you did: actions taken and their results",
       "- anything uncertain or missing, and what you'd ask the user",
       `Be complete and factual; the lead can't search again cheaply. If the job is beyond you, reply exactly ${ESCALATE}.`,
-      ...atScale(code, workspace), "JOB:", b.input);
+      ...atScale(code, workspace, lead), "JOB:", b.input);
   } else if (b.mode === "voice") {
     parts.push("", "You are the lead on ONE job. A teammate on a cheaper model already did the legwork (searches, actions); their notes are",
       "below. Write the reply the user sees, in your teammate voice. They read it on a PHONE: the answer first in 1-3 short lines,",
@@ -490,6 +516,8 @@ export type Meter = { costUsd: number; unknown: boolean; signal?: AbortSignal; o
   thread?: string;
   /** Where its thread should work (the ramble's project; workspace from the planner or channel); pinned on first use. */
   workspace?: Place;
+  /** A cheaper model is doing the job: the lead (the heavy model) is on hand to ask (see brains/lead.ts). */
+  lead?: boolean;
   /** Set by Brain when a run carried on the thread's earlier session instead of starting a new one. */
   resumed?: boolean };
 
@@ -746,6 +774,11 @@ export class Brain {
    * A live status line from the quick model (see brains/narrate.ts). Skips the queue on purpose: it's a few hundred tokens,
    * and waiting behind the very job it describes would make it useless.
    */
+  /** The lead's advice for a job that asked mid-run (hearth-lead). Skips the queue: the asking job holds a slot already. */
+  async advise(question: string, profile: BrainProfile): Promise<string> {
+    return this.dispatch({ mode: "advise", context: {}, input: question.slice(0, 20_000) }, profile);
+  }
+
   async narrate(prompt: string, profile: BrainProfile): Promise<string> {
     return this.dispatch({ mode: "narrate", context: {}, input: prompt }, profile);
   }
@@ -825,7 +858,10 @@ export class Brain {
     // Working calls in the jail can run code: a shell, files and the open internet (the jail hides the hub's secrets).
     const jail = web && (harness === "claude" || harness === "codex") ? this.jail() : null;
     const coder = jail ? (harness as "claude" | "codex") : null;
-    const prompt = (codexSkills.length ? skillCatalog(codexSkills, "codex").trim() + "\n\n" : "") + buildPrompt(b, coder, thread ? this.sessions.placeOf(thread) || true : false);
+    // A cheaper model doing a job gets the lead on hand: an Opus sub-agent on Claude (it can read the files), and the
+    // hearth-lead command on either brain (see brains/lead.ts).
+    const lead = !!(web && meter?.lead && coder);
+    const prompt = (codexSkills.length ? skillCatalog(codexSkills, "codex").trim() + "\n\n" : "") + buildPrompt(b, coder, thread ? this.sessions.placeOf(thread) || true : false, lead);
     const planning = b.mode === "orchestrate";
     const name = `${harness}${model ? ` (${model})` : ""}`;
     let cmd: string[];
@@ -847,7 +883,7 @@ export class Brain {
           // No permission checks: `claude -p` can't ask anyone, so a tool call outside --allowedTools was just refused.
           // --tools still decides which tools exist.
           "--dangerously-skip-permissions",
-          ...(coder ? ["--agents", JSON.stringify(SCOUT)] : [])];
+          ...(coder ? ["--agents", JSON.stringify(lead && !/opus/i.test(model) ? { ...SCOUT, ...LEAD } : SCOUT)] : [])];
         break;
       }
       case "codex":
@@ -1038,6 +1074,8 @@ function echoBrain(b: BrainInput): string {
   if (b.mode === "describe") return `Shows ${(b.input.match(/^Title: (.*)$/m)?.[1] || "a view").trim()}.`;
   if (b.mode === "clean") return b.input.replace(/\b(um+|uh+|you know),?\s*/gi, "").replace(/\s+/g, " ").trim();
   if (b.mode === "narrate") return "";
+  if (b.mode === "coach") return "";
+  if (b.mode === "advise") return "Try the export first, and count rows before and after.";
   if (b.mode === "voice") return (b.input.split("NOTES FROM THE LEGWORK:")[1] || b.input).replace(/<\/?untrusted>/g, "").trim();
   if (b.mode === "ideas") {
     const facts = ((b.context as any).memory || []) as { fact: string }[];

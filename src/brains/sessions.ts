@@ -124,6 +124,14 @@ export class Sessions {
     return dir;
   }
 
+  /** The start of the NOTES.md a thread's runs will see (where it's pinned, else where it would go), without making anything. */
+  notes(thread: string, want?: Place, max = 4000): string {
+    const f = this.read()[thread]?.folder;
+    const rel0 = typeof f === "string" && FOLDER_RE.test(f) ? f : want && FOLDER_RE.test(rel(want)) ? rel(want) : `threads/${thread}`;
+    if (!THREAD_RE.test(thread)) return "";
+    try { return readFileSync(join(this.workDir, rel0, "NOTES.md"), "utf8").slice(0, max).trim(); } catch { return ""; }
+  }
+
   /**
    * The workspaces in a project (or, with none, those outside any project), most recently used first, with the start of
    * each one's NOTES.md (what was done there): for the planner to put a new job in the right one.

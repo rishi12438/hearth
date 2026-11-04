@@ -14,6 +14,7 @@ import { deepgram } from "./deepgram.ts";
 import { instagram, linkedin } from "./cookies.ts";
 import { google } from "./google.ts";
 import { googleSkills } from "./google-agent.ts";
+import { leadSkill } from "../brains/lead.ts";
 import { claude, codex, takeLogin } from "./brains.ts";
 import { whatsappSource } from "./whatsapp-source.ts";
 import { registerSource } from "../sources/index.ts";
@@ -66,6 +67,8 @@ export class Connect {
     registerSkills(() => (this.plaid.connected() ? [plaidSkill(`http://${local}:${hub.config.port}`, this.agentKey)] : []));
     // Gmail, Drive and Calendar for the agent, while Google is connected, with the same key (google-agent.ts).
     registerSkills(() => (hub.google.connected ? googleSkills(`http://${local}:${hub.config.port}`, this.agentKey) : []));
+    // The lead on hand mid-job (brains/lead.ts): always there, with the same key.
+    registerSkills(() => [leadSkill(`http://${local}:${hub.config.port}`, this.agentKey)]);
   }
 
   /** The key hearth-plaid and the Google commands send from this machine. */
