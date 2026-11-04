@@ -3239,12 +3239,12 @@ function drawTriggers() {
             s.claim?.releasedAt ? h("span", { class: "tag" }, "Released") : s.status === "paused" ? h("span", { class: "tag" }, "Paused") : null),
           w ? h("small", { class: "sub" }, `Watches ${w.describe}`) : s.claim ? null : s.description ? h("small", { class: "sub" }, s.description) : null,
           // A port's claim: what it's for, what calls it, who took it and when (and when it was given back).
-          s.claim ? h("small", { class: "sub" }, h("b", null, "For: "), s.claim.reason) : null,
+          s.claim ? h("small", { class: "sub" }, `For: ${s.claim.reason}`) : null,
           s.claim ? h("small", { class: "sub" }, `Called by ${s.claim.publisher} · claimed by ${s.claim.by} ${shortAgo(s.claim.at)}`,
             s.claim.threadId ? [" · ", h("a", { href: s.claim.threadId.startsWith("tm-") ? `#t/${s.claim.threadId.slice(3)}` : `#c/${s.claim.threadId}${s.claim.jobId ? `/${s.claim.jobId}` : ""}` }, "the task that took it")] : null) : null,
           s.claim?.releasedAt ? h("small", { class: "sub" }, `Released ${shortAgo(s.claim.releasedAt)} by ${s.claim.releasedBy}${s.claim.releaseReason ? `: ${s.claim.releaseReason}` : ""}`) : null,
           w ? h("small", { class: `sub ${w.lastError ? "warn" : ""}` }, w.lastError ? `Couldn't look: ${w.lastError}` : w.lastRunAt ? `looked ${shortAgo(w.lastRunAt)}${w.looked ? "" : " (first look saved)"}` : "first look soon") : null,
-          h("small", { class: "sub" }, [!w && !s.claim && s.service ? `${s.service}${s.scope ? ` · ${s.scope}` : ""}` : null, `${s.eventCount} event${s.eventCount === 1 ? "" : "s"}`, s.lastEventAt ? `last ${shortAgo(s.lastEventAt)}` : null, builtin ? null : by(s.createdBy)].filter(Boolean).join(" · "))),
+          h("small", { class: "sub" }, [!w && !s.claim && s.service ? `${s.service}${s.scope ? ` · ${s.scope}` : ""}` : null, `${s.eventCount} event${s.eventCount === 1 ? "" : "s"}`, s.lastEventAt ? `last ${shortAgo(s.lastEventAt)}` : null, builtin || s.claim ? null : by(s.createdBy)].filter(Boolean).join(" · "))),
         w && owner ? h("button", { class: "iconbtn", "aria-label": "Check now", title: "Check now", on: { click: () => pipeDo(() => call(`/api/pipeline/watchers/${w.id}/check`, { body: {} }), "Looked") } }, icon("refresh", 16)) : null,
         w ? pause(w, `/api/pipeline/watchers/${w.id}`) : s.kind === "push" && !s.claim?.releasedAt ? pause(s, `/api/pipeline/sources/${s.id}`) : null,
         owner && s.kind === "push" && !s.claim?.releasedAt ? h("button", { class: "btn small ghost", on: { click: () => confirmSheet(`Release ${s.name}?`, "Its URL stops working right away. Its record, triggers and events stay, so you can see what it was for.", "Release", async () => { await call(`/api/pipeline/sources/${s.id}/release`, { body: { reason: "released in Triggers" } }); reopen("sources"); }) } }, "Release") : null,
@@ -3296,7 +3296,19 @@ function drawTriggers() {
       builtIn.length ? [h("h4", null, "The hub's own"), h("div", { class: "list" }, builtIn.map(triggerRow))] : null,
     ] : null,
     tab === "timers" ? (timers.length ? h("div", { class: "list" }, timers.map(timerRow)) : h("p", { class: "empty" }, "No timers. A timer pushes one event to the time source when it's due, and triggers on “time” pick it up.")) : null,
-    tab === "sources" ? h("div", { class: "list" }, sources.map(sourceRow)) : null,
+    // Ports (callback URLs someone claimed, with what each is for) first, then every other source, then the ports given back.
+    tab === "sources" ? (() => {
+      const ports = sources.filter((s: any) => s.kind === "push" && !s.claim?.releasedAt);
+      const released = sources.filter((s: any) => s.kind === "push" && s.claim?.releasedAt);
+      const rest = sources.filter((s: any) => s.kind !== "push");
+      return [
+        h("h4", null, "Ports"),
+        ports.length ? h("div", { class: "list" }, ports.map(sourceRow))
+          : h("p", { class: "empty" }, "No ports yet. A port is a callback URL for a webhook: ask Hearth (“give me a URL Stripe can call when a payment fails”) and it claims one, saying what it's for."),
+        rest.length ? [h("h4", null, "Other sources"), h("div", { class: "list" }, rest.map(sourceRow))] : null,
+        released.length ? [h("h4", null, "Released ports"), h("div", { class: "list" }, released.map(sourceRow))] : null,
+      ];
+    })() : null,
     tab === "events" ? [
       S.pipeEvents.length ? h("div", { class: "list" }, S.pipeEvents.map(eventRow)) : h("p", { class: "empty" }, "No events yet."),
       S.pipeEvents.length && owner ? h("button", { class: "link", on: { click: () => confirmSheet("Clear the event log?", "Every saved event and its log goes. Sources, triggers and timers stay.", "Clear", async () => { await call("/api/pipeline/events", { method: "DELETE" }); S.pipeEvents = []; reopen("events"); }) } }, "Clear the log") : null,
