@@ -120,6 +120,8 @@ export type Job = Doc & {
   /** Set when the job can't go on without you (a login, your laptop, a permission). It parks until you unblock it. */
   /** needs "computer": parked until a linked computer is online, then it resumes on its own. */
   blocked?: { need: string; why: string; unblock: string; needs?: "computer" | "brains"; until?: number | null };
+  /** When you saw it stuck (any device). Seen, it stops counting in the badges until it gets stuck again. */
+  seenAt?: string;
   /** Where the model ran: a linked computer's name, or "cloud" for this hub. */
   ranOn?: string;
   effort: "quick" | "light" | "heavy";
