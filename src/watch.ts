@@ -2,8 +2,8 @@ import { lookup } from "node:dns/promises";
 import { sha256 } from "./auth.ts";
 import pkg from "../package.json" with { type: "json" };
 
-// Watch hooks: the hub reads a web page now and then and speaks only when its text changes, like changedetection.io
-// but built in. For pages that only render in a browser, run changedetection.io and point it at a webhook hook.
+// Page watchers: the hub reads a web page now and then and pushes an event only when its text changes, like
+// changedetection.io but built in. For pages that only render in a browser, point changedetection.io at a push source.
 
 const MAX_PAGE = 2_000_000;
 const MAX_TEXT = 20_000;
@@ -51,7 +51,7 @@ export function lineDiff(before: string, after: string) {
   const a = new Set(before.split("\n")), b = new Set(after.split("\n"));
   const added = [...b].filter((l) => !a.has(l)), removed = [...a].filter((l) => !b.has(l));
   const show = (xs: string[], sign: string) => xs.slice(0, 40).map((l) => `${sign} ${l.slice(0, 300)}`).join("\n") + (xs.length > 40 ? `\n${sign} …and ${xs.length - 40} more` : "");
-  return { added: added.length, removed: removed.length, text: [added.length ? show(added, "+") : "", removed.length ? show(removed, "-") : ""].filter(Boolean).join("\n") };
+  return { added: added.length, removed: removed.length, addedLines: added, removedLines: removed, text: [added.length ? show(added, "+") : "", removed.length ? show(removed, "-") : ""].filter(Boolean).join("\n") };
 }
 
 export type Look = { hash: string; text: string; at: string };

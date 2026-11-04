@@ -5,7 +5,7 @@ import type { Fact, Importance } from "./types.ts";
 // - Importance 3 is "core": always in the brain's context, like a profile.
 // - Others are recalled by relevance to the current message, then importance, then recent use.
 // - Changing a fact supersedes it; the old version stays as history. Facts can expire.
-// - A nightly review hook merges duplicates and refreshes each notebook's summary.
+// - A nightly review (a built-in trigger) merges duplicates and refreshes each notebook's summary.
 
 const STOP = new Set(("the and for are but not you your with this that have from was were will what when where who " +
   "how why can could would should about into just like some than then them they there these those its it's i'm " +

@@ -311,7 +311,7 @@ test("the brain's tools make sources, triggers and timers; matches post a messag
 
   // And can delete what it made.
   const d = await hub.applyActions([{ type: "trigger.remove", name: "acme" }, { type: "time.cancel", name: "check-acme" }, { type: "source.remove", name: "stripe" }], "clean up");
-  expect(d.done.map((x) => x.label)).toEqual(["Removed trigger: acme", "Cancelled timer: check-acme", "Removed source: stripe and 1 trigger(s)"]);
+  expect(d.done.map((x) => x.label)).toEqual(["Removed trigger: acme", "Cancelled: check-acme", "Removed source: stripe and 1 trigger(s)"]);
   expect(hub.pipeline.triggers()).toHaveLength(0);
   hub.stop(); await hub.idle(5000); await store.close();
 });

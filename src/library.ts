@@ -134,21 +134,7 @@ export function validateWorkflow(a: any) {
   return { value: { name, description, steps, inputs: cleanInputs(a.inputs) } };
 }
 
-/** A trigger recipe from the brain: a name, inputs and a hook whose strings may hold $input.x blanks. */
-export function validateTriggerRecipe(a: any) {
-  const name = String(a?.name || "").toLowerCase();
-  const description = str(a?.description, 240);
-  if (!NAME_RE.test(name) || !description) return { error: "A trigger recipe needs a lowercase-dash name and a description." };
-  const h = a?.hook;
-  if (!h || typeof h !== "object" || !h.trigger || !h.action || !str(h.title, 80)) return { error: "A trigger recipe needs a hook with title, trigger and action." };
-  const hook = { title: str(h.title, 80)!, trigger: h.trigger, action: h.action, why: str(h.why, 300) || "From a saved setup.",
-    ...(typeof h.teammate === "string" && h.teammate.trim() ? { teammate: h.teammate.trim().slice(0, 24) } : {}),
-    ...(h.cooldownMin ? { cooldownMin: Number(h.cooldownMin) || undefined } : {}) };
-  if (JSON.stringify(hook).length > 6000) return { error: "That trigger recipe is too big." };
-  return { value: { name, description, inputs: cleanInputs(a.inputs), hook } };
-}
-
-/** Fills $input.x blanks in every string inside a value (a recipe's hook). */
+/** Fills $input.x blanks in every string inside a value. */
 export function fillDeep<T>(v: T, inputs: Record<string, string>): T {
   if (typeof v === "string") return fill(v, inputs, "") as T;
   if (Array.isArray(v)) return v.map((x) => fillDeep(x, inputs)) as T;

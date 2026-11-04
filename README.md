@@ -76,7 +76,7 @@ Reminders and routines live on your hub, and it sends them as push notifications
 - **You own the data.** SQLite by default, or your own Postgres, MySQL or MongoDB. Export everything as one JSON file, or wipe it, from the app.
 - **Just ramble.** Type or hold to talk. An **orchestrator** splits what you said into jobs and hands each to the right **teammate** (Reminders, Research, Bills… or a new one it creates), and you watch the job cards finish.
 - **Your agent is the brain.** Each job runs headless on the CLI you configure. Pick a harness and model per role (orchestrator, workhorse, heavy); jobs start on the cheapest model that can do them and escalate on their own. The hub stores no model keys.
-- **Proactive by design.** The assistant creates *hooks* (time, schedule, interval, place, silence) for when to speak first. Each one has a reason you can tap, and all of them respect quiet hours and a daily cap.
+- **Proactive by design.** The assistant sets up its own *triggers* (reminders, routines, page and app watchers, places, webhooks) in an event pipeline you can see under Triggers. Each one has a reason you can tap, and all of them respect quiet hours and a daily cap.
 - **Memory you can see.** Facts live in notebooks, with history kept when they change. View, star, edit and delete anything.
 - **Skills, scripts and mini apps.** It saves what it solved so it doesn't work it out twice, writes scripts that only run after you approve the code, and builds small sandboxed apps (flashcards, checklists, countdowns) you can pin to Home.
 - **Approve before send.** Anything that sends, posts, pays, books or deletes outside the hub stops at an **Approve** card. The hub enforces this, not the model.
@@ -89,7 +89,7 @@ See **[docs/features.md](docs/features.md)** for the full tour.
 
 ```
 phone (home-screen web app) ──HTTPS──►  your hub (e.g. a $5 VPS)
-                                         ├─ hooks engine   when to speak first (time, schedule, watch, place, silence)
+                                         ├─ event pipeline when to speak first (timers, watchers, places, webhooks → triggers)
                                          ├─ memory         notebooks of facts, core facts always in mind, history kept
                                          ├─ scripts        small programs it can run; ones it writes need your approval
                                          ├─ brain          claude -p / codex exec / custom CLI, run per event
@@ -209,7 +209,7 @@ All settings are environment variables. See [.env.example](.env.example) for the
 ## Project layout
 
 ```
-src/          the hub: server, hooks engine, memory, brain runner, auth, scripts, storage backends (src/store),
+src/          the hub: server, event pipeline (src/events), memory, brain runner, auth, scripts, storage backends (src/store),
               computer links (computers.ts on the hub, computer.ts on your Mac)
 src/brains/   detecting Claude Code / Codex, live plan usage (who takes each job), long-lived logins
 src/connectors/  the connector grid: one file per connector (serper.ts, whatsapp.ts, slack.ts…) behind types.ts
@@ -228,7 +228,7 @@ docs/         feature documentation
 ## Development
 
 ```bash
-bun test                        # hooks engine, quiet hours, memory, pairing, script approval
+bun test                        # event pipeline, quiet hours, memory, pairing, script approval
 TEST_DB=postgres://… bun test   # same suite against Postgres
 bun run typecheck
 bun run doctor                  # security self-check for a hub on the internet

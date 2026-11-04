@@ -50,7 +50,7 @@ import { isActive, search } from "./memory.ts";
 import { isValidTimeZone } from "./time.ts";
 import type { Shares } from "./shares.ts";
 import { sharePage } from "./share-page.ts";
-import type { Component, Person, StoredFile, Approval, Device, Fact, Hook, LocationFix, MiniApp, Message, Notebook, Place, Prefs, Skill, Teammate, Workflow } from "./types.ts";
+import type { Component, Person, StoredFile, Approval, Device, Fact, LocationFix, MiniApp, Message, Notebook, Place, Prefs, Skill, Teammate, Workflow } from "./types.ts";
 import pkg from "../package.json" with { type: "json" };
 
 const WEB = resolve(import.meta.dir, "../web");
@@ -290,14 +290,18 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       if (!r) throw new HttpError(404, "That request expired. Ask again.");
       return json({ status: r.status, token: r.token, deviceId: r.deviceId, hub: { name: config.name, build: web.build } });
     }
-    // A webhook hook's secret URL. The token is the password; it wakes that hook's teammate with whatever was sent.
+    // The URL webhooks had before they became push sources: the token is that source's secret now, so old URLs still work.
     if (seg[1] === "webhook" && seg[2] && !seg[3]) {
       if (method !== "POST") throw new HttpError(405, "POST to this address.");
       if (badToken.blocked(ip)) throw banned();
       if (!webhookLimiter.allow(seg[2])) throw new HttpError(429, "Too many calls. Wait a minute.");
       if (Number(req.headers.get("content-length") || 0) > 64_000) throw new HttpError(413, "Too large.");
       const text = (await req.text()).slice(0, 64_000);
-      if (!(await hub.webhook(seg[2], text))) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(404, "No webhook here."); }
+      const headers: Record<string, string> = {};
+      req.headers.forEach((v, k) => { if (!/^(authorization|cookie|x-hearth-)/i.test(k)) headers[k] = v.slice(0, 500); });
+      const r = hub.pipeline.pushBySecret(decodeURIComponent(seg[2]), text, headers);
+      if (!r) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(404, "No webhook here."); }
+      if (r.error) throw new HttpError(409, r.error);
       return json({ ok: true }, 202);
     }
     // An event-pipeline source's secret URL: anything can POST JSON here; it's saved as an event and matched to triggers.
@@ -474,9 +478,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       }
       case "today": {
         const now = Date.now();
-        const hooks = (await hub.listHooks()).filter((h) => h.status === "active" && h.source !== "system");
-        const upcoming = hooks.filter((h) => h.nextAt && (h.trigger.type === "at" || h.trigger.type === "schedule") && new Date(h.nextAt).getTime() - now < 36 * 3.6e6).sort((a, b) => a.nextAt!.localeCompare(b.nextAt!));
-        const watching = hooks.filter((h) => ["every", "place", "silence"].includes(h.trigger.type));
+        const upcoming = hub.upcomingPlans((await hub.prefs()).tz).filter((h) => new Date(h.nextAt).getTime() - now < 36 * 3.6e6);
+        const watching = hub.pipeline.watchers().filter((w) => w.status === "active").map((w) => ({ id: w.id, title: w.name, when: w.describe }));
         const msgs = await store.recent<Message>("messages", 80);
         return json({
           upcoming: upcoming.slice(0, 8), watching: watching.slice(0, 8),
@@ -899,26 +902,13 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (method === "DELETE" && !seg[3]) { ownerOnly(); for (const k of ["", ":invitations", ":notifications"]) hub.vault?.delete(`recent:${id}${k}`); const st = hub.connections.remove(id); await hub.log("connection.removed", `${labelFor(id)} disconnected`); await hub.audit("remove", hub.connections.domainFor(id) || id, "you", { ok: true }); hub.emit("connections"); return json(st); }
         break;
       }
-      case "trigger-recipes": {
-        if (method === "GET" && !id) return json(await hub.listTriggerRecipes());
-        if (method === "DELETE" && id) return json({ ok: await hub.removeTriggerRecipe(id) });
-        break;
-      }
-      case "hooks": {
-        if (method === "GET" && !id) return json(await hub.listHooks());
-        if (method === "POST" && !id) { const r = await hub.addHook(await body(req), "you"); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
-        if (method === "POST" && seg[3] === "run") { const h = await store.get<Hook>("hooks", id); if (!h) break; hub.fire({ ...h, cooldownMin: 0 }, "You tapped Run now"); return json({ ok: true }); }
-        if (method === "PATCH" && id) { const h = await hub.updateHook(id, await body(req)); if (!h) throw new HttpError(400, "Couldn't update that hook."); return json(h); }
-        if (method === "DELETE" && id) { const h = await store.get<Hook>("hooks", id); if (h?.source === "system") throw new HttpError(400, "Pause system hooks instead."); return json({ ok: await hub.removeHook(id) }); }
-        break;
-      }
       // The event pipeline: sources, triggers, timers and the event log. Reading is for any device; changes are the owner's.
       case "pipeline": {
         const p = hub.pipeline;
         const sub = seg[2], key = seg[3] ? decodeURIComponent(seg[3]) : "";
         const ok = <T,>(r: { value?: T; error?: string; conflict?: unknown }) => { if (r.error) return json({ error: r.error, conflict: r.conflict ?? null }, 409); return json(r.value); };
         const withUrl = (src: ReturnType<typeof p.sources>[number]) => ({ ...src, pushPath: src.kind === "push" && owner ? `/api/events/${src.name}/${p.secretOf(src.id)}` : null });
-        if (method === "GET" && !sub) return json({ sources: p.sources().map(withUrl), triggers: p.triggers(), timers: p.timers() });
+        if (method === "GET" && !sub) return json({ sources: p.sources().map(withUrl), triggers: p.triggers(), timers: p.timers(), watchers: p.watchers(), held: p.heldCount() });
         if (method === "GET" && sub === "events" && key) { const e = p.getEvent(key); if (!e) break; return json(e); }
         if (method === "GET" && sub === "triggers" && key && seg[4] === "examples") return json(p.examples(key));
         if (method === "GET" && sub === "events") {
@@ -944,10 +934,19 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           if (method === "PATCH" && key) return ok(await p.updateTrigger(key, await body(req)));
           if (method === "DELETE" && key) return json({ ok: p.removeTrigger(key) });
         }
+        // A reminder or routine you set yourself (a timer and its trigger in one).
+        if (sub === "reminders" && method === "POST" && !key) return ok(await p.remind(await body(req), "you"));
         if (sub === "timers") {
           if (method === "POST" && !key) return ok(await p.addTimer(await body(req), "you"));
+          if (method === "POST" && seg[4] === "run") { const e = await p.runTimerNow(key); if (!e) break; return json(e); }
           if (method === "PATCH" && key) return ok(await p.updateTimer(key, await body(req)));
           if (method === "DELETE" && key) return json({ ok: p.removeTimer(key) });
+        }
+        if (sub === "watchers") {
+          if (method === "POST" && !key) return ok(await p.addWatcher(await body(req), "you"));
+          if (method === "POST" && seg[4] === "check") { p.checkNow((w) => w.id === key || w.name === key); await p.tick(); const w = p.findWatcher(key); if (!w) break; return json(w); }
+          if (method === "PATCH" && key) return ok(await p.updateWatcher(key, await body(req)));
+          if (method === "DELETE" && key) return json({ ok: p.removeWatcher(key) });
         }
         // "The judge got this one wrong": the right value becomes an example it sees next time.
         if (sub === "events" && key && seg[4] === "correct" && method === "POST") { const b = await body(req); return ok(p.correct(key, String(b.trigger || ""), b.value)); }
