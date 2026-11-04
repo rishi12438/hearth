@@ -1035,6 +1035,10 @@ export class Hub {
       const stored = await this.store.get<Job>("jobs", job.id);
       const blocked = stored?.blocked;
       const status = patch.status === "failed" ? "failed" : blocked ? "blocked" : pending ? "waiting" : "done";
+      // The reply was written before the hub tried its asks: one that was refused made no Approve card, so say so
+      // rather than leave "Tap Approve" with nothing to tap.
+      const refused = (patch.did || []).filter((d) => d.kind === "approval" && !d.id).map((d) => d.label.length > 240 ? `${d.label.slice(0, 240)}…` : d.label);
+      if (refused.length && typeof patch.result === "string") patch = { ...patch, result: `${patch.result}\n\nNo Approve card was made, so nothing was sent: ${refused.join("; ")}`.slice(0, 4400) };
       await this.addSpend(job.messageId, meter.costUsd);
       cur = await this.saveJob({
         ...cur, ...patch, blocked, relogged: stored?.relogged, status, ranOn: meter.ranOn, ...(models.length ? { models } : {}),
@@ -1718,7 +1722,9 @@ export class Hub {
   async requestApproval(a: any, where: { threadId?: string; jobId?: string }) {
     const script = String(a?.script || "");
     const sc = (await this.scripts.list()).find((s) => s.name === script);
-    if (!sc) return { error: `No script called ${script}.` };
+    if (!sc) return { error: /^[\w.-]{1,80}$/.test(script)
+      ? `No script called ${script}.`
+      : "approval.request takes the name of a saved script, not code. Write the code with script.propose first, or send a text with message.send." };
     const ap = await this.store.put<Approval>("approvals", {
       ...this.doc({}), threadId: where.threadId, jobId: where.jobId,
       summary: String(a.summary || `Run ${script}`).slice(0, 200), details: a.details ? String(a.details).slice(0, 1000) : undefined,
