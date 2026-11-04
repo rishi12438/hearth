@@ -1,0 +1,23 @@
+test/sessions.test.ts
+  s_491999f8651450::t_488b11260744e1 168,171-177
+src/brains/codex-app.ts
+  s_491999f8651450::t_5ba2ee58f73469 23
+  s_491999f8651450::t_94e71c970c05dc 39-41
+  s_491999f8651450::t_2992db29859582 119-122,124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "cde22d70ed00f5396a74ab3ad6dd8e5e9ee48a91",
+  "prompts": {},
+  "sessions": {
+    "s_491999f8651450": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ed2b42df-2bee-40ab-ba28-79fa43092aee",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
