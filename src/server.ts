@@ -65,6 +65,7 @@ import { isActive, search } from "./memory.ts";
 import { isValidTimeZone } from "./time.ts";
 import type { Shares } from "./shares.ts";
 import { sharePage } from "./share-page.ts";
+import { mcpAgent } from "./mcp.ts";
 import type { Component, Person, StoredFile, Approval, Device, Fact, LocationFix, MiniApp, Message, Notebook, Place, Prefs, Skill, Teammate, Workflow } from "./types.ts";
 import pkg from "../package.json" with { type: "json" };
 
@@ -357,6 +358,39 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         const answer = await hub.askLead(q.slice(0, 20_000));
         return new Response(answer + "\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
       } catch (e: any) { throw new HttpError(503, `The lead couldn't answer: ${String(e?.message || e).slice(0, 200)}`); }
+    }
+    // MCP for brains (mcp.ts). /api/agent/mcp/<name> is the proxy a run's MCP client talks to (the hub adds the server's
+    // login on the way out); /api/agent/mcp is the hearth-mcp command. Same keys as hearth-lead.
+    if (seg[1] === "agent" && seg[2] === "mcp") {
+      const key = req.headers.get("x-hearth-agent");
+      const from = fromThisMachine(req, server) && connect.isAgentKey(key) ? "hub" : computers.agentKeyOwner(key);
+      if (!from) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not the agent's key."); }
+      if (seg[3] && !seg[4]) {
+        if (Number(req.headers.get("content-length") || 0) > 20_000_000) throw new HttpError(413, "Too large.");
+        server.timeout(req, 0); // a server's event stream stays open as long as the run does
+        return connect.mcp.forward(decodeURIComponent(seg[3]), req);
+      }
+      if (seg[3] || method !== "POST") throw new HttpError(404, "Not here.");
+      let argv: string[] = [];
+      try { argv = (await req.formData()).getAll("a").slice(0, 10).map((a) => String(a).slice(0, 200_000)); } catch { throw new HttpError(400, "Send the command's words as a fields."); }
+      server.timeout(req, 300);
+      try {
+        const out = await mcpAgent(connect.mcp, argv, from === "hub" ? "an agent" : `an agent on ${from}`);
+        if (argv[0] === "add" || argv[0] === "call") await hub.log("mcp.agent", `hearth-mcp ${argv.slice(0, 3).join(" ").slice(0, 160)}`);
+        return new Response(out + "\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
+      } catch (e: any) { return new Response(`Error: ${String(e?.message || e).slice(0, 500)}\n`, { status: 502, headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } }); }
+    }
+    // An MCP server's login service sends the browser back here (no device key on a redirect; the state ties it to the
+    // sign-in the hub started).
+    if (path === "/api/mcp/callback" && method === "GET") {
+      const err = url.searchParams.get("error");
+      const r = err ? { error: err === "access_denied" ? "You didn't allow access." : (url.searchParams.get("error_description") || err).slice(0, 200) }
+        : await connect.mcp.finish(url.searchParams.get("state") || "", url.searchParams.get("code") || "");
+      if (r.error && badToken.blocked(ip)) throw banned();
+      if (r.error) badToken.allow(ip);
+      else await hub.log("mcp.connected", `MCP: signed in to ${r.value}`);
+      const to = `/#mcp=${r.error ? `error:${encodeURIComponent(r.error)}` : `ok:${encodeURIComponent(r.value!)}`}`;
+      return new Response(null, { status: 302, headers: { Location: to, "Cache-Control": "no-store" } });
     }
     // The agent's hearth-gmail / hearth-drive / hearth-calendar commands. Two keys open them: the hub's agent key, only
     // straight from this machine (like hearth-plaid), or a linked computer's key, which lives only as long as that
@@ -776,7 +810,11 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           if (method === "GET") return json({ at: await hub.inboxSeen() });
           break;
         }
-        return json(await hub.inbox());
+        {
+          // MCP servers an agent asked for wait here too ("Needs you"), next to approvals.
+          const asked = connect.mcp.waiting().map((s) => ({ kind: "mcp", at: s.addedAt, id: `mcp:${s.name}`, summary: `${s.name} · ${s.url}`, server: { name: s.name, url: s.url, addedBy: s.addedBy }, teammateId: "hearth" }));
+          return json([...asked, ...(await hub.inbox())]);
+        }
       case "teammates": {
         if (method === "GET" && id) { const d = await hub.teammateDetail(id); if (!d) break; return json(d); }
         if (method === "POST" && id && seg[3] === "seen") return json({ at: await hub.markChatSeen(`tm-${id}`), marked: await hub.markStuckSeen({ teammateId: id }) });
@@ -857,6 +895,47 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (audio.length > 15 * 1024 * 1024) throw new HttpError(413, "Recording too long.");
         try { return json({ text: await stt.transcribe(audio, type) }); }
         catch (err: any) { throw new HttpError(502, `Transcription failed: ${err.message}`); }
+      }
+      // MCP servers (/mcp in the app): GET the list; POST {url, name?, header?, key?} adds one; POST <name>/signin gives a
+      // sign-in link (or reconnects with a fresh token); POST <name>/check looks again; PATCH <name> {enabled}; DELETE.
+      case "mcp": {
+        const name = id ? decodeURIComponent(id) : "";
+        const verb = seg[3];
+        if (method === "GET" && !name) return json({ servers: connect.mcp.list() });
+        ownerOnly();
+        const res = <T>(r: { value?: T; error?: string }) => { if (r.error) throw new HttpError(400, r.error); return r.value as T; };
+        if (method === "POST" && !name) {
+          const b = await body(req);
+          const v = res(await connect.mcp.add({ url: String(b.url || ""), name: b.name ? String(b.name) : undefined, header: b.header ? String(b.header) : undefined, key: b.key ? String(b.key) : undefined }, device.name));
+          await hub.log("mcp.added", `MCP: ${v.name} added by ${device.name}`);
+          return json({ server: v });
+        }
+        if (!connect.mcp.get(name)) throw new HttpError(404, `No MCP server called ${name}.`);
+        if (method === "POST" && verb === "signin") {
+          // The browser comes back to this hub as you reached it (a hub with no public address: localhost).
+          const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || url.host;
+          const proto = config.behindProxy ? (req.headers.get("x-forwarded-proto") || "https") : url.protocol.replace(":", "");
+          const v = res(await connect.mcp.signIn(name, process.env.HEARTH_PUBLIC_URL ? undefined : `${proto}://${host}/api/mcp/callback`));
+          return json({ ...v, server: connect.mcp.view(name) });
+        }
+        // A server an agent asked for: you approve it (the hub contacts it for the first time) or deny it (DELETE).
+        if (method === "POST" && verb === "approve") {
+          const v = res(await connect.mcp.approve(name));
+          await hub.log("mcp.approved", `MCP: ${name} approved by ${device.name}`);
+          hub.emit("inbox");
+          return json({ server: v });
+        }
+        if (method === "POST" && verb === "signout") { res(connect.mcp.signOut(name)); return json({ server: connect.mcp.view(name) }); }
+        if (method === "POST" && verb === "check") { await connect.mcp.check(name); return json({ server: connect.mcp.view(name) }); }
+        if (method === "PATCH" && !verb) return json({ server: res(await connect.mcp.setEnabled(name, (await body(req)).enabled !== false)) });
+        if (method === "DELETE" && !verb) {
+          const asked = !!connect.mcp.get(name)?.pending;
+          res(connect.mcp.remove(name));
+          await hub.log("mcp.removed", `MCP: ${name} ${asked ? "denied" : "removed"} by ${device.name}`);
+          if (asked) hub.emit("inbox");
+          return json({ ok: true });
+        }
+        throw new HttpError(404, "Not here.");
       }
       case "google": {
         // The redirect Google must allow: this hub's own address, as your browser sees it.

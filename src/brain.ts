@@ -579,6 +579,18 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
   return parts.join("\n");
 }
 
+type RunMcp = { name: string; url: string; headers: Record<string, string> }[];
+
+/** Claude's --mcp-config: the servers as streamable HTTP, each with the agent key as a header. */
+export function claudeMcpConfig(servers: RunMcp): string {
+  return JSON.stringify({ mcpServers: Object.fromEntries(servers.map((s) => [s.name, { type: "http", url: s.url, headers: s.headers }])) });
+}
+
+/** Codex's thread config: one dotted key per server, so the servers already in ~/.codex/config.toml (the browser) stay. */
+export function codexMcpConfig(servers: RunMcp): Record<string, unknown> {
+  return Object.fromEntries(servers.map((s) => [`mcp_servers.${s.name}`, { url: s.url, http_headers: s.headers }]));
+}
+
 function agentEnv(harness?: string, paths: string[] = []) {
   // Agents need their own login (HOME, PATH) but nothing of the hub's: drop HEARTH_* (DB URL, etc.).
   const env: Record<string, string> = {};
@@ -787,6 +799,9 @@ export class Brain {
 
   /** Set by the hub: write your connected logins where the brain's browser loads them (brains/browser-logins.ts). */
   beforeBrowse: (() => void) | null = null;
+
+  /** Set by the hub: the MCP servers a working run gets, as the hub's proxy (mcp.ts). No tokens: the proxy adds them. */
+  mcpServers: (() => { name: string; url: string; headers: Record<string, string> }[]) | null = null;
 
   private skillState: { at: number; key: string; skills: Skill[]; paths: string[] } | null = null;
   /** Look again on the next call (a connector that brings a skill just connected or left). */
@@ -1010,6 +1025,9 @@ export class Brain {
     const prompt = (codexSkills.length ? skillCatalog(codexSkills, "codex").trim() + "\n\n" : "") + buildPrompt(b, coder, thread ? this.sessions.placeOf(thread) || true : false, lead) + imagesNote(images, cwd, harness);
     const planning = b.mode === "orchestrate";
     const name = `${harness}${model ? ` (${model})` : ""}`;
+    // Working runs get your MCP servers (Settings → /mcp), each through this hub's proxy, which holds the logins.
+    let mcp: { name: string; url: string; headers: Record<string, string> }[] = [];
+    if (web && (harness === "claude" || harness === "codex")) { try { mcp = this.mcpServers?.() ?? []; } catch {} }
     let cmd: string[];
     switch (harness) {
       case "claude": {
@@ -1025,6 +1043,8 @@ export class Brain {
         const allowed = web ? [...new Set(["WebSearch", "WebFetch", ...(coder ? [] : sf.allowed), ...coding, ...look])] : [];
         cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose",
           ...(thread ? (resume ? ["--resume", resume] : []) : ["--no-session-persistence"]), ...(model ? ["--model", model] : []),
+          // Only the hub's MCP servers (none of this machine's): --strict-mcp-config, plus --mcp-config when there are any.
+          ...(mcp.length ? ["--mcp-config", claudeMcpConfig(mcp)] : []),
           "--system-prompt", SYSTEM_PROMPT + skillCatalog(skills), "--strict-mcp-config", "--setting-sources", "project",
           "--tools", tools.join(","), ...(allowed.length ? ["--allowedTools", ...allowed] : []),
           // No permission checks: `claude -p` can't ask anyone, so a tool call outside --allowedTools was just refused.
@@ -1059,7 +1079,7 @@ export class Brain {
     if (harness === "codex") {
       const sink = proc.stdin as import("bun").FileSink;
       const turn = (app = new CodexAppTurn((l) => { sink.write(l); sink.flush(); },
-        { cwd, prompt, images, model, resume, web, ephemeral: !thread,
+        { cwd, prompt, images, model, resume, web, ephemeral: !thread, mcp: codexMcpConfig(mcp),
           onModel: (m) => { if (m !== model) meter?.onBrain?.({ harness, model: m, ranOn: meter.ranOn }); },
           onTokens: (t, m) => {
             if (!meter) return;
