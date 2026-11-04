@@ -735,16 +735,20 @@ export class Brain {
         cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence", ...(model ? ["--model", model] : []),
           "--system-prompt", SYSTEM_PROMPT + skillCatalog(skills), "--strict-mcp-config", "--setting-sources", "project",
           "--tools", tools.join(","), ...(allowed.length ? ["--allowedTools", ...allowed] : []),
+          // No permission checks: `claude -p` can't ask anyone, so a tool call outside --allowedTools was just refused.
+          // --tools still decides which tools exist.
+          "--dangerously-skip-permissions",
           ...(coder ? ["--agents", JSON.stringify(SCOUT)] : [])];
         break;
       }
       case "codex":
         outFile = join(this.workDir, `${randomUUID()}.txt`);
-        // Working calls search the web. In the jail Codex may also write in its folder and reach the internet from code;
-        // outside it, read-only and no network, as before.
+        // Working calls search the web. Codex runs with no sandbox and no approvals: `codex exec` can't ask anyone, so
+        // with a sandbox any command its rules didn't cover (a heredoc, a pipe into hearth-drive) was refused outright
+        // ("approval required by policy, but AskForApproval is set to Never").
         cmd = ["codex", "exec", ...(model ? ["-m", model] : []), "--skip-git-repo-check", "--ephemeral",
           ...(web ? ["-c", 'web_search="live"'] : []),
-          ...(coder ? ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"] : ["--sandbox", "read-only"]),
+          "--dangerously-bypass-approvals-and-sandbox",
           "--color", "never", "--json", "-o", outFile, "-"];
         break;
       case "custom":
