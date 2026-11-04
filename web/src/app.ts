@@ -886,7 +886,10 @@ function drawHeader() {
   if (r.view === "chat" && r.job) {
     const j = chat?.jobs?.find((x: any) => x.id === r.job);
     const t = mate(j?.teammateId);
-    clear(top, h("div", { class: "toprow stagerow" }, back, stage("chat", t, j ? jobState(j) : "idle", t.name, `Thread in #${name}`, null), search));
+    // The ramble's other threads stay in view up here (like switching threads in Slack), with how many are running.
+    const others = new Set((chat?.jobs || []).filter((x: any) => !x.parentId && (x.status === "working" || x.status === "queued")).map((x: any) => x.followsUp || x.id).filter((id: string) => id !== r.job)).size;
+    clear(top, h("div", { class: "toprow stagerow" }, back, stage("chat", t, j ? jobState(j) : "idle", t.name, [`Thread in #${name}`, others ? `${others} other${others === 1 ? "" : "s"} running` : null].filter(Boolean).join(" · "), null), search),
+      threadTabs(chat, r.job, 2));
     return;
   }
   // A ramble: Hearth while it's sorting things out, then whoever is doing the work takes the stage.
@@ -1472,9 +1475,11 @@ const dismissBtn = (id: string, then?: () => void) => h("button", { class: "sbtn
 function threadTabs(chat: any, activeId: string | null, min = 1): HTMLElement | null {
   const roots = (chat?.jobs || []).filter((x: any) => !x.parentId && !x.followsUp);
   if (!chat?.thread || roots.length < min) return null;
-  const strip = h("div", { class: "threadtabs" }, roots.map((x: any) =>
-    h("button", { class: `threadtab ${x.id === activeId ? "on" : ""}`, on: { click: () => { location.hash = `#c/${chat.thread.id}/${x.id}`; } } },
-      face(mate(x.teammateId), 20, jobState(x)), h("span", null, jobLabel(x)), x.status === "done" ? null : h("i", { class: `tdot ${x.status}` }))));
+  // A thread is as busy as its latest turn (a follow-up can be running after the first answer is done).
+  const latest = (x: any) => (chat.jobs as any[]).filter((y: any) => !y.parentId && (y.id === x.id || y.followsUp === x.id)).sort((a: any, b: any) => a.createdAt.localeCompare(b.createdAt)).at(-1) || x;
+  const strip = h("div", { class: "threadtabs" }, roots.map((x: any) => { const now = latest(x);
+    return h("button", { class: `threadtab ${x.id === activeId ? "on" : ""}`, on: { click: () => { location.hash = `#c/${chat.thread.id}/${x.id}`; } } },
+      face(mate(x.teammateId), 20, jobState(now)), h("span", null, jobLabel(x)), now.status === "done" ? null : h("i", { class: `tdot ${now.status}` })); }));
   if (activeId) requestAnimationFrame(() => strip.querySelector(".on")?.scrollIntoView({ inline: "center", block: "nearest" }));
   return strip;
 }
@@ -1497,10 +1502,7 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
     ...[j, ...follow].map((x: any) => ({ at: when(x), node: () => answer(x) })),
   ].sort((a, b) => a.at - b.at);
   const n = items.filter((x) => x.at !== Infinity).length;
-  // The ramble's other threads, one tap away (like switching threads in Slack).
-  const switcher = threadTabs(S.chat, j.id, 2);
   const nodes: (Node | null)[] = [
-    switcher,
     row(mateWho("hearth"), j.createdAt, [h("div", { class: "ttitle" }, jobLabel(j)), h("div", { class: "brief" }, withMentions(`@${t.name} ${String(j.task).split("\n\nThe user added: ")[0]}`))]),
     h("div", { class: "repdiv" }, n ? `${n} repl${n === 1 ? "y" : "ies"}` : "No replies yet"),
     ...items.map((x) => x.node()),
@@ -1684,8 +1686,8 @@ function drawDm(stick = true) {
 
 /**
  * Messages you sent while the teammate was mid-run: greyed under the run, going out together as its next turn when it
- * ends. Send now puts one into the run straight away (it starts over with it); Run separately starts it next to the run;
- * New ramble starts it as its own ramble; Edit takes it back into the box; × drops it.
+ * ends. Send now puts one into the run straight away (it starts over with it); New session starts it now instead, as a new
+ * thread here (a separate run, in a DM) or its own ramble; Edit takes it back into the box; × drops it.
  */
 function queuedRows(held: any[], runs: any[]) {
   if (!held.length) return [];
@@ -1693,13 +1695,13 @@ function queuedRows(held: any[], runs: any[]) {
   const stuck = !run && runs.find((x: any) => x.status === "blocked" || x.status === "waiting");
   const name = mate(held[0].teammateId || run?.teammateId || "hearth").name;
   const why = run ? `Queued · goes to ${name} when this run ends` : stuck ? `Not sent · ${name} is ${stuck.status === "waiting" ? "waiting on you" : "stuck"}` : "Sending…";
-  const act = (m: any, how: "send" | "edit" | "drop" | "ramble" | "run") => async () => {
+  const act = (m: any, how: "send" | "edit" | "drop" | "ramble" | "thread") => async () => {
     try {
       if (how === "send") await call(`/api/messages/${m.id}/send`, { body: {} });
-      else if (how === "ramble") { const r = await call(`/api/messages/${m.id}/ramble`, { body: {} }); loadThreads(); location.hash = `#c/${r.threadId}`; return; }
-      else if (how === "run") {
-        const r = await call(`/api/messages/${m.id}/run`, { body: {} });
-        if (!String(r.threadId).startsWith("tm-")) { location.hash = `#c/${r.threadId}/${r.jobId}`; return; } // in a ramble it's a task of its own: open its thread
+      else if (how === "ramble" || how === "thread") {
+        const r = await call(`/api/messages/${m.id}/${how}`, { body: {} });
+        // In a ramble, Hearth plans it in the channel (a new task, or "Looks like a new topic"); a new ramble opens.
+        if (!String(r.threadId).startsWith("tm-")) { loadThreads(); location.hash = `#c/${r.threadId}`; return; }
       }
       else {
         await call(`/api/messages/${m.id}`, { method: "DELETE" });
@@ -1708,11 +1710,21 @@ function queuedRows(held: any[], runs: any[]) {
     } catch (e) { handleError(e); }
     const r = route(); if (r.view === "chat") loadChat(r.id); else if (r.view === "dm") loadDm(r.id);
   };
+  // New session: don't wait for the run. A new thread right here (in a DM, a separate run next to this one), or its own ramble.
+  const newSessionMenu = (anchor: HTMLElement, m: any) => {
+    const dm = String(m.threadId || "").startsWith("tm-");
+    const item = (lead: Node, title: string, sub: string, how: "thread" | "ramble") => h("button", { class: "droprow", role: "menuitem", on: { click: () => { close(); act(m, how)(); } } },
+      lead, h("span", { class: "grow" }, h("b", null, title), h("small", null, sub)));
+    const close = popAt(anchor, [
+      dm ? item(icon("plus", 16), "Separate run", `${name} starts it now, next to the current one`, "thread")
+        : item(icon("plus", 16), "New thread", `Hearth starts it as its own task in #${S.chat?.thread ? channelName(S.chat.thread) : "this ramble"}`, "thread"),
+      item(h("span", { class: "shash" }, "#"), "New ramble", "Moves it to a ramble of its own", "ramble"),
+    ], "qmenu");
+  };
   return held.map((m: any, i: number) => row(youWho(), m.createdAt, [h("div", { class: "mtext" }, m.text),
     h("div", { class: "qbar" }, i === held.length - 1 ? h("small", null, why) : null,
       h("button", { class: "qbtn", title: run ? `Stops ${name}'s run and starts it over with this` : `Send it to ${name}`, on: { click: act(m, "send") } }, "Send now"),
-      run ? h("button", { class: "qbtn", title: `Start it now as its own run here, next to ${name}'s current one`, on: { click: act(m, "run") } }, "Run separately") : null,
-      h("button", { class: "qbtn", title: "Start it as its own ramble; Hearth hands it out fresh", on: { click: act(m, "ramble") } }, "New ramble"),
+      h("button", { class: "qbtn", "aria-haspopup": "menu", title: "Start it on its own instead of waiting for this run", on: { click: (e: Event) => newSessionMenu(e.currentTarget as HTMLElement, m) } }, "New session", icon("chevron", 12)),
       h("button", { class: "qbtn", on: { click: act(m, "edit") } }, "Edit"),
       h("button", { class: "qbtn", "aria-label": "Don't send", title: "Don't send", on: { click: act(m, "drop") } }, icon("x", 13)))], false, "queued"));
 }

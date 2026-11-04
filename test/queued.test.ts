@@ -100,7 +100,7 @@ test("without queue (voice, apps, older clients) a mid-run DM still folds in as 
   expect(second.job.id).toBe(first.job.id);
 });
 
-test("Run separately starts a queued DM as its own run next to the one that's going; it isn't folded in", async () => {
+test("New session → Separate run starts a queued DM as its own run next to the one that's going; it isn't folded in", async () => {
   await setup();
   process.env.FAKE_MS = "1500";
   const first = (await hub.askTeammate("scout", "find a pottery studio")).value!;
@@ -108,7 +108,7 @@ test("Run separately starts a queued DM as its own run next to the one that's go
   await Bun.sleep(200);
   process.env.FAKE_MS = "50";
   const q = (await hub.askTeammate("scout", "also book a dentist", { queue: true })).value!;
-  const r = (await hub.startQueuedApart(q.message.id, "run")).value!;
+  const r = (await hub.startQueuedApart(q.message.id, "thread")).value!;
   expect(r.jobId).not.toBe(first.job.id);
   expect((await store.get<Message>("messages", q.message.id))!.queued).toBeUndefined();
   await until(() => settled(2));
@@ -116,26 +116,54 @@ test("Run separately starts a queued DM as its own run next to the one that's go
   expect(run.task).toBe("also book a dentist");
   expect(run.teammateId).toBe("scout");
   expect((await store.get<Job>("jobs", first.job.id))!.task).not.toContain("dentist");
-  expect((await hub.startQueuedApart(q.message.id, "run")).error).toBeTruthy(); // already sent
+  expect((await hub.startQueuedApart(q.message.id, "thread")).error).toBeTruthy(); // already sent
 });
 
-test("New ramble takes a queued thread reply out and starts it as a ramble of its own", async () => {
-  await setup();
+/** A ramble with one task whose thread has a follow-up run going, and a reply queued behind it. */
+async function queuedInRamble(text: string) {
   process.env.FAKE_PLAN = JSON.stringify({ title: "t", reply: "On it", jobs: [{ task: "find a restaurant", teammate: "Scout" }] });
-  await hub.ramble("dinner");
+  const { thread } = (await hub.ramble("dinner")).value!;
   await until(() => settled(1));
   const [root] = await jobs();
-  process.env.FAKE_MS = "1200";
-  await hub.replyToJob(root.id, "somewhere quiet");
+  process.env.FAKE_MS = "1500";
+  const run = (await hub.replyToJob(root.id, "somewhere quiet")).value!;
   await until(working);
   await Bun.sleep(150);
   process.env.FAKE_MS = "50";
-  const q = (await hub.replyToJob(root.id, "what is the purpose of life?", { queue: true })).value!;
-  const r = (await hub.startQueuedApart(q.message.id, "ramble")).value!;
-  expect(r.threadId).not.toBe(root.threadId);
-  expect(await store.get("messages", q.message.id)).toBeNull();
-  const fresh = (await msgs()).find((m) => m.threadId === r.threadId && m.role === "user")!;
-  expect(fresh.text).toBe("what is the purpose of life?");
+  const q = (await hub.replyToJob(root.id, text, { queue: true })).value!;
+  expect(q.message.queued).toBe(true);
+  return { thread, root, run: run.job, q: q.message };
+}
+
+test("New session → New thread hands a queued reply to Hearth to plan in the ramble, never back into the thread it waited on", async () => {
+  await setup();
+  const { thread, root, run, q } = await queuedInRamble("also find a florist");
+  // Even if the planner tries to fold it into the thread it was queued on, that's refused: it becomes a task of its own.
+  process.env.FAKE_PLAN = JSON.stringify({ title: "t", reply: "On it", jobs: [{ task: "find a florist", teammate: "Scout", addTo: root.id, continue: root.id }] });
+  expect((await hub.startQueuedApart(q.id, "thread")).value!.threadId).toBe(thread.id);
+  await until(async () => (await jobs()).some((j) => j.task === "find a florist"));
+  const fresh = (await jobs()).find((j) => j.task === "find a florist")!;
+  expect(fresh.threadId).toBe(thread.id);
+  expect(fresh.followsUp).toBeUndefined();
+  expect(fresh.messageId).toBe(q.id);
+  const m = (await store.get<Message>("messages", q.id))!;
+  expect(m.queued).toBeUndefined();
+  expect(m.replyTo).toBeUndefined();
+  expect((await store.get<Job>("jobs", run.id))!.task).not.toContain("florist");
+});
+
+test("New session → New ramble moves a queued reply to its own ramble the way the new-topic offer does", async () => {
+  await setup();
+  const { thread, q } = await queuedInRamble("what is the purpose of life?");
+  const r = (await hub.startQueuedApart(q.id, "ramble")).value!;
+  expect(r.threadId).not.toBe(thread.id);
+  const moved = (await store.get<Message>("messages", q.id))!;
+  expect(moved.threadId).toBe(r.threadId);
+  expect(moved.movedFrom).toBe(thread.id);
+  expect(moved.queued).toBeUndefined();
+  expect(moved.newTopic).toBeUndefined(); // no countdown: you already chose
+  expect((await msgs()).some((m) => m.threadId === thread.id && m.movedTo === r.threadId)).toBe(true);
+  await until(async () => (await jobs()).some((j) => j.threadId === r.threadId));
 });
 
 test("chats are read on the hub: a reply after you last looked is unread on every device, opening it clears it", async () => {

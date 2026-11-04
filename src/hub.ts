@@ -767,7 +767,7 @@ export class Hub {
       const ctx = await this.context(batch.map((x) => x.text).join(" "), "orchestrate", null);
       const team0 = await this.store.all<Teammate>("teammates");
       const openTasks = (await this.store.all<Job>("jobs"))
-        .filter((j) => j.threadId === thread.id && !j.parentId && !j.followsUp && (j.status === "queued" || j.status === "working"))
+        .filter((j) => j.threadId === thread.id && !j.parentId && !j.followsUp && !declined.has(j.id) && (j.status === "queued" || j.status === "working"))
         .map((j) => ({ id: j.id, label: j.label || shortLabel(undefined, j.task), teammate: team0.find((t) => t.id === j.teammateId)?.name, status: j.status, task: j.task.slice(0, 400) }));
       // Finished or stuck tasks in this ramble, so a follow-up about one goes on in its thread instead of starting a new one.
       const all0 = await this.store.all<Job>("jobs");
@@ -805,7 +805,7 @@ export class Hub {
     const continued: Job[] = [];
     for (const j of (plan.jobs || []).slice(0, 8)) {
       if (typeof j?.task !== "string" || !j.task.trim()) continue;
-      if (typeof j.addTo === "string" && (await this.addToJob(j.addTo, thread.id, j.task, j.label))) continue;
+      if (typeof j.addTo === "string" && !declined.has(j.addTo) && (await this.addToJob(j.addTo, thread.id, j.task, j.label))) continue;
       if (typeof j.continue === "string" && !declined.has(j.continue)) { const c = await this.continueTask(j.continue, thread.id, m, j.task); if (c) { continued.push(c); continue; } }
       const wanted = String(j.teammate || "Hearth").toLowerCase();
       let mate = team.find((t) => t.name.toLowerCase() === wanted || t.id === wanted);
@@ -1247,28 +1247,39 @@ export class Hub {
   }
 
   /**
-   * A queued message you'd rather not hold for the run: "ramble" starts it as its own ramble (Hearth hands it out
-   * fresh), "run" starts it right away as a separate run in the same chat, next to the one that's going.
+   * New session on a queued message: don't wait for the run. In a ramble, "thread" hands it to Hearth to plan here like
+   * any new message, just not back into the thread it was waiting on (a new task, or the "Looks like a new topic" offer
+   * if it's about something else); "ramble" moves it to its own ramble the same way that offer does. In a DM, "thread"
+   * is a separate run next to the current one and "ramble" starts a ramble with it.
    */
-  async startQueuedApart(id: string, how: "ramble" | "run"): Promise<{ error?: string; value?: { threadId: string; jobId?: string } }> {
+  async startQueuedApart(id: string, how: "thread" | "ramble"): Promise<{ error?: string; value?: { threadId: string; jobId?: string } }> {
     const m = await this.store.get<Message>("messages", id);
     if (!m?.queued) return { error: "That's already sent." };
-    if (how === "ramble") {
-      const from = m.threadId ? await this.store.get<Thread>("threads", m.threadId) : null;
-      await this.store.remove("messages", id);
-      this.emit("message", { ...m, deleted: true });
-      const r = await this.ramble(m.text, undefined, m.fileIds || [], from?.projectId);
-      if (r.error) return { error: r.error };
-      return { value: { threadId: r.value!.thread.id } };
+    if (m.threadId?.startsWith("tm-")) {
+      if (how === "ramble") {
+        await this.store.remove("messages", id);
+        this.emit("message", { ...m, deleted: true });
+        const r = await this.ramble(m.text, undefined, m.fileIds || []);
+        return r.error ? { error: r.error } : { value: { threadId: r.value!.thread.id } };
+      }
+      const job = await this.store.put<Job>("jobs", { ...this.doc({}), threadId: m.threadId, messageId: m.id, task: m.text, teammateId: m.teammateId || "hearth", status: "queued", effort: "light" } as Job);
+      this.emit("message", await this.store.put<Message>("messages", { ...m, queued: undefined, jobIds: [job.id] }));
+      this.emit("job", job);
+      this.pump(m.id);
+      return { value: { threadId: m.threadId, jobId: job.id } };
     }
-    const root = m.replyTo ? await this.store.get<Job>("jobs", m.replyTo) : null;
-    const teammateId = root?.teammateId || m.teammateId || "hearth";
-    const job = await this.store.put<Job>("jobs", { ...this.doc({}), threadId: m.threadId!, messageId: m.id, task: m.text, teammateId, status: "queued", effort: root?.effort || "light" } as Job);
-    const sent = await this.store.put<Message>("messages", { ...m, queued: undefined, replyTo: undefined, jobIds: [job.id] });
-    this.emit("message", sent);
-    this.emit("job", job);
-    this.pump(sent.id);
-    return { value: { threadId: m.threadId!, jobId: job.id } };
+    const thread = m.threadId ? await this.store.get<Thread>("threads", m.threadId) : null;
+    if (!thread) return { error: "No such chat." };
+    const { queued: _, replyTo, ...rest } = m;
+    const plain = await this.store.put<Message>("messages", rest as Message);
+    this.emit("message", plain);
+    if (replyTo) this.handedBack.set(m.id, replyTo);
+    if (how === "thread") { this.queuePlan(thread, plain); return { value: { threadId: thread.id } }; }
+    // Already decided: no "new topic" countdown, straight into the move (and planned there).
+    this.moves.set(plain.id, { promise: Promise.resolve("move"), resolve: () => {} });
+    const moved = await this.settleMove(thread, plain);
+    this.queuePlan(moved.thread, moved.m);
+    return { value: { threadId: moved.thread.id } };
   }
 
   /** A run in a thread ended: whatever you queued for it goes out together as the next turn (unless another run there is still going). */
