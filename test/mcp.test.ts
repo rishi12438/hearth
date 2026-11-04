@@ -199,6 +199,8 @@ test("an API key goes in its header, kept in the vault, not in mcp.json", async 
 test("bad input is refused", async () => {
   expect((await mcp.add({ url: "ftp://x" }, "me")).error).toContain("https");
   expect((await mcp.add({ url: "http://example.com/mcp" }, "me")).error).toContain("https");
+  expect((await mcp.add({ url: "http://127.0.0.1:8790/api/health" }, "me")).error).toContain("https");
+  expect((await mcp.add({ url: "http://localhost:3000/mcp" }, "me")).error).toContain("https");
   expect((await mcp.add({ url: "https://user:pw@example.com/mcp" }, "me")).error).toContain("key field");
   expect((await mcp.add({ url: OPEN, name: "Bad Name!" }, "me")).error).toContain("Names");
   expect(nameFromUrl("https://mcp.linear.app/mcp")).toBe("linear");

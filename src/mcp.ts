@@ -107,7 +107,8 @@ export class Mcp {
   async add(input: { name?: string; url: string; header?: string; key?: string }, by: string): Promise<Result<McpView>> {
     let url: URL;
     try { url = new URL(String(input.url || "").trim()); } catch { return { error: "That isn't a web address." }; }
-    if (url.protocol !== "https:" && !(url.protocol === "http:" && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(url.hostname))) return { error: "MCP servers need an https:// address." };
+    // https only: no plain-http server, local ones included (the hub would be calling its own machine's services).
+    if (url.protocol !== "https:") return { error: "MCP servers need an https:// address." };
     if (url.username || url.password) return { error: "Put the key in the key field, not in the address." };
     const name = (input.name || nameFromUrl(url.href)).trim().toLowerCase();
     if (!NAME_RE.test(name)) return { error: "Names are lowercase letters, numbers, - and _ (up to 31)." };
