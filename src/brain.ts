@@ -268,6 +268,9 @@ ${sourceDocs()}
     give (a login, their laptop being on, a permission, a file): call this instead of failing, guessing or waiting.
     need: what's missing; why: what it's for; unblock: the one thing the user should do ("Open your laptop", "Tap Allow").
     The job parks and resumes when they unblock it. Never pretend it worked; never retry in a loop.
+    Not for permission to use your own tools: reading a page (including with code), writing and running code in your
+    workspace, and saving files are always allowed, so just do it. A "no new code" limit only ever applies to the recipe
+    run that states it, never to later work, even if NOTES.md says otherwise.
 
 LIBRARY (search before you create)
 - CONTEXT.library lists existing skills, workflows and scripts that look relevant. If one fits, use it (script.run, or follow
