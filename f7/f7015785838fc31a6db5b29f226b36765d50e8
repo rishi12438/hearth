@@ -6,6 +6,7 @@ test/brain-health.test.ts
 test/sessions.test.ts
   s_85e0083345809d::t_dac1459bc05a9b 50
   s_85e0083345809d::t_0ebd2c16b810ce 1-49,51-109,111-135,137-138
+  s_85e0083345809d::t_6b890d7db114d6 110,136
 test/fixtures/codex.ts
   s_85e0083345809d::t_158517063166de 1-12
 test/machines.test.ts
@@ -13,6 +14,7 @@ test/machines.test.ts
 src/brains/codex-app.ts
   s_85e0083345809d::t_1fd63a6f2b686a 1-24,25-102,105,107-124,126-163
   s_85e0083345809d::t_9047d118c870ae 125
+  s_85e0083345809d::t_1e45e6876382e5 103-104,106
 test/fixtures/fake-codex-app.ts
   s_85e0083345809d::t_8e514483a84de8 1-12,14-40
   s_85e0083345809d::t_966d1bf899ede6 13
@@ -39,6 +41,8 @@ src/brain.ts
   s_85e0083345809d::t_421855cc5a425b 16-17
   s_85e0083345809d::t_1161e0d86ec63f 909
   s_85e0083345809d::t_65229e73a471d1 448-455
+  s_85e0083345809d::t_2d848c698e4fbe 782-784
+  s_85e0083345809d::t_6b890d7db114d6 807
 ---
 {
   "schema_version": "authorship/3.0.0",
