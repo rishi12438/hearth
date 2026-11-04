@@ -19,6 +19,8 @@ export type Config = {
   agentTimeoutMs: number;
   /** Quick-model status lines while a long job sits on "Working it out" (HEARTH_NARRATE=off to turn off). */
   narrate: boolean;
+  /** Working calls (jobs with web, shell and files). 0 = no limit: they run until done or the user stops them. */
+  jobTimeoutMs: number;
   allowedOrigins: string[];
   contact: string;
   behindProxy: boolean;
@@ -56,6 +58,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     agentCmd,
     agentTimeoutMs: Number(env.HEARTH_AGENT_TIMEOUT_SEC || 180) * 1000,
     narrate: env.HEARTH_NARRATE !== "off",
+    jobTimeoutMs: Math.max(0, Number(env.HEARTH_JOB_TIMEOUT_SEC) || 0) * 1000,
     allowedOrigins: list(env.HEARTH_ALLOWED_ORIGINS),
     contact: env.HEARTH_CONTACT || "mailto:hearth@example.com",
     behindProxy: env.HEARTH_BEHIND_PROXY === "1",
