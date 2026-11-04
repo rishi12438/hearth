@@ -1247,9 +1247,9 @@ export class Hub {
   }
 
   /**
-   * New session on a queued message: don't wait for the run. In a ramble, "thread" hands it to Hearth to plan here like
-   * any new message, just not back into the thread it was waiting on (a new task, or the "Looks like a new topic" offer
-   * if it's about something else); "ramble" moves it to its own ramble the same way that offer does. In a DM, "thread"
+   * New session on a queued message: don't wait for the run. In a ramble, "thread" hands it to Hearth to plan here as a
+   * new task (never back into the thread it was waiting on, and never moved out even if it's a new topic); "ramble"
+   * moves it to its own ramble the same way the "Looks like a new topic" offer does. In a DM, "thread"
    * is a separate run next to the current one and "ramble" starts a ramble with it.
    */
   async startQueuedApart(id: string, how: "thread" | "ramble"): Promise<{ error?: string; value?: { threadId: string; jobId?: string } }> {
@@ -1274,9 +1274,10 @@ export class Hub {
     const plain = await this.store.put<Message>("messages", rest as Message);
     this.emit("message", plain);
     if (replyTo) this.handedBack.set(m.id, replyTo);
+    // You already chose where it goes, so the planner's "new topic" offer doesn't second-guess it: New thread stays in
+    // this ramble even if it's about something else; New ramble moves straight away, no countdown.
+    this.moves.set(plain.id, { promise: Promise.resolve(how === "thread" ? "keep" : "move"), resolve: () => {} });
     if (how === "thread") { this.queuePlan(thread, plain); return { value: { threadId: thread.id } }; }
-    // Already decided: no "new topic" countdown, straight into the move (and planned there).
-    this.moves.set(plain.id, { promise: Promise.resolve("move"), resolve: () => {} });
     const moved = await this.settleMove(thread, plain);
     this.queuePlan(moved.thread, moved.m);
     return { value: { threadId: moved.thread.id } };

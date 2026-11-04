@@ -196,6 +196,7 @@ function soon() {
   }, 250);
 }
 
+let openWhenPlanned: string | null = null; // a queued message sent off as New thread: open its thread once it's planned
 function onEvent(e: { type: string; data?: any }) {
   const r = route();
   const open = r.view === "chat" ? r.id : null;
@@ -249,6 +250,10 @@ function onEvent(e: { type: string; data?: any }) {
         return;
       }
       // A teammate finished something you're not looking at: an in-app banner you can tap, like a phone notification.
+      // You chose New thread on a queued message: its task is here, open its thread.
+      if (openWhenPlanned && e.data.messageId === openWhenPlanned && !e.data.parentId && !e.data.followsUp && open === e.data.threadId) {
+        openWhenPlanned = null; location.hash = `#c/${e.data.threadId}/${e.data.id}`;
+      }
       const was = jobStatus.get(e.data.id);
       jobStatus.set(e.data.id, e.data.status);
       if (e.data.status === "done" || e.data.status === "failed") readIfOpen(e.data.threadId);
@@ -1700,8 +1705,11 @@ function queuedRows(held: any[], runs: any[]) {
       if (how === "send") await call(`/api/messages/${m.id}/send`, { body: {} });
       else if (how === "ramble" || how === "thread") {
         const r = await call(`/api/messages/${m.id}/${how}`, { body: {} });
-        // In a ramble, Hearth plans it in the channel (a new task, or "Looks like a new topic"); a new ramble opens.
-        if (!String(r.threadId).startsWith("tm-")) { loadThreads(); location.hash = `#c/${r.threadId}`; return; }
+        // In a ramble: a new ramble opens; a new thread opens as soon as Hearth has made its task (see "job" in onEvent).
+        if (!String(r.threadId).startsWith("tm-")) {
+          if (how === "thread") openWhenPlanned = m.id;
+          loadThreads(); location.hash = `#c/${r.threadId}`; return;
+        }
       }
       else {
         await call(`/api/messages/${m.id}`, { method: "DELETE" });
