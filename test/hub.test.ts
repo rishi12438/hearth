@@ -686,3 +686,20 @@ test("a write-up that fails posts the finished legwork instead of failing the jo
   const [job] = await store.all<Job>("jobs");
   expect([job.status, job.result]).toEqual(["done", "NOTES: 93 items; CSV uploaded to Drive."]);
 });
+
+test("when Hearth answers itself, you get a notification; when it hands out tasks, the finished task notifies instead", async () => {
+  const sentPush: any[] = [];
+  const config = { ...loadConfig({}), dataDir: dir, agent: "echo" };
+  const h2 = new Hub(config, store, new Brain(config), new Scripts(store, dir, join(import.meta.dir, "../scripts")), { send: async (p: any) => { sentPush.push(p); return 0; }, onSend: null } as any);
+  h2.clock = () => now;
+  await h2.ensureTeammates();
+  const r = await h2.ramble("remember my sister likes jasmine tea");
+  await until(async () => sentPush.length > 0);
+  expect(sentPush[0]).toMatchObject({ title: "Hearth replied", body: "Noted.", url: `/#c/${r.value!.thread.id}` });
+  sentPush.length = 0;
+  await h2.ramble("find a cheap dinner spot");
+  await until(async () => sentPush.length > 0);
+  expect(sentPush.map((p) => p.title)).not.toContain("Hearth replied");
+  expect(sentPush[0].title).toContain("finished");
+  h2.stop(); await h2.idle(5000);
+});
