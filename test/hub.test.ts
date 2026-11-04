@@ -463,7 +463,15 @@ test("an Approve nobody answers expires after a day: it never runs, leaves Needs
   await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "waiting"));
   // An ask that came with no job at all (a call that didn't say which run it was) waits too, in Activity only.
   await hub.requestMcp({ server: "parley", tool: "send_message", args: { to: "2" } });
-  expect((await hub.inbox()).filter((i: any) => i.kind === "approval")).toHaveLength(2);
+  const asks = (await hub.inbox()).filter((i: any) => i.kind === "approval");
+  expect(asks).toHaveLength(2);
+  // Each one links to its conversation, scrolled to that card: the job's thread, or Hearth's DM for the one with no job.
+  const [withJob] = await store.all<Job>("jobs");
+  const byTo = (to: string) => asks.find((i: any) => i.approval.action.args.to === to);
+  expect(byTo("1").link).toBe(`/#c/${withJob.threadId}/${withJob.id}?ap=${byTo("1").id}`);
+  expect(byTo("2").approval.threadId).toBe("tm-hearth");
+  expect(byTo("2").link).toBe(`/#t/hearth?ap=${byTo("2").id}`);
+  expect((await hub.teammateDetail("hearth"))!.approvals.map((a: any) => a.id)).toContain(byTo("2").id);
 
   now = new Date(now.getTime() + 23 * 3_600_000);
   expect(await hub.expireApprovals()).toBe(0);

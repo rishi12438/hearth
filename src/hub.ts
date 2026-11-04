@@ -61,6 +61,8 @@ const MAX_OPEN_IDEAS = 4;
 const LOCATION_KEEP_DAYS = 7;
 /** An Approve nobody answers stops asking after a day (expireApprovals). */
 export const APPROVAL_TTL_MS = 86_400_000;
+/** An ask that came with no job or chat lives in Hearth's DM. */
+const ORPHAN_THREAD = "tm-hearth";
 
 type TurnOpts = { teammate?: Teammate | null; threadId?: string; jobId?: string; extra?: string; profile?: BrainProfile; meter?: Meter; allowedScripts?: string[]; top?: boolean; images?: BrainImage[] };
 const label = (p: BrainProfile) => `${p.harness}${p.model ? `/${p.model}` : ""}`;
@@ -1741,7 +1743,7 @@ export class Hub {
     }
     await this.log("approval.requested", ap.summary);
     this.emit("approval", ap);
-    await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: ap.threadId ? threadLink(ap.threadId) : "/" });
+    await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: await this.approvalLink(ap) });
     return { value: ap };
   }
 
@@ -1764,7 +1766,8 @@ export class Hub {
     const told = `This call hasn't run: ${c.tool} on ${c.server} waits for the user's Approve in Hearth. Don't call it again or try another way. Say in your reply that it's waiting for their Approve; when they tap it, the hub makes this exact call and adds the result to your reply.`;
     if (same) return told;
     const ap = await this.store.put<Approval>("approvals", {
-      ...this.doc({}), threadId: job?.threadId, jobId: job?.id,
+      // No job to put it under: it goes in Hearth's DM, so it's still in a conversation you can open.
+      ...this.doc({}), threadId: job?.threadId || ORPHAN_THREAD, jobId: job?.id,
       summary: `${c.server}: ${c.tool.replace(/_/g, " ")}`.slice(0, 200),
       details: shown.length > 1500 ? `${shown.slice(0, 1500)}…` : shown,
       action: { type: "mcp", server: c.server, tool: c.tool, args },
@@ -1773,7 +1776,7 @@ export class Hub {
     if (job) await this.saveJob({ ...job, approvalIds: [...(job.approvalIds || []), ap.id] });
     await this.log("approval.requested", ap.summary);
     this.emit("approval", ap);
-    await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: ap.threadId ? threadLink(ap.threadId) : "/#activity" });
+    await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: await this.approvalLink(ap) });
     return told;
   }
 
@@ -1878,7 +1881,7 @@ ${JSON.stringify(shown, null, 1)}
     }
     await this.log("approval.requested", ap.summary);
     this.emit("approval", ap);
-    await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: ap.threadId ? threadLink(ap.threadId) : "/" });
+    await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: await this.approvalLink(ap) });
     return { value: ap };
   }
 
@@ -1922,7 +1925,7 @@ ${JSON.stringify(shown, null, 1)}
     }
     await this.log("approval.requested", ap.summary);
     this.emit("approval", ap);
-    await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: ap.threadId ? threadLink(ap.threadId) : "/" });
+    await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: await this.approvalLink(ap) });
     return { value: ap };
   }
 
@@ -1937,6 +1940,17 @@ ${JSON.stringify(shown, null, 1)}
    * Asks nobody answered within a day stop asking: they're marked expired (they never ran), so Activity's "Needs you"
    * doesn't keep an old card forever. A job left waiting on nothing but expired asks ends, with a note in its thread.
    */
+  /**
+   * Where an ask is: its conversation, opened on the job's thread, scrolled to that card (?ap=). An ask with no chat
+   * is in Hearth's DM.
+   */
+  async approvalLink(ap: Approval) {
+    const job = ap.jobId ? await this.store.get<Job>("jobs", ap.jobId) : null;
+    const thread = ap.threadId || ORPHAN_THREAD;
+    const root = job ? job.followsUp || job.id : "";
+    return `${thread.startsWith("tm-") ? `/#t/${thread.slice(3)}` : `/#c/${thread}${root ? `/${root}` : ""}`}?ap=${ap.id}`;
+  }
+
   async expireApprovals() {
     const cutoff = this.clock().getTime() - APPROVAL_TTL_MS;
     const old = (await this.store.all<Approval>("approvals")).filter((a) => a.status === "pending" && Date.parse(a.createdAt) < cutoff);
@@ -2484,7 +2498,7 @@ ${JSON.stringify(shown, null, 1)}
     const items: any[] = [];
     for (const a of approvals) {
       const j = jobs.find((x) => x.id === a.jobId);
-      items.push({ kind: "approval", at: a.createdAt, id: a.id, summary: a.summary, approval: a, teammateId: j?.teammateId || "hearth", threadId: a.threadId, jobId: j ? rootOf(j) : undefined });
+      items.push({ kind: "approval", at: a.createdAt, id: a.id, summary: a.summary, approval: a, teammateId: j?.teammateId || "hearth", threadId: a.threadId || ORPHAN_THREAD, jobId: j ? rootOf(j) : undefined, link: await this.approvalLink(a) });
     }
     for (const j of jobs.filter((x) => x.status === "blocked")) items.push({ kind: "blocked", at: j.updatedAt || j.createdAt, id: j.id, summary: j.blocked?.need || j.task, unblock: j.blocked?.unblock, seen: stuckSeen(j), teammateId: j.teammateId, threadId: j.threadId, jobId: rootOf(j) });
     for (const m of msgs.filter((x) => x.proactive)) items.push({ kind: "proactive", at: m.createdAt, id: m.id, summary: m.text, title: m.proactive!.title, teammateId: m.teammateId || "hearth", threadId: m.threadId });
@@ -2537,7 +2551,8 @@ ${JSON.stringify(shown, null, 1)}
     const prefs = await this.prefs();
     const routines = this.pipeline.triggers().filter((t) => t.teammateId === id && t.status !== "done" && t.createdBy !== "system")
       .map((t) => ({ id: t.id, name: t.name, title: t.title, status: t.status, timed: !!t.timer, when: t.timer ? scheduleWords(t.timer.schedule, prefs.tz) : `on ${t.sourceName}: ${t.formula}` }));
-    const approvals = (await this.store.all<Approval>("approvals")).filter((a) => jobs.some((j) => j.id === a.jobId));
+    const approvals = (await this.store.all<Approval>("approvals")).filter((a) => jobs.some((j) => j.id === a.jobId)
+      || (a.threadId || (id === "hearth" && !a.jobId ? ORPHAN_THREAD : "")) === `tm-${id}`);
     return { teammate, jobs, messages, routines, approvals };
   }
 

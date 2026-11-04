@@ -1193,8 +1193,8 @@ function drawActivity() {
     const t = mate(it.teammateId);
     const line = it.kind === "approval" ? `${t.name} needs your OK` : it.kind === "blocked" ? `${t.name} is stuck` : it.kind === "proactive" ? `${t.name} · ${it.title}` : it.kind === "failed" ? `${t.name} couldn't finish` : `${t.name} replied`;
     return h("div", { class: `actrow ${it.kind === "approval" || it.kind === "blocked" ? "hot" : ""}` },
-      // An ask that isn't in any chat opens on its own, so the tap shows what it is instead of doing nothing.
-      h("button", { class: "actmain", on: { click: it.kind === "approval" && !it.threadId ? () => openApproval(it.approval, renderActivity) : go(it) } }, face(t, 40, it.kind === "approval" ? "waiting" : it.kind === "blocked" ? "blocked" : "idle"),
+      // An ask opens its conversation, scrolled to that card (the hub's link ends ?ap=<id>).
+      h("button", { class: "actmain", on: { click: it.kind === "approval" && it.link ? () => { location.hash = String(it.link).replace(/^\/?#/, ""); } : go(it) } }, face(t, 40, it.kind === "approval" ? "waiting" : it.kind === "blocked" ? "blocked" : "idle"),
         h("span", { class: "grow" },
           h("span", { class: "l1" }, h("b", null, line), h("small", null, chan(it.threadId)), h("time", null, shortAgo(it.at))),
           h("span", { class: "l2" }, it.kind === "done" || it.kind === "failed" ? `${it.summary}${it.result ? ` — ${it.result}` : ""}` : it.kind === "blocked" ? `${it.summary}. ${it.unblock || ""}` : it.summary))),
@@ -1342,9 +1342,13 @@ function drawChannel(el: HTMLElement, stick: boolean) {
     lastWho = m.taskJobId ? "task" : who; lastAt = t;
   }
   if (S.planning === S.chat.thread.id) nodes.push(row(mateWho("hearth", "thinking"), new Date().toISOString(), [h("div", { class: "typing" }, h("i"), h("i"), h("i"), h("span", null, "Reading that and splitting it up…"))], lastWho === "hearth"));
+  // Asks here with no task of their own to sit under.
+  nodes.push(...looseApprovals((S.chat.approvals || []).filter((a: any) => !S.chat.jobs.some((x: any) => x.id === a.jobId)), new Set()).map((x) => x.node));
   const atBottom = el.parentElement!.scrollHeight - el.parentElement!.scrollTop - el.parentElement!.clientHeight < 120;
   clear(el, nodes);
   if (stick || atBottom) requestAnimationFrame(() => { const s = document.getElementById("scroll")!; s.scrollTop = s.scrollHeight; });
+  const rt = route();
+  if (rt.view === "chat" && !rt.job) revealApproval();
 }
 
 /** Mentions (@Research) look like Slack's blue mentions. */
@@ -1514,35 +1518,39 @@ setInterval(() => {
 }, 1000);
 
 async function decide(id: string, yes: boolean, always = false): Promise<any> { try { return await call(`/api/approvals/${id}/${yes ? "approve" : "reject"}`, { body: { always } }); } catch (e) { handleError(e); return null; } }
+/** One ask, as a card in its conversation. data-ap is what a link from Activity or a notification scrolls to. */
+function approvalCard(a: any) {
+  return h("div", { class: "block", "data-ap": a.id },
+    h("div", { class: "blockhead" }, icon("lock", 15), h("b", null, a.summary)), a.details ? h("p", null, a.details) : null, codeToApprove(a),
+    a.status === "pending" ? h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => decide(a.id, true) } }, "Approve"), alwaysBtn(a), h("button", { class: "sbtn", on: { click: () => decide(a.id, false) } }, "No"))
+      : [h("small", { class: "muted" }, approvalState(a)), a.result ? h("pre", { class: "code" }, a.result) : null]);
+}
+/** The card a link points at (#…?ap=<id>), if any. */
+const linkedAp = () => location.hash.match(/[?&]ap=([\w-]+)/)?.[1] || null;
+/**
+ * Asks in this conversation that no waiting answer shows (no job, or its job isn't waiting any more), as rows from
+ * Hearth: pending ones, and the one a link points at even once it's decided, so the tap always lands on it.
+ */
+function looseApprovals(aps: any[], shown: Set<string>): { at: string; node: Node }[] {
+  const want = linkedAp();
+  return aps.filter((a: any) => !shown.has(a.id) && (a.status === "pending" || a.id === want))
+    .sort((a: any, b: any) => a.createdAt.localeCompare(b.createdAt))
+    .map((a: any) => ({ at: a.createdAt, node: row(mateWho(S.chat?.jobs?.find((j: any) => j.id === a.jobId)?.teammateId || "hearth", a.status === "pending" ? "waiting" : "idle"), a.createdAt, [approvalCard(a)]) }));
+}
+/** Scroll to the card the link names and light it up, once it's drawn; then drop ?ap= so a redraw doesn't jump back. */
+function revealApproval() {
+  const id = linkedAp();
+  if (!id) return;
+  requestAnimationFrame(() => {
+    const el = (document.querySelector(`#threadview [data-ap="${id}"]`) || document.querySelector(`[data-ap="${id}"]`)) as HTMLElement | null;
+    if (!el) return;
+    el.scrollIntoView({ block: "center" });
+    el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash");
+    history.replaceState(null, "", location.href.replace(/[?&]ap=[\w-]+/, ""));
+  });
+}
 const approvalState = (a: any) => a.status === "done" ? "Approved and done" : a.status === "failed" ? "Approved, but it failed" : a.status === "rejected" ? "You said no" : a.status === "expired" ? "Expired: nobody answered within a day, so it didn't run" : a.status === "approved" ? "Approved" : "Waiting for you";
 
-/**
- * An ask on its own: what exactly it would do, where it came from, and (once decided) what came back. For an ask that
- * isn't in any chat (an agent call that didn't say which job it was), so tapping it in Activity still shows you something.
- */
-function openApproval(a0: any, then?: () => void) {
-  const box = h("div");
-  const draw = (a: any) => {
-    const act = a.action || {};
-    const what = act.type === "mcp" ? `MCP · ${act.server} · ${act.tool}` : act.type === "message" ? `${CHANNEL_NAME[act.channel] || act.channel} to ${act.to}` : act.type === "google" ? `Google · ${GOOGLE_KINDS[act.kind] || act.kind}` : act.type === "script" ? `Script · ${act.script}` : "";
-    const done = (r: any) => { if (r) draw(r); then?.(); };
-    clear(box,
-      h("p", { class: "muted" }, [what, `asked ${shortAgo(a.createdAt)}`, a.threadId ? null : "not from any chat"].filter(Boolean).join(" · ")),
-      a.details ? h("pre", { class: "code" }, a.details) : null,
-      codeToApprove(a),
-      a.status === "pending"
-        ? h("div", { class: "blockbtns" },
-          h("button", { class: "sbtn", on: { click: async () => done(await decide(a.id, false)) } }, "No"),
-          h("button", { class: "sbtn primary", on: { click: async () => done(await decide(a.id, true)) } }, "Approve"),
-          alwaysBtn(a, async () => { done((await call(`/api/approvals`).catch(() => [])).find((x: any) => x.id === a.id)); }))
-        : h("p", null, h("b", null, approvalState(a))),
-      a.result ? [h("small", null, "What came back"), h("pre", { class: "code" }, a.result)] : null,
-      a.threadId ? h("button", { class: "btn big", on: { click: () => { closeSheet(); location.hash = threadLink(a.threadId); } } }, "Open the chat it came from") : null);
-  };
-  draw(a0);
-  openSheet(a0.summary || "Needs your OK", box);
-}
-const threadLink = (id: string) => (id.startsWith("tm-") ? `#t/${id.slice(3)}` : `#c/${id}`);
 const CHANNEL_NAME: Record<string, string> = { whatsapp: "WhatsApp", slack: "Slack", gmail: "Gmail", instagram: "Instagram", linkedin: "LinkedIn", x: "X" };
 /** "Always allow": for a message to one chat, one kind of Google change, or one MCP tool (scripts and payments always ask). */
 const alwaysBtn = (ap: any, then?: () => void) => ap?.action?.type === "message" || ap?.action?.type === "mcp" || (ap?.action?.type === "google" && GOOGLE_KINDS[ap.action.kind])
@@ -1597,10 +1605,13 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
     row(mateWho("hearth"), j.createdAt, [h("div", { class: "ttitle" }, jobLabel(j)), h("div", { class: "brief" }, withMentions(`@${t.name} ${String(j.task).split("\n\nThe user added: ")[0]}`))]),
     h("div", { class: "repdiv" }, n ? `${n} repl${n === 1 ? "y" : "ies"}` : "No replies yet"),
     ...items.map((x) => x.node()),
+    ...looseApprovals((S.chat.approvals || []).filter((a: any) => [j, ...follow].some((x: any) => x.id === a.jobId)),
+      new Set((S.chat.approvals || []).filter((a: any) => [j, ...follow].some((x: any) => x.id === a.jobId && x.status === "waiting")).map((a: any) => a.id))).map((x) => x.node),
     ...queuedRows(mine.filter((m: any) => m.queued), [j, ...follow]),
   ];
   clear(el, nodes);
   if (stick) requestAnimationFrame(() => { const s = document.getElementById("scroll")!; s.scrollTop = s.scrollHeight; });
+  revealApproval();
 }
 
 /** One teammate answer inside a thread (or "working…", or the Approve / stuck block). */
@@ -1618,10 +1629,7 @@ function answer(j: any) {
     j.status === "working" ? h("ol", { class: "steplog", "data-steplog": j.id }, (S.stepLog.get(j.id) || []).slice().reverse().map(stepRow)) : null]);
   if (j.status === "waiting") {
     const aps = (S.chat.approvals || []).filter((a: any) => a.jobId === j.id);
-    return row(who, at, [j.result ? richText(j.result) : null, aps.map((a: any) => h("div", { class: "block" },
-      h("div", { class: "blockhead" }, icon("lock", 15), h("b", null, a.summary)), a.details ? h("p", null, a.details) : null, codeToApprove(a),
-      a.status === "pending" ? h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => decide(a.id, true) } }, "Approve"), alwaysBtn(a), h("button", { class: "sbtn", on: { click: () => decide(a.id, false) } }, "No"))
-        : h("small", { class: "muted" }, approvalState(a))))]);
+    return row(who, at, [j.result ? richText(j.result) : null, aps.map(approvalCard)]);
   }
   if (j.status === "blocked") return row(who, at, [h("div", { class: "block" }, h("div", { class: "blockhead" }, h("b", null, j.blocked?.need)), j.blocked?.why ? h("p", null, j.blocked.why) : null,
     h("p", null, j.blocked?.unblock), h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => retry(j.id) } }, "Try again"),
@@ -1760,6 +1768,9 @@ function drawDm(stick = true) {
     const m = d.messages.find((x: any) => x.id === j.messageId);
     items.push({ at: j.createdAt, nodes: [userRow(m), answer(j)] });
   }
+  // Asks in this DM that no waiting answer above shows (one that came with no job lands in Hearth's).
+  const shownHere = new Set<string>(d.approvals.filter((a: any) => d.jobs.some((j: any) => j.id === a.jobId && j.status === "waiting" && direct.has(j.messageId))).map((a: any) => a.id));
+  for (const x of looseApprovals(d.approvals.filter((a: any) => !d.jobs.some((j: any) => j.id === a.jobId && !direct.has(j.messageId))), shownHere)) items.push({ at: x.at, nodes: [x.node] });
   S.chat = saved;
   items.sort((a, b) => a.at.localeCompare(b.at));
   const elsewhere = d.jobs.filter((j: any) => !direct.has(j.messageId) && !j.followsUp).slice(-6).reverse();
@@ -1773,6 +1784,7 @@ function drawDm(stick = true) {
     items.flatMap((x) => x.nodes),
     queuedRows(d.messages.filter((m: any) => m.queued), d.jobs.filter((j: any) => !j.parentId && direct.has(j.messageId))));
   if (stick) requestAnimationFrame(() => { const s = document.getElementById("scroll")!; s.scrollTop = s.scrollHeight; });
+  revealApproval();
 }
 
 /**
