@@ -16,13 +16,26 @@ import type { Vault } from "./vault.ts";
 // is reachable at once through `hearth-mcp call` (the run's own tool list was fixed when it started).
 //
 // The list (names and URLs, nothing secret) is <data>/mcp.json; tokens and API keys are in the vault as mcp:<name>.
+//
+// Tools that change things ask first. Every call goes through the hub (the proxy, or hearth-mcp call), so a call to a tool
+// that asks isn't sent on: it becomes an Approve card (onAsk), and the agent is told it's waiting. Approve runs that
+// exact call; "Always allow" switches the tool to allowed. Which tools ask: what you chose in /mcp, else the server's own
+// read-only label (MCP tool annotations), else the tool's name (list_…, get_…, read_… only read).
 
 /** pending: an agent added it and you haven't approved it. The hub doesn't contact it, and no run or command can use it. */
-export type McpServer = { name: string; url: string; enabled: boolean; addedBy: string; addedAt: string; pending?: boolean };
+export type McpServer = { name: string; url: string; enabled: boolean; addedBy: string; addedAt: string; pending?: boolean;
+  /** Your choice per tool in /mcp: "ask" waits for Approve, "allow" runs straight away. Tools not here use the default. */
+  gates?: Record<string, "ask" | "allow"> };
 export type McpState = "connected" | "signin" | "failed" | "off" | "checking" | "pending";
 export type McpStatus = { state: McpState; tools: string[]; error?: string; checkedAt?: string };
-export type McpView = McpServer & McpStatus & { auth: "oauth" | "key" | "none" };
-export type McpTool = { name: string; description?: string; inputSchema?: unknown };
+/** ask: the tools that wait for your Approve. */
+export type McpView = McpServer & McpStatus & { auth: "oauth" | "key" | "none"; ask: string[] };
+export type McpTool = { name: string; description?: string; inputSchema?: unknown; readOnly?: boolean };
+/** A call held for your Approve. jobId: the job whose run made it, when the run said. */
+export type McpAsk = { server: string; tool: string; args: unknown; jobId?: string };
+
+/** Names of tools that only look: list_x, get_x, read_x, search_x, x_status… Anything else asks unless the server says it's read-only. */
+const LOOKS = /^(list|get|read|search|find|fetch|load|query|describe|view|show|lookup|count|check|whoami|me)([_-]|$)|[_-](status|info|details)$/i;
 
 type OAuthCreds = {
   kind: "oauth"; clientId: string; clientSecret?: string; authMethod: AuthMethod; tokenEndpoint: string; resource: string;
@@ -65,6 +78,8 @@ export type McpOptions = {
   onChange?: () => void;
   /** An agent asked for a server: tell the user (a notification, and Activity). */
   onPending?: (s: McpServer) => void;
+  /** A call to a tool that asks: make the Approve card. Returns what the agent is told. Without it, nothing is held. */
+  onAsk?: (c: McpAsk) => Promise<string>;
   fetch?: typeof fetch;
   now?: () => number;
 };
@@ -73,6 +88,8 @@ export class Mcp {
   private file: string;
   private servers: McpServer[] = [];
   private status = new Map<string, McpStatus>();
+  /** What each server says about its tools: true read-only, false changes things (from tools/list annotations). */
+  private readOnly = new Map<string, Map<string, boolean>>();
   private pending = new Map<string, Pending>();
   private refreshing = new Map<string, Promise<boolean>>();
   private timers: ReturnType<typeof setInterval>[] = [];
@@ -101,8 +118,34 @@ export class Mcp {
       const c = this.creds(s.name);
       const st = s.pending ? { state: "pending" as const, tools: [] }
         : !s.enabled ? { state: "off" as const, tools: this.status.get(s.name)?.tools || [] } : this.status.get(s.name) ?? { state: "checking" as const, tools: [] };
-      return { ...s, ...st, auth: c?.kind === "key" ? "key" : c?.kind === "oauth" || this.status.get(s.name)?.state === "signin" ? "oauth" : "none" };
+      return { ...s, ...st, auth: c?.kind === "key" ? "key" : c?.kind === "oauth" || this.status.get(s.name)?.state === "signin" ? "oauth" : "none",
+        ask: st.tools.filter((t) => this.asks(s.name, t)) };
     });
+  }
+
+  /** Does this tool wait for your Approve? Your choice, else the server's read-only label, else its name. */
+  asks(name: string, tool: string): boolean {
+    const chosen = this.get(name)?.gates?.[tool];
+    if (chosen) return chosen === "ask";
+    const ro = this.readOnly.get(name)?.get(tool);
+    if (ro !== undefined) return !ro;
+    return !LOOKS.test(tool);
+  }
+
+  /** /mcp: make one tool ask first, or let it run (also "Always allow" on its Approve card). */
+  setGate(name: string, tool: string, ask: boolean): Result<McpView> {
+    const s = this.get(name);
+    if (!s) return { error: `No MCP server called ${name}.` };
+    if (!tool || tool.length > 128) return { error: "Which tool?" };
+    s.gates = { ...s.gates, [tool]: ask ? "ask" : "allow" };
+    this.save();
+    return { value: this.view(name)! };
+  }
+
+  /** A call an agent made: null to send it on, or what to tell the agent because it's waiting for your Approve. */
+  async hold(name: string, tool: string, args: unknown, jobId?: string): Promise<string | null> {
+    if (!this.o.onAsk || !this.asks(name, tool)) return null;
+    return this.o.onAsk({ server: name, tool, args: args ?? {}, jobId });
   }
   get(name: string) { return this.servers.find((s) => s.name === name) ?? null; }
   view(name: string) { return this.list().find((s) => s.name === name) ?? null; }
@@ -188,9 +231,11 @@ export class Mcp {
   }
 
   /** What a working run gets: each server that's on and usable, as this hub's proxy. */
-  forRun(base: string, key: string): { name: string; url: string; headers: Record<string, string> }[] {
+  forRun(base: string, key: string, jobId?: string): { name: string; url: string; headers: Record<string, string> }[] {
+    // The job in the address, so a call that waits for Approve puts its card in that job's thread.
+    const q = jobId ? `?job=${encodeURIComponent(jobId)}` : "";
     return this.servers.filter((s) => s.enabled && !s.pending && this.status.get(s.name)?.state === "connected")
-      .map((s) => ({ name: s.name, url: `${base}/api/agent/mcp/${s.name}`, headers: { "X-Hearth-Agent": key } }));
+      .map((s) => ({ name: s.name, url: `${base}/api/agent/mcp/${s.name}${q}`, headers: { "X-Hearth-Agent": key } }));
   }
 
   // ---- signing in ----
@@ -284,6 +329,7 @@ export class Mcp {
     if (!s.enabled) return { state: "off", tools: [] };
     try {
       const tools = await this.tools(name);
+      this.readOnly.set(name, new Map(tools.filter((t) => t.readOnly !== undefined).map((t) => [t.name, t.readOnly!])));
       return this.setStatus(name, { state: "connected", tools: tools.map((t) => t.name) });
     } catch (e: any) {
       if (e instanceof NeedsSignIn) return this.setStatus(name, { state: "signin", tools: [], error: this.creds(name)?.kind === "key" ? "The server refused the key." : undefined });
@@ -297,7 +343,9 @@ export class Mcp {
       let cursor: string | undefined;
       for (let page = 0; page < 20; page++) {
         const r = await rpc("tools/list", cursor ? { cursor } : {});
-        out.push(...(Array.isArray(r?.tools) ? r.tools : []).map((t: any) => ({ name: String(t?.name || ""), description: t?.description ? String(t.description) : undefined, inputSchema: t?.inputSchema })).filter((t: McpTool) => t.name));
+        out.push(...(Array.isArray(r?.tools) ? r.tools : []).map((t: any) => ({ name: String(t?.name || ""), description: t?.description ? String(t.description) : undefined, inputSchema: t?.inputSchema,
+          // readOnlyHint true: it only looks. destructiveHint true (or readOnlyHint false): it changes things.
+          readOnly: t?.annotations?.readOnlyHint === true ? true : t?.annotations?.readOnlyHint === false || t?.annotations?.destructiveHint === true ? false : undefined })).filter((t: McpTool) => t.name));
         cursor = typeof r?.nextCursor === "string" && r.nextCursor ? r.nextCursor : undefined;
         if (!cursor) break;
       }
@@ -322,6 +370,18 @@ export class Mcp {
     const headers: Record<string, string> = {};
     for (const h of PASS_UP) { const v = req.headers.get(h); if (v) headers[h] = v; }
     const body = req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer();
+    // A call to a tool that asks first isn't sent on: it waits for your Approve, and the run is told so.
+    if (body && this.o.onAsk) {
+      let msg: any = null;
+      try { msg = JSON.parse(new TextDecoder().decode(body)); } catch {}
+      const calls = (Array.isArray(msg) ? msg : [msg]).filter((m) => m?.method === "tools/call" && this.asks(name, String(m?.params?.name || "")));
+      if (calls.length && Array.isArray(msg)) return rpcReply(msg.filter((m) => m?.id !== undefined).map((m) => ({ jsonrpc: "2.0", id: m.id, error: { code: -32600, message: "Send calls to tools that ask first one at a time." } })));
+      if (calls.length) {
+        const job = new URL(req.url).searchParams.get("job") || undefined;
+        const text = await this.o.onAsk({ server: name, tool: String(msg.params.name), args: msg.params.arguments ?? {}, jobId: job });
+        return rpcReply({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text }] } });
+      }
+    }
     let up: Response;
     try { up = await this.send(name, s.url, { method: req.method, headers, body, signal: req.signal }); }
     catch (e: any) { return new Response(JSON.stringify({ error: `Couldn't reach ${name}: ${String(e?.message || e).slice(0, 200)}` }), { status: 502, headers: { "Content-Type": "application/json" } }); }
@@ -489,6 +549,8 @@ type TokenResponse = { access_token?: string; refresh_token?: string; expires_in
 class NeedsSignIn extends Error {}
 class Refused extends Error {}
 
+const rpcReply = (m: unknown) => new Response(JSON.stringify(m), { status: 200, headers: { "Content-Type": "application/json" } });
+
 async function errorText(r: Response) {
   try { const t = (await r.text()).replace(/\s+/g, " ").trim(); return t ? `: ${t.slice(0, 200)}` : ""; } catch { return ""; }
 }
@@ -550,7 +612,12 @@ tools (named mcp__<server>__<tool> on Claude). This command reaches all of them,
   for them. Once they have, \`call\` works right away.
 - \`hearth-mcp signin <server>\`: a fresh sign-in link for an approved server that's signed out (give the user the link)
 
-Use the server's own tools when you have them; \`call\` is for a server added after this run started.`,
+Use the server's own tools when you have them; \`call\` is for a server added after this run started.
+
+Tools that change things (send, post, react, delete, connect…) wait for the user's Approve. Calling one doesn't run it:
+the answer says it's waiting. Don't call it again or look for another way round; say in your reply that it's waiting for
+their Approve. When they tap Approve the hub makes that exact call. So put everything in the one call (the full message,
+the attachment) and get it right first time.`,
   };
 }
 
@@ -566,13 +633,15 @@ export async function mcpAgent(mcp: Mcp, argv: string[], by: string): Promise<st
     case "tools": {
       if (!a || !mcp.get(a)) return `No MCP server called ${a || "?"}. Run: hearth-mcp list`;
       const tools = await mcp.tools(a);
-      return tools.map((t) => `${t.name}: ${(t.description || "").replace(/\s+/g, " ").slice(0, 300)}\n  takes: ${JSON.stringify(t.inputSchema ?? {}).slice(0, 1500)}`).join("\n") || "No tools.";
+      return tools.map((t) => `${t.name}${mcp.asks(a, t.name) ? " (waits for the user's Approve)" : ""}: ${(t.description || "").replace(/\s+/g, " ").slice(0, 300)}\n  takes: ${JSON.stringify(t.inputSchema ?? {}).slice(0, 1500)}`).join("\n") || "No tools.";
     }
     case "call": {
       if (!a || !b) return "usage: hearth-mcp call <server> <tool> '<json arguments>'";
       if (!mcp.get(a)) return `No MCP server called ${a}. Run: hearth-mcp list`;
       let args: unknown = {};
       if (c?.trim()) { try { args = JSON.parse(c); } catch { return "The arguments must be JSON, like '{\"query\": \"…\"}'."; } }
+      const held = await mcp.hold(a, b, args);
+      if (held) return held;
       return JSON.stringify(await mcp.call(a, b, args), null, 1);
     }
     case "add": {

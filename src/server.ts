@@ -927,7 +927,12 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         }
         if (method === "POST" && verb === "signout") { res(connect.mcp.signOut(name)); return json({ server: connect.mcp.view(name) }); }
         if (method === "POST" && verb === "check") { await connect.mcp.check(name); return json({ server: connect.mcp.view(name) }); }
-        if (method === "PATCH" && !verb) return json({ server: res(await connect.mcp.setEnabled(name, (await body(req)).enabled !== false)) });
+        if (method === "PATCH" && !verb) {
+          const b = await body(req);
+          // {tool, ask}: that tool waits for Approve (or runs without asking); {enabled}: the server on or off.
+          if (typeof b.tool === "string") return json({ server: res(connect.mcp.setGate(name, b.tool, b.ask !== false)) });
+          return json({ server: res(await connect.mcp.setEnabled(name, b.enabled !== false)) });
+        }
         if (method === "DELETE" && !verb) {
           const asked = !!connect.mcp.get(name)?.pending;
           res(connect.mcp.remove(name));

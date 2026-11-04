@@ -1217,3 +1217,11 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 .mcpdot.warn { background: var(--warn); }
 .mcpdot.danger { background: var(--danger); }
 .mcptools { display: block; margin-top: 2px; overflow-wrap: anywhere; }
+
+/* /mcp: each tool, tap to make it ask for Approve first or run without asking */
+.mcpgates { margin-top: 4px; }
+.mcpgates summary { cursor: pointer; list-style-position: inside; }
+.mcpchips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.mcpchip { font: 12px/1.2 var(--mono); padding: 4px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--card); color: var(--muted); cursor: pointer; }
+.mcpchip.ask { color: var(--ink); border-color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+.mcpchip:disabled { opacity: .5; }

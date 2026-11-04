@@ -632,6 +632,8 @@ export type Meter = { costUsd: number; unknown: boolean; signal?: AbortSignal; o
   onFrame?: (f: Frame) => void; ranOn?: string;
   /** The job thread this call works for: its working runs share one session and folder (see brains/sessions.ts). */
   thread?: string;
+  /** The job itself: an MCP call that waits for Approve puts its card in this job's thread. */
+  jobId?: string;
   /** Where its thread should work (the ramble's project; workspace from the planner or channel); pinned on first use. */
   workspace?: Place;
   /** A cheaper model is doing the job: the lead (the heavy model) is on hand to ask (see brains/lead.ts). */
@@ -801,7 +803,7 @@ export class Brain {
   beforeBrowse: (() => void) | null = null;
 
   /** Set by the hub: the MCP servers a working run gets, as the hub's proxy (mcp.ts). No tokens: the proxy adds them. */
-  mcpServers: (() => { name: string; url: string; headers: Record<string, string> }[]) | null = null;
+  mcpServers: ((jobId?: string) => { name: string; url: string; headers: Record<string, string> }[]) | null = null;
 
   private skillState: { at: number; key: string; skills: Skill[]; paths: string[] } | null = null;
   /** Look again on the next call (a connector that brings a skill just connected or left). */
@@ -1027,7 +1029,7 @@ export class Brain {
     const name = `${harness}${model ? ` (${model})` : ""}`;
     // Working runs get your MCP servers (Settings → /mcp), each through this hub's proxy, which holds the logins.
     let mcp: { name: string; url: string; headers: Record<string, string> }[] = [];
-    if (web && (harness === "claude" || harness === "codex")) { try { mcp = this.mcpServers?.() ?? []; } catch {} }
+    if (web && (harness === "claude" || harness === "codex")) { try { mcp = this.mcpServers?.(meter?.jobId) ?? []; } catch {} }
     let cmd: string[];
     switch (harness) {
       case "claude": {

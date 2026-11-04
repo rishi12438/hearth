@@ -19,6 +19,7 @@ let refreshTokens: Map<string, { access: string; next: string }>;
 let challenges: Map<string, string>;
 let registered: number;
 let changes: number;
+let extraTools: any[] = [];
 
 const ok = (j: unknown, headers: Record<string, string> = {}) => new Response(JSON.stringify(j), { headers: { "Content-Type": "application/json", ...headers } });
 const sse = (j: unknown) => new Response(`event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", method: "notifications/message", params: {} })}\n\nevent: message\ndata: ${JSON.stringify(j)}\n\n`, { headers: { "Content-Type": "text/event-stream" } });
@@ -30,7 +31,7 @@ async function mcpServer(req: Request, auth: () => boolean): Promise<Response> {
   if (!m.id) return new Response(null, { status: 202 });
   if (m.method === "initialize") return ok({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fake" } } }, { "Mcp-Session-Id": "s1" });
   if (req.headers.get("mcp-session-id") !== "s1") return new Response("no session", { status: 400 });
-  if (m.method === "tools/list") return sse({ jsonrpc: "2.0", id: m.id, result: { tools: [{ name: "search", description: "Search issues", inputSchema: { type: "object" } }, { name: "create" }] } });
+  if (m.method === "tools/list") return sse({ jsonrpc: "2.0", id: m.id, result: { tools: [{ name: "search", description: "Search issues", inputSchema: { type: "object" } }, { name: "create" }, ...extraTools] } });
   if (m.method === "tools/call") return ok({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: `called ${m.params.name} with ${JSON.stringify(m.params.arguments)}` }] } });
   return ok({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: "no such method" } });
 }
@@ -84,7 +85,7 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "hearth-mcp-"));
   vault = new Vault(dir, { masterKey: randomBytes(32) });
   now = Date.parse("2026-11-04T10:00:00Z");
-  calls = []; valid = new Set(); refreshTokens = new Map(); challenges = new Map(); registered = 0; changes = 0;
+  extraTools = []; calls = []; valid = new Set(); refreshTokens = new Map(); challenges = new Map(); registered = 0; changes = 0;
   mcp = new Mcp({ dataDir: dir, vault, redirectUri: () => "https://hub.example.com/api/mcp/callback", fetch: fakeFetch as typeof fetch, now: () => now, onChange: () => changes++ });
 });
 
@@ -280,4 +281,49 @@ test("run config: Claude's --mcp-config and Codex's per-server keys", () => {
   const s = [{ name: "linear", url: "http://127.0.0.1:8790/api/agent/mcp/linear", headers: { "X-Hearth-Agent": "k" } }];
   expect(JSON.parse(claudeMcpConfig(s))).toEqual({ mcpServers: { linear: { type: "http", url: s[0].url, headers: { "X-Hearth-Agent": "k" } } } });
   expect(codexMcpConfig(s)).toEqual({ "mcp_servers.linear": { url: s[0].url, http_headers: { "X-Hearth-Agent": "k" } } });
+});
+
+test("tools that change things wait for Approve: the proxy and hearth-mcp call hold them, read-only ones go through", async () => {
+  const asked: any[] = [];
+  mcp = new Mcp({ dataDir: dir, vault, redirectUri: () => "https://hub.example.com/api/mcp/callback", fetch: fakeFetch as typeof fetch, now: () => now,
+    onAsk: async (c) => { asked.push(c); return "waiting for Approve"; } });
+  // The server's own labels win over the name: get_or_make changes things, nuke_cache says it only reads.
+  extraTools = [{ name: "get_or_make", annotations: { readOnlyHint: false } }, { name: "nuke_cache", annotations: { readOnlyHint: true } }];
+  await mcp.add({ url: OPEN, name: "open" }, "me");
+  expect(mcp.view("open")!.ask).toEqual(["create", "get_or_make"]);
+
+  const rpc = (body: unknown, job = "") => mcp.forward("open", new Request(`http://127.0.0.1:8790/api/agent/mcp/open${job}`, { method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "Mcp-Session-Id": "s1" }, body: JSON.stringify(body) }));
+  // A read goes straight to the server.
+  const read = await (await rpc({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "search", arguments: { q: "x" } } })).json();
+  expect(read.result.content[0].text).toBe('called search with {"q":"x"}');
+  // A change isn't sent on: the run hears it's waiting, and the card knows which job.
+  const before = calls.length;
+  const held = await (await rpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "create", arguments: { title: "t" } } }, "?job=j1")).json();
+  expect(held).toEqual({ jsonrpc: "2.0", id: 2, result: { content: [{ type: "text", text: "waiting for Approve" }] } });
+  expect(calls.length).toBe(before);
+  expect(asked).toEqual([{ server: "open", tool: "create", args: { title: "t" }, jobId: "j1" }]);
+  // Batches can't slip one through.
+  const batch = await (await rpc([{ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "create", arguments: {} } }])).json();
+  expect(batch[0].error.message).toContain("one at a time");
+  expect(await mcpAgent(mcp, ["call", "open", "create", '{"title":"u"}'], "an agent")).toBe("waiting for Approve");
+  expect(await mcpAgent(mcp, ["tools", "open"], "an agent")).toContain("create (waits for the user's Approve)");
+  expect(asked).toHaveLength(2);
+
+  // Your choice in /mcp (or "Always allow"): create runs without asking; search asks. It's kept across a restart.
+  mcp.setGate("open", "create", false);
+  mcp.setGate("open", "search", true);
+  expect(await mcpAgent(mcp, ["call", "open", "create", '{"title":"v"}'], "an agent")).toContain("called create");
+  expect(await mcpAgent(mcp, ["call", "open", "search", "{}"], "an agent")).toBe("waiting for Approve");
+  const again = new Mcp({ dataDir: dir, vault, redirectUri: () => "", fetch: fakeFetch as typeof fetch });
+  expect(again.asks("open", "create")).toBe(false);
+  expect(again.asks("open", "search")).toBe(true);
+  // By name when the server says nothing: Parley-style tools.
+  for (const t of ["list_channels", "read_inbox", "get_media", "connection_status", "load_history"]) expect(again.asks("open", t)).toBe(false);
+  for (const t of ["send_message", "react_to_message", "delete_message", "connect"]) expect(again.asks("open", t)).toBe(true);
+});
+
+test("the job goes in each run's proxy address, so a held call's card lands in its thread", async () => {
+  await mcp.add({ url: OPEN, name: "open" }, "me");
+  expect(mcp.forRun("http://127.0.0.1:8790", "k", "job 1")[0].url).toBe("http://127.0.0.1:8790/api/agent/mcp/open?job=job%201");
 });
