@@ -21,19 +21,48 @@ const OUTPUT_CAP = 8000;
  * The real gate is you reading the code before approving it.
  */
 export function detectEffects(code: string): "read" | "external" {
-  if (/^\s*\/\/\s*effects:\s*external/m.test(code)) return "external";
+  if (/^\s*(\/\/|#)\s*effects:\s*external/m.test(code)) return "external";
+  // Python and shell: write-style requests, curl with a body or method, subprocesses, file writes.
+  if (/\b(requests|httpx|session)\.(post|put|patch|delete)\b|\burlopen\([^)]*data\s*=|\bsubprocess\b|\bos\.(system|popen|remove|unlink)\b|\bopen\([^)]*,\s*["'][wa]/.test(code)) return "external";
+  if (langOf(code) === "sh") {
+    if (/\bcurl\b[^\n]*(\s-X\s*(POST|PUT|PATCH|DELETE)|\s(-d|--data[\w-]*|-F|--form)\s)/.test(code)) return "external";
+    if (/(^|[\s;|&])(rm|mv|tee|cp)\s/m.test(code) || /[^2&]>\s*[\w~/.$]/.test(code)) return "external";
+  }
   if (/method\s*:\s*["'`](POST|PUT|PATCH|DELETE)["'`]/i.test(code)) return "external";
   if (/\b(sendmail|nodemailer|smtp|twilio|stripe|child_process|Bun\.spawn|spawnSync|execSync|writeFile|unlink|rmSync)\b/.test(code)) return "external";
   return "read";
 }
 
 export function describeScript(code: string) {
-  const m = code.match(/^\s*\/\/\s*(?:description:\s*)?(.+)$/m);
+  const m = code.replace(/^#!.*\n/, "").match(/^\s*(?:\/\/|#(?!!))\s*(?:description:\s*)?(.+)$/m);
   return (m?.[1] || "No description").trim().slice(0, 200);
 }
 
+/** The languages a script can be written in, by file extension. */
+export type ScriptLang = "ts" | "py" | "sh";
+const LANGS: ScriptLang[] = ["ts", "py", "sh"];
+/** From its first line: a python or shell shebang; TypeScript (Bun) otherwise. */
+export function langOf(code: string, asked?: unknown): ScriptLang {
+  if (typeof asked === "string") {
+    const a = asked.toLowerCase();
+    if (a === "py" || a === "python" || a === "python3") return "py";
+    if (a === "sh" || a === "bash" || a === "shell") return "sh";
+    if (a === "ts" || a === "typescript" || a === "js" || a === "bun") return "ts";
+  }
+  const first = code.split("\n", 1)[0];
+  if (/^#!.*\bpython/.test(first)) return "py";
+  if (/^#!.*\b(ba|z)?sh\b/.test(first)) return "sh";
+  return "ts";
+}
+/** What runs a script of that language. */
+function interpreter(lang: ScriptLang): string[] {
+  if (lang === "py") return [Bun.which("python3") || "python3", "-I"];
+  if (lang === "sh") return [Bun.which("bash") || "/bin/bash"];
+  return [process.execPath];
+}
+
 /** Keys a script can ask for by name, and the env var it gets. */
-export const SCRIPT_KEYS: Record<string, string> = { serper: "SERPER_API_KEY" };
+export const SCRIPT_KEYS: Record<string, string> = { serper: "SERPER_API_KEY", plaid: "HEARTH_PLAID_KEY" };
 
 export class Scripts {
   readonly repoDir: string;
@@ -49,6 +78,8 @@ export class Scripts {
 
   /** API keys a script may ask for with a `// needs: serper` header (the hub's vault). Only the named ones are passed. */
   keys: (name: string) => string | null = () => null;
+  /** This hub on its own machine, for scripts given a hub key (HEARTH_HUB). Set by the hub. */
+  hubUrl: string | null = null;
 
   constructor(private store: Store, dataDir: string, repoDir = resolve("scripts")) {
     this.repoDir = repoDir;
@@ -57,22 +88,22 @@ export class Scripts {
     for (const d of [this.ownDir, this.workDir]) mkdirSync(d, { recursive: true, mode: 0o700 });
   }
 
-  fileFor(s: Pick<Script, "name" | "origin">) {
-    return join(s.origin === "repo" ? this.repoDir : this.ownDir, `${s.name}.ts`);
+  fileFor(s: Pick<Script, "name" | "origin" | "lang">) {
+    return join(s.origin === "repo" ? this.repoDir : this.ownDir, `${s.name}.${s.lang || "ts"}`);
   }
 
   /** Register (or refresh) scripts shipped in the repo's scripts/ folder. */
   async syncRepo() {
     if (!existsSync(this.repoDir)) return;
     const existing = await this.store.all<Script>("scripts");
-    for (const file of readdirSync(this.repoDir).filter((f) => f.endsWith(".ts"))) {
-      const name = file.slice(0, -3);
+    for (const file of readdirSync(this.repoDir).filter((f) => /\.(ts|py|sh)$/.test(f))) {
+      const name = file.slice(0, -3), lang = file.slice(-2) as ScriptLang;
       if (!NAME_RE.test(name)) continue;
       const code = readFileSync(join(this.repoDir, file), "utf8");
       const prev = existing.find((s) => s.name === name && s.origin === "repo");
       await this.store.put<Script>("scripts", {
         ...(prev || { id: randomUUID(), createdAt: new Date().toISOString() }),
-        name, origin: "repo", status: "approved", sha256: sha256(code), description: describeScript(code), effects: detectEffects(code),
+        name, origin: "repo", lang, status: "approved", sha256: sha256(code), description: describeScript(code), effects: detectEffects(code),
       });
     }
   }
@@ -88,19 +119,23 @@ export class Scripts {
     return existsSync(file) ? readFileSync(file, "utf8") : "";
   }
 
-  async propose(input: { name?: unknown; description?: unknown; code?: unknown }) {
+  /** lang: "ts" (Bun, the default), "py" (python3) or "sh" (bash); a shebang on the first line works too. */
+  async propose(input: { name?: unknown; description?: unknown; code?: unknown; lang?: unknown }) {
     const name = String(input.name || "").toLowerCase();
     const code = typeof input.code === "string" ? input.code : "";
     if (!NAME_RE.test(name)) return { error: "Script name must be lowercase letters, digits and dashes." };
     if (!code.trim() || code.length > 20000) return { error: "Script code is empty or too long." };
     const existing = await this.byName(name);
     if (existing?.origin === "repo") return { error: `A repo script called ${name} already exists.` };
-    const file = join(this.ownDir, `${name}.ts`);
+    const lang = langOf(code, input.lang);
+    // One file per script: a rewrite in another language drops the old file.
+    for (const l of LANGS) if (l !== lang) rmSync(join(this.ownDir, `${name}.${l}`), { force: true });
+    const file = join(this.ownDir, `${name}.${lang}`);
     writeFileSync(file, code, { mode: 0o600 });
     const description = typeof input.description === "string" ? input.description.slice(0, 200) : describeScript(code);
     const s = await this.store.put<Script>("scripts", {
       ...(existing || { id: randomUUID(), createdAt: new Date().toISOString() }),
-      name, origin: "assistant", status: "proposed", sha256: sha256(code), description, effects: detectEffects(code),
+      name, origin: "assistant", lang, status: "proposed", sha256: sha256(code), description, effects: detectEffects(code),
     });
     return { value: s };
   }
@@ -135,12 +170,18 @@ export class Scripts {
   /** `// needs: serper` -> SERPER_API_KEY, when the key is connected. Nothing else from the vault reaches a script. */
   private neededKeys(code: string): Record<string, string> {
     const out: Record<string, string> = {};
-    const m = /^\s*\/\/\s*needs:\s*([a-z, -]+)$/m.exec(code);
+    const m = /^\s*(?:\/\/|#)\s*needs:\s*([a-z, -]+)$/m.exec(code);
     for (const n of (m?.[1] || "").split(/[ ,]+/).filter((x) => SCRIPT_KEYS[x])) { const v = this.keys(n); if (v) out[SCRIPT_KEYS[n]] = v; }
+    // plaid: call it as  curl -H "X-Hearth-Agent: $HEARTH_PLAID_KEY" "$HEARTH_HUB/api/agent/plaid?a=transactions&a=--days&a=3"
+    if (out.HEARTH_PLAID_KEY && this.hubUrl) out.HEARTH_HUB = this.hubUrl;
     return out;
   }
 
-  async run(name: string, args: string[] = [], opts: { approvedRun?: boolean; timeoutMs?: number; last?: string } = {}): Promise<{ ok: boolean; output: string; needsApproval?: boolean }> {
+  /**
+   * opts.event: the pipeline event this run is for. The script gets it whole, as JSON on stdin and in HEARTH_EVENT
+   * ({id, source, variables, payload, receivedAt, test}), so it can work on the object in any language.
+   */
+  async run(name: string, args: string[] = [], opts: { approvedRun?: boolean; timeoutMs?: number; last?: string; event?: unknown; cap?: number } = {}): Promise<{ ok: boolean; output: string; needsApproval?: boolean }> {
     const timeoutMs = opts.timeoutMs ?? 60_000;
     const s = await this.byName(name);
     if (!s) return { ok: false, output: `No script called ${name}.` };
@@ -158,17 +199,18 @@ export class Scripts {
     const runToken = opts.approvedRun ? randomUUID() : null;
     if (runToken) this.approvedRuns.add(runToken);
     try {
-      const proc = Bun.spawn([process.execPath, file, ...args.map(String)], {
+      const event = opts.event === undefined ? null : JSON.stringify(opts.event);
+      const proc = Bun.spawn([...interpreter(s.lang || "ts"), file, ...args.map(String)], {
         cwd: this.workDir,
         // HEARTH_LAST: what this script printed last time, for check hooks (so it can say only what's new).
-        env: { PATH: process.env.PATH || "/usr/bin:/bin", HOME: this.workDir, LANG: process.env.LANG || "en_US.UTF-8", TZ: process.env.TZ || "", ...(opts.last !== undefined ? { HEARTH_LAST: opts.last } : {}), ...this.neededKeys(code.toString()), ...(runToken ? { HEARTH_RUN: runToken } : {}) },
-        stdin: "ignore", stdout: "pipe", stderr: "pipe",
+        env: { PATH: process.env.PATH || "/usr/bin:/bin", HOME: this.workDir, LANG: process.env.LANG || "en_US.UTF-8", TZ: process.env.TZ || "", ...(opts.last !== undefined ? { HEARTH_LAST: opts.last } : {}), ...this.neededKeys(code.toString()), ...(runToken ? { HEARTH_RUN: runToken } : {}), ...(event !== null ? { HEARTH_EVENT: event } : {}) },
+        stdin: event !== null ? new TextEncoder().encode(event) : "ignore", stdout: "pipe", stderr: "pipe",
       });
       const timer = setTimeout(() => proc.kill(), timeoutMs);
       const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
       const code2 = await proc.exited;
       clearTimeout(timer);
-      const output = (out + (code2 !== 0 && err ? `\n[stderr]\n${err}` : "")).trim().slice(0, OUTPUT_CAP) || "(no output)";
+      const output = (out + (code2 !== 0 && err ? `\n[stderr]\n${err}` : "")).trim().slice(0, opts.cap ?? OUTPUT_CAP) || "(no output)";
       await this.store.put("scripts", { ...s, lastRunAt: new Date().toISOString(), lastResult: output.slice(0, 500) });
       return { ok: code2 === 0, output };
     } finally { if (runToken) this.approvedRuns.delete(runToken); }

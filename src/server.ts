@@ -66,6 +66,7 @@ import { isValidTimeZone } from "./time.ts";
 import type { Shares } from "./shares.ts";
 import { sharePage } from "./share-page.ts";
 import { mcpAgent } from "./mcp.ts";
+import { portsAgent } from "./events/ports.ts";
 import type { Component, Person, StoredFile, Approval, Device, Fact, LocationFix, MiniApp, Message, Notebook, Place, Prefs, Skill, Teammate, Workflow } from "./types.ts";
 import pkg from "../package.json" with { type: "json" };
 
@@ -338,7 +339,9 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
     // Only straight from this machine: the key is written in the brain's tool, so a copy leaked off the box (or a request
     // through the public proxy, which adds X-Forwarded-For) is refused.
     if (path === "/api/agent/plaid" && method === "GET") {
-      if (!fromThisMachine(req, server) || !connect.isAgentKey(req.headers.get("x-hearth-agent"))) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not the agent's key."); }
+      // The agent's key, or the Plaid-only key an approved script gets with `needs: plaid`.
+      const k = req.headers.get("x-hearth-agent");
+      if (!fromThisMachine(req, server) || !(connect.isAgentKey(k) || connect.isPlaidKey(k))) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not the agent's key."); }
       const argv = url.searchParams.getAll("a").slice(0, 20).map((a) => a.slice(0, 200));
       try {
         const r = await connect.plaid.agent(argv);
@@ -380,6 +383,24 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (argv[0] === "add" || argv[0] === "call") await hub.log("mcp.agent", `hearth-mcp ${argv.slice(0, 3).join(" ").slice(0, 160)}`);
         return new Response(out + "\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
       } catch (e: any) { return new Response(`Error: ${String(e?.message || e).slice(0, 500)}\n`, { status: 502, headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } }); }
+    }
+    // The agent's hearth-trigger-port (events/ports.ts): claim a callback URL for a webhook, list, release. The claim
+    // records which teammate and job took it (X-Hearth-Job), so every live URL can be traced to the task that wanted it.
+    if (path === "/api/agent/ports" && method === "POST") {
+      const key = req.headers.get("x-hearth-agent");
+      const from = fromThisMachine(req, server) && connect.isAgentKey(key) ? "hub" : computers.agentKeyOwner(key);
+      if (!from) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not the agent's key."); }
+      let argv: string[] = [];
+      try { argv = (await req.formData()).getAll("a").slice(0, 30).map((a) => String(a).slice(0, 4000)); } catch { throw new HttpError(400, "Send the command's words as a fields."); }
+      const jobId = req.headers.get("x-hearth-job")?.slice(0, 100) || null;
+      const job = jobId ? await store.get<any>("jobs", jobId) : null;
+      const mate = job?.teammateId ? await store.get<any>("teammates", job.teammateId) : null;
+      const who = { by: `${mate?.name || "Hearth"}${from === "hub" ? "" : ` (on ${from})`}`, jobId: job ? job.id : null, threadId: job?.threadId ?? null, teammateId: job?.teammateId ?? null };
+      // The agent calls from this machine, so its Host is local: the public address is what an outside service needs.
+      const base = (process.env.HEARTH_PUBLIC_URL || `${url.protocol}//${req.headers.get("host") || url.host}`).replace(/\/$/, "");
+      const out = portsAgent(hub.pipeline, argv, who, base);
+      if (argv[0] === "claim" || argv[0] === "release") await hub.log(`port.${argv[0]}`, `${who.by}: hearth-trigger-port ${argv.filter((a) => !/^https?:/.test(a)).join(" ").slice(0, 200)}`);
+      return new Response(out + "\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
     }
     // An MCP server's login service sends the browser back here (no device key on a redirect; the state ties it to the
     // sign-in the hub started).
@@ -445,7 +466,9 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       let b: any = null;
       try { b = JSON.parse(raw); } catch { throw new HttpError(400, "Not JSON."); }
       const what = connect.plaid.handle(b);
-      await hub.log("plaid.webhook", `${b.webhook_type || "?"} ${b.webhook_code || "?"}: ${what}`);
+      // Ports claimed for plaid get the ping too (item X has updates); their triggers' scripts fetch the details.
+      const ports = hub.pipeline.forwardToPorts("plaid", b);
+      await hub.log("plaid.webhook", `${b.webhook_type || "?"} ${b.webhook_code || "?"}: ${what}${ports ? ` · to ${ports} port(s)` : ""}`);
       return json({ ok: true });
     }
     // Google sends the browser back here after you approve (no device key on a redirect; the state ties it to your Connect).
@@ -1010,7 +1033,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         const p = hub.pipeline;
         const sub = seg[2], key = seg[3] ? decodeURIComponent(seg[3]) : "";
         const ok = <T,>(r: { value?: T; error?: string; conflict?: unknown }) => { if (r.error) return json({ error: r.error, conflict: r.conflict ?? null }, 409); return json(r.value); };
-        const withUrl = (src: ReturnType<typeof p.sources>[number]) => ({ ...src, pushPath: src.kind === "push" && owner ? `/api/events/${src.name}/${p.secretOf(src.id)}` : null });
+        const withUrl = (src: ReturnType<typeof p.sources>[number]) => ({ ...src, pushPath: src.kind === "push" && owner && p.secretOf(src.id) ? `/api/events/${src.name}/${p.secretOf(src.id)}` : null });
         if (method === "GET" && !sub) return json({ sources: p.sources().map(withUrl), triggers: p.triggers(), timers: p.timers(), watchers: p.watchers(), held: p.heldCount() });
         if (method === "GET" && sub === "events" && key) { const e = p.getEvent(key); if (!e) break; return json(e); }
         if (method === "GET" && sub === "triggers" && key && seg[4] === "examples") return json(p.examples(key));
@@ -1022,6 +1045,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (sub === "sources") {
           if (method === "POST" && !key) { const r = p.createSource(await body(req), "you"); return r.value ? json({ ...withUrl(r.value.source) }) : ok(r); }
           if (method === "PATCH" && key) return ok(p.updateSource(key, await body(req)));
+          if (method === "POST" && seg[4] === "release") { const b = await body(req); const r = p.releasePort(key, "you", String(b.reason || "")); if (r.value) await hub.log("port.release", `you released ${r.value.name}`); return r.value ? json(withUrl(r.value)) : ok(r); }
           if (method === "POST" && seg[4] === "rotate") { const r = p.rotateSecret(key); return r.value ? json(withUrl(r.value.source)) : ok(r); }
           if (method === "POST" && seg[4] === "test") {
             const r = p.publish(key, (await body(req)).payload ?? {}, {}, true);

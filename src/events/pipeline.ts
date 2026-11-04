@@ -35,13 +35,29 @@ export type EventSource = {
   mapping: Record<string, string> | null;
   status: "active" | "paused"; createdBy: string;
   createdAt: string; updatedAt: string; lastEventAt: string | null; eventCount: number;
+  /** A trigger port: who took this URL, for what, and what calls it. Null for sources made before ports. */
+  claim: PortClaim | null;
+};
+/**
+ * A trigger port is a push source someone claimed on the fly: Hearth hands out a callback URL and writes down who took
+ * it, from which job, why, and what's meant to call it (the publisher). The publisher is just whatever POSTs to the
+ * URL, so it can be swapped for another service tomorrow without touching the triggers. Released: the URL stops
+ * working; the record and its events stay.
+ */
+export type PortClaim = {
+  reason: string; publisher: string; by: string;
+  jobId: string | null; threadId: string | null; teammateId: string | null; at: string;
+  releasedAt?: string; releasedBy?: string; releaseReason?: string;
 };
 export type TriggerAction =
   | { type: "notify"; text: string }
   | { type: "think"; prompt: string }
   | { type: "workflow"; name: string; inputs: Record<string, string> }
   /** Run an approved script; say what it printed, or have the teammate make sense of it. */
-  | { type: "script"; script: string; args: string[]; then: "notify" | "think" }
+  /** Run an approved script on the event (it gets the whole event as JSON on stdin and in HEARTH_EVENT). Then say
+   *  what it printed, have the teammate make sense of it, or publish: each JSON object line it prints becomes an
+   *  event on the source `into` (a raw "item X has updates" ping → the script fetches the details → clean events). */
+  | { type: "script"; script: string; args: string[]; then: "notify" | "think" | "publish"; into?: string }
   /** The hub's own housekeeping (memory review, ideas, library cleanup). Only the hub makes these. */
   | { type: "system"; job: string };
 /**
@@ -285,7 +301,7 @@ export class EventPipeline {
       CREATE INDEX IF NOT EXISTS held_until ON held (until);
     `);
     // Files made before judges and reminders existed get the new columns.
-    for (const [table, col, def] of [["triggers", "judge", "TEXT"], ["event_log", "value", "TEXT"], ["triggers", "title", "TEXT"], ["triggers", "timer_id", "TEXT REFERENCES timers(id) ON DELETE CASCADE"], ["triggers", "route", "TEXT"]]) {
+    for (const [table, col, def] of [["triggers", "judge", "TEXT"], ["event_log", "value", "TEXT"], ["triggers", "title", "TEXT"], ["triggers", "timer_id", "TEXT REFERENCES timers(id) ON DELETE CASCADE"], ["triggers", "route", "TEXT"], ["sources", "claim", "TEXT"]]) {
       const cols = this.db.query(`PRAGMA table_info(${table})`).all() as { name: string }[];
       if (!cols.some((c) => c.name === col)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
     }
@@ -317,7 +333,8 @@ export class EventPipeline {
   private source(r: any): EventSource {
     return { id: r.id, name: r.name, kind: r.kind, description: r.description, service: r.service, scope: r.scope,
       variables: JSON.parse(r.variables), mapping: r.mapping ? JSON.parse(r.mapping) : null, status: r.status, createdBy: r.created_by,
-      createdAt: r.created_at, updatedAt: r.updated_at, lastEventAt: r.last_event_at, eventCount: r.event_count };
+      createdAt: r.created_at, updatedAt: r.updated_at, lastEventAt: r.last_event_at, eventCount: r.event_count,
+      claim: r.claim ? JSON.parse(r.claim) : null };
   }
   private trigger(r: any): EventTrigger {
     return { id: r.id, name: r.name, sourceId: r.source_id, sourceName: r.source_name, title: r.title || r.name, timerId: r.timer_id ?? null,
@@ -485,10 +502,65 @@ export class EventPipeline {
     const s = this.findSource(idOrName);
     if (!s) return { error: `No source called "${idOrName}".` };
     if (s.kind !== "push") return { error: "Only push sources have a URL." };
+    if (s.claim?.releasedAt) return { error: `"${s.name}" was released; claim a new port (with what it's for) instead.` };
     const secret = randomBytes(24).toString("base64url");
     this.db.query("UPDATE sources SET secret = ?, updated_at = ? WHERE id = ?").run(secret, this.now(), s.id);
     this.onChange("sources");
     return { value: { source: s, secret } };
+  }
+
+  // ---------- trigger ports ----------
+
+  /**
+   * Claim a trigger port: a push source made on the fly, with a record of who took it and why. reason and publisher
+   * are required, so every live URL can be accounted for. Variables are optional (formulas can always read payload.*).
+   * Returns the secret once; the URL is /api/events/<name>/<secret>.
+   */
+  claimPort(input: any, who: { by: string; jobId?: string | null; threadId?: string | null; teammateId?: string | null }): Result<{ source: EventSource; secret: string; others: EventSource[] }> {
+    const reason = str(input?.reason, 300);
+    const publisher = str(input?.publisher ?? input?.source, 60).toLowerCase();
+    if (reason.length < 4) return { error: 'Say what the port is for: --reason "alert on card charges over $200".' };
+    if (!publisher) return { error: 'Say what will call it: --source plaid (the service, or "zapier", "shortcut", "my-script").' };
+    const pub = slug(publisher).replace(/[^a-z0-9_-]+/g, "-").replace(/^[-_]+|[-_]+$/g, "") || "port";
+    let name = slug(input?.name);
+    if (!name) { name = `${pub.slice(0, 36)}-${randomBytes(3).toString("hex")}`; }
+    const vars = input?.variables === undefined || (Array.isArray(input.variables) && !input.variables.length)
+      ? [{ name: "text", description: "the body, when it wasn't JSON (read the rest as payload.*)" }] : input.variables;
+    const others = this.sources().filter((s) => s.kind === "push" && s.claim && !s.claim.releasedAt && s.claim.publisher === publisher);
+    const r = this.createSource({ name, description: str(input?.description, 300) || reason, variables: vars, mapping: input?.mapping, service: publisher, scope: str(input?.scope, 120) || `port:${name}` }, who.by);
+    if (!r.value) return r;
+    const claim: PortClaim = { reason, publisher, by: str(who.by, 60) || "an agent", jobId: who.jobId || null, threadId: who.threadId || null, teammateId: who.teammateId || null, at: this.now() };
+    this.db.query("UPDATE sources SET claim = ? WHERE id = ?").run(j(claim), r.value.source.id);
+    return { value: { source: this.findSource(r.value.source.id)!, secret: r.value.secret, others } };
+  }
+
+  /**
+   * A webhook the hub itself receives (Plaid's goes to the hub, which keeps that URL set on every bank) is passed on
+   * to every live port claimed for that publisher, so a port can stand in for it like any outside webhook.
+   */
+  forwardToPorts(publisher: string, payload: unknown): number {
+    let n = 0;
+    for (const s of this.sources()) {
+      if (s.kind !== "push" || s.status !== "active" || !s.claim || s.claim.releasedAt || s.claim.publisher !== publisher) continue;
+      if (this.publish(s, payload).value) n++;
+    }
+    return n;
+  }
+
+  /** Every port (push source), newest first; released ones too, so it's clear what each URL was for. */
+  ports(): EventSource[] { return this.sources().filter((s) => s.kind === "push").reverse(); }
+
+  /** Give a port back: its URL stops working at once and it's paused. The record, its triggers and events stay. */
+  releasePort(idOrName: string, by: string, reason = ""): Result<EventSource> {
+    const s = this.findSource(idOrName);
+    if (!s) return { error: `No port called "${idOrName}".` };
+    if (s.kind !== "push") return { error: `"${s.name}" isn't a port.` };
+    if (s.claim?.releasedAt) return { error: `"${s.name}" was already released (${s.claim.releasedAt} by ${s.claim.releasedBy}).` };
+    const claim: PortClaim = { ...(s.claim || { reason: s.description || "(made before ports)", publisher: s.service || "?", by: s.createdBy, jobId: null, threadId: null, teammateId: null, at: s.createdAt }),
+      releasedAt: this.now(), releasedBy: str(by, 60) || "you", ...(str(reason, 300) ? { releaseReason: str(reason, 300) } : {}) };
+    this.db.query("UPDATE sources SET secret = NULL, status = 'paused', claim = ?, updated_at = ? WHERE id = ?").run(j(claim), this.now(), s.id);
+    this.onChange("sources");
+    return { value: this.findSource(s.id)! };
   }
 
   /** Delete a source and its triggers. Its past events stay in the log unless purgeEvents. */
@@ -518,6 +590,12 @@ export class EventPipeline {
         const script = str(a.script, 40).toLowerCase();
         if (!script) return "A script action needs the script's name.";
         const args = Array.isArray(a.args) ? a.args.slice(0, 8).map((x: unknown) => String(x).slice(0, 200)) : [];
+        if (a.then === "publish") {
+          const into = this.findSource(str(a.into, 48));
+          if (!into) return `A script that publishes needs "into": the source its events go to${a.into ? ` (there's no source called "${a.into}")` : ""}. Make one first (source.create or a port).`;
+          if (into.kind === "time" || into.kind === "place") return `The ${into.name} source is built in; publish into a source of your own.`;
+          return { type: "script", script, args, then: "publish", into: into.name };
+        }
         return { type: "script", script, args, then: a.then === "think" ? "think" : "notify" };
       }
       case "system": if (system && str(a.job, 40)) return { type: "system", job: str(a.job, 40) }; break;
@@ -531,7 +609,7 @@ export class EventPipeline {
         return { type: "workflow", name, inputs };
       }
     }
-    return 'The action must be {"type":"notify","text"}, {"type":"think","prompt"}, {"type":"workflow","name","inputs"} or {"type":"script","script","args","then"}.';
+    return 'The action must be {"type":"notify","text"}, {"type":"think","prompt"}, {"type":"workflow","name","inputs"} or {"type":"script","script","args","then":"notify|think|publish","into"?}.';
   }
 
   /** Variables a formula may read on this source; anything else is a typo. */
@@ -1008,7 +1086,7 @@ export class EventPipeline {
       }
       this.db.query("UPDATE triggers SET last_fired_at = ?, fire_count = fire_count + 1 WHERE id = ?").run(this.now(), t.id);
       if (r.skipped) this.log(e.id, "skipped", `${t.name}: ${r.skipped}`, t.id);
-      else this.log(e.id, r.quiet ? "quiet" : "ran", r.quiet ? `${t.name}: nothing worth saying` : `${t.name}: ${(r.text || "done").slice(0, 500)}`, t.id);
+      else this.log(e.id, r.quiet ? "quiet" : "ran", r.quiet ? `${t.name}: ${r.text ? r.text.slice(0, 500) : "nothing worth saying"}` : `${t.name}: ${(r.text || "done").slice(0, 500)}`, t.id);
       return "ran";
     } catch (err: any) {
       this.log(e.id, "failed", `${t.name}: ${String(err?.message || err).slice(0, 500)}`, t.id);
