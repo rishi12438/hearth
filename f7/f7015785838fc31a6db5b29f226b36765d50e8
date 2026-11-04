@@ -1,0 +1,58 @@
+test/brain-health.test.ts
+  s_85e0083345809d::t_39761d9324e8c5 93
+  s_85e0083345809d::t_104e85f52a2154 68,70-83
+  s_85e0083345809d::t_309d2a55c0bf1b 5
+  s_85e0083345809d::t_1fe4254e8b267b 40-41
+test/sessions.test.ts
+  s_85e0083345809d::t_dac1459bc05a9b 50
+  s_85e0083345809d::t_0ebd2c16b810ce 1-49,51-109,111-135,137-138
+test/fixtures/codex.ts
+  s_85e0083345809d::t_158517063166de 1-12
+test/machines.test.ts
+  s_85e0083345809d::t_0a59290da1643f 265,268-271
+src/brains/codex-app.ts
+  s_85e0083345809d::t_1fd63a6f2b686a 1-24,25-102,105,107-124,126-163
+  s_85e0083345809d::t_9047d118c870ae 125
+test/fixtures/fake-codex-app.ts
+  s_85e0083345809d::t_8e514483a84de8 1-12,14-40
+  s_85e0083345809d::t_966d1bf899ede6 13
+test/computers.test.ts
+  s_85e0083345809d::t_19243efbed7de2 104,108,111,113,115-116,118,120-121,123-134
+src/brains/sessions.ts
+  s_85e0083345809d::t_02647a8748829f 2-66,72-73
+  s_85e0083345809d::t_016f07e6543462 67-71
+  s_85e0083345809d::t_48f9e081fda0dd 1
+src/hub.ts
+  s_85e0083345809d::t_f1e220c31ab4ca 829-831
+src/brain.ts
+  s_85e0083345809d::t_1c3363da300937 920-921
+  s_85e0083345809d::t_0b798e92333f82 885-888,891,895,900-908,910
+  s_85e0083345809d::t_c90297a68e7b8f 853
+  s_85e0083345809d::t_162d5e66dde4a3 733-734,741-748
+  s_85e0083345809d::t_effc7b64eb5a21 569,572-574
+  s_85e0083345809d::t_bb1051f90e0dbb 707-711,713-720
+  s_85e0083345809d::t_b67473aced96ee 771-772
+  s_85e0083345809d::t_181e9c106fd9b1 432-436
+  s_85e0083345809d::t_0b13fdb084ef0e 785
+  s_85e0083345809d::t_f871fe11f400c5 794
+  s_85e0083345809d::t_116321cbe35461 799,802-806,808-811
+  s_85e0083345809d::t_421855cc5a425b 16-17
+  s_85e0083345809d::t_1161e0d86ec63f 909
+  s_85e0083345809d::t_65229e73a471d1 448-455
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "f7f7015785838fc31a6db5b29f226b36765d50e8",
+  "prompts": {},
+  "sessions": {
+    "s_85e0083345809d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "20cc45a3-606b-4046-84a0-c162dc81fc5c",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
