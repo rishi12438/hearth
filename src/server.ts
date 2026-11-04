@@ -375,7 +375,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       try { argv = (await req.formData()).getAll("a").slice(0, 10).map((a) => String(a).slice(0, 200_000)); } catch { throw new HttpError(400, "Send the command's words as a fields."); }
       server.timeout(req, 300);
       try {
-        const out = await mcpAgent(connect.mcp, argv, from === "hub" ? "an agent" : `an agent on ${from}`);
+        // A script run you approved (its one-time token): your Approve covers its MCP calls too.
+        const out = await mcpAgent(connect.mcp, argv, from === "hub" ? "an agent" : `an agent on ${from}`, { approved: hub.scripts.isApprovedRun(req.headers.get("x-hearth-run")) });
         if (argv[0] === "add" || argv[0] === "call") await hub.log("mcp.agent", `hearth-mcp ${argv.slice(0, 3).join(" ").slice(0, 160)}`);
         return new Response(out + "\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
       } catch (e: any) { return new Response(`Error: ${String(e?.message || e).slice(0, 500)}\n`, { status: 502, headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } }); }

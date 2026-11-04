@@ -309,6 +309,9 @@ test("tools that change things wait for Approve: the proxy and hearth-mcp call h
   expect(await mcpAgent(mcp, ["call", "open", "create", '{"title":"u"}'], "an agent")).toBe("waiting for Approve");
   expect(await mcpAgent(mcp, ["tools", "open"], "an agent")).toContain("create (waits for the user's Approve)");
   expect(asked).toHaveLength(2);
+  // From a script run the user approved: that Approve covers the call, so it runs with no second card.
+  expect(await mcpAgent(mcp, ["call", "open", "create", '{"title":"w"}'], "an agent", { approved: true })).toContain("called create");
+  expect(asked).toHaveLength(2);
 
   // Your choice in /mcp (or "Always allow"): create runs without asking; search asks. It's kept across a restart.
   mcp.setGate("open", "create", false);

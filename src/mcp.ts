@@ -671,7 +671,10 @@ for a in "$@"; do
   if [ "$a" = "-" ]; then a="$(cat)"; fi
   args+=(--data-urlencode "a=$a")
 done
-exec curl -sS -m 600 -H "X-Hearth-Agent: ${key}" "\${args[@]}" "${hubUrl}/api/agent/mcp"
+# Inside a script run the user approved, the hub's one-time token for that run: its calls need no second Approve.
+run=()
+if [ -n "\${HEARTH_RUN:-}" ]; then run=(-H "X-Hearth-Run: \${HEARTH_RUN}"); fi
+exec curl -sS -m 600 -H "X-Hearth-Agent: ${key}" \${run[@]+"\${run[@]}"} "\${args[@]}" "${hubUrl}/api/agent/mcp"
 `;
   return {
     name: "hearth-mcp", common: true, commands: ["hearth-mcp"], reads: [], scripts: { "hearth-mcp": script },
@@ -699,7 +702,8 @@ the attachment) and get it right first time.`,
 }
 
 /** What `hearth-mcp <argv>` does, for the hub's /api/agent/mcp. Text back for the agent to read. */
-export async function mcpAgent(mcp: Mcp, argv: string[], by: string): Promise<string> {
+/** o.approved: the call comes from a script run the user approved, so a tool that asks first runs without a second card. */
+export async function mcpAgent(mcp: Mcp, argv: string[], by: string, o: { approved?: boolean } = {}): Promise<string> {
   const [cmd = "list", a, b, c] = argv;
   const line = (s: McpView) => `${s.name}  ${s.state}${s.error ? ` (${s.error})` : ""}  ${s.url}${s.tools.length ? `\n  tools: ${s.tools.join(", ")}` : ""}`;
   switch (cmd) {
@@ -717,7 +721,7 @@ export async function mcpAgent(mcp: Mcp, argv: string[], by: string): Promise<st
       if (!mcp.get(a)) return `No MCP server called ${a}. Run: hearth-mcp list`;
       let args: unknown = {};
       if (c?.trim()) { try { args = JSON.parse(c); } catch { return "The arguments must be JSON, like '{\"query\": \"…\"}'."; } }
-      const held = await mcp.hold(a, b, args);
+      const held = o.approved ? null : await mcp.hold(a, b, args);
       if (held) return held;
       return JSON.stringify(await mcp.call(a, b, args), null, 1);
     }
