@@ -28,6 +28,7 @@ const S = {
   components: [] as any[],
   progress: new Map<string, string>(), // jobId -> what it's doing right now
   stepLog: new Map<string, { at: string; text: string }[]>(), // jobId -> every step so far, for the live list in the thread
+  running: new Map<string, string>(), // jobId -> the model on it right now and where ("Claude opus on the cloud")
   frames: new Map<string, { n: number; src: string }>(), // jobId -> the latest live-view picture of its browser or app
   skills: [] as any[],
   workflows: [] as any[],
@@ -271,6 +272,11 @@ function onEvent(e: { type: string; data?: any }) {
     case "skills": loadSkills(); return;
     case "frame": {
       if (document.querySelector(`[data-frame="${e.data.jobId}"]`)) loadFrame(e.data.jobId, e.data.n);
+      return;
+    }
+    case "running": {
+      S.running.set(e.data.jobId, e.data.text);
+      for (const el of document.querySelectorAll<HTMLElement>(`[data-running="${e.data.jobId}"]`)) { el.textContent = e.data.text; el.hidden = false; }
       return;
     }
     case "progress": {
@@ -1185,7 +1191,7 @@ function openJump() {
 async function loadChat(id: string) {
   if (id !== "new") markSeen(id);
   if (id === "new") { S.chat = { thread: { id: "new", title: "" }, messages: [], jobs: [], approvals: [] }; drawChat(); setTimeout(() => document.getElementById("composer")?.focus(), 80); return; }
-  try { S.chat = await call(`/api/threads/${id}`); for (const [k, v] of Object.entries(S.chat.steps || {})) S.progress.set(k, String(v)); for (const [k, v] of Object.entries(S.chat.stepLog || {})) S.stepLog.set(k, v as any); for (const [k, n] of Object.entries(S.chat.frames || {})) loadFrame(k, Number(n)); drawChat(); if (S.chat.jobs.some(unseenStuck)) seeStuck(`/api/threads/${id}/seen`); }
+  try { S.chat = await call(`/api/threads/${id}`); for (const [k, v] of Object.entries(S.chat.steps || {})) S.progress.set(k, String(v)); for (const [k, v] of Object.entries(S.chat.stepLog || {})) S.stepLog.set(k, v as any); for (const [k, v] of Object.entries(S.chat.running || {})) S.running.set(k, String(v)); for (const [k, n] of Object.entries(S.chat.frames || {})) loadFrame(k, Number(n)); drawChat(); if (S.chat.jobs.some(unseenStuck)) seeStuck(`/api/threads/${id}/seen`); }
   catch (e) { if (e instanceof ApiError && e.status === 404) { location.hash = ""; return; } handleError(e); }
 }
 
@@ -1476,6 +1482,8 @@ function answer(j: any) {
   if (j.status === "queued" || j.status === "working") return row(who, at, [h("div", { class: "typing live" }, h("i"), h("i"), h("i"),
     h("span", { "data-progress": j.id }, j.status === "working" ? S.progress.get(j.id) || (j.tier === "heavy" ? "Thinking it through" : "On it") : "Up next"),
     j.status === "working" && j.startedAt ? h("time", { "data-since": j.startedAt }, elapsed(j.startedAt)) : null),
+    // Which model is on it right now, and where (it changes when the job moves up a model or the lead writes it up).
+    j.status === "working" ? h("div", { class: "running-model", "data-running": j.id, hidden: !S.running.get(j.id) }, S.running.get(j.id) || "") : null,
     // What's on its browser page or app window right now (hidden until there's a picture). Tap to see it bigger.
     j.status === "working" ? liveView(j.id) : null,
     // Every step so far, newest on top, so you can see how it's going and not just the latest line.
@@ -1511,7 +1519,9 @@ function metaLine(j: any) {
     const n = (j.skillId ? S.skills.find((x) => x.id === j.skillId) : S.workflows.find((x) => x.id === j.workflowId))?.name;
     return `${n ? `used ${n} · ` : ""}${secs(j.durationMs)} · ${money(j.costUsd)}`;
   }
-  const model = j.voiced ? `${j.tier === "quick" ? "quick" : "workhorse"} + heavy` : j.tier === "quick" ? "quick" : j.tier === "heavy" ? "heavy" : null;
+  // The models that actually ran ("Claude sonnet → Claude opus"); older jobs only kept the tier.
+  const model = j.models?.length ? j.models.join(" → ")
+    : j.voiced ? `${j.tier === "quick" ? "quick" : "workhorse"} + heavy` : j.tier === "quick" ? "quick" : j.tier === "heavy" ? "heavy" : null;
   return [j.escalated ? "moved up" : null, model, j.ranOn ? `on ${j.ranOn === "cloud" ? "the cloud" : j.ranOn}` : null, secs(j.durationMs), money(j.costUsd)].filter(Boolean).join(" · ");
 }
 

@@ -126,6 +126,8 @@ caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
 systemctl reload caddy || systemctl restart caddy
 
 say "Starting the hub"
+# The unit lets the hub write ~/.enkidu (the browser's logins file); it must exist for that rule to apply.
+sudo -u hearth mkdir -p "$(getent passwd hearth | cut -d: -f6)/.enkidu"
 cp "$APP/deploy/hearth.service" /etc/systemd/system/hearth.service
 systemctl daemon-reload
 systemctl enable hearth >/dev/null
