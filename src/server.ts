@@ -24,7 +24,7 @@ import { homedir, hostname, networkInterfaces, cpus, freemem, totalmem } from "n
 import { lookup } from "node:dns/promises";
 
 /** How busy the hub's machine is, as whole percents: CPU over a short sample, memory in use (Linux: MemAvailable, since freemem counts cache as used). */
-async function hubLoad(): Promise<{ cpu: number; mem: number }> {
+async function hubLoad(): Promise<{ cpu: number; mem: number; cores: number; memUsed: number; memTotal: number }> {
   const tick = () => cpus().reduce((a, c) => { const t = Object.values(c.times).reduce((x, y) => x + y, 0); return { idle: a.idle + c.times.idle, total: a.total + t }; }, { idle: 0, total: 0 });
   const a = tick();
   await new Promise((r) => setTimeout(r, 250));
@@ -33,8 +33,9 @@ async function hubLoad(): Promise<{ cpu: number; mem: number }> {
   const cpu = span > 0 ? Math.round(100 * (1 - (b.idle - a.idle) / span)) : 0;
   let free = freemem();
   try { const m = /MemAvailable:\s+(\d+)/.exec(readFileSync("/proc/meminfo", "utf8")); if (m) free = Number(m[1]) * 1024; } catch {}
-  const mem = Math.round(100 * (1 - free / totalmem()));
-  return { cpu: Math.min(100, Math.max(0, cpu)), mem: Math.min(100, Math.max(0, mem)) };
+  const total = totalmem(), used = Math.max(0, total - free);
+  const mem = Math.round(100 * used / total);
+  return { cpu: Math.min(100, Math.max(0, cpu)), mem: Math.min(100, Math.max(0, mem)), cores: cpus().length, memUsed: used, memTotal: total };
 }
 
 /** The IP the hub answers on: its public name resolved, else this machine's first outside-facing address. */

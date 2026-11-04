@@ -1188,5 +1188,15 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 .trigdata { margin-top: 4px; font-size: 13px; color: var(--muted); }
 .trigdata summary { cursor: pointer; }
 
-.hubload .warm { color: var(--warn); font-weight: var(--fw-semibold); }
-.hubload .hot { color: var(--danger); font-weight: var(--fw-semibold); }
+.hubload { display: grid; gap: 10px; margin: 4px 0 6px; }
+.loadrow { display: grid; grid-template-columns: 64px 1fr auto; align-items: center; gap: 12px; }
+.loadname { font-size: 14px; font-weight: var(--fw-medium); color: var(--ink); }
+.loadbar { height: 8px; border-radius: 999px; background: color-mix(in srgb, var(--ink) 10%, transparent); overflow: hidden; }
+.loadbar i { display: block; height: 100%; border-radius: inherit; background: var(--ok); transition: width .3s; }
+.loadval { display: flex; align-items: baseline; gap: 8px; min-width: 150px; justify-content: flex-end; font-variant-numeric: tabular-nums; }
+.loadval b { font-size: 14px; font-weight: var(--fw-semibold); color: var(--ink); }
+.loadval small { font-size: 13px; color: var(--ink-2); }
+.loadrow.warm .loadbar i { background: var(--warn); }
+.loadrow.warm .loadval b { color: var(--warn); }
+.loadrow.hot .loadbar i { background: var(--danger); }
+.loadrow.hot .loadval b, .loadrow.hot .loadname { color: var(--danger); }
