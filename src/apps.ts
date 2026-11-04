@@ -45,6 +45,11 @@ window.hearth = { data: ${j(data)}, state: ${j(state)}, view: ${j(view)},
   ask(text) { parent.postMessage({ hearth: "ask", text: String(text).slice(0, 2000) }, "*"); },
   open() { parent.postMessage({ hearth: "open" }, "*"); },
   ready(cb) { document.readyState === "loading" ? document.addEventListener("DOMContentLoaded", cb) : cb(); } };
+// The sandbox has no allow-popups, so plain web links and window.open would do nothing. Send them out through hearth.link.
+(() => { const web = (u) => typeof u === "string" && /^https?:\\/\\//i.test(u.trim());
+  document.addEventListener("click", (e) => { const a = e.target && e.target.closest && e.target.closest("a[href]");
+    if (a && web(a.getAttribute("href"))) { e.preventDefault(); window.hearth.link(a.getAttribute("href").trim()); } }, true);
+  window.open = (u) => { if (web(String(u ?? ""))) window.hearth.link(String(u).trim()); return null; }; })();
 ${view === "inline" ? `window.hearth.ready(() => { const tell = () => parent.postMessage({ hearth: "height", h: Math.ceil(document.body.getBoundingClientRect().height) }, "*");
   document.documentElement.style.height = "auto"; document.body.style.height = "auto"; document.body.style.minHeight = "0";
   new ResizeObserver(tell).observe(document.body); tell(); });` : ""}

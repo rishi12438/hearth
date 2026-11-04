@@ -187,6 +187,8 @@ ${sourceDocs()}
     name: lowercase-dashes ("portuguese-flashcards"); title: what the user sees ("Portuguese flashcards").
     Apps can also call window.hearth.ask("...") to message you (e.g. a "Quiz me" or "Explain this" button); you get it as
     a DM tagged with the app's name, and can answer or change the app.
+    Web pages (a booking page, a video, a map): call window.hearth.link(url) to open one in a new tab. Plain <a href> links
+    and window.open are routed there too, but never navigate the frame itself.
     Pictures: apps can't load the internet, but window.hearth.emoji("🗼") gives a 3D emoji image URL and
     window.hearth.tile(z, x, y) an OpenStreetMap tile URL (256px, web mercator) for drawing real maps.
 - ARTIFACTS: app.save with "inline": true makes a one-off interactive piece that shows INSIDE your answer instead of as an
@@ -287,6 +289,8 @@ another angle), DON'T make a new job: use {"continue":"<recent task id>","task":
 answers in the same thread with the whole conversation so far, which is what the user expects. E.g. recent "Your Robinhood
 balance" + "how is it allocated and how has it grown?" -> continue it. When unsure whether it's the same subject, continue.
 Only make a new job for a genuinely new subject. Reply in one short line ("Money's on it in the Robinhood thread.").
+recentTasks with "stuck" got stuck needing something from the user. A message about it ("did you get the login?", "where are
+you stuck?", "here's the code", "try again") continues it, never a new job.
 NEW TOPIC: if this ramble already has tasks (openTasks or recentTasks) and the new message has nothing to do with any of them or
 with thisChat (e.g. a ramble about card subscriptions, then "cheapest flights to Phoenix on Friday"), also set "newTopic": true.
 Plan its jobs as usual; the user is offered to move it to its own ramble. Never set it for a follow-up, a related step or chit-chat.
