@@ -12,6 +12,7 @@ import { BrainHealth, signInProblem } from "./brains/health.ts";
 import { jailArgs, jailWorks } from "./brains/jail.ts";
 import { loginsFile } from "./brains/browser-logins.ts";
 import { masterKeyPath } from "./vault.ts";
+import { liveOwner, watchLive, type Frame } from "./brains/live-view.ts";
 
 /** Each trigger module's own description of its config, for the hook docs below. */
 /** Each trigger module's own description, read when a prompt is built (the hub adds WhatsApp and Slack at start). */
@@ -424,7 +425,9 @@ export class BrainsFull extends Error { constructor(msg: string, readonly until:
 /** Collects model spend across calls. `unknown` flips when a harness can't report cost. */
 /** Spend for one job; signal stops its model process when the user changes the job mid-run. */
 /** ranOn: set by Brain to the linked computer that ran the call, or "cloud" when this hub ran it while computers are linked. */
-export type Meter = { costUsd: number; unknown: boolean; signal?: AbortSignal; onProgress?: (what: string) => void; onAction?: (raw: string) => void; ranOn?: string };
+export type Meter = { costUsd: number; unknown: boolean; signal?: AbortSignal; onProgress?: (what: string) => void; onAction?: (raw: string) => void;
+  /** The latest picture of the browser page or app window a working job is using, for the live view. */
+  onFrame?: (f: Frame) => void; ranOn?: string };
 
 /** Somewhere else that can run a brain call: a computer linked to this hub (see computers.ts). */
 export type RemoteRunner = { name: string; run(b: BrainInput, p: BrainProfile, meter?: Meter): Promise<string> };
@@ -752,10 +755,13 @@ export class Brain {
         throw new Error(`Unknown harness: ${harness}`);
     }
     if (jail) cmd = [...jail, ...cmd];
-    const proc = Bun.spawn(cmd, {
-      cwd: this.workDir, env: agentEnv(harness, harness === "claude" || harness === "codex" ? this.skills().paths : []),
-      stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe",
-    });
+    const env = agentEnv(harness, harness === "claude" || harness === "codex" ? this.skills().paths : []);
+    // Live view: this run's browser and computer-use sessions get their own owner, so we can show what's on them.
+    const owner = web && meter?.onFrame && (harness === "claude" || harness === "codex") ? liveOwner() : null;
+    if (owner) env.ENKIDU_OWNER = owner;
+    const proc = Bun.spawn(cmd, { cwd: this.workDir, env, stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe" });
+    const stopLive = owner && meter?.onFrame ? watchLive(owner, meter.onFrame) : () => {};
+    proc.exited.then(stopLive, stopLive);
     let timedOut = false;
     // Planning and chat should answer fast. Real jobs (browsing, logging in, research) run until done, unless
     // HEARTH_JOB_TIMEOUT_SEC sets a cap; a new message from the user still stops them.

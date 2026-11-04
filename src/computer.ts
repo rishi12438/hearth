@@ -200,7 +200,8 @@ export function connect(opts: Opts) {
       const profile: BrainProfile = { harness: String(m.profile?.harness || ""), model: String(m.profile?.model || "") };
       if (!availableHarnesses(config).includes(profile.harness)) throw new Error(`${profile.harness} isn't installed on ${link.name}.`);
       const meter = { costUsd: 0, unknown: false, signal: ctl.signal, onProgress: (text: string) => send({ t: "step", id: m.id, text }),
-        onAction: (text: string) => send({ t: "act", id: m.id, text }) };
+        onAction: (text: string) => send({ t: "act", id: m.id, text }),
+        onFrame: (f: { data: Uint8Array; mime: string }) => send({ t: "frame", id: m.id, mime: f.mime, data: Buffer.from(f.data).toString("base64") }) };
       const reply = await brain.think(m.input, profile, meter);
       send({ t: "done", id: m.id, reply, costUsd: meter.unknown ? undefined : meter.costUsd });
     } catch (e: any) {
