@@ -4298,11 +4298,24 @@ async function openConnectedDevices() {
       return el;
     };
 
+    // CPU and memory as system-monitor bars: amber with a "!" over 70%, red over 90%.
+    const loadBars = (l: any) => {
+      const gb = (b: number) => b / 1024 ** 3 < 10 ? (b / 1024 ** 3).toFixed(1) : String(Math.round(b / 1024 ** 3));
+      const bar = (name: string, pct: number, detail: string) => {
+        const lvl = pct > 90 ? "hot" : pct > 70 ? "warm" : "";
+        return h("div", { class: `loadrow ${lvl}`, title: lvl === "hot" ? "Very high" : lvl === "warm" ? "High" : "" },
+          h("span", { class: "loadname" }, name),
+          h("span", { class: "loadbar" }, h("i", { style: `width:${Math.max(2, pct)}%` })),
+          h("span", { class: "loadval" }, h("b", {}, `${pct}%${lvl ? " !" : ""}`), detail && h("small", {}, detail)));
+      };
+      return h("div", { class: "hubload" },
+        bar("CPU", l.cpu, l.cores ? `${l.cores} core${l.cores === 1 ? "" : "s"}` : ""),
+        bar("Memory", l.mem, l.memTotal ? `${gb(l.memUsed)} / ${gb(l.memTotal)} GB` : ""));
+    };
     const hubRow = row("server", hubInfo?.name || S.state?.hub?.name || "Hearth", "Hub",
       hubInfo?.address || (activeHub()?.url || location.origin).replace(/^https?:\/\//, ""), S.conn, () => [
         facts(hubInfo?.target === "lightsail" ? "A server" : "This computer", ip(hubInfo?.ip), hubInfo?.upSince && `up ${relTime(hubInfo.upSince).replace(/ ago$/, "")}`),
-        hubInfo?.load && h("p", { class: "muted small hubload" }, ...([["CPU", hubInfo.load.cpu], ["Memory", hubInfo.load.mem]] as [string, number][]).flatMap(([k, v], i) => [
-          i ? " · " : "", h("span", { class: v > 90 ? "hot" : v > 70 ? "warm" : "", title: v > 90 ? "Very high" : v > 70 ? "High" : "" }, `${k} ${v}%${v > 70 ? " !" : ""}`)])),
+        hubInfo?.load && loadBars(hubInfo.load),
         h("small", { class: "cclabel" }, "Tools"),
         toolsBlock(hubInfo?.tools, "Couldn't check the hub's tools."),
       ]);
