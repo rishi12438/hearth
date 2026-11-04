@@ -538,3 +538,26 @@ test("activity seen mark lives on the hub and only moves forward", async () => {
   expect(second > first).toBe(true);
   expect(await hub.inboxSeen()).toBe(second);
 });
+
+test("a working job keeps every step so the thread can show the whole stream", async () => {
+  await hub.ensureTeammates();
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  (hub.brain as any).think = async (b: any, _p: any, meter: any) => {
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "check my orders", teammate: "Hearth", effort: "light" }] });
+    if (b.mode === "narrate") return "";
+    for (const s of ["Opening AliExpress", "Opening AliExpress", "Reading your orders", "Checking tracking for 3 parcels"]) meter?.onProgress?.(s);
+    await gate;
+    return "Done.";
+  };
+  await hub.ramble("check my aliexpress orders");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "working"));
+  const job = (await store.all<Job>("jobs")).find((j) => j.status === "working")!;
+  let d: any;
+  await until(async () => { d = await hub.threadDetail(job.threadId); return (d.stepLog?.[job.id] || []).length === 3; });
+  expect(d.stepLog[job.id].map((s: any) => s.text)).toEqual(["Opening AliExpress", "Reading your orders", "Checking tracking for 3 parcels"]); // repeats collapse
+  expect(d.steps[job.id]).toBe("Checking tracking for 3 parcels"); // the single latest line still works for older apps
+  release();
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done"));
+  expect((await hub.threadDetail(job.threadId) as any).stepLog[job.id]).toBeUndefined(); // cleared once it's finished
+});

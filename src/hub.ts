@@ -395,7 +395,8 @@ export class Hub {
     if (!thread) return null;
     const messages = (await this.store.all<Message>("messages")).filter((m) => m.threadId === id);
     const jobs = (await this.store.all<Job>("jobs")).filter((j) => j.threadId === id);
-    return { thread, messages, jobs, steps: Object.fromEntries(jobs.filter((j) => this.steps.has(j.id)).map((j) => [j.id, this.steps.get(j.id)])) };
+    return { thread, messages, jobs, steps: Object.fromEntries(jobs.filter((j) => this.steps.has(j.id)).map((j) => [j.id, this.steps.get(j.id)!.at(-1)!.text])),
+      stepLog: Object.fromEntries(jobs.filter((j) => this.steps.has(j.id)).map((j) => [j.id, this.steps.get(j.id)])) };
   }
 
   async removeThread(id: string) {
@@ -557,7 +558,8 @@ export class Hub {
 
   /** A teammate said a fast-pathed message isn't about its thread: drop the follow-up and plan the message as usual. */
   /** What each running job is doing right now, so a reload or another device sees it too. */
-  private steps = new Map<string, string>();
+  /** Each working job's steps so far (newest last, capped), so the app can show the whole stream, not just the latest. */
+  private steps = new Map<string, { at: string; text: string }[]>();
   private handedBack = new Map<string, string>(); // message id -> the task thread that handed it back
   private async handBack(job: Job, meter: Meter) {
     this.stops.delete(job.id); this.steps.delete(job.id);
@@ -804,7 +806,15 @@ export class Hub {
     const stop = new AbortController();
     this.stops.set(job.id, stop);
     // Live progress for the app ("Searching: pottery gifts"): an event only, not stored, so it can't race the job's own saves.
-    const show = (what: string) => { this.steps.set(job.id, what); this.emit("progress", { jobId: job.id, threadId: job.threadId, text: what }); };
+    const show = (what: string) => {
+      const log = this.steps.get(job.id) ?? [];
+      if (log.at(-1)?.text === what) return;
+      const at = this.clock().toISOString();
+      log.push({ at, text: what });
+      if (log.length > 60) log.splice(0, log.length - 60);
+      this.steps.set(job.id, log);
+      this.emit("progress", { jobId: job.id, threadId: job.threadId, text: what, at });
+    };
     // When the label is stuck on "Working it out", the quick model reads the last few actions and says what's going on.
     const narrator = this.config.narrate === false ? null : new Narrator({ task: job.label || job.task, show,
       ask: async (prompt) => this.brain.narrate(prompt, (await this.brains()).quick) });
