@@ -39,7 +39,7 @@ const S = {
   planning: null as null | string, // chat id the orchestrator is reading
   updateReady: false,
   sheetOpen: false,
-  panel: null as null | "memory" | "skills" | "people" | "shares" | "triggers" | `share:${string}`,
+  panel: null as null | "memory" | "skills" | "people" | "shares" | "triggers" | "mcp" | `share:${string}`,
   /** The event pipeline: sources, triggers (formula rules), timers, and recent events. */
   pipe: { sources: [], triggers: [], timers: [], watchers: [], held: 0 } as { sources: any[]; triggers: any[]; timers: any[]; watchers: any[]; held: number },
   pipeEvents: [] as any[],
@@ -93,6 +93,9 @@ async function boot() {
   // Back from Google's sign-in: #connections=google:<email added>, or #connections=error:<why>.
   const backFromGoogle = location.hash.startsWith("#connections=") ? decodeURIComponent(location.hash.slice(13)) : null;
   if (backFromGoogle) history.replaceState(null, "", "#");
+  // Back from an MCP server's sign-in: #mcp=ok:<name>, or #mcp=error:<why>.
+  const backFromMcp = location.hash.startsWith("#mcp=") ? decodeURIComponent(location.hash.slice(5)) : null;
+  if (backFromMcp) history.replaceState(null, "", "#");
   await Promise.all([refreshState(), loadTeammates(), loadSkills(), loadFiles(), loadApps(), loadIdeas(), loadProjects(), loadPipeline()]);
   (window as any).webkit?.messageHandlers?.hearth?.postMessage({ type: "ready" });
   if (inMacApp) { void ensureMacLinked(); void checkMacNotif(); window.addEventListener("focus", () => void checkMacNotif()); }
@@ -119,6 +122,11 @@ async function boot() {
     const ok = !backFromGoogle.startsWith("error:"), who = backFromGoogle.replace(/^google:?/, "");
     if (ok) openGoogleSetup(); else openConnections("available");
     toast(ok ? `Google connected${who ? ` · ${who}` : ""}` : `Google: ${backFromGoogle.replace(/^error:/, "")}`, ok ? undefined : "err");
+  }
+  else if (backFromMcp) {
+    const ok = backFromMcp.startsWith("ok:");
+    openMcp();
+    toast(ok ? `Signed in to ${backFromMcp.slice(3)}` : `MCP: ${backFromMcp.replace(/^error:/, "")}`, ok ? undefined : "err");
   }
   else if (welcome) openWelcome();
   else if (wantsAccess || S.state?.pendingAccess) openDevices();
@@ -327,6 +335,7 @@ function onEvent(e: { type: string; data?: any }) {
       return;
     case "scripts": refreshState(); return;
     case "connections": refreshState().then(drawSide); return; // a Google account signed in or out: the Connectors warning follows
+    case "mcp": if (S.panel === "mcp") void drawMcp(); return; // a server signed in, renewed, added (by an agent too)
     case "inbox": if (r.view !== "activity") loadInbox(); return; // seen on another device: clear the badge here too
     case "reset": refresh(); return;
   }
@@ -1751,10 +1760,28 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
     : "Ramble. Hearth will hand it out…";
   const draftKey = `hearth.draft.${targetId}${threadJob ? `.${threadJob}` : ""}`;
   wrap.dataset.job = threadJob || "";
+  // Type / for commands (/mcp…): a menu above the box, arrows to pick, Enter or Tab to run, Esc to close.
+  const menu = h("div", { class: "slash", role: "listbox", hidden: true });
+  let pick = 0;
+  const slashMatches = () => (/^\/\S*$/.test(box.value) ? SLASH.filter((c) => c.cmd.startsWith(box.value.toLowerCase())) : []);
+  const runSlash = (c: SlashCommand) => { box.value = ""; sessionStorage.removeItem(draftKey); box.dispatchEvent(new Event("input")); c.run(); };
+  const drawMenu = () => {
+    const m = slashMatches();
+    menu.hidden = !m.length;
+    pick = Math.min(pick, Math.max(0, m.length - 1));
+    clear(menu, m.map((c, i) => h("button", { class: `slashitem${i === pick ? " on" : ""}`, role: "option", "aria-selected": String(i === pick),
+      on: { mousedown: (e: Event) => e.preventDefault(), click: () => runSlash(c) } }, h("b", null, c.cmd), h("span", { class: "sub" }, c.what))));
+  };
   const box = h("textarea", { rows: 1, value: sessionStorage.getItem(draftKey) || "", placeholder, enterKeyHint: "send",
     on: {
-      input: () => { autosize(box); sessionStorage.setItem(draftKey, box.value); swap(); },
-      keydown: (e: KeyboardEvent) => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); submit(); } },
+      input: () => { autosize(box); sessionStorage.setItem(draftKey, box.value); swap(); drawMenu(); },
+      keydown: (e: KeyboardEvent) => {
+        const m = menu.hidden ? [] : slashMatches();
+        if (m.length && (e.key === "ArrowDown" || e.key === "ArrowUp")) { e.preventDefault(); pick = (pick + (e.key === "ArrowDown" ? 1 : m.length - 1)) % m.length; drawMenu(); return; }
+        if (m.length && (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey))) { e.preventDefault(); runSlash(m[pick]); return; }
+        if (m.length && e.key === "Escape") { e.preventDefault(); menu.hidden = true; return; }
+        if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); submit(); }
+      },
       // A screenshot on the clipboard (⌘⇧⌃4, or Copy on any picture) goes in as an attachment; text still pastes as text.
       paste: (e: ClipboardEvent) => {
         const files = Array.from(e.clipboardData?.files || []);
@@ -1764,7 +1791,12 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
       },
     } }) as HTMLTextAreaElement;
   if (targetId === "composerwrap") box.id = "composer";
-  const submit = () => { const v = box.value; box.value = ""; sessionStorage.removeItem(draftKey); box.dispatchEvent(new Event("input")); send(v, inThread); };
+  const submit = () => {
+    // A command typed out in full and sent (the send button on a phone) runs instead of going to the team.
+    const cmd = SLASH.find((c) => c.cmd === box.value.trim().toLowerCase());
+    if (cmd && !pending.length) return runSlash(cmd);
+    const v = box.value; box.value = ""; sessionStorage.removeItem(draftKey); box.dispatchEvent(new Event("input")); send(v, inThread);
+  };
   const action = h("button", { class: "act", "aria-label": "Hold to talk" });
   const canAttach = r.view !== "dm";
   const pending: any[] = [];
@@ -1807,9 +1839,82 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
     dragover: dropping(true), dragleave: dropping(false),
     drop: (e: DragEvent) => { if (!canAttach || !e.dataTransfer?.files.length) return; e.preventDefault(); bar.classList.remove("drop"); upload(Array.from(e.dataTransfer.files)); },
   } }, clip, box, action, picker);
-  clear(wrap, h("div", { class: "rec", id: targetId === "composerwrap" ? "rec" : undefined, hidden: true }), chips, bar);
+  clear(wrap, h("div", { class: "rec", id: targetId === "composerwrap" ? "rec" : undefined, hidden: true }), chips, menu, bar);
   swap();
   autosize(box);
+  drawMenu();
+}
+
+type SlashCommand = { cmd: string; what: string; run: () => void };
+/** The message box's / commands. Add one here and it shows in the menu. */
+const SLASH: SlashCommand[] = [
+  { cmd: "/mcp", what: "MCP servers: see them, sign in, reconnect, add one", run: () => openMcp() },
+];
+
+// ---------------- MCP servers (/mcp) ----------------
+
+/** Every MCP server the hub has, for every brain: its state and tools, Sign in / Reconnect, on/off, and adding one. */
+function openMcp() {
+  S.panel = "mcp";
+  openSheet("MCP servers", h("div", { id: "mcp" }, h("p", { class: "muted" }, "Loading…")), { onClose: () => { S.panel = null; } });
+  void drawMcp();
+}
+
+const MCP_STATE: Record<string, [string, string]> = {
+  connected: ["ok", "Connected"], signin: ["warn", "Needs sign-in"], failed: ["danger", "Failed"], off: ["muted", "Off"], checking: ["muted", "Checking…"],
+};
+
+async function drawMcp() {
+  const root = document.getElementById("mcp");
+  if (!root) return;
+  let servers: any[] = [];
+  try { servers = (await call("/api/mcp")).servers; } catch (e) { return handleError(e); }
+  const busy = (b: HTMLButtonElement, fn: () => Promise<void>) => async () => { b.disabled = true; try { await fn(); } catch (e) { handleError(e); } finally { b.disabled = false; void drawMcp(); } };
+  const signIn = async (name: string) => {
+    const r = await call(`/api/mcp/${encodeURIComponent(name)}/signin`, { body: {} });
+    if (r.url) location.href = r.url; // back at #mcp=ok:<name>
+    else toast(`${name} is connected`);
+  };
+  const btn = (label: string, cls: string, fn: () => Promise<void>) => { const b = h("button", { class: `sbtn ${cls}` }, label) as HTMLButtonElement; b.addEventListener("click", busy(b, fn)); return b; };
+  const row = (s: any) => {
+    const [tone, label] = MCP_STATE[s.state] || ["muted", s.state];
+    const host = (() => { try { return new URL(s.url).host; } catch { return s.url; } })();
+    const detail = [label, s.state === "connected" ? `${s.tools.length} tool${s.tools.length === 1 ? "" : "s"}` : s.error, host, s.auth === "key" ? "API key" : null].filter(Boolean).join(" · ");
+    const actions = [
+      s.state === "signin" ? btn("Sign in", "primary", () => signIn(s.name))
+        : s.state === "failed" || (s.state === "connected" && s.auth === "oauth") ? btn("Reconnect", "", () => (s.auth === "oauth" ? signIn(s.name) : call(`/api/mcp/${encodeURIComponent(s.name)}/check`, { body: {} }).then(() => {}))) : null,
+      btn(s.enabled ? "Turn off" : "Turn on", "", () => call(`/api/mcp/${encodeURIComponent(s.name)}`, { method: "PATCH", body: { enabled: !s.enabled } }).then(() => {})),
+      h("button", { class: "sbtn danger-ghost", "aria-label": `Remove ${s.name}`, on: { click: () => confirmSheet(`Remove ${s.name}?`, "Its sign-in is deleted from the hub and no brain gets it any more.", "Remove", async () => { await call(`/api/mcp/${encodeURIComponent(s.name)}`, { method: "DELETE" }); toast(`${s.name} removed`); openMcp(); }) } }, "Remove"),
+    ];
+    return h("div", { class: "item mcprow" },
+      h("span", { class: `mcpdot ${tone}`, "aria-hidden": "true" }),
+      h("span", { class: "grow left" }, h("b", { class: "light" }, s.name), h("small", { class: s.state === "failed" ? "err" : "sub" }, detail),
+        s.state === "connected" && s.tools.length ? h("small", { class: "sub mcptools" }, s.tools.slice(0, 12).join(", ") + (s.tools.length > 12 ? ` +${s.tools.length - 12}` : "")) : null),
+      h("span", { class: "row gap" }, ...actions.filter(Boolean)));
+  };
+  // Adding one: its address, and an optional API key (most servers sign in with OAuth instead).
+  const url = h("input", { class: "field", type: "url", placeholder: "https://mcp.linear.app/mcp", autocapitalize: "off", spellcheck: false }) as HTMLInputElement;
+  const name = h("input", { class: "field", placeholder: "Name (optional)", autocapitalize: "off", spellcheck: false, maxLength: 31 }) as HTMLInputElement;
+  const header = h("input", { class: "field", placeholder: "Header (Authorization)", autocapitalize: "off", spellcheck: false }) as HTMLInputElement;
+  const key = h("input", { class: "field", type: "password", placeholder: "API key", autocomplete: "off" }) as HTMLInputElement;
+  const keyBox = h("div", { class: "stack gap", hidden: true }, header, key);
+  const keyToggle = h("button", { class: "btn ghost small", on: { click: () => { keyBox.hidden = !keyBox.hidden; } } }, "Uses an API key instead of signing in");
+  const add = h("button", { class: "btn primary" }, "Add server") as HTMLButtonElement;
+  add.addEventListener("click", async () => {
+    if (!url.value.trim()) return url.focus();
+    add.disabled = true;
+    try {
+      const r = await call("/api/mcp", { body: { url: url.value.trim(), name: name.value.trim() || undefined, header: header.value.trim() || undefined, key: key.value || undefined } });
+      toast(r.server.state === "signin" ? `Added ${r.server.name}. Sign in to finish.` : `Added ${r.server.name}`);
+      if (r.server.state === "signin") return void (await signIn(r.server.name));
+      void drawMcp();
+    } catch (e) { handleError(e); } finally { add.disabled = false; }
+  });
+  clear(root,
+    h("p", { class: "muted small" }, "Sign in once here and every brain (Claude and Codex) gets these tools on its jobs. Logins stay on the hub and renew on their own; a job that's running keeps working through a reconnect."),
+    servers.length ? h("div", { class: "list" }, servers.map(row)) : h("p", { class: "muted" }, "No MCP servers yet. Add one below, or ask the team to (\"add the Linear MCP\")."),
+    h("h4", null, "Add a server"),
+    h("div", { class: "stack gap" }, url, name, keyToggle, keyBox, add));
 }
 
 /**

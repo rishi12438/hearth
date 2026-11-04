@@ -1178,7 +1178,6 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 .judged b { display: inline; font-weight: var(--fw-semibold); color: var(--ink); }
 .judgepick .btn { width: auto; flex: none; }
 .judgepick .btn.cur { background: var(--surface-2); color: var(--ink); }
-=======
 .composer.drop { outline: 1.5px dashed var(--muted); outline-offset: -1.5px; }
 .item .sub.warn { color: var(--danger); }
 .sugg.fired .grow { font-weight: var(--fw-semibold); color: var(--ink); }
@@ -1200,3 +1199,21 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 .loadrow.warm .loadval b { color: var(--warn); }
 .loadrow.hot .loadbar i { background: var(--danger); }
 .loadrow.hot .loadval b, .loadrow.hot .loadname { color: var(--danger); }
+/* The message box's / commands, above the box. */
+.slash { display: flex; flex-direction: column; margin: 0 8px 8px; padding: 4px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); }
+.slash[hidden] { display: none; }
+.slashitem { display: flex; align-items: baseline; gap: 10px; padding: 9px 12px; border-radius: 12px; text-align: left; }
+.slashitem b { font-weight: var(--fw-semibold); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; }
+.slashitem .sub { color: var(--muted); font-size: 14px; }
+.slashitem.on, .slashitem:hover { background: var(--surface); }
+
+/* /mcp: one row per server, a dot for its state. */
+.mcprow { align-items: flex-start; flex-wrap: wrap; }
+.mcprow .row.gap { gap: 6px; flex-wrap: wrap; }
+.mcprow .sbtn { height: 32px; padding: 0 11px; font-size: 14px; }
+.mcprow .sbtn.danger-ghost { color: var(--danger); }
+.mcpdot { flex: none; width: 9px; height: 9px; margin-top: 7px; border-radius: 50%; background: var(--muted); }
+.mcpdot.ok { background: var(--ok); }
+.mcpdot.warn { background: var(--warn); }
+.mcpdot.danger { background: var(--danger); }
+.mcptools { display: block; margin-top: 2px; overflow-wrap: anywhere; }

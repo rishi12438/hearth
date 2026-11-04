@@ -15,6 +15,7 @@ import { instagram, linkedin } from "./cookies.ts";
 import { google } from "./google.ts";
 import { googleSkills } from "./google-agent.ts";
 import { leadSkill } from "../brains/lead.ts";
+import { Mcp, mcpSkill } from "../mcp.ts";
 import { claude, codex, takeLogin } from "./brains.ts";
 import { whatsappSource } from "./whatsapp-source.ts";
 import { registerSource } from "../sources/index.ts";
@@ -69,7 +70,20 @@ export class Connect {
     registerSkills(() => (hub.google.connected ? googleSkills(`http://${local}:${hub.config.port}`, this.agentKey) : []));
     // The lead on hand mid-job (brains/lead.ts): always there, with the same key.
     registerSkills(() => [leadSkill(`http://${local}:${hub.config.port}`, this.agentKey)]);
+    // MCP servers, signed in once here, for every brain (mcp.ts): each working run gets them through this hub's proxy,
+    // and hearth-mcp lists, adds and calls them (a server added mid-job too).
+    const base = `http://${local}:${hub.config.port}`;
+    this.mcp = new Mcp({
+      dataDir: hub.config.dataDir, vault,
+      redirectUri: () => `${(process.env.HEARTH_PUBLIC_URL || base).replace(/\/$/, "")}/api/mcp/callback`,
+      onChange: () => hub.emit("mcp"),
+    });
+    registerSkills(() => [mcpSkill(base, this.agentKey)]);
+    hub.brain.mcpServers = () => this.mcp.forRun(base, this.agentKey);
   }
+
+  /** MCP servers and their logins (mcp.ts). */
+  readonly mcp: Mcp;
 
   /** The key hearth-plaid and the Google commands send from this machine. */
   private readonly agentKey = randomBytes(24).toString("hex");
@@ -79,7 +93,11 @@ export class Connect {
   }
 
   /** Let each connector pick up where it left off (WhatsApp keeps its link across restarts). */
-  async start() { for (const c of CONNECTORS) await c.start?.(this.ctx).catch(() => {}); }
+  async start() {
+    this.mcp.start();
+    for (const c of CONNECTORS) await c.start?.(this.ctx).catch(() => {});
+  }
+  stop() { this.mcp.stop(); }
 
   async tiles(): Promise<Tile[]> {
     return Promise.all(CONNECTORS.map(async (c) => ({

@@ -26,6 +26,8 @@ export type CodexAppOptions = {
   web: boolean;
   /** No thread kept on disk (a quick call that nothing follows up). */
   ephemeral: boolean;
+  /** The hub's MCP servers, as config keys (`mcp_servers.<name>` → {url, http_headers}), for working runs. */
+  mcp?: Record<string, unknown>;
   /** The model the thread really runs on (Codex picks its own default when we don't name one). */
   onModel?: (model: string) => void;
   /** What one model call just used, and on which model (Codex is on a plan: tokens, not dollars). */
@@ -123,7 +125,7 @@ export class CodexAppTurn {
       // `--tools ""`. With one, the lead went back through the workspace's files and looked like it was redoing the job.
       sandbox: o.web ? "danger-full-access" : "read-only",
       approvalPolicy: "never",
-      config: o.web ? { web_search: "live" } : NO_SHELL,
+      config: o.web ? { web_search: "live", ...(o.mcp || {}) } : NO_SHELL,
     };
     const fresh = () => this.request("thread/start", { ...tuning, ...(o.ephemeral ? { ephemeral: true } : {}) }, (m) => this.opened(m, false));
     if (!o.resume) return fresh();
