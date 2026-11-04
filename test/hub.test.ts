@@ -449,6 +449,37 @@ test("a held MCP call is an Approve card in its job's thread; Approve makes that
   (hub as any).connect = null;
 });
 
+test("an Approve nobody answers expires after a day: it never runs, leaves Needs you, and its waiting job ends", async () => {
+  const made: any[] = [];
+  (hub as any).connect = { mcp: { get: () => ({}), call: async (...a: any[]) => { made.push(a); return { content: [] }; }, setGate: () => {} } };
+  await hub.ensureTeammates();
+  (hub.brain as any).think = async (b: any) => {
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "Send Sam a GIF", teammate: "Hearth", effort: "light" }] });
+    const [job] = await store.all<Job>("jobs");
+    await hub.requestMcp({ server: "parley", tool: "send_message", args: { to: "1" }, jobId: job.id });
+    return "It's waiting for your Approve.";
+  };
+  await hub.ramble("send sam a gif");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "waiting"));
+  // An ask that came with no job at all (a call that didn't say which run it was) waits too, in Activity only.
+  await hub.requestMcp({ server: "parley", tool: "send_message", args: { to: "2" } });
+  expect((await hub.inbox()).filter((i: any) => i.kind === "approval")).toHaveLength(2);
+
+  now = new Date(now.getTime() + 23 * 3_600_000);
+  expect(await hub.expireApprovals()).toBe(0);
+  now = new Date(now.getTime() + 2 * 3_600_000);
+  expect((await hub.inbox()).filter((i: any) => i.kind === "approval")).toHaveLength(0);
+  const aps = await store.all<any>("approvals");
+  expect(aps.map((a) => a.status)).toEqual(["expired", "expired"]);
+  const [ap] = aps;
+  expect((await hub.decideApproval(ap.id, true)).error).toContain("expired");
+  expect(made).toEqual([]);
+  const [job] = await store.all<Job>("jobs");
+  expect(job.status).toBe("done");
+  expect(job.result).toContain("Expired without an answer, so it didn't run: parley: send message");
+  (hub as any).connect = null;
+});
+
 test("an approved read goes back to the agent, which carries on instead of saying it's still waiting", async () => {
   (hub as any).connect = { mcp: { get: () => ({}), call: async () => ({ content: [{ type: "text", text: '{"messages":[{"text":"At least I can see you"}]}' }] }), setGate: () => {} } };
   await hub.ensureTeammates();

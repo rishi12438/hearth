@@ -306,7 +306,8 @@ test("tools that change things wait for Approve: the proxy and hearth-mcp call h
   // Batches can't slip one through.
   const batch = await (await rpc([{ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "create", arguments: {} } }])).json();
   expect(batch[0].error.message).toContain("one at a time");
-  expect(await mcpAgent(mcp, ["call", "open", "create", '{"title":"u"}'], "an agent")).toBe("waiting for Approve");
+  expect(await mcpAgent(mcp, ["call", "open", "create", '{"title":"u"}'], "an agent", { jobId: "j2" })).toBe("waiting for Approve");
+  expect(asked[1]).toMatchObject({ tool: "create", jobId: "j2" }); // hearth-mcp call says which job (X-Hearth-Job), so the card lands in its thread
   expect(await mcpAgent(mcp, ["tools", "open"], "an agent")).toContain("create (waits for the user's Approve)");
   expect(asked).toHaveLength(2);
   // From a script run the user approved: that Approve covers the call, so it runs with no second card.

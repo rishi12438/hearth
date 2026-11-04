@@ -1073,6 +1073,8 @@ export class Brain {
     // Live view: this run's browser and computer-use sessions get their own owner, so we can show what's on them.
     const owner = web && meter?.onFrame && (harness === "claude" || harness === "codex") ? liveOwner() : null;
     if (owner) env.ENKIDU_OWNER = owner;
+    // Which job this run is: hearth-mcp sends it, so a call that waits for your Approve lands in this job's thread.
+    if (meter?.jobId) env.HEARTH_JOB = meter.jobId;
     const proc = Bun.spawn(cmd, { cwd, env, stdin: harness === "codex" ? "pipe" : new Blob([prompt]), stdout: "pipe", stderr: "pipe" });
     const stopLive = owner && meter?.onFrame ? watchLive(owner, meter.onFrame) : () => {};
     proc.exited.then(stopLive, stopLive);
