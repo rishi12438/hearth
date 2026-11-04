@@ -3,6 +3,8 @@
 import { appendFileSync } from "node:fs";
 const prompt = await new Response(Bun.stdin.stream()).text();
 if (prompt.startsWith("You are the orchestrator")) { console.log(process.env.FAKE_PLAN); process.exit(0); }
+// The quick status check on a running task: FAKE_STATUS is the update, unset means "that's more than a status question".
+if (prompt.startsWith("You are a teammate in the middle of a task")) { console.log(process.env.FAKE_STATUS || "[[add]]"); process.exit(0); }
 const task = prompt.match(/JOB:\n([^\n]*)/)?.[1] ?? "?";
 // A message that came straight to a thread but is about something else: handed back.
 if (prompt.includes("came straight to you") && task.includes("NEW")) { console.log("[[hand-back]]"); process.exit(0); }

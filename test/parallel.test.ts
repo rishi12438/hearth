@@ -262,6 +262,39 @@ test("saying more about a task that's still running restarts it with the whole b
   expect(readFileSync(log, "utf8").split("\n").filter((l) => l.startsWith("end")).length).toBe(1); // the first run was stopped
 });
 
+test("asking for a status update in a working task's thread answers there and keeps the run going", async () => {
+  await setup();
+  process.env.FAKE_MS = "1500";
+  plan([{ label: "AliExpress orders", task: "check my aliexpress orders", teammate: "Hearth" }]);
+  const r = await hub.ramble("check my aliexpress orders");
+  await until(async () => (await jobs()).some((j) => j.status === "working"));
+  const first = (await jobs())[0];
+  await Bun.sleep(300);
+  process.env.FAKE_STATUS = "Going through your orders, 1 min in.";
+  try { await hub.replyToJob(first.id, "how far r u?"); } finally { delete process.env.FAKE_STATUS; }
+  await until(() => allDone(1));
+  const all = await jobs();
+  expect(all.length).toBe(1);
+  expect(all[0].task).not.toContain("The user added");
+  expect(readFileSync(log, "utf8").split("\n").filter((l) => l.startsWith("start")).length).toBe(1); // never restarted
+  const msgs = await store.all<any>("messages");
+  expect(msgs.some((m) => m.threadId === r.value!.thread.id && m.role === "assistant" && m.replyTo === first.id && m.text === "Going through your orders, 1 min in.")).toBe(true);
+});
+
+test("anything more than a status question in a working task's thread still goes into the task", async () => {
+  await setup();
+  process.env.FAKE_MS = "1500";
+  plan([{ label: "AliExpress orders", task: "check my aliexpress orders", teammate: "Hearth" }]);
+  await hub.ramble("check my aliexpress orders");
+  await until(async () => (await jobs()).some((j) => j.status === "working"));
+  const first = (await jobs())[0];
+  await Bun.sleep(300);
+  process.env.FAKE_MS = "50";
+  await hub.replyToJob(first.id, "also check the customs fees");
+  await until(() => allDone(1));
+  expect((await jobs())[0].task).toContain("The user added: also check the customs fees");
+});
+
 test("the model deck: quick jobs run on the quick model and move up step by step when it can't do them", async () => {
   await setup();
   process.env.FAKE_MS = "20";

@@ -667,9 +667,13 @@ export class Hub {
       const brains = await this.brains();
       const ctx = await this.context(batch.map((x) => x.text).join(" "), "orchestrate", null);
       const team0 = await this.store.all<Teammate>("teammates");
+      const mins = (at: string) => Math.max(0, Math.round((this.clock().getTime() - new Date(at).getTime()) / 60_000));
       const openTasks = (await this.store.all<Job>("jobs"))
         .filter((j) => j.threadId === thread.id && !j.parentId && !j.followsUp && (j.status === "queued" || j.status === "working"))
-        .map((j) => ({ id: j.id, label: j.label || shortLabel(undefined, j.task), teammate: team0.find((t) => t.id === j.teammateId)?.name, status: j.status, task: j.task.slice(0, 400) }));
+        .map((j) => ({ id: j.id, label: j.label || shortLabel(undefined, j.task), teammate: team0.find((t) => t.id === j.teammateId)?.name, status: j.status, task: j.task.slice(0, 400),
+          // Where it's at, so a status question can be answered from here instead of restarting the task.
+          ...(j.startedAt ? { minutesRunning: mins(j.startedAt) } : {}),
+          ...(this.steps.has(j.id) ? { steps: this.steps.get(j.id)!.slice(-8).map((s) => ({ text: s.text, minutesAgo: mins(s.at) })) } : {}) }));
       // Finished or stuck tasks in this ramble, so a follow-up about one goes on in its thread instead of starting a new one.
       const all0 = await this.store.all<Job>("jobs");
       const recentTasks = all0.filter((j) => j.threadId === thread.id && !j.parentId && !j.followsUp && !declined.has(j.id) && ["done", "failed", "blocked"].includes(j.status)).slice(-8)
@@ -792,6 +796,23 @@ export class Hub {
    * The user said more about a task that hasn't finished ("…and I want to strengthen my lower body too"). A queued task
    * just gets the addition; a running one is stopped and starts over with the whole brief, so there's one answer.
    */
+  /**
+   * A message for a task that's working right now: if it only asks for a status update, the teammate answers in the thread
+   * from its live steps and keeps going (folding it in would stop the run and start over). False: it's more than that.
+   */
+  private async answerIfStatus(j: Job, threadId: string, text: string, replyTo?: string) {
+    if (j.status !== "working" || !this.stops.has(j.id)) return false;
+    const at = (iso: string) => Math.max(0, Math.round((this.clock().getTime() - new Date(iso).getTime()) / 60_000));
+    const task = { label: j.label || shortLabel(undefined, j.task), brief: j.task.slice(0, 600), ...(j.startedAt ? { minutesRunning: at(j.startedAt) } : {}),
+      steps: (this.steps.get(j.id) || []).slice(-8).map((s) => ({ text: s.text, minutesAgo: at(s.at) })) };
+    let answer = "";
+    try { answer = await this.brain.status(task, text, (await this.brains()).quick); }
+    catch (err: any) { await this.log("job.status.failed", err.message); return false; }
+    if (!answer) return false;
+    await this.addMessage({ role: "assistant", teammateId: j.teammateId, threadId, text: answer.slice(0, 1000), ...(replyTo ? { replyTo } : {}) });
+    return true;
+  }
+
   private async addToJob(id: string, threadId: string, addition: string, label?: unknown) {
     const j = await this.store.get<Job>("jobs", id);
     if (!j || j.threadId !== threadId || j.parentId || !["queued", "working"].includes(j.status)) return false;
@@ -982,6 +1003,7 @@ export class Hub {
   /** The next turn in a task's thread: folded into the teammate's current run if it's still going, else a new follow-up job. */
   private async followUp(root: Job, m: Message, task: string, mayHandBack = false): Promise<{ job: Job; folded: boolean }> {
     const busy = (await this.store.all<Job>("jobs")).filter((j) => (j.id === root.id || j.followsUp === root.id) && (j.status === "queued" || j.status === "working")).at(-1);
+    if (busy && (await this.answerIfStatus(busy, root.threadId, task, root.id))) return { job: busy, folded: true };
     if (busy && (await this.addToJob(busy.id, root.threadId, task))) return { job: busy, folded: true };
     // Replying in a stuck thread picks it up: the stuck turn is settled (it stops saying "Stuck") and the new turn goes on from it.
     for (const j of (await this.store.all<Job>("jobs")).filter((x) => (x.id === root.id || x.followsUp === root.id) && x.status === "blocked"))
@@ -1946,6 +1968,7 @@ export class Hub {
     await this.setPrefs({ lastUserAt: m.createdAt });
     // Still working on your last message? This one goes into that task, so you get one answer.
     const busy = (await this.store.all<Job>("jobs")).filter((j) => j.threadId === tid && !j.parentId && (j.status === "queued" || j.status === "working")).at(-1);
+    if (busy && (await this.answerIfStatus(busy, tid, clean))) return { value: { message: m, job: busy } };
     if (busy && (await this.addToJob(busy.id, tid, clean))) return { value: { message: m, job: busy } };
     const job = await this.store.put<Job>("jobs", { ...this.doc({}), threadId: tid, messageId: m.id, task: clean, teammateId: mate.id, status: "queued", effort: "light" } as Job);
     await this.store.put<Message>("messages", { ...m, jobIds: [job.id] });

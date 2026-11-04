@@ -25,7 +25,7 @@ const sourceDocs = () => SOURCES.map((s) => `        ${s.id}: ${s.doc}`).join("\
 // with; elsewhere it gets the web tools only, in an empty folder.
 
 export type BrainInput = {
-  mode: "chat" | "hook" | "review" | "job" | "orchestrate" | "ideas" | "legwork" | "voice" | "clean" | "describe" | "narrate";
+  mode: "chat" | "hook" | "review" | "job" | "orchestrate" | "ideas" | "legwork" | "voice" | "clean" | "describe" | "narrate" | "status";
   context: Record<string, unknown>;
   input: string;
   toolResults?: string;
@@ -37,7 +37,7 @@ export const ESCALATE = "[[escalate]]";
 export const HAND_BACK = "[[hand-back]]";
 export const REDO = "[[redo]]";
 /** Calls that only read and write text: no web tools. */
-const NO_TOOLS = new Set<BrainInput["mode"]>(["orchestrate", "voice", "review", "ideas", "clean", "describe", "narrate"]);
+const NO_TOOLS = new Set<BrainInput["mode"]>(["orchestrate", "voice", "review", "ideas", "clean", "describe", "narrate", "status"]);
 /** Claude's tools for calls that can run code (in the jail). */
 const CODE_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent"];
 /** A helper on the small model that Claude fans wide searches out to. */
@@ -50,6 +50,13 @@ const SCOUT = {
   },
 };
 /** Dictation clean-up (like Wispr Flow): tidy what was said without changing what it means. */
+/** A message arrived for a task that's still running: a status question gets answered here, anything else goes into the task. */
+const STATUS = `
+You are a teammate in the middle of a task for the user, and they just sent you a message. If they're asking for a status update,
+answer it: what you're doing now, how long it's been going and what's done so far, from the task and its steps below. Plain words,
+up to 2 short lines, first person. If the message asks for anything more than a status update, reply exactly [[add]] instead.
+`.trim();
+
 const CLEAN = `Clean up this dictated text so it reads as if typed. Remove filler (um, uh, like, you know), false starts and repeated
 words. When the speaker corrects themselves ("at 5, no, 6"), keep only the correction. Fix punctuation, capitals and obvious
 mis-hearings. Keep their words, tone, language and every detail: names, numbers, dates, requests. Don't answer it, summarize it,
@@ -284,6 +291,9 @@ corrects or narrows one of them (same topic, or it belongs in the same answer), 
 restarts with the whole brief and gives ONE answer. E.g. open "Left knee pain before volleyball" + "I also want to strengthen my
 lower body so it doesn't happen again" -> addTo it, label "Knee, volleyball and lower body". Only make a new job for something
 separate. Keep the reply to one short line when you only added to a task ("Added that to Fitness's knee plan.").
+STATUS UPDATES: when the user asks for a status update on an open task, give it yourself in the reply. Read that task's steps
+and minutesRunning in CONTEXT.openTasks and say what it's doing now, how long it's been going and what it's done so
+far. Don't addTo or make a job for it: addTo stops the teammate and starts it over, losing its work.
 CONTINUE, DON'T SPLIT: CONTEXT.recentTasks are tasks in this ramble that already finished (with the start of their answer). If the
 new message follows on from one (a question about its answer, "more on that", a change to it, the next step, the same subject from
 another angle), DON'T make a new job: use {"continue":"<recent task id>","task":"the follow-up, as an instruction"}. That teammate
@@ -329,6 +339,7 @@ function atScale(code: "claude" | "codex" | null | undefined): string[] {
 /** code: which brain can run code in this call (in the jail), else null. */
 export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = null) {
   if (b.mode === "clean") return [CLEAN, "", "DICTATED:", b.input].join("\n");
+  if (b.mode === "status") return [STATUS, "", "TASK (JSON):", JSON.stringify(b.context, null, 1), "", "THEIR MESSAGE:", b.input].join("\n");
   if (b.mode === "narrate") return b.input; // built by narratePrompt (brains/narrate.ts)
   if (b.mode === "describe") return ["Write ONE sentence describing this reusable UI component for a library: what it shows and when to use it, so a",
     "teammate searching later can tell if it fits (e.g. \"Tabs per day with a zoomed map and a short list of things to do; use for any multi-day trip.\").",
@@ -667,6 +678,12 @@ export class Brain {
    * A live status line from the quick model (see brains/narrate.ts). Skips the queue on purpose: it's a few hundred tokens,
    * and waiting behind the very job it describes would make it useless.
    */
+  /** A status update for a running task, or "" when the message is more than a status question (so it goes into the task). */
+  async status(context: Record<string, unknown>, message: string, profile: BrainProfile): Promise<string> {
+    const out = (await this.dispatch({ mode: "status", context, input: message }, profile)).trim();
+    return !out || out.includes("[[add]]") ? "" : out;
+  }
+
   async narrate(prompt: string, profile: BrainProfile): Promise<string> {
     return this.dispatch({ mode: "narrate", context: {}, input: prompt }, profile);
   }
@@ -892,6 +909,7 @@ function echoBrain(b: BrainInput): string {
   if (b.mode === "describe") return `Shows ${(b.input.match(/^Title: (.*)$/m)?.[1] || "a view").trim()}.`;
   if (b.mode === "clean") return b.input.replace(/\b(um+|uh+|you know),?\s*/gi, "").replace(/\s+/g, " ").trim();
   if (b.mode === "narrate") return "";
+  if (b.mode === "status") return "[[add]]";
   if (b.mode === "voice") return (b.input.split("NOTES FROM THE LEGWORK:")[1] || b.input).replace(/<\/?untrusted>/g, "").trim();
   if (b.mode === "ideas") {
     const facts = ((b.context as any).memory || []) as { fact: string }[];
