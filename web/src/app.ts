@@ -200,7 +200,9 @@ function onEvent(e: { type: string; data?: any }) {
   const r = route();
   const open = r.view === "chat" ? r.id : null;
   switch (e.type) {
-    case "hello": if (e.data?.build && e.data.build !== __BUILD__) markUpdate(); return;
+    case "hello": if (e.data?.build && e.data.build !== __BUILD__) markUpdate(); loadSeen(); return;
+    // You read a chat (here or on another device): its dot goes out everywhere.
+    case "seen": if (e.data?.threadId && (seen[e.data.threadId] || "") < e.data.at) seen[e.data.threadId] = e.data.at; drawSide(); if (r.view === "home") drawHome(); else if (r.view === "dms") drawDms(); return;
     // Don't redraw a project page while you're typing in its title or description (its own saves trigger this).
     case "projects": loadProjects(); if (r.view === "project" && !document.activeElement?.closest("#project .ietext")) drawProject(r.id!); return;
     case "notify": {
@@ -227,6 +229,7 @@ function onEvent(e: { type: string; data?: any }) {
         location.hash = `#c/${e.data.threadId}`;
         return;
       }
+      if (e.data.role === "assistant") readIfOpen(e.data.threadId);
       if (open && S.chat && e.data.threadId === open) {
         if (e.data.deleted) S.chat.messages = S.chat.messages.filter((x: any) => x.id !== e.data.id); else upsert(S.chat.messages, e.data);
         drawChat();
@@ -248,6 +251,7 @@ function onEvent(e: { type: string; data?: any }) {
       // A teammate finished something you're not looking at: an in-app banner you can tap, like a phone notification.
       const was = jobStatus.get(e.data.id);
       jobStatus.set(e.data.id, e.data.status);
+      if (e.data.status === "done" || e.data.status === "failed") readIfOpen(e.data.threadId);
       // Tell them unless they're already looking at that very thread (or that DM).
       const here = (r.view === "chat" && r.job && (r.job === e.data.id || r.job === e.data.followsUp)) || (r.view === "dm" && e.data.threadId === `tm-${r.id}`);
       if (was && was !== e.data.status && (e.data.status === "done" || e.data.status === "failed") && !e.data.parentId && !here) {
@@ -259,8 +263,8 @@ function onEvent(e: { type: string; data?: any }) {
       if (open && S.chat && e.data.threadId === open) { upsert(S.chat.jobs, e.data); drawChat(false); }
       if (r.view === "dm" && S.dm && e.data.teammateId === r.id) { upsert(S.dm.jobs, e.data); drawDm(false); }
       if (unseenStuck(e.data) && !e.data.parentId && !document.hidden) {
-        if (open && e.data.threadId === open) seeStuck(`/api/threads/${open}/seen`);
-        else if (r.view === "dm" && e.data.teammateId === r.id) seeStuck(`/api/teammates/${r.id}/seen`);
+        if (open && e.data.threadId === open) markSeen(open);
+        else if (r.view === "dm" && e.data.teammateId === r.id) markSeen(`tm-${r.id}`);
         else if (r.view === "activity") seeStuck("/api/inbox/seen");
       }
       soon();
@@ -545,8 +549,10 @@ function drawSide() {
   const ramble = (t: any, nested = false) => h("div", { class: "srow", draggable: "true",
       on: { dragstart: (e: DragEvent) => { e.dataTransfer?.setData("text/hearth-thread", t.id); e.dataTransfer!.effectAllowed = "move"; },
         contextmenu: (e: MouseEvent) => { e.preventDefault(); projectMenuAt({ x: e.clientX, y: e.clientY }, t.projectId || null, (id) => fileRamble(t.id, id)); } } },
-    h("button", { class: `snav ${nested ? "nested" : ""} ${r.view === "chat" && r.id === t.id ? "on" : ""}`, on: { click: () => { location.hash = `#c/${t.id}`; } } },
-      h("span", { class: "shash" }, "#"), h("span", { class: "grow" }, channelName(t))),
+    h("button", { class: `snav ${nested ? "nested" : ""} ${r.view === "chat" && r.id === t.id ? "on" : ""} ${unread(t.id, t.lastReplyAt) ? "unread" : ""}`, on: { click: () => { location.hash = `#c/${t.id}`; } } },
+      h("span", { class: "shash" }, "#"), h("span", { class: "grow" }, channelName(t)),
+      // Blinks while someone's working in it; a steady dot once something new came back that you haven't opened.
+      t.working ? h("i", { class: "rundot", title: `${t.working} running` }) : unread(t.id, t.lastReplyAt) ? h("i", { class: "udot", title: "New since you last looked" }) : null),
     h("button", { class: "sact", "aria-label": t.projectId ? "Move to another project" : "Add to a project", title: t.projectId ? "Move to another project" : "Add to a project", on: { click: (e: Event) => projectMenuAt(e.currentTarget as HTMLElement, t.projectId || null, (id) => fileRamble(t.id, id)) } }, icon("folder", 14)));
   const dropTo = (projectId: string | null) => ({
     dragover: (e: DragEvent) => { if (e.dataTransfer?.types.includes("text/hearth-thread")) { e.preventDefault(); (e.currentTarget as HTMLElement).classList.add("drop"); } },
@@ -578,7 +584,7 @@ function drawSide() {
     h("nav", { class: "sgroup", on: dropTo(null) }, loose.length ? loose.map((t: any) => ramble(t)) : h("p", { class: "snone" }, "Tap + to start one.")),
     team.length ? [h("div", { class: "slabel" }, "Teammates"), h("nav", { class: "sgroup" }, team.map((t: any) =>
       h("button", { class: `snav mate ${r.view === "dm" && r.id === t.id ? "on" : ""}`, on: { click: () => { location.hash = `#t/${t.id}`; } } },
-        face(t, 22, t.state || "idle"), h("span", { class: "grow" }, t.name), t.needsYou ? h("em", null, String(t.needsYou)) : null)))] : null,
+        face(t, 22, t.state || "idle"), h("span", { class: "grow" }, t.name), t.needsYou ? h("em", null, String(t.needsYou)) : unreadDm(t) ? h("i", { class: "udot", title: "New since you last looked" }) : null)))] : null,
     h("div", { class: "slabel" }, "Your hub"),
     h("nav", { class: "sgroup" },
       nav("brain", "Memory", false, openMemory),
@@ -809,7 +815,7 @@ function needsYouCount() {
 let actSeen = "";
 let actVisit: string | null = null; // what was already seen when you opened Activity this time, so new rows stay marked while you look
 const isFresh = (it: any, since = actSeen) => (it.kind === "done" || it.kind === "failed" || it.kind === "proactive") &&
-  String(it.at) > since && String(it.at) > (seen[it.threadId?.startsWith("tm-") ? it.threadId.slice(3) : it.threadId] || "");
+  String(it.at) > since && String(it.at) > seenAt(it.threadId);
 const unseenCount = () => (S.inbox || []).filter((it: any) => isFresh(it)).length;
 const activityBadge = () => needsYouCount() + (route().view === "activity" ? 0 : unseenCount());
 function markActivitySeen() {
@@ -1074,8 +1080,7 @@ async function fillHome(el: HTMLElement) {
   let b: any = { needsYou: [] }, today: any = { proactive: [] };
   try { [b, today] = await Promise.all([call("/api/board"), call("/api/today")]); } catch {}
   // A reminder or trigger that went off in the last 12 hours and you haven't looked at: its own row, on top.
-  const seenKey = (threadId: string) => (threadId?.startsWith("tm-") ? threadId.slice(3) : threadId);
-  const fired = (today.proactive || []).filter((m: any) => m.threadId && Date.now() - new Date(m.createdAt).getTime() < 12 * 3.6e6 && m.createdAt > (seen[seenKey(m.threadId)] || "")).slice(0, 2);
+  const fired = (today.proactive || []).filter((m: any) => m.threadId && Date.now() - new Date(m.createdAt).getTime() < 12 * 3.6e6 && m.createdAt > seenAt(m.threadId)).slice(0, 2);
   const row = (ic: Node, text: string, meta: string | null, fn: () => void, hover = "") =>
     h("button", { class: "sugg", title: hover, on: { click: fn } }, h("span", { class: "suggic" }, ic), h("span", { class: "grow" }, text), meta ? h("small", null, meta) : null);
   const fill = (text: string) => { const box = document.getElementById("composer") as HTMLTextAreaElement | null; if (box) { box.value = text; box.dispatchEvent(new Event("input")); box.focus(); } };
@@ -1212,7 +1217,7 @@ function openJump() {
 async function loadChat(id: string) {
   if (id !== "new") markSeen(id);
   if (id === "new") { S.chat = { thread: { id: "new", title: "" }, messages: [], jobs: [], approvals: [] }; drawChat(); setTimeout(() => document.getElementById("composer")?.focus(), 80); return; }
-  try { S.chat = await call(`/api/threads/${id}`); for (const [k, v] of Object.entries(S.chat.steps || {})) S.progress.set(k, String(v)); for (const [k, v] of Object.entries(S.chat.stepLog || {})) S.stepLog.set(k, v as any); for (const [k, v] of Object.entries(S.chat.running || {})) S.running.set(k, String(v)); for (const [k, n] of Object.entries(S.chat.frames || {})) loadFrame(k, Number(n)); drawChat(); if (S.chat.jobs.some(unseenStuck)) seeStuck(`/api/threads/${id}/seen`); }
+  try { S.chat = await call(`/api/threads/${id}`); for (const [k, v] of Object.entries(S.chat.steps || {})) S.progress.set(k, String(v)); for (const [k, v] of Object.entries(S.chat.stepLog || {})) S.stepLog.set(k, v as any); for (const [k, v] of Object.entries(S.chat.running || {})) S.running.set(k, String(v)); for (const [k, n] of Object.entries(S.chat.frames || {})) loadFrame(k, Number(n)); drawChat(); }
   catch (e) { if (e instanceof ApiError && e.status === 404) { location.hash = ""; return; } handleError(e); }
 }
 
@@ -1593,19 +1598,51 @@ function renameRamble(t: any) {
 
 // ---------------- a DM with one teammate ----------------
 
-// When you last opened each DM or ramble (this device), for the unread dot.
-const seen: Record<string, string> = JSON.parse(localStorage.getItem("hearth.seen") || "{}");
-function markSeen(id: string) {
-  seen[id] = new Date(Date.now() + 2000).toISOString(); // a little ahead, so your own message landing doesn't count as new
-  localStorage.setItem("hearth.seen", JSON.stringify(seen));
+// When you last opened each chat, by thread id (a DM is tm-<teammate>), for the unread dot. The hub keeps these, so
+// reading a ramble on your phone clears its dot on the Mac too. Until the hub answers, nothing counts as unread.
+const seen: Record<string, string> = {};
+let seenSince = "9";
+const seenAt = (tid?: string) => (!tid ? "" : (seen[tid] || "") > seenSince ? seen[tid] : seenSince);
+const unread = (tid: string, lastReplyAt?: string) => !!lastReplyAt && lastReplyAt > seenAt(tid);
+async function loadSeen() {
+  try {
+    const r = await call("/api/threads/seen");
+    seenSince = r.since || "";
+    for (const [k, v] of Object.entries(r.seen || {})) if ((seen[k] || "") < (v as string)) seen[k] = v as string;
+    drawSide(); if (route().view === "home") drawHome();
+  } catch {}
 }
+const seenPost = new Map<string, ReturnType<typeof setTimeout> | null>();
+/** You're looking at this chat: its dot goes out now, and the hub hears about it (at most every couple of seconds). */
+function markSeen(tid: string) {
+  if (!tid || tid === "new") return;
+  seen[tid] = new Date(Date.now() + 2000).toISOString(); // a little ahead, so your own message landing doesn't count as new
+  if (seenPost.has(tid)) { seenPost.set(tid, null); return; } // one's in flight: send another once it's done
+  const send = () => {
+    seenPost.set(tid, setTimeout(() => { const again = seenPost.get(tid) === null; seenPost.delete(tid); if (again) markSeen(tid); }, 2000));
+    call(tid.startsWith("tm-") ? `/api/teammates/${tid.slice(3)}/seen` : `/api/threads/${tid}/seen`, { body: {} }).catch(() => {});
+  };
+  send();
+}
+/** Something came back in a chat: if you're looking at it right now, it's read. */
+function readIfOpen(tid?: string) {
+  if (!tid || document.hidden) return;
+  const r = route();
+  if ((r.view === "chat" && r.id === tid) || (r.view === "dm" && `tm-${r.id}` === tid)) markSeen(tid);
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  const r = route();
+  if (r.view === "chat") markSeen(r.id!); else if (r.view === "dm") markSeen(`tm-${r.id}`);
+  drawSide();
+});
 // Seeing a stuck job is enough to clear it from the badges (the hub remembers, on every device); it stays stuck until you act.
 const unseenStuck = (j: any) => j?.status === "blocked" && !(j.seenAt && j.seenAt >= (j.updatedAt || j.createdAt));
 const seeStuck = (path: string) => { call(path, { body: {} }).catch(() => {}); };
-const unreadDm = (t: any) => !!t.lastDmAt && t.lastDmAt > (seen[t.id] || "");
+const unreadDm = (t: any) => unread(`tm-${t.id}`, t.lastDmAt);
 
 async function loadDm(id: string) {
-  try { S.dm = await call(`/api/teammates/${id}`); markSeen(id); seeStuck(`/api/teammates/${id}/seen`); drawDm(); }
+  try { S.dm = await call(`/api/teammates/${id}`); markSeen(`tm-${id}`); drawDm(); }
   catch (e) { if (e instanceof ApiError && e.status === 404) { location.hash = ""; return; } handleError(e); }
 }
 
@@ -1647,7 +1684,8 @@ function drawDm(stick = true) {
 
 /**
  * Messages you sent while the teammate was mid-run: greyed under the run, going out together as its next turn when it
- * ends. Send now puts one into the run straight away (it starts over with it); Edit takes it back into the box; × drops it.
+ * ends. Send now puts one into the run straight away (it starts over with it); Run separately starts it next to the run;
+ * New ramble starts it as its own ramble; Edit takes it back into the box; × drops it.
  */
 function queuedRows(held: any[], runs: any[]) {
   if (!held.length) return [];
@@ -1655,9 +1693,14 @@ function queuedRows(held: any[], runs: any[]) {
   const stuck = !run && runs.find((x: any) => x.status === "blocked" || x.status === "waiting");
   const name = mate(held[0].teammateId || run?.teammateId || "hearth").name;
   const why = run ? `Queued · goes to ${name} when this run ends` : stuck ? `Not sent · ${name} is ${stuck.status === "waiting" ? "waiting on you" : "stuck"}` : "Sending…";
-  const act = (m: any, how: "send" | "edit" | "drop") => async () => {
+  const act = (m: any, how: "send" | "edit" | "drop" | "ramble" | "run") => async () => {
     try {
       if (how === "send") await call(`/api/messages/${m.id}/send`, { body: {} });
+      else if (how === "ramble") { const r = await call(`/api/messages/${m.id}/ramble`, { body: {} }); loadThreads(); location.hash = `#c/${r.threadId}`; return; }
+      else if (how === "run") {
+        const r = await call(`/api/messages/${m.id}/run`, { body: {} });
+        if (!String(r.threadId).startsWith("tm-")) { location.hash = `#c/${r.threadId}/${r.jobId}`; return; } // in a ramble it's a task of its own: open its thread
+      }
       else {
         await call(`/api/messages/${m.id}`, { method: "DELETE" });
         if (how === "edit") { const box = document.getElementById("composer") as HTMLTextAreaElement | null; if (box) { box.value = box.value.trim() ? `${box.value}\n${m.text}` : m.text; box.dispatchEvent(new Event("input")); box.focus(); } }
@@ -1668,6 +1711,8 @@ function queuedRows(held: any[], runs: any[]) {
   return held.map((m: any, i: number) => row(youWho(), m.createdAt, [h("div", { class: "mtext" }, m.text),
     h("div", { class: "qbar" }, i === held.length - 1 ? h("small", null, why) : null,
       h("button", { class: "qbtn", title: run ? `Stops ${name}'s run and starts it over with this` : `Send it to ${name}`, on: { click: act(m, "send") } }, "Send now"),
+      run ? h("button", { class: "qbtn", title: `Start it now as its own run here, next to ${name}'s current one`, on: { click: act(m, "run") } }, "Run separately") : null,
+      h("button", { class: "qbtn", title: "Start it as its own ramble; Hearth hands it out fresh", on: { click: act(m, "ramble") } }, "New ramble"),
       h("button", { class: "qbtn", on: { click: act(m, "edit") } }, "Edit"),
       h("button", { class: "qbtn", "aria-label": "Don't send", title: "Don't send", on: { click: act(m, "drop") } }, icon("x", 13)))], false, "queued"));
 }

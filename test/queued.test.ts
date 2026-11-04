@@ -99,3 +99,59 @@ test("without queue (voice, apps, older clients) a mid-run DM still folds in as 
   expect(second.message.queued).toBeUndefined();
   expect(second.job.id).toBe(first.job.id);
 });
+
+test("Run separately starts a queued DM as its own run next to the one that's going; it isn't folded in", async () => {
+  await setup();
+  process.env.FAKE_MS = "1500";
+  const first = (await hub.askTeammate("scout", "find a pottery studio")).value!;
+  await until(working);
+  await Bun.sleep(200);
+  process.env.FAKE_MS = "50";
+  const q = (await hub.askTeammate("scout", "also book a dentist", { queue: true })).value!;
+  const r = (await hub.startQueuedApart(q.message.id, "run")).value!;
+  expect(r.jobId).not.toBe(first.job.id);
+  expect((await store.get<Message>("messages", q.message.id))!.queued).toBeUndefined();
+  await until(() => settled(2));
+  const run = (await store.get<Job>("jobs", r.jobId!))!;
+  expect(run.task).toBe("also book a dentist");
+  expect(run.teammateId).toBe("scout");
+  expect((await store.get<Job>("jobs", first.job.id))!.task).not.toContain("dentist");
+  expect((await hub.startQueuedApart(q.message.id, "run")).error).toBeTruthy(); // already sent
+});
+
+test("New ramble takes a queued thread reply out and starts it as a ramble of its own", async () => {
+  await setup();
+  process.env.FAKE_PLAN = JSON.stringify({ title: "t", reply: "On it", jobs: [{ task: "find a restaurant", teammate: "Scout" }] });
+  await hub.ramble("dinner");
+  await until(() => settled(1));
+  const [root] = await jobs();
+  process.env.FAKE_MS = "1200";
+  await hub.replyToJob(root.id, "somewhere quiet");
+  await until(working);
+  await Bun.sleep(150);
+  process.env.FAKE_MS = "50";
+  const q = (await hub.replyToJob(root.id, "what is the purpose of life?", { queue: true })).value!;
+  const r = (await hub.startQueuedApart(q.message.id, "ramble")).value!;
+  expect(r.threadId).not.toBe(root.threadId);
+  expect(await store.get("messages", q.message.id)).toBeNull();
+  const fresh = (await msgs()).find((m) => m.threadId === r.threadId && m.role === "user")!;
+  expect(fresh.text).toBe("what is the purpose of life?");
+});
+
+test("chats are read on the hub: a reply after you last looked is unread on every device, opening it clears it", async () => {
+  await setup();
+  const { since } = await hub.chatSeen();
+  process.env.FAKE_PLAN = JSON.stringify({ title: "t", reply: "On it", jobs: [{ task: "find a restaurant", teammate: "Scout" }] });
+  const { thread } = (await hub.ramble("dinner")).value!;
+  await until(() => settled(1));
+  const t = (await hub.listThreads()).find((x: any) => x.id === thread.id)!;
+  expect(t.lastReplyAt! > since).toBe(true); // something came back: unread
+  const at = await hub.markChatSeen(thread.id);
+  expect((await hub.chatSeen()).seen[thread.id]).toBe(at);
+  expect(at >= t.lastReplyAt!).toBe(true);
+  expect(await hub.markChatSeen(thread.id) >= at).toBe(true); // only moves forward
+  // DMs are keyed tm-<teammate>, and the roster says when the teammate last wrote.
+  await hub.askTeammate("scout", "hi");
+  await until(() => settled(2));
+  expect((await hub.roster()).find((x) => x.id === "scout")!.lastDmAt).toBeTruthy();
+});
