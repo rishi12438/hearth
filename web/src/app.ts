@@ -95,7 +95,7 @@ async function boot() {
   if (backFromGoogle) history.replaceState(null, "", "#");
   await Promise.all([refreshState(), loadTeammates(), loadSkills(), loadFiles(), loadApps(), loadIdeas(), loadProjects(), loadPipeline()]);
   (window as any).webkit?.messageHandlers?.hearth?.postMessage({ type: "ready" });
-  if (inMacApp) void ensureMacLinked();
+  if (inMacApp) { void ensureMacLinked(); void checkMacNotif(); window.addEventListener("focus", () => void checkMacNotif()); }
   show();
   connect();
   if (localStorage.getItem("hearth.autoLocation") === "1") shareLocation(true);
@@ -1082,7 +1082,9 @@ async function fillHome(el: HTMLElement) {
   const when = (t: any) => t.updatedAt || t.createdAt || "";
   const recent = [...S.threads].filter((t: any) => !fired.some((m: any) => m.threadId === t.id)).sort((a: any, b: any) => when(b).localeCompare(when(a))).slice(0, 2);
   const idea = S.ideas[0];
+  const notif = notifProblem();
   const rows = [
+    notif ? h("button", { class: "sugg warn", on: { click: fixMacNotif } }, h("span", { class: "suggic" }, icon("bell", 16)), h("span", { class: "grow" }, notif), h("small", null, "Fix")) : null,
     ...(b.needsYou || []).slice(0, 1).map((c: any) => row(icon("lock", 16), c.title, "Needs you", () => { location.hash = c.threadId?.startsWith("tm-") ? `#t/${c.teammateId}` : `#c/${c.threadId}/${c.root}`; })),
     ...fired.map((m: any) => h("button", { class: "sugg fired", title: m.text, on: { click: () => { location.hash = m.threadId.startsWith("tm-") ? `#t/${m.threadId.slice(3)}` : `#c/${m.threadId}`; } } },
       h("span", { class: "suggic" }, icon("bell", 16)), h("span", { class: "grow" }, m.proactive.title), h("i", { class: "udot" }), h("small", null, `went off ${shortAgo(m.createdAt)}`))),
@@ -2179,6 +2181,34 @@ function accessLog(entries: any[], domain: string) {
       h("span", { class: "grow" }, h("b", { class: "light" }, `${e.by} ${verb[e.action] || e.action}`), h("small", { class: "sub" }, `${relTime(e.createdAt)}${e.ok === false ? " · failed" : ""}${e.detail ? ` · ${e.detail}` : ""}`))))));
 }
 
+/**
+ * Will macOS actually show Hearth's notifications? The Mac app asks it: allowed, and as banners/alerts (not just
+ * dropped into Notification Center). Checked at start and each time the window comes back to the front.
+ * null = unknown (not the Mac app, or one too old to say).
+ */
+let macNotif: { auth: string; alerts: boolean; style: string; center: boolean } | null = null;
+async function checkMacNotif() {
+  if (!inMacApp) return;
+  const before = JSON.stringify(macNotif);
+  try { macNotif = await askMac("notif-status", {}, 4000); } catch { macNotif = null; }
+  if (JSON.stringify(macNotif) !== before && route().view === "home") drawHome();
+}
+/** What's wrong with the Mac's notifications for Hearth, in a few words, or null when they'll pop up. */
+function notifProblem() {
+  const n = macNotif;
+  if (!n) return null;
+  if (n.auth === "denied") return "Notifications are off for Hearth on this Mac";
+  if (n.auth === "notDetermined") return "Hearth isn't allowed to notify you yet";
+  if (!n.alerts || n.style === "none") return "Hearth's notifications don't pop up on this Mac";
+  return null;
+}
+async function fixMacNotif() {
+  const asking = macNotif?.auth === "notDetermined";
+  if (!asking) toast("In Settings: turn on Allow notifications, and pick Banners or Alerts");
+  try { macNotif = await askMac("notif-settings", {}, 60_000); } catch (e) { handleError(e); }
+  if (route().view === "home") drawHome();
+}
+
 /** Ask the Mac app (it reads Chrome on this Mac) and wait for its answer. Generous default: macOS may be asking you. */
 const macAsks = new Map<string, (r: any) => void>();
 (window as any).hearthNative = (id: string, json: string) => { const f = macAsks.get(id); macAsks.delete(id); try { f?.(JSON.parse(json)); } catch { f?.({ error: "The Mac app sent something odd back." }); } };
@@ -3174,7 +3204,7 @@ function openSettings() {
     h("div", { class: "list" },
       row("Name and time zone", `${p.userName || "Not set"} · ${p.tz}`, openProfile),
       // The Mac app shows them as Mac notifications (allowed or not in System Settings → Notifications → Hearth).
-      inMacApp ? row("Notifications", "Mac notifications · change them in System Settings → Notifications → Hearth", () => toast("Open System Settings → Notifications → Hearth"))
+      inMacApp ? row("Notifications", notifProblem() || (macNotif ? `On · ${macNotif.style === "alert" ? "alerts stay until you close them" : "banners"}` : "Mac notifications · System Settings → Notifications → Hearth"), fixMacNotif)
         : row("Notifications", st.push.subscribed ? "On for this device" : "Off", () => togglePush(st.push.subscribed), sw(st.push.subscribed)),
       row("Quiet hours and daily limit", `${p.quietStart}–${p.quietEnd} · up to ${p.maxProactivePerDay}/day`, openQuiet)),
     h("div", { class: "list" }, row("Brains", "Which models do what, and smart voice", openBrains),
