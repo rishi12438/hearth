@@ -318,7 +318,9 @@ test("a follow-up in a thread with a session is that session answering: no lead 
   const hub = new Hub(config, store, brain, new Scripts(store, dir, join(import.meta.dir, "../scripts")), null);
   const h = hub as any;
   const base = await h.brains();
-  h.brains = async () => ({ ...base, workhorse: { harness: "codex", model: "gpt-6.1-sol" }, heavy: { harness: "claude", model: "claude-opus-5-5" } });
+  // The live hub's setup: every role on Claude, Claude and Codex picked, and the thread's session on Codex.
+  h.brains = async () => ({ ...base, workhorse: { harness: "claude", model: "claude-sonnet-5-5" }, heavy: { harness: "claude", model: "claude-opus-5-5" } });
+  brain.pool = async () => ["claude", "codex"];
   const modes: string[] = [];
   let tips = 0;
   h.turn = async (mode: string) => { modes.push(mode); return { text: "nope, about $871B", did: [], used: [], tiles: [], fileIds: [] }; };
@@ -345,4 +347,32 @@ test("a follow-up in a thread with a session is that session answering: no lead 
   await h.runJob(await job("j-f2", { followsUp: "j-root" }), "and now?");
   expect(modes).toEqual(["legwork", "voice"]);
   await store.close();
+});
+
+test("a thread's follow-up goes back to the brain holding its session, even when the role or the pool says another", async () => {
+  const bin = mkdtempSync(join(tmpdir(), "hearth-held-"));
+  const calls = fakeClaude(bin);
+  fakeCodex(bin, { answer: "from the codex session", log: join(bin, "req.log"), state: join(bin, "threads.json") });
+  const brain = new Brain(loadConfig({ HEARTH_DATA: mkdtempSync(join(tmpdir(), "hearth-held-data-")), HEARTH_AGENT: "claude", HEARTH_SKILLS: "off", HEARTH_BRAIN_JAIL: "off" }));
+  brain.pool = async () => ["claude", "codex"];
+  const sonnet = { harness: "claude", model: "claude-sonnet-5-5", role: "workhorse" as const };
+  await withPath(bin, async () => {
+    // The thread's first run landed on Codex (the pool had more room there).
+    await brain.think(JOB, { harness: "codex", model: "" }, meter("thread-held"));
+    expect(await brain.sessionBrain("thread-held", sonnet)).toBe("codex");
+    const m = meter("thread-held");
+    expect(await brain.think(JOB, sonnet, m)).toBe("from the codex session");
+    expect(m.resumed).toBe(true);
+    expect(calls()).toEqual([]);
+    // Codex signed out: it doesn't count as holding the thread, and the role's brain does it.
+    brain.health.signedOut("codex", "401");
+    expect(await brain.sessionBrain("thread-held", sonnet)).toBeUndefined();
+    // Not a brain you picked: the session there isn't used.
+    brain.health.fine("codex");
+    brain.pool = async () => ["claude"];
+    expect(await brain.sessionBrain("thread-held", sonnet)).toBeUndefined();
+    // Planning and other no-tool calls never follow a session.
+    brain.pool = async () => ["claude", "codex"];
+    expect(await brain.think({ mode: "clean", context: {}, input: "hi" }, sonnet, meter("thread-held"))).toBe("done");
+  });
 });
