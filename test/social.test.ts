@@ -169,10 +169,77 @@ test("a Mac copies a login up over the link; the hub stores it and re-asks on si
 
   // The agent pulls a fresh login on demand with connection.refresh.
   sent.length = 0;
+  hub.freshLoginWaitMs = 30;
   await hub.applyActions([{ type: "connection.refresh", site: "linkedin" }], "test");
   const reask = sent.find((m) => m.t === "wantCookies");
   expect(reask).toBeTruthy();
   expect(reask.have["linkedin.com"]).toBeUndefined();
+  expect(reask.fresh).toBe("linkedin.com");
+});
+
+test("a job that hits a sign-out checks your Mac: a fresh login reruns it, a signed-out Mac or an offline one parks it", async () => {
+  const { Computers } = await import("../src/computers.ts");
+  const sent: any[] = [];
+  const ws = { send: (d: string) => sent.push(JSON.parse(d)), close: () => {} };
+  const cmp = new Computers({
+    dataDir: dir, homeDir: join(dir, "home"), acceptCopies: true,
+    cookieSites: () => hub.connections.macSites(),
+    cookieHave: (s) => hub.connections.cookieHave(s),
+    onCookies: (s, data) => hub.connections.receiveFromMac(s, data),
+  });
+  hub.computers = cmp;
+  hub.freshLoginWaitMs = 2000;
+  hub.connections.browserOptions = () => []; // a server hub: no browser of its own, only your Mac's
+  const retried: string[] = [];
+  const realRetry = hub.retryJob.bind(hub);
+  hub.retryJob =(async (id: string) => { retried.push(id); return { value: null }; }) as any;
+  const job = async () => store.put("jobs", { id: crypto.randomUUID(), createdAt: new Date().toISOString(), threadId: "t1", messageId: "m1", task: "AliExpress orders", teammateId: "x", status: "working", effort: "light" } as any);
+  const blockedOf = async (id: string) => ((await store.get("jobs", id)) as any).blocked;
+
+  // No Mac online: parked until it comes back, saying so.
+  const j0 = await job();
+  await hub.applyActions([{ type: "connection.refresh", site: "aliexpress.com" }], "t", { jobId: j0.id, threadId: "t1" });
+  expect(await blockedOf(j0.id)).toMatchObject({ needs: "computer", site: "aliexpress.com", need: expect.stringContaining("Your Mac") });
+
+  cmp.attach("mac1", "Rishi's Mac", ws as any);
+  cmp.message("mac1", JSON.stringify({ t: "hello", harnesses: ["claude"], platform: "darwin" }));
+
+  // The Mac's Chrome isn't signed in either: it says so, and the job asks you to sign in there.
+  const j1 = await job();
+  sent.length = 0;
+  const p1 = hub.applyActions([{ type: "connection.refresh", site: "aliexpress.com" }], "t", { jobId: j1.id, threadId: "t1" });
+  await Bun.sleep(5);
+  expect(sent.find((m) => m.t === "wantCookies")?.fresh).toBe("aliexpress.com");
+  cmp.message("mac1", JSON.stringify({ t: "noCookies", site: "aliexpress.com", why: "signed-out" }));
+  await p1;
+  expect(await blockedOf(j1.id)).toMatchObject({ needs: "login", need: "Sign in to aliexpress.com on your Mac" });
+
+  // The Mac has a good login: it's copied up and the job is marked to run again by itself.
+  const j2 = await job();
+  const p2 = hub.applyActions([{ type: "connection.refresh", site: "aliexpress.com" }], "t", { jobId: j2.id, threadId: "t1" });
+  await Bun.sleep(5);
+  cmp.message("mac1", JSON.stringify({ t: "cookies", site: "aliexpress.com", data: JSON.stringify({ cookies: [{ name: "xman_t", value: "fresh", domain: ".aliexpress.com" }] }), hash: "h" }));
+  const out = await p2;
+  expect(hub.connections.connected("aliexpress.com")).toBe(true);
+  expect(out.done.some((d: any) => /running it again/.test(d.label))).toBe(true);
+  const j2now = (await store.get("jobs", j2.id)) as any;
+  expect(j2now.relogged).toEqual(["aliexpress.com"]);
+
+  // Already rerun once with a fresh login and still signed out: no loop, it asks you instead.
+  const p3 = hub.applyActions([{ type: "connection.refresh", site: "aliexpress.com" }], "t", { jobId: j2.id, threadId: "t1" });
+  await Bun.sleep(5);
+  cmp.message("mac1", JSON.stringify({ t: "cookies", site: "aliexpress.com", data: JSON.stringify({ cookies: [{ name: "xman_t", value: "fresh2", domain: ".aliexpress.com" }] }), hash: "h2" }));
+  await p3;
+  expect(await blockedOf(j2.id)).toMatchObject({ needs: "login", why: expect.stringContaining("still shows") });
+
+  // Try again on a job stuck on a login checks the Mac first; still signed out there, it stays parked without a run.
+  await store.put("jobs", { ...(await store.get("jobs", j1.id)), status: "blocked" } as any);
+  const p4 = realRetry(j1.id);
+  await Bun.sleep(5);
+  cmp.message("mac1", JSON.stringify({ t: "noCookies", site: "aliexpress.com", why: "signed-out" }));
+  const r4 = await p4;
+  expect((r4 as any).value.status).toBe("blocked");
+  expect(await blockedOf(j1.id)).toMatchObject({ needs: "login", why: expect.stringContaining("still isn't signed in") });
 });
 
 test("any domain works, not just presets: save, read a logged-in page, and watch it change", async () => {
