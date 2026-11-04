@@ -791,6 +791,16 @@ export class Brain {
           const line = buf.slice(0, i); buf = buf.slice(i + 1);
           if (harness === "codex") { codexLine(line); continue; }
           if (line.includes('"rate_limit_event"')) { try { this.usage.noteClaudeEvent(JSON.parse(line)?.rate_limit_info); } catch {} continue; }
+          // A tool call that failed (a skill command's error): into the log, so "it couldn't" always has the real reason.
+          if (line.includes('"is_error":true')) {
+            try {
+              for (const c of JSON.parse(line)?.message?.content || []) {
+                if (c?.type !== "tool_result" || !c.is_error) continue;
+                const text = (Array.isArray(c.content) ? c.content.map((x: any) => x?.text || "").join(" ") : String(c.content ?? "")).replace(/\s+/g, " ").trim();
+                console.warn(`brain tool error (${name}): ${text.slice(0, 500)}`);
+              }
+            } catch {}
+          }
           if (!(meter?.onProgress || meter?.onAction) || !line.includes('"type":"assistant"')) continue;
           try {
             for (const c of JSON.parse(line)?.message?.content || []) {
