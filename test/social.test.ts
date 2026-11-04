@@ -240,6 +240,17 @@ test("a job that hits a sign-out checks your Mac: a fresh login reruns it, a sig
   const r4 = await p4;
   expect((r4 as any).value.status).toBe("blocked");
   expect(await blockedOf(j1.id)).toMatchObject({ needs: "login", why: expect.stringContaining("still isn't signed in") });
+
+  // The hub couldn't hand logins to the jobs' browser: the job says that, not "sign in on your Mac", and doesn't rerun.
+  hub.loginsProblem = "EROFS";
+  const j5 = await job();
+  const p5 = hub.applyActions([{ type: "connection.refresh", site: "aliexpress.com" }], "t", { jobId: j5.id, threadId: "t1" });
+  await Bun.sleep(5);
+  cmp.message("mac1", JSON.stringify({ t: "cookies", site: "aliexpress.com", data: JSON.stringify({ cookies: [{ name: "xman_t", value: "fresh3", domain: ".aliexpress.com" }] }), hash: "h3" }));
+  const out5 = await p5;
+  expect(await blockedOf(j5.id)).toMatchObject({ need: "The hub's browser can't get your logins", why: expect.stringContaining("EROFS") });
+  expect(out5.done.some((d: any) => /running it again/.test(d.label))).toBe(false);
+  hub.loginsProblem = null;
 });
 
 test("any domain works, not just presets: save, read a logged-in page, and watch it change", async () => {

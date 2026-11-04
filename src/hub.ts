@@ -2927,6 +2927,10 @@ export class Hub {
       if (push) await this.push?.send({ title: "I'm stuck", body: `${b.need}. ${b.unblock}`, tag: jobId, url: threadLink(job.threadId) });
       return { kind: "blocked" as const, label: `Blocked: ${b.need}` };
     };
+    // The hub couldn't hand any login to the jobs' browser (giveBrowserLogins): a fresh one wouldn't help and your Mac isn't
+    // the problem, so say the real cause and don't spend a rerun on it.
+    if (this.loginsProblem)
+      return park({ need: `The hub's browser can't get your logins`, why: `${name} shows signed out because the hub couldn't give the jobs' browser your logins (${this.loginsProblem}). Your Mac's login is fine.`, unblock: "Tap Try again once the hub is fixed (a redeploy with the browser-logins fix)", needs: "login" });
     if ((r.state === "fresh" || r.state === "timeout") && !tried) {
       // Got one (or a Mac that's still reading): run the job again with it as soon as this turn ends.
       this.rerunAfterLogin.add(jobId);
