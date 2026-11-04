@@ -376,6 +376,23 @@ test("Approve on a run card for a new script approves its code too; a failed run
   expect(jobs.find((j) => j.followsUp === root.id)?.result).toContain("Fixing it");
 });
 
+test("a script run you approved carries a one-time token (its MCP calls need no second Approve); other runs don't", async () => {
+  const code = '// effects: external\nawait Bun.write("token.txt", process.env.HEARTH_RUN || "none"); await Bun.sleep(400); console.log("ok")';
+  await approvedScript("tok", code);
+  const file = join(hub.scripts.workDir, "token.txt");
+  const run = hub.scripts.run("tok", [], { approvedRun: true });
+  let token = "";
+  for (let i = 0; i < 100 && !token; i++) { await Bun.sleep(10); token = await Bun.file(file).text().catch(() => ""); }
+  expect(token).not.toBe("none");
+  expect(hub.scripts.isApprovedRun(token)).toBe(true); // live while the run goes
+  expect((await run).ok).toBe(true);
+  expect(hub.scripts.isApprovedRun(token)).toBe(false); // and gone after
+  expect(hub.scripts.isApprovedRun("made-up")).toBe(false);
+  await approvedScript("tok-read", 'await Bun.write("token.txt", process.env.HEARTH_RUN || "none")');
+  await hub.scripts.run("tok-read", []);
+  expect(await Bun.file(file).text()).toBe("none");
+});
+
 test("a run card doesn't approve script code that changed after it was made", async () => {
   await hub.scripts.propose({ name: "send-gif", code: '// effects: external\nconsole.log("v1")' });
   const ap = (await hub.requestApproval({ script: "send-gif", summary: "Send it" }, {})).value!;

@@ -40,6 +40,13 @@ export class Scripts {
   readonly ownDir: string;
   readonly workDir: string;
 
+  /**
+   * Runs you approved that are going right now, by a one-time token in their env (HEARTH_RUN). hearth-mcp sends it, so
+   * an MCP call the run makes is covered by the Approve you already gave that run (no second card).
+   */
+  private approvedRuns = new Set<string>();
+  isApprovedRun(token: string | null | undefined) { return !!token && this.approvedRuns.has(token); }
+
   /** API keys a script may ask for with a `// needs: serper` header (the hub's vault). Only the named ones are passed. */
   keys: (name: string) => string | null = () => null;
 
@@ -148,18 +155,22 @@ export class Scripts {
       return { ok: false, output: `Script ${name} changed after approval; it needs approving again.` };
     }
     try { chmodSync(this.workDir, 0o700); } catch {}
-    const proc = Bun.spawn([process.execPath, file, ...args.map(String)], {
-      cwd: this.workDir,
-      // HEARTH_LAST: what this script printed last time, for check hooks (so it can say only what's new).
-      env: { PATH: process.env.PATH || "/usr/bin:/bin", HOME: this.workDir, LANG: process.env.LANG || "en_US.UTF-8", TZ: process.env.TZ || "", ...(opts.last !== undefined ? { HEARTH_LAST: opts.last } : {}), ...this.neededKeys(code.toString()) },
-      stdin: "ignore", stdout: "pipe", stderr: "pipe",
-    });
-    const timer = setTimeout(() => proc.kill(), timeoutMs);
-    const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-    const code2 = await proc.exited;
-    clearTimeout(timer);
-    const output = (out + (code2 !== 0 && err ? `\n[stderr]\n${err}` : "")).trim().slice(0, OUTPUT_CAP) || "(no output)";
-    await this.store.put("scripts", { ...s, lastRunAt: new Date().toISOString(), lastResult: output.slice(0, 500) });
-    return { ok: code2 === 0, output };
+    const runToken = opts.approvedRun ? randomUUID() : null;
+    if (runToken) this.approvedRuns.add(runToken);
+    try {
+      const proc = Bun.spawn([process.execPath, file, ...args.map(String)], {
+        cwd: this.workDir,
+        // HEARTH_LAST: what this script printed last time, for check hooks (so it can say only what's new).
+        env: { PATH: process.env.PATH || "/usr/bin:/bin", HOME: this.workDir, LANG: process.env.LANG || "en_US.UTF-8", TZ: process.env.TZ || "", ...(opts.last !== undefined ? { HEARTH_LAST: opts.last } : {}), ...this.neededKeys(code.toString()), ...(runToken ? { HEARTH_RUN: runToken } : {}) },
+        stdin: "ignore", stdout: "pipe", stderr: "pipe",
+      });
+      const timer = setTimeout(() => proc.kill(), timeoutMs);
+      const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+      const code2 = await proc.exited;
+      clearTimeout(timer);
+      const output = (out + (code2 !== 0 && err ? `\n[stderr]\n${err}` : "")).trim().slice(0, OUTPUT_CAP) || "(no output)";
+      await this.store.put("scripts", { ...s, lastRunAt: new Date().toISOString(), lastResult: output.slice(0, 500) });
+      return { ok: code2 === 0, output };
+    } finally { if (runToken) this.approvedRuns.delete(runToken); }
   }
 }
