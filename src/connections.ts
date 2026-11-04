@@ -45,6 +45,12 @@ export class Connections {
     return id === "google" ? this.google.connected : !!this.saved(this.key(id) || id)?.cookies.length;
   }
   cookies(id: string): Cookie[] { const d = this.key(id); return (d && this.saved(d)?.cookies) || []; }
+  /** Every stored login, domain -> cookies, for the brain's browser (brains/browser-logins.ts). Never shown anywhere. */
+  allCookies(): Record<string, Cookie[]> {
+    const names = this.vault?.names() ?? [];
+    const domains = names.filter((n) => n.startsWith("cookies:") && n !== "cookies:from-mac").map((n) => n.slice(8)).filter(isValidDomain);
+    return Object.fromEntries(domains.map((d) => [d, this.saved(d)?.cookies || []]));
+  }
 
   /** The browser to read a page as: the fingerprint saved with the login for that page's site, if any. */
   fingerprintFor(url: string): Fingerprint | null {

@@ -28,6 +28,7 @@ import { Files, extractFiles } from "./files.ts";
 import { Apps, appSize } from "./apps.ts";
 import { sha256 } from "./auth.ts";
 import { Narrator } from "./brains/narrate.ts";
+import { syncBrowserLogins } from "./brains/browser-logins.ts";
 
 const DEFAULT_PREFS: Prefs = {
   userName: "", tz: "UTC", quietStart: "23:00", quietEnd: "07:30",
@@ -136,6 +137,8 @@ export class Hub {
     readonly apps: Apps = new Apps(store),
   ) {
     brain.pool = () => this.brainPool();
+    // The brain's browser (enkidu-browser) opens signed in to every site you connected.
+    brain.beforeBrowse = () => { syncBrowserLogins(this.connections.allCookies(), join(config.dataDir, "browser-logins.json")); };
     brain.health.onChange = (st) => { void this.brainHealthChanged(st.harness, st.ok, st.message).catch(() => {}); };
     brain.health.onSeen = () => this.emit("brains");
     // Every phone notification also goes out on the live stream, so the Mac app can show it as a Mac notification.
