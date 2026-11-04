@@ -386,6 +386,19 @@ test("a run card doesn't approve script code that changed after it was made", as
   expect((await hub.scripts.byName("send-gif"))!.status).toBe("proposed");
 });
 
+test("a refused ask says so in the reply instead of leaving 'Tap Approve' with no card", async () => {
+  await hub.ensureTeammates();
+  (hub.brain as any).think = async (b: any) => b.mode === "orchestrate"
+    ? JSON.stringify({ reply: "On it", jobs: [{ task: "Send Sam a GIF", teammate: "Hearth", effort: "light" }] })
+    : 'Prepared it. Tap Approve to send.\n```hearth\n[{"type":"approval.request","script":"const p = Bun.spawn([\'hearth-mcp\',\'call\']); await p.exited","summary":"Send Sam a GIF"}]\n```';
+  await hub.ramble("send sam a gif");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done"));
+  expect(await store.all<any>("approvals")).toHaveLength(0);
+  const [job] = await store.all<Job>("jobs");
+  expect(job.result).toContain("No Approve card was made, so nothing was sent");
+  expect(job.result).toContain("takes the name of a saved script, not code");
+});
+
 test("a job matched to a script skill runs with no model at all", async () => {
   await hub.ensureTeammates();
   await approvedScript("echo-city", 'console.log("weather in " + process.argv[2])');
