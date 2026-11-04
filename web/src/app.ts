@@ -88,6 +88,7 @@ async function boot() {
   if (backFromGoogle) history.replaceState(null, "", "#");
   await Promise.all([refreshState(), loadTeammates(), loadSkills(), loadFiles(), loadApps(), loadIdeas(), loadProjects()]);
   (window as any).webkit?.messageHandlers?.hearth?.postMessage({ type: "ready" });
+  if (inMacApp) void ensureMacLinked();
   show();
   connect();
   if (localStorage.getItem("hearth.autoLocation") === "1") shareLocation(true);
@@ -204,7 +205,7 @@ function onEvent(e: { type: string; data?: any }) {
     }
     case "unpaired": toast("This device was signed out of the hub.", "err"); removeHub(activeHub()!.id); location.reload(); return;
     case "locked": location.reload(); return;
-    case "access": if (S.state?.device.primary && e.data?.pending) { toast("A new device wants in. Settings → Devices"); refreshState(); } return;
+    case "access": if (e.data?.pending) { toast("A new device wants in. Settings → Devices"); refreshState(); } return;
     case "computers": computersChanged(); return;
     case "thinking":
       if (e.data?.on === false) { if (S.planning === e.data.threadId) S.planning = null; }
@@ -519,7 +520,7 @@ function drawSide() {
   const openProject = r.view === "project" ? r.id : r.view === "chat" ? S.threads.find((t: any) => t.id === r.id)?.projectId : null;
   const host = (activeHub()?.url || location.origin).replace(/^https?:\/\//, "");
   clear(el,
-    h("button", { class: "sbrand", on: { click: openHubs } },
+    h("button", { class: "sbrand", on: { click: openConnectedDevices } },
       h("span", { class: "grow" }, h("b", null, S.state?.hub?.name || "Hearth"), h("small", null, host)), h("i", { class: `status ${S.conn}` })),
     brainDots(),
     h("button", { class: "ssearch", on: { click: openJump } }, icon("search", 16), h("span", { class: "grow" }, "Search"), h("kbd", null, "⌘K")),
@@ -2394,7 +2395,7 @@ function openMenu() {
   const item = (ic: string, label: string, sub: string, fn: () => void, badge?: string) =>
     h("button", { class: "mi", on: { click: () => { closeDrawer(); setTimeout(fn, 180); } } }, icon(ic, 20), h("span", { class: "grow" }, h("b", null, label), h("small", null, sub)), badge ? h("em", null, badge) : null);
   const drawer = h("aside", { class: "drawer", role: "dialog", "aria-label": "Menu" },
-    h("button", { class: "hubcard", on: { click: () => { closeDrawer(); setTimeout(openHubs, 180); } } },
+    h("button", { class: "hubcard", on: { click: () => { closeDrawer(); setTimeout(openConnectedDevices, 180); } } },
       h("span", { class: "hubicon" }, icon("server", 20)),
       h("span", { class: "grow" }, h("b", null, st?.hub?.name || "Hub"), h("small", null, `${st?.hub?.storage || "?"}${st?.voice ? " · voice on" : ""}`)),
       h("i", { class: `status ${S.conn}` })),
@@ -2782,7 +2783,7 @@ function openSettings() {
       row("Places", "Home, office…", openPlaces)),
     h("h4", null, "Security and data"),
     h("div", { class: "list" },
-      row("Devices", st.device.primary ? (st.pendingAccess ? `${st.pendingAccess} waiting to join` : "This is your primary device") : "Who can talk to this hub", openDevices),
+      row("Devices", st.pendingAccess ? `${st.pendingAccess} waiting to join` : st.device.primary ? "This is your primary device" : "Who can talk to this hub", openDevices),
       st.device.primary ? row("Finish setting up", "Your devices and connectors, in one place", openWelcome) : null,
       row("Hubs", inMacApp ? "Switch hubs, or set up a new one" : "Switch between your hubs", openHubs),
       passkeysWork() ? row("Face ID lock", st.device.passkey ? "On · asked each time you open the app" : "Off · a copied key alone could open this hub", toggleFaceId, sw(st.device.passkey)) : null,
@@ -3132,7 +3133,7 @@ function renderPairing(code: string) {
     h("label", null, h("span", null, "Pairing code"), codeIn),
     h("label", null, h("span", null, "Name this device"), name),
     err, btn,
-    h("button", { class: "btn ghost", type: "button", on: { click: () => askToJoin(url.value, name.value, err) } }, "No code? Ask your primary device"),
+    h("button", { class: "btn ghost", type: "button", on: { click: () => askToJoin(url.value, name.value, err) } }, "No code? Ask one of your devices"),
     h("p", { class: "hint" }, "Setting up for the first time? On your server, run ", h("code", null, "bun run setup"), " and scan the code. That phone becomes your primary device."),
   );
   clear(app, h("div", { class: "pairing" },
@@ -3464,7 +3465,7 @@ async function openWelcome() {
 async function openDevices() {
   try {
     const primary = !!S.state?.device.primary;
-    const [devices, waiting, cloud] = await Promise.all([call("/api/devices"), primary ? call("/api/access") : Promise.resolve([]), primary ? call("/api/machines").catch(() => null) : Promise.resolve(null)]);
+    const [devices, waiting, cloud] = await Promise.all([call("/api/devices"), call("/api/access"), primary ? call("/api/machines").catch(() => null) : Promise.resolve(null)]);
     const codeBox = h("div");
     const decide = async (r: any, verb: "approve" | "deny") => {
       try {
@@ -3476,8 +3477,8 @@ async function openDevices() {
     };
     openSheet("Devices", [
       h("p", { class: "muted" }, primary
-        ? "This is your primary device: it lets other devices in. Each device has its own key; sign one out and it loses access at once."
-        : "New devices join through your primary device. Each device has its own key; sign one out and it loses access at once."),
+        ? "This is your primary device. Any of your signed-in devices can let a new device or computer in. Each device has its own key; sign one out and it loses access at once."
+        : "Any of your signed-in devices, this one included, can let a new device or computer in. Each device has its own key; sign one out and it loses access at once."),
       waiting.length ? h("h4", null, "Waiting to join") : null,
       waiting.length ? h("div", { class: "list" }, waiting.map((r: any) => h("div", { class: "item" },
         h("div", { class: "hicon" }, icon(r.kind === "computer" ? "laptop" : "phone", 16)),
@@ -3492,7 +3493,7 @@ async function openDevices() {
         primary || d.current ? h("button", { class: "btn small danger-ghost", on: { click: () => confirmSheet(`Sign out ${d.name}?`, "It will need to be let in again to come back.", "Sign out", async () => { await call(`/api/devices/${d.id}`, { method: "DELETE" }); if (d.current) { removeHub(activeHub()!.id); location.reload(); } toast("Signed out"); }) } }, "Sign out") : null))),
       codeBox,
       computersSection(devices.filter((d: any) => d.role === "computer"), primary, cloud),
-      primary ? h("button", { class: "btn ghost", on: { click: () => showPairCode(codeBox) } }, icon("plus", 16), "Add a device (phone, iPad, another computer)") : null,
+      h("button", { class: "btn ghost", on: { click: () => showPairCode(codeBox) } }, icon("plus", 16), "Add a device (phone, iPad, another computer)"),
     ]);
   } catch (e) { handleError(e); }
 }
@@ -3702,7 +3703,7 @@ async function toggleFaceId() {
   } catch (e) { e instanceof ApiError ? handleError(e) : toast((e as Error).message || "Face ID didn't work", "err"); }
 }
 
-/** A new device with no code: ask the hub, show a short code, and wait for the primary phone to approve. */
+/** A new device with no code: ask the hub, show a short code, and wait for any of your signed-in devices to approve. */
 async function askToJoin(url: string, name: string, err: HTMLElement) {
   err.textContent = "";
   try {
@@ -3711,7 +3712,7 @@ async function askToJoin(url: string, name: string, err: HTMLElement) {
     clear(app, h("div", { class: "pairing" },
       h("div", { class: "mark" }, h("img", { src: "/icon.svg", alt: "", width: 72, height: 72 })),
       h("h1", null, "Asked to join"),
-      h("p", { class: "lede" }, "Your primary device got a notification. Approve it there if it shows this same code:"),
+      h("p", { class: "lede" }, "Your other devices got a notification (or open Hearth on one: Settings → Devices). Approve it there if it shows this same code:"),
       h("div", { class: "paircode" }, h("b", null, code), h("small", null, "Waiting… the request lasts 10 minutes")),
       h("button", { class: "btn ghost", on: { click: () => { stop.abort(); location.reload(); } } }, "Cancel")));
     await waitForApproval(origin, poll, stop.signal);
@@ -3758,6 +3759,68 @@ function openWipe() {
 
 /** Inside the Hearth Mac app (it adds "HearthMac" to its user agent): it can run setup for a new hub. */
 const inMacApp = /HearthMac/.test(navigator.userAgent);
+
+/**
+ * Every launch of the Hearth Mac app: make sure this Mac is linked to the hub as a computer (so teammates can use its
+ * browser logins and run work here). If the hub doesn't know it, link it now with this window's own session; no approval.
+ * Silent: an older Mac app that can't link just doesn't answer.
+ */
+async function ensureMacLinked() {
+  try {
+    const st = await askMac("computer-link-status", {}, 8000);
+    if (st?.error) return;
+    const devices: any[] = await call("/api/devices");
+    const known = st.linked && st.hub === location.origin && devices.some((d) => d.role === "computer" && d.id === st.deviceId);
+    if (known) return;
+    const link = await call("/api/devices/link-self", { body: { name: st.name } });
+    const r = await askMac("computer-link", { link }, 8000);
+    if (r?.error) throw new Error(r.error);
+    void refreshState();
+  } catch (e) { console.warn("Linking this Mac didn't work:", e); }
+}
+
+/** The top-left hub name: everything connected to this hub — the hub itself, your devices, linked computers — with addresses. */
+async function openConnectedDevices() {
+  try {
+    const [hubInfo, devices, waiting] = await Promise.all([
+      call("/api/devices/hub").catch(() => null), call("/api/devices"), call("/api/access").catch(() => []),
+    ]);
+    const codeBox = h("div");
+    const isComputerName = (n: string) => /mac|computer|laptop|pc\b|desktop/i.test(n);
+    const ipLine = (ip?: string | null) => (ip ? ip.replace(/^::ffff:/, "") : "IP not seen yet");
+    const mine = devices.filter((d: any) => d.role !== "computer");
+    const comps = devices.filter((d: any) => d.role === "computer");
+    const row = (ic: string, title: any[], sub: string, dot?: string) => h("div", { class: "item" },
+      h("div", { class: "hicon" }, icon(ic, 16)),
+      h("div", { class: "grow" }, h("div", { class: "title" }, ...title), h("div", { class: "sub" }, sub)),
+      dot ? h("i", { class: `status ${dot}` }) : null);
+    const tag = (t: string) => h("span", { class: "tag soft" }, t);
+    openSheet("Connected devices", [
+      h("h4", null, "Hub"),
+      h("div", { class: "list" }, row("server",
+        [hubInfo?.name || S.state?.hub?.name || "Hearth", tag(hubInfo?.target === "lightsail" ? "Server" : "This computer")],
+        [hubInfo?.address || (activeHub()?.url || location.origin).replace(/^https?:\/\//, ""), hubInfo ? ipLine(hubInfo.ip) : null,
+          hubInfo?.upSince ? `up ${relTime(hubInfo.upSince).replace(/ ago$/, "")}` : null].filter(Boolean).join(" · "), S.conn)),
+      waiting.length ? h("button", { class: "btn ghost", on: { click: openDevices } }, `${waiting.length} waiting to join · review`) : null,
+      h("h4", null, `Your devices (${mine.length})`),
+      h("div", { class: "list" }, mine.map((d: any) => row(d.passkey ? "lock" : isComputerName(d.name) ? "laptop" : "phone",
+        [d.name, d.primary ? tag("Main device") : null, d.current ? tag("This device") : null],
+        `${ipLine(d.ip)} · seen ${relTime(d.lastSeenAt)}`))),
+      h("h4", null, `Computers (${comps.length})`),
+      comps.length
+        ? h("div", { class: "list" }, comps.map((d: any) => row(d.machine ? "cloud" : "laptop", [d.name],
+          `${STATE_LABEL[d.link?.state] || "Offline"} · ${ipLine(d.ip)} · ${d.link?.state === "online" ? "can read your browser logins and run work" : `last seen ${relTime(d.link?.lastAliveAt || d.lastSeenAt)}`}`,
+          d.link?.state || "offline")))
+        : h("p", { class: "muted small" }, "No computer linked yet. Link your Mac so teammates can use your browser logins (AliExpress, LinkedIn…) and run work there."),
+      codeBox,
+      h("button", { class: "btn primary big", on: { click: () => showPairCode(codeBox) } }, icon("plus", 16), "Connect another device"),
+      h("p", { class: "hint" }, "To link a computer instead, run ", h("code", null, `bun run join ${activeHub()?.url || location.origin}`), " on it and approve it here."),
+      h("div", { class: "row" },
+        h("button", { class: "btn ghost", on: { click: openDevices } }, "Manage devices"),
+        h("button", { class: "btn ghost", on: { click: openHubs } }, icon("server", 16), "Switch hub")),
+    ]);
+  } catch (e) { handleError(e); }
+}
 
 function openHubs() {
   const list = hubs();

@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync, existsSync, mkdirSync } from "node:fs";
 import { join, resolve, extname, dirname } from "node:path";
 type Server = Bun.Server<unknown>;
-import { rotateToken, sha256, deviceForToken, newPairingCode, redeemPairingCode, RateLimiter, addDevice, owners, isOwner, newChallenge, verifyPasskeyRegistration, verifyPasskeyAssertion, Sessions, AccessRequests } from "./auth.ts";
+import { rotateToken, sha256, deviceForToken, newPairingCode, redeemPairingCode, RateLimiter, addDevice, owners, personalDevices, isOwner, newChallenge, verifyPasskeyRegistration, verifyPasskeyAssertion, Sessions, AccessRequests } from "./auth.ts";
 import QRCode from "qrcode";
 import type { Hub } from "./hub.ts";
 import { deepgramLive, type VoiceSettings } from "./voice.ts";
@@ -18,7 +18,27 @@ import { cleanFingerprint } from "./browser.ts";
 import { adminToken, isAdminRequest } from "./admin.ts";
 import { detectBrains } from "./brains/logins.ts";
 import { hasLogin, readLogin } from "./computer.ts";
-import { homedir } from "node:os";
+import { homedir, hostname, networkInterfaces } from "node:os";
+import { lookup } from "node:dns/promises";
+
+/** The IP the hub answers on: its public name resolved, else this machine's first outside-facing address. */
+const hubIpCache = new Map<string, { ip: string | null; at: number }>();
+async function hubIp(address: string): Promise<string | null> {
+  const hit = hubIpCache.get(address);
+  if (hit && Date.now() - hit.at < 10 * 60_000) return hit.ip;
+  let ip: string | null = null;
+  try {
+    const host = new URL(/^https?:\/\//.test(address) ? address : `http://${address}`).hostname;
+    if (/^[\d.]+$|:/.test(host) && host !== "0.0.0.0") ip = host;
+    else if (!/^(localhost|0\.0\.0\.0)$/.test(host)) ip = (await lookup(host, { family: 4 })).address;
+  } catch {}
+  if (!ip || /^127\.|^::1$/.test(ip)) {
+    const nic = Object.values(networkInterfaces()).flat().find((n) => n && n.family === "IPv4" && !n.internal);
+    ip = nic?.address || ip;
+  }
+  hubIpCache.set(address, { ip, at: Date.now() });
+  return ip;
+}
 import { MAX_FILE_BYTES } from "./files.ts";
 import { fetchPublic } from "./watch.ts";
 import { isCookieSite } from "./connections.ts";
@@ -89,7 +109,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   const webhookLimiter = new RateLimiter(30, 60_000);
   // Wrong device tokens: 20 in 10 minutes and that address is shut out of the API for the rest of the window.
   const badToken = new RateLimiter(20, 10 * 60_000);
-  // Access requests notify your primary phone, so strangers can't spam it.
+  // Access requests notify all your devices, so strangers can't spam them.
   const askLimiter = new RateLimiter(3, 10 * 60_000);
   const askGlobal = new RateLimiter(10, 10 * 60_000);
   const sessions = new Sessions(config.unlockHours * 3600_000);
@@ -249,14 +269,14 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
 
     // ---- public ----
     if (path === "/api/health") return json({ name: config.name, version: pkg.version, build: web.build, setup: (await store.all<Device>("devices")).length === 0 });
-    // A new device asks to join. Your primary phone gets a notification with the same short code to compare.
+    // A new device asks to join. Every one of your signed-in devices gets a notification with the same short code to compare.
     if (path === "/api/access/request" && method === "POST") {
       if (!askLimiter.allow(ip) || !askGlobal.allow("all")) throw new HttpError(429, "Too many requests. Wait 10 minutes.");
       if ((await store.all<Device>("devices")).length === 0) throw new HttpError(409, "This hub isn't set up yet. Use the setup code from the server.");
       const b = await body(req);
       const { poll, request } = access.create(b.deviceName, ip, b.kind);
       hub.emit("access", { pending: access.pending().length });
-      await hub.push?.send({ title: request.kind === "computer" ? "A computer wants to link" : "New device wants in", body: `${request.name} · code ${request.code}. Open Hearth to approve or deny.`, tag: "access", url: "/#access" }, (await owners(store)).map((d) => d.id));
+      await hub.push?.send({ title: request.kind === "computer" ? "A computer wants to link" : "New device wants in", body: `${request.name} · code ${request.code}. Open Hearth to approve or deny.`, tag: "access", url: "/#access" }, (await personalDevices(store)).map((d) => d.id));
       return json({ poll, code: request.code, expiresInMin: 10 });
     }
     if (path === "/api/access/poll" && method === "POST") {
@@ -340,7 +360,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
     }
     const owner = cli || (await isOwner(store, device));
     const ownerOnly = () => { if (!owner) throw new HttpError(403, "Only your primary device can do that."); };
-    if (!cli && Date.now() - new Date(device.lastSeenAt).getTime() > 5 * 60_000) await store.put<Device>("devices", { ...device, lastSeenAt: new Date().toISOString() });
+    if (!cli && (Date.now() - new Date(device.lastSeenAt).getTime() > 5 * 60_000 || (ip !== "?" && device.ip !== ip))) await store.put<Device>("devices", { ...device, lastSeenAt: new Date().toISOString(), ip: ip !== "?" ? ip : device.ip });
     const id = seg[2];
 
     switch (seg[1]) {
@@ -349,7 +369,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         return json({
           hub: { name: config.name, version: pkg.version, build: web.build, brain: hub.brain.label, storage: store.kind },
           device: { id: device.id, name: device.name, primary: owner, passkey: !!device.passkey }, requirePasskey: config.requirePasskey,
-          pendingAccess: owner ? access.pending().length : 0, prefs: publicPrefs(prefs), thinking: hub.thinking,
+          pendingAccess: access.pending().length, prefs: publicPrefs(prefs), thinking: hub.thinking,
           push: { available: !!hub.push, subscribed: hub.push ? await hub.push.hasDevice(device.id) : false },
           pendingScripts: (await hub.scripts.list()).filter((s) => s.status === "proposed").length,
           voice: voice?.current?.name ?? null,
@@ -892,6 +912,12 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       }
       case "devices": {
         const primaries = (await owners(store)).map((d) => d.id);
+        // The hub itself, for the top of Connected devices: where it lives and the address it answers on.
+        if (method === "GET" && id === "hub") {
+          const address = process.env.HEARTH_PUBLIC_URL || pageOrigin || `http://${config.host}:${config.port}`;
+          return json({ name: config.name, address: address.replace(/^https?:\/\//, ""), ip: await hubIp(address), host: hostname(),
+            target: config.target, version: pkg.version, upSince: new Date(Date.now() - process.uptime() * 1000).toISOString() });
+        }
         if (method === "GET") return json((await store.all<Device>("devices")).map(({ tokenHash, passkey, ...d }) => ({
           ...d, primary: primaries.includes(d.id), passkey: !!passkey, current: d.id === device.id,
           ...(d.role === "computer" ? { link: computers.status(d.id, d.name, d.lastSeenAt), copy: d.copy || [],
@@ -910,8 +936,32 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           await hub.log("computer.copy", `${target.name} copies: ${items.map((i) => COPY_ITEMS[i].label).join(", ") || "nothing"}`);
           return json({ ok: true, copy: items, copied: computers.copied() });
         }
+        // The Hearth Mac app links its own Mac as a computer, no approval: it's already one of your signed-in devices.
+        // One computer per signed-in device; asking again (the app lost its link file) hands out a fresh key for the same one.
+        if (method === "POST" && id === "link-self") {
+          if (!pageOrigin && !process.env.HEARTH_PUBLIC_URL) throw new HttpError(400, "Open the hub's own address to link this computer.");
+          const b = await body(req);
+          const name = String(b.name || `${device.name} (computer)`).replace(/[\u0000-\u001f]/g, "").trim().slice(0, 60) || "My Mac";
+          const all = await store.all<Device>("devices");
+          const mine = all.find((d) => d.role === "computer" && d.linkedBy === device.id && !d.machine);
+          let token: string, deviceId: string;
+          if (mine) {
+            token = await rotateToken(store, mine.id);
+            computers.drop(mine.id, "new key");
+            deviceId = mine.id;
+            if (mine.name !== name) await store.put<Device>("devices", { ...(await store.get<Device>("devices", mine.id))!, name });
+          } else {
+            const added = await addDevice(store, name, "computer");
+            await store.put<Device>("devices", { ...added.device, linkedBy: device.id });
+            token = added.token; deviceId = added.device.id;
+            await recount();
+          }
+          await hub.log("device.paired", `${name} linked itself as a computer (from ${device.name})`);
+          hub.emit("computers", {});
+          return json({ hub: pageOrigin || new URL(process.env.HEARTH_PUBLIC_URL!).origin, token, deviceId, name });
+        }
+        // Any of your devices can hand out a code for a new one (same trust as approving a request).
         if (method === "POST" && id === "pair-code") {
-          ownerOnly();
           const r = await newPairingCode(store);
           const link = `${pageOrigin || process.env.HEARTH_PUBLIC_URL || ""}/#pair=${r.code}`;
           return json({ ...r, link, qr: await QRCode.toString(link, { type: "svg", margin: 1, errorCorrectionLevel: "M" }) });
@@ -977,9 +1027,9 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         }
         break;
       }
-      // New devices asking to join. Approving takes a fresh Face ID check when the primary has one.
+      // New devices asking to join. Any of your signed-in devices can approve (computer keys never reach /api).
+      // Approving takes a fresh Face ID check when the approving device has one.
       case "access": {
-        ownerOnly();
         if (method === "GET") return json(access.pending().map(({ token, ...r }) => r));
         const r = id ? access.find(id) : null;
         if (!r || r.status !== "pending") throw new HttpError(404, "That request expired.");
@@ -1108,7 +1158,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           const tar = Bun.spawn(["tar", "-czf", "-", "-C", root, "src", "scripts", "patches", "package.json", "bun.lock", "tsconfig.json"], { stdout: "pipe", stderr: "ignore" });
           return new Response(tar.stdout, { headers: { "Content-Type": "application/gzip", "Cache-Control": "no-store" } });
         }
-        await store.put<Device>("devices", { ...d, lastSeenAt: new Date().toISOString() });
+        await store.put<Device>("devices", { ...d, lastSeenAt: new Date().toISOString(), ip: ip !== "?" ? ip : d.ip });
         if (server.upgrade(req, { data: { kind: "computer", deviceId: d.id, name: d.name, want: d.copy || [], cloud: !!d.machine } })) return undefined as unknown as Response;
         return new Response("This is the computer link; connect with a WebSocket.", { status: 426 });
       }

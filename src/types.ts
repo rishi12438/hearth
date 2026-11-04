@@ -5,6 +5,10 @@ import type { Repeat } from "./time.ts";
 export type Passkey = { credId: string; spki: string; alg: number };
 /** "computer": a Mac (or any machine) linked to this hub to run work with its own logins. Its key opens only the link. */
 export type Device = Doc & { name: string; tokenHash: string; lastSeenAt: string; role?: "owner" | "member" | "computer"; passkey?: Passkey;
+  /** The address this device last talked to the hub from (shown in Connected devices). */
+  ip?: string;
+  /** For a computer the Mac app linked by itself: the signed-in device (the app's window) that linked it. */
+  linkedBy?: string;
   /** For a computer: which of its logins it keeps copied up to this hub, so the cloud can work while it's off. */
   copy?: ("claude" | "codex")[];
   /** For a computer the hub set up itself (an E2B sandbox or your VM): its machine id. The hub hands it its logins. */
