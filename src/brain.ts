@@ -576,9 +576,10 @@ export class Brain {
     let paths: string[] = [];
     try {
       const bin = installSkills(this.workDir, skills);
-      // Codex's rules live in its home, not the brain's folder. A server hub's hearth user exists only for Hearth, so its
-      // ~/.codex is ours to write; on your own computer that's your personal Codex, so only with HEARTH_CODEX_RULES=on.
-      if (this.config.target === "lightsail" || process.env.HEARTH_CODEX_RULES === "on") {
+      // Codex's rules live in its home, not the brain's folder. Without them Codex's sandbox can't reach the browser's
+      // daemon, so every browser job fails ("daemon not reachable"). Hearth owns only its own file (rules/hearth.rules),
+      // which lets just the skills' commands out of the sandbox. On your own computer HEARTH_CODEX_RULES=off skips it.
+      if (process.env.HEARTH_CODEX_RULES !== "off") {
         installCodexRules(process.env.CODEX_HOME || join(homedir(), ".codex"), skills);
       }
       paths = [...new Set([bin, ...skills.flatMap((s) => s.commands.map((c) => findCommandDir(c)).filter(Boolean) as string[])])];
