@@ -149,6 +149,38 @@ ${sourceDocs()}
     details change (a sender, a URL, a time). Save one when the setup took thought and could come up again.
 - trigger.use {name, inputs:{…}}   make a plan from a saved setup with new details
 - trigger.forget {name}
+EVENT PIPELINE (CONTEXT.eventPipeline: sources, triggers, timers). For "when X happens, do Y" rules that should run
+    the same way every time. Anything pushes events into a SOURCE (a named inbox with its own variables); every event is
+    saved; each TRIGGER on that source is a FORMULA checked with plain code (no model) against the event's variables,
+    and when it's true its action runs. "time" is a built-in source fed by TIMERS. Plain reminders stay hook.add.
+    Formulas: == != < <= > >= && || ! and or not ( ), contains startsWith endsWith matches "regex" in [..] not in [..],
+    lower() upper() trim() len() num() price() exists(). contains/startsWith/endsWith/matches ignore case; == is exact.
+    Every event also has source and payload (what was sent, e.g. payload.sender.login). A missing variable is null.
+    e.g. from == "Mom" && text contains "call"   ·   payload.type == "payment_failed"   ·   price(added) < 500
+    Use a formula for facts you can check. If the rule needs judgment ("is it urgent?"), match the facts in the
+    formula and use a think action that decides and replies ${QUIET} when it doesn't matter.
+- source.list   see every source, trigger and timer (you'll be called again with them). Look BEFORE creating.
+- source.create {name, description, variables:[{name,description}], service?, scope?, mapping?}
+    a push source with a secret URL (/api/events/<name>/<secret>) anything can POST JSON to: GitHub, Stripe, Zapier,
+    iOS Shortcuts, a script. service+scope say what it's for ("github", "rishi/hearth"), so it's never made twice.
+    mapping: variable -> where it is in what's sent ({"title":"pull_request.title","kind":"headers.x-github-event"});
+    without one, a variable is read from the top level. The URL shows in Triggers; tell the user to copy it from there.
+- source.update {name, description?, variables?, mapping?, status?} | source.remove {name, purgeEvents?}
+- source.test {name, payload}   push a test event through every trigger; you'll be called again with what happened
+- trigger.add {name, source, formula, action, why, cooldownMin?, force?}
+    action: {"type":"notify","text":"… {{variable}} …"} | {"type":"think","prompt":"…"} | {"type":"workflow","name","inputs":{"x":"{{variable}}"}}
+    {{variable}} fills from the event (e.g. {{payload.customer.email}}, {{data.who}}).
+- trigger.dryrun {source, formula}   what it would have caught in recent events, and which triggers already catch them
+- trigger.update {name, formula?, action?, why?, status?, cooldownMin?} | trigger.remove {name}
+- time.schedule {name, schedule, data?}   a timer: at its time the "time" source gets one event with
+    time_to_run (= name), scheduled_for, current_time, late_by_min, hour, minute, weekday ("Mon"), date, data.
+    schedule: {"at":"<ISO with offset>","repeat"?:"none|daily|weekdays|weekly|monthly"} | {"time":"HH:MM","days":[0-6]} | {"everyMin":n>=5}
+    Pair it with a trigger on source "time": time_to_run == "<name>" (add late_by_min < 60 to skip stale runs).
+    To check back later yourself ("ask again in 2 hours if they haven't replied"), schedule a one-off timer.
+- time.update {name, schedule?, data?, status?} | time.cancel {name}
+    The hub checks every change for conflicts (same name, a source that already covers that service, a variable the
+    source doesn't send, a trigger that already does the same thing). A conflict comes back to you with the options:
+    reuse or widen the existing one; force: true only when the user wants both; ask them when it's their call.
 - memory.add {fact, notebook, importance, evidence, expiresAt?}
     One fact per entry, written as a standalone sentence. notebook: a short topic (people, health, work, food, home, travel, money, preferences…).
     importance: 3 = core identity or something they'd be upset you forgot (always loaded), 2 = useful, 1 = minor.
@@ -1167,6 +1199,14 @@ function echoBrain(b: BrainInput): string {
   }
   m = text.match(/^save (?:this place|here) as (.+)/i);
   if (m) return `Saved this spot as ${m[1]}.` + fence([{ type: "place.add", name: m[1], here: true }]);
+  // The event pipeline, offline: a timer five minutes out and a trigger on the time source that picks it up.
+  if (/\bmake a test trigger\b/i.test(text)) {
+    const name = `test-${Date.now().toString(36).slice(-4)}`;
+    return `Done: a timer in 5 minutes and a trigger that says hi when it fires.` + fence([
+      { type: "time.schedule", name, schedule: { at: new Date(Date.now() + 5 * 60_000).toISOString() } },
+      { type: "trigger.add", name: `${name}-hi`, source: "time", formula: `time_to_run == "${name}"`, action: { type: "notify", text: "Hi from {{time_to_run}}" }, why: "A test trigger" },
+    ]);
+  }
   if (/weather/i.test(text)) {
     const loc = (b.context as any).location;
     return "Let me check." + fence([{ type: "script.run", name: "weather", args: loc ? [String(loc.lat), String(loc.lon)] : [] }]);

@@ -43,7 +43,13 @@ const S = {
   planning: null as null | string, // chat id the orchestrator is reading
   updateReady: false,
   sheetOpen: false,
-  panel: null as null | "plans" | "memory" | "skills" | "people" | "shares" | `share:${string}`,
+  panel: null as null | "plans" | "memory" | "skills" | "people" | "shares" | "triggers" | `share:${string}`,
+  /** The event pipeline: sources, triggers (formula rules), timers, and recent events. */
+  pipe: { sources: [], triggers: [], timers: [] } as { sources: any[]; triggers: any[]; timers: any[] },
+  pipeEvents: [] as any[],
+  pipeTab: "triggers" as "triggers" | "timers" | "sources" | "events",
+  /** Just made by a teammate: highlighted as it lands. */
+  pipeFresh: new Set<string>(),
 };
 
 let live: ReturnType<typeof stream> | null = null;
@@ -89,7 +95,7 @@ async function boot() {
   // Back from Google's sign-in: #connections=google:<email added>, or #connections=error:<why>.
   const backFromGoogle = location.hash.startsWith("#connections=") ? decodeURIComponent(location.hash.slice(13)) : null;
   if (backFromGoogle) history.replaceState(null, "", "#");
-  await Promise.all([refreshState(), loadTeammates(), loadSkills(), loadFiles(), loadApps(), loadIdeas(), loadProjects()]);
+  await Promise.all([refreshState(), loadTeammates(), loadSkills(), loadFiles(), loadApps(), loadIdeas(), loadProjects(), loadPipeline()]);
   (window as any).webkit?.messageHandlers?.hearth?.postMessage({ type: "ready" });
   if (inMacApp) void ensureMacLinked();
   show();
@@ -293,6 +299,12 @@ function onEvent(e: { type: string; data?: any }) {
       return;
     }
     case "people": if (S.panel === "people") openPeople(); return;
+    case "pipeline": {
+      // A teammate made a trigger, timer or source: it flies into Triggers.
+      const d = e.data || {};
+      loadPipeline().then(() => { if (d.created && d.by !== "you") landInTriggers(d.what, d.created); });
+      return;
+    }
     case "ideas": loadIdeas().then(() => { if (route().view === "home") drawHome(); }); return;
     case "brains": refreshState().then(() => { if (route().view === "home") drawHome(); drawSide(); }); return;
     case "about": if (S.panel === "memory") loadAbout(); return;
@@ -571,7 +583,9 @@ function drawSide() {
     h("nav", { class: "sgroup" },
       nav("brain", "Memory", false, openMemory),
       nav("users", "People", false, openPeople),
-      nav("sparkle", "Skills", false, openSkills)),
+      nav("sparkle", "Skills", false, openSkills),
+      h("button", { class: `snav ${S.panel === "triggers" ? "on" : ""}`, id: "snav-triggers", on: { click: () => openTriggers() } }, icon("zap", 18), h("span", { class: "grow" }, "Triggers"),
+        S.pipe.triggers.length ? h("small", { class: "scount" }, String(S.pipe.triggers.filter((t) => t.status === "active").length)) : null)),
     h("div", { class: "sfoot" },
       nav("settings", "Settings", false, openSettings)),
   );
@@ -2506,6 +2520,7 @@ function openMenu() {
       item("dms", "People", "Your relationship map", openPeople),
       item("users", "Teammates", "Who the orchestrator can hand work to", openTeammates),
       item("sparkle", "Skills", "What the team already knows how to do", openSkills),
+      item("zap", "Triggers", "Rules that act when something happens", () => openTriggers()),
       item("brain", "Brains", "Which harness and model does what", openBrains),
       item("download", "Files", "Attached and made, ready to download", openFiles),
       item("settings", "Settings", "Notifications, location, data", openSettings)),
@@ -2665,6 +2680,172 @@ function openSkill(sk: any) {
       sk.kind === "script" ? h("button", { class: "btn ghost", on: { click: async () => { const list = await call("/api/scripts"); const sc = list.find((x: any) => x.name === sk.script); if (sc) openScript(sc); } } }, icon("code", 16), "View the code") : null,
       h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet(`Delete ${sk.name}?`, "The team will work it out again next time.", "Delete", async () => { await call(`/api/skills/${sk.id}`, { method: "DELETE" }); toast("Deleted"); }) } }, icon("trash", 16), "Delete")),
   ]);
+}
+
+// ---------------- triggers (the event pipeline) ----------------
+// Sources push events in, every event is saved, and each trigger's formula (plain code) decides whether it acts.
+
+async function loadPipeline() {
+  try {
+    const [pipe, events] = await Promise.all([call("/api/pipeline"), S.panel === "triggers" ? call("/api/pipeline/events?limit=60") : Promise.resolve(S.pipeEvents)]);
+    S.pipe = pipe; S.pipeEvents = events;
+    drawSide();
+    if (S.panel === "triggers") drawTriggers();
+  } catch {}
+}
+
+function openTriggers(tab?: typeof S.pipeTab) {
+  S.panel = "triggers";
+  if (tab) S.pipeTab = tab;
+  openSheet("Triggers", h("div", { id: "triggers" }), { onClose: () => { S.panel = null; drawSide(); } });
+  drawTriggers();
+  loadPipeline();
+}
+
+const pipeDo = async (fn: () => Promise<unknown>, ok?: string) => { try { await fn(); if (ok) toast(ok); await loadPipeline(); } catch (e) { handleError(e); } };
+
+function scheduleText(sc: any) {
+  if (sc.at) return sc.repeat && sc.repeat !== "none" ? `${sc.repeat} from ${dayLabel(sc.at)} ${clockTime(sc.at)}` : `once, ${dayLabel(sc.at)} ${clockTime(sc.at)}`;
+  if (sc.time) {
+    const d = (sc.days || []).join(",");
+    const days = !d || d === "0,1,2,3,4,5,6" ? "every day" : d === "1,2,3,4,5" ? "weekdays" : d === "0,6" ? "weekends" : sc.days.map((x: number) => ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][x]).join(", ");
+    return `${days} at ${sc.time}`;
+  }
+  return sc.everyMin % 60 === 0 ? `every ${sc.everyMin / 60}h` : `every ${sc.everyMin} min`;
+}
+
+function actionText(a: any) {
+  if (a.type === "workflow") return `runs workflow ${a.name}`;
+  if (a.type === "think") return `thinks: ${a.prompt}`;
+  return `says: ${a.text}`;
+}
+
+function drawTriggers() {
+  const el = document.getElementById("triggers");
+  if (!el) return;
+  const { sources, triggers, timers } = S.pipe;
+  const owner = !!S.state?.device?.primary;
+  const tabs: [typeof S.pipeTab, string, number][] = [["triggers", "Triggers", triggers.length], ["timers", "Timers", timers.filter((t) => t.status !== "done").length], ["sources", "Sources", sources.length], ["events", "Events", 0]];
+  const fresh = (id: string) => (S.pipeFresh.has(id) ? "fresh" : "");
+  const del = (label: string, text: string, fn: () => Promise<unknown>) => owner ? h("button", { class: "iconbtn", "aria-label": `Delete ${label}`, on: { click: (e: Event) => { e.stopPropagation(); confirmSheet(`Delete ${label}?`, text, "Delete", async () => { await fn(); openTriggers(); }); } } }, icon("trash", 16)) : null;
+  const pause = (t: any, path: string) => owner ? h("button", { class: "iconbtn", "aria-label": t.status === "paused" ? "Resume" : "Pause",
+    on: { click: () => pipeDo(() => call(path, { method: "PATCH", body: { status: t.status === "paused" ? "active" : "paused" } }), t.status === "paused" ? "Resumed" : "Paused") } }, icon(t.status === "paused" ? "play" : "pause", 16)) : null;
+  const by = (who: string) => (who && who !== "you" ? `made by ${who}` : "made by you");
+
+  const triggerRow = (t: any) => h("div", { class: `item pipe ${t.status} ${fresh(t.id)}`, "data-pipe": t.id },
+    h("span", { class: "hicon" }, icon("zap", 16)),
+    h("span", { class: "grow" },
+      h("b", null, t.name, t.status === "paused" ? h("span", { class: "tag" }, "Paused") : null),
+      h("small", { class: "sub" }, h("span", { class: "srcchip" }, t.sourceName), " when ", h("code", { class: "formula" }, t.formula)),
+      h("small", { class: "sub" }, actionText(t.action)),
+      h("small", { class: "sub" }, [t.fireCount ? `ran ${t.fireCount}×` : "hasn't run yet", t.lastFiredAt ? `last ${shortAgo(t.lastFiredAt)}` : null, t.cooldownMin ? `at most every ${t.cooldownMin} min` : null, by(t.createdBy)].filter(Boolean).join(" · "))),
+    pause(t, `/api/pipeline/triggers/${t.id}`),
+    del(t.name, "It stops acting on new events. Past events stay in the log.", () => call(`/api/pipeline/triggers/${t.id}`, { method: "DELETE" })));
+
+  const timerRow = (t: any) => h("div", { class: `item pipe ${t.status} ${fresh(t.id)}`, "data-pipe": t.id },
+    h("span", { class: "hicon" }, icon("clock", 16)),
+    h("span", { class: "grow" },
+      h("b", null, t.name, t.status === "paused" ? h("span", { class: "tag" }, "Paused") : t.status === "done" ? h("span", { class: "tag" }, "Done") : null),
+      h("small", { class: "sub" }, scheduleText(t.schedule), t.nextAt && t.status === "active" ? ` · next ${dayLabel(t.nextAt)} ${clockTime(t.nextAt)}` : ""),
+      Object.keys(t.data || {}).length ? h("small", { class: "sub" }, h("code", { class: "formula" }, JSON.stringify(t.data))) : null,
+      h("small", { class: "sub" }, [t.runCount ? `ran ${t.runCount}×` : null, by(t.createdBy), (triggers.filter((x) => x.sourceName === "time" && x.formula.includes(`"${t.name}"`)).map((x) => `→ ${x.name}`).join(", ")) || "no trigger listens to it yet"].filter(Boolean).join(" · "))),
+    t.status !== "done" ? pause(t, `/api/pipeline/timers/${t.id}`) : null,
+    del(t.name, "It won't fire again.", () => call(`/api/pipeline/timers/${t.id}`, { method: "DELETE" })));
+
+  const sourceRow = (s: any) => {
+    const url = s.pushPath ? `${activeHub()?.url?.replace(/\/$/, "") || location.origin}${s.pushPath}` : null;
+    return h("div", { class: `item pipe col ${s.status} ${fresh(s.id)}`, "data-pipe": s.id },
+      h("div", { class: "row gap" },
+        h("span", { class: "hicon" }, icon(s.kind === "time" ? "clock" : "plug", 16)),
+        h("span", { class: "grow" },
+          h("b", null, s.name, s.kind === "time" ? h("span", { class: "tag" }, "built in") : null, s.status === "paused" ? h("span", { class: "tag" }, "Paused") : null),
+          s.description ? h("small", { class: "sub" }, s.description) : null,
+          h("small", { class: "sub" }, [s.service ? `${s.service}${s.scope ? ` · ${s.scope}` : ""}` : null, `${s.eventCount} event${s.eventCount === 1 ? "" : "s"}`, s.lastEventAt ? `last ${shortAgo(s.lastEventAt)}` : null, s.kind === "push" ? by(s.createdBy) : null].filter(Boolean).join(" · "))),
+        s.kind === "push" ? pause(s, `/api/pipeline/sources/${s.id}`) : null,
+        s.kind === "push" ? del(s.name, "Its triggers go too, and its URL stops working. Past events stay in the log.", () => call(`/api/pipeline/sources/${s.id}`, { method: "DELETE" })) : null),
+      h("div", { class: "vars" }, s.variables.map((v: any) => h("span", { class: "varchip", title: v.description || "" }, v.name))),
+      url ? h("div", { class: "row gap" },
+        h("button", { class: "codeline grow", title: "Copy", on: { click: () => { navigator.clipboard?.writeText(url); toast("URL copied"); } } }, url),
+        h("button", { class: "btn small ghost", on: { click: () => pipeDo(() => call(`/api/pipeline/sources/${s.id}/test`, { body: { payload: { test: true } } }), "Test event sent") } }, "Test"),
+        owner ? h("button", { class: "btn small ghost", on: { click: () => confirmSheet("New URL?", "The old URL stops working right away. Anything using it needs the new one.", "Make new URL", async () => { await call(`/api/pipeline/sources/${s.id}/rotate`, { body: {} }); openTriggers("sources"); }) } }, "New URL") : null) : null);
+  };
+
+  const eventRow = (e: any) => {
+    const ran = (e.log || []).filter((l: any) => l.step === "matched").map((l: any) => l.detail.split(":")[0]);
+    const body = h("pre", { class: "output hidden" }, JSON.stringify({ variables: e.variables, payload: e.payload }, null, 2) + "\n\n" + (e.log || []).map((l: any) => `${clockTime(l.at)}  ${l.step.padEnd(9)} ${l.detail}`).join("\n"));
+    return h("div", { class: `item pipe col ev ${e.status}` },
+      h("button", { class: "row gap evhead", on: { click: () => body.classList.toggle("hidden") } },
+        h("span", { class: `evdot ${e.status}` }),
+        h("span", { class: "grow" },
+          h("b", null, e.sourceName, e.test ? h("span", { class: "tag" }, "test") : null),
+          h("small", { class: "sub" }, e.sourceName === "time" ? `timer ${e.variables.time_to_run}` : Object.entries(e.variables).filter(([, v]) => v != null && v !== "").slice(0, 3).map(([k, v]) => `${k}: ${String(typeof v === "object" ? JSON.stringify(v) : v).slice(0, 40)}`).join(" · ") || "(nothing mapped)"),
+          h("small", { class: "sub" }, `${shortAgo(e.receivedAt)} · `, e.status === "matched" ? `→ ${ran.join(", ")}` : e.status === "unmatched" ? "no trigger matched" : e.status === "failed" ? "a trigger failed" : "waiting")),
+        del("this event", "It's removed from the log.", () => call(`/api/pipeline/events/${e.id}`, { method: "DELETE" }))),
+      body);
+  };
+
+  const tab = S.pipeTab;
+  const active = triggers.filter((t) => t.status === "active").length;
+  clear(el,
+    h("p", { class: "muted" }, "Anything can push events into a source. Every event is saved, and each trigger's formula decides, with plain code, whether it acts."),
+    h("div", { class: "pipeflow" }, h("span", null, `${sources.length} source${sources.length === 1 ? "" : "s"}`), "→", h("span", null, "events"), "→", h("span", { id: "pipe-drop" }, `${active} trigger${active === 1 ? "" : "s"}`), "→", h("span", null, "actions")),
+    h("div", { class: "seg" }, tabs.map(([k, label, n]) => h("button", { class: tab === k ? "on" : "", on: { click: () => { S.pipeTab = k; if (k === "events") loadPipelineEvents(); drawTriggers(); } } }, label, n ? h("small", null, ` ${n}`) : null))),
+    tab === "triggers" ? (triggers.length ? h("div", { class: "list" }, triggers.map(triggerRow)) : h("p", { class: "empty" }, "No triggers yet. Say “when Mom texts about dinner, tell me” or “when a GitHub PR is opened on my repo, summarize it”.")) : null,
+    tab === "timers" ? (timers.length ? h("div", { class: "list" }, timers.map(timerRow)) : h("p", { class: "empty" }, "No timers. A timer pushes one event to the time source when it's due, and triggers on “time” pick it up.")) : null,
+    tab === "sources" ? h("div", { class: "list" }, sources.map(sourceRow)) : null,
+    tab === "events" ? [
+      S.pipeEvents.length ? h("div", { class: "list" }, S.pipeEvents.map(eventRow)) : h("p", { class: "empty" }, "No events yet."),
+      S.pipeEvents.length && owner ? h("button", { class: "link", on: { click: () => confirmSheet("Clear the event log?", "Every saved event and its log goes. Sources, triggers and timers stay.", "Clear", async () => { await call("/api/pipeline/events", { method: "DELETE" }); S.pipeEvents = []; openTriggers("events"); }) } }, "Clear the log") : null,
+    ] : null);
+}
+
+async function loadPipelineEvents() {
+  try { S.pipeEvents = await call("/api/pipeline/events?limit=60"); if (S.panel === "triggers") drawTriggers(); } catch (e) { handleError(e); }
+}
+
+/**
+ * A teammate just made something in the pipeline: a card with it appears and flies into Triggers (the sidebar item,
+ * or the open list), which pulses as it lands. With the list open, the new row slides in highlighted.
+ */
+let flights: Promise<void> = Promise.resolve();
+function landInTriggers(what: string, id: string) {
+  // One card at a time: a teammate often makes a timer and its trigger together.
+  flights = flights.then(() => new Promise<void>((done) => { flyIn(what, id, done); setTimeout(done, 4000); }));
+}
+
+function flyIn(what: string, id: string, next: () => void) {
+  const item = what === "triggers" ? S.pipe.triggers.find((t) => t.id === id) : what === "timers" ? S.pipe.timers.find((t) => t.id === id) : S.pipe.sources.find((s) => s.id === id);
+  if (!item) return next();
+  S.pipeFresh.add(id);
+  setTimeout(() => { S.pipeFresh.delete(id); if (S.panel === "triggers") drawTriggers(); }, 4500);
+  const tab = what === "triggers" ? "triggers" : what === "timers" ? "timers" : "sources";
+  if (S.panel === "triggers") { S.pipeTab = tab; drawTriggers(); document.querySelector(`[data-pipe="${id}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }); }
+  const label = what === "triggers" ? "New trigger" : what === "timers" ? "New timer" : "New source";
+  const detail = what === "triggers" ? item.formula : what === "timers" ? scheduleText(item.schedule) : item.variables.map((v: any) => v.name).join(", ");
+  const card = h("button", { class: "flycard", on: { click: () => { card.remove(); openTriggers(tab); } } },
+    h("span", { class: "flyicon" }, icon(what === "timers" ? "clock" : what === "sources" ? "plug" : "zap", 18)),
+    h("span", { class: "grow" }, h("small", null, `${label} · ${item.createdBy || "a teammate"}`), h("b", null, item.name), h("code", null, detail)));
+  document.body.appendChild(card);
+  // Looked up when it flies (and again when it lands): the sidebar may have been redrawn in between.
+  const findTarget = () => (S.panel === "triggers" ? document.getElementById("pipe-drop") : null) || document.getElementById("snav-triggers");
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  // Show it for a moment, then fly it into its place; the next card can come up as this one leaves.
+  setTimeout(() => {
+    next();
+    const t = findTarget()?.getBoundingClientRect();
+    const c = card.getBoundingClientRect();
+    if (!t || !t.width || reduce) { card.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 400, fill: "forwards" }).onfinish = () => card.remove(); return; }
+    const dx = t.left + t.width / 2 - (c.left + c.width / 2), dy = t.top + t.height / 2 - (c.top + c.height / 2);
+    card.animate([
+      { transform: "translate(0, 0) scale(1)", opacity: 1 },
+      { transform: `translate(${dx * 0.6}px, ${dy * 0.6 - 40}px) scale(.55)`, opacity: .9, offset: .6 },
+      { transform: `translate(${dx}px, ${dy}px) scale(.12)`, opacity: 0 },
+    ], { duration: 850, easing: "cubic-bezier(.5, 0, .3, 1)", fill: "forwards" }).onfinish = () => {
+      card.remove();
+      const target = findTarget();
+      if (target) { target.classList.remove("landed"); void target.offsetWidth; target.classList.add("landed"); }
+    };
+  }, 1400);
 }
 
 // ---------------- plans & memory panels ----------------

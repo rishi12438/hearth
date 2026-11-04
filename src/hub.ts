@@ -33,6 +33,7 @@ import { Narrator } from "./brains/narrate.ts";
 import { syncBrowserLogins } from "./brains/browser-logins.ts";
 import type { FreshLogin } from "./computers.ts";
 import { labelFor } from "./cookie-sites.ts";
+import { EventPipeline, fillTemplate, type EventTrigger, type PipelineEvent } from "./events/pipeline.ts";
 
 const DEFAULT_PREFS: Prefs = {
   userName: "", tz: "UTC", quietStart: "23:00", quietEnd: "07:30",
@@ -135,6 +136,22 @@ export class Hub {
     now: this.clock(), tz: (await this.prefs()).tz });
   /** Webhook calls that arrived while their hook was still busy with the last one; handled together right after. */
   private webhookQueue = new Map<string, string[]>();
+  private _pipeline: EventPipeline | null = null;
+  /**
+   * The event pipeline (events/pipeline.ts): sources push events, plain-code formulas pick triggers, triggers run.
+   * Its own SQLite file next to the hub's data, with real columns (formula, JSON event details, a log per event).
+   */
+  get pipeline() {
+    if (!this._pipeline) {
+      const p = new EventPipeline(join(this.config.dataDir, "events.db"), () => this.clock(), async () => (await this.prefs()).tz);
+      p.run = (t, e) => this.runEventTrigger(t, e);
+      p.checkAction = async (a) => a.type !== "workflow" || (await this.store.all<Workflow>("workflows")).some((w) => w.name === a.name && w.status === "active")
+        ? null : `No switched-on workflow called "${a.name}". Workflows: ${(await this.store.all<Workflow>("workflows")).filter((w) => w.status === "active").map((w) => w.name).join(", ") || "none yet"}.`;
+      p.onChange = (what, detail) => this.emit("pipeline", { what, ...(detail || {}) });
+      this._pipeline = p;
+    }
+    return this._pipeline;
+  }
   private timer: ReturnType<typeof setInterval> | null = null;
   // Planning runs one batch at a time per ramble: messages sent while it's planning wait and are planned together next.
   private planning = new Set<string>();
@@ -275,6 +292,8 @@ export class Hub {
       location,
       places: places.map((p) => ({ name: p.name, radiusM: p.radiusM })),
       sources: SOURCES.map((s) => ({ id: s.id, label: s.label, connected: typeof s.needs === "function" ? undefined : this.connections.connected(s.needs) })),
+      // The event pipeline: what pushes events in, the rules that watch them, and the timers (see EVENT PIPELINE).
+      eventPipeline: this.pipelineSummary(),
       ...(project ? { project: { name: project.name, notebook: project.notebook, about: project.about || undefined,
         rambles: (await this.store.all<Thread>("threads")).filter((t) => t.projectId === project.id).map((t) => channelOf(t)).slice(0, 20) } } : {}),
       memory: memory.map((f) => ({ id: f.id, fact: f.fact, notebook: f.notebook, importance: f.importance, ...(f.expiresAt ? { expiresAt: f.expiresAt } : {}) })),
@@ -312,6 +331,7 @@ export class Hub {
 
     const results: string[] = [];
     for (const r of applied.runs.slice(0, 3)) {
+      if (r.name === "@pipeline") { results.push(r.args[0]); continue; }
       if (r.name === "@history") { results.push(`## Past conversations matching "${r.args[0]}"\n${await this.searchHistory(r.args[0])}`); continue; }
       if (r.name === "@source") { results.push(await this.readSource(JSON.parse(r.args[0]), teammate?.name || "a teammate")); continue; }
       if (opts.allowedScripts && !opts.allowedScripts.includes(r.name)) {
@@ -1793,6 +1813,14 @@ export class Hub {
             if (h) done.push({ kind: "hook", label: `Paused: ${h.title}` });
             break;
           }
+          case "source.list": case "source.create": case "source.update": case "source.remove": case "source.test":
+          case "trigger.add": case "trigger.update": case "trigger.remove": case "trigger.list": case "trigger.dryrun":
+          case "time.schedule": case "time.update": case "time.cancel": {
+            if (where.recipe) break;
+            const note = await this.pipelineAction(a, where, done);
+            if (note) runs.push({ name: "@pipeline", args: [note] });
+            break;
+          }
           case "memory.add": {
             const r = await this.addFact({ ...a, evidence: a.evidence || evidence.slice(0, 300) }, "assistant");
             if (r.value) done.push({ kind: "memory", label: `Remembered: ${r.value.fact}`, id: r.value.id });
@@ -2789,6 +2817,7 @@ export class Hub {
         }
       }
     }
+    try { await this.pipeline.tick(); } catch (e: any) { console.error("event pipeline tick failed", e); }
   }
 
   private async reschedule(h: Hook, now: Date) {
@@ -3171,6 +3200,128 @@ export class Hub {
     }
   }
 
+  // ---------- the event pipeline ----------
+
+  /** What the brain sees of the pipeline: sources with their variables, the rules, the timers. */
+  pipelineSummary() {
+    const p = this.pipeline;
+    return {
+      sources: p.sources().slice(0, 40).map((s) => ({ name: s.name, kind: s.kind, ...(s.service ? { service: s.service, scope: s.scope } : {}), variables: s.variables.map((v) => v.name), status: s.status, events: s.eventCount })),
+      triggers: p.triggers().slice(0, 60).map((t) => ({ name: t.name, source: t.sourceName, formula: t.formula, does: t.action.type === "workflow" ? `workflow ${t.action.name}` : t.action.type, status: t.status })),
+      timers: p.timers().filter((t) => t.status !== "done").slice(0, 40).map((t) => ({ name: t.name, schedule: t.schedule, next: t.nextAt })),
+    };
+  }
+
+  /**
+   * The brain's pipeline tools. Changes go through the pipeline's conflict checks; what the brain needs to see next
+   * (a listing, a dry-run, a conflict and its options) comes back as a note, and it's called again with it.
+   */
+  private async pipelineAction(a: any, where: { teammateId?: string; threadId?: string }, done: Done[]): Promise<string | null> {
+    const p = this.pipeline;
+    const by = (await this.teammate(where.teammateId))?.name || "Hearth";
+    const no = (what: string, r: { error?: string }) => `## ${what}: not done\n${r.error}\nPick one of the options and try again, or ask the user if it's their call.`;
+    const name = String(a.name ?? a.source ?? "");
+    switch (a.type) {
+      case "source.list": case "trigger.list":
+        return `## The event pipeline now\n${JSON.stringify(this.pipelineSummary(), null, 1).slice(0, 8000)}`;
+      case "source.create": {
+        const r = p.createSource(a, by);
+        if (!r.value) return no(`source.create ${name}`, r);
+        done.push({ kind: "hook", label: `Source: ${r.value.source.name}` });
+        return `## source.create ${r.value.source.name}: done\nIts push URL is on the source in Triggers (Menu → Triggers). Tell the user to copy it from there; don't repeat it. Variables: ${r.value.source.variables.map((v) => v.name).join(", ")}.`;
+      }
+      case "source.update": {
+        const r = p.updateSource(name, a);
+        if (!r.value) return no(`source.update ${name}`, r);
+        done.push({ kind: "hook", label: `Updated source: ${r.value.name}` });
+        return null;
+      }
+      case "source.remove": {
+        const r = p.removeSource(name, a.purgeEvents === true);
+        if (!r.value) return no(`source.remove ${name}`, r);
+        done.push({ kind: "hook", label: `Removed source: ${name}${r.value.triggers ? ` and ${r.value.triggers} trigger(s)` : ""}` });
+        return null;
+      }
+      case "source.test": {
+        const r = p.publish(name, a.payload && typeof a.payload === "object" ? a.payload : {}, {}, true);
+        if (!r.value) return no(`source.test ${name}`, r);
+        await p.drain();
+        const e = p.getEvent(r.value.id)!;
+        return `## source.test ${name}\nstatus: ${e.status}\n${e.log!.map((l) => `- ${l.step}: ${l.detail}`).join("\n")}`;
+      }
+      case "trigger.dryrun": {
+        const r = p.dryrun(String(a.source || ""), String(a.formula ?? a.when ?? ""));
+        if (!r.value) return no("trigger.dryrun", r);
+        const v = r.value;
+        return `## trigger.dryrun on ${a.source}\nchecked ${v.checked} recent events, ${v.matched} matched.${v.alsoMatchedBy.length ? ` Already caught by: ${v.alsoMatchedBy.map((x) => `${x.name} (${x.count})`).join(", ")}.` : ""}\n${v.examples.map((e) => `- ${e.receivedAt}: ${JSON.stringify(e.variables).slice(0, 300)}`).join("\n")}`;
+      }
+      case "trigger.add": {
+        const r = await p.addTrigger({ ...a, teammateId: where.teammateId, threadId: where.threadId }, by);
+        if (!r.value) return no(`trigger.add ${name}`, r);
+        done.push({ kind: "hook", label: `Trigger: ${r.value.name}` });
+        return null;
+      }
+      case "trigger.update": {
+        const r = await p.updateTrigger(name, a);
+        if (!r.value) return no(`trigger.update ${name}`, r);
+        done.push({ kind: "hook", label: `Updated trigger: ${r.value.name}` });
+        return null;
+      }
+      case "trigger.remove":
+        if (p.removeTrigger(name)) done.push({ kind: "hook", label: `Removed trigger: ${name}` });
+        return null;
+      case "time.schedule": {
+        const r = await p.addTimer({ ...a, name: a.name ?? a.time_to_run }, by);
+        if (!r.value) return no(`time.schedule ${a.name ?? a.time_to_run}`, r);
+        done.push({ kind: "hook", label: `Timer: ${r.value.name}` });
+        return null;
+      }
+      case "time.update": {
+        const r = await p.updateTimer(name, a);
+        if (!r.value) return no(`time.update ${name}`, r);
+        done.push({ kind: "hook", label: `Moved timer: ${r.value.name}` });
+        return null;
+      }
+      case "time.cancel":
+        if (p.removeTimer(name)) done.push({ kind: "hook", label: `Cancelled timer: ${name}` });
+        return null;
+    }
+    return null;
+  }
+
+  /** A trigger matched: notify, think, or run a workflow, and say it where the trigger was made. */
+  private async runEventTrigger(t: EventTrigger, e: PipelineEvent): Promise<{ text?: string; quiet?: boolean }> {
+    const vars = { ...e.variables, source: e.sourceName };
+    const teammate = await this.teammate(t.teammateId);
+    const extra = `## The event (from ${e.sourceName})\n<untrusted>\n${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 20_000)}\n</untrusted>`;
+    let text = "", did: Done[] = [];
+    const a = t.action;
+    if (a.type === "notify") text = fillTemplate(a.text, vars);
+    else if (a.type === "think") {
+      const r = await this.turn("hook", `${t.name}\n${fillTemplate(a.prompt, vars)}`, `trigger: ${t.name}`, { teammate, threadId: t.threadId ?? undefined, extra });
+      text = r.text; did = r.did;
+    } else {
+      const wf = (await this.store.all<Workflow>("workflows")).find((w) => w.name === a.name && w.status === "active");
+      if (!wf) throw new Error(`The workflow "${a.name}" isn't switched on any more.`);
+      const inputs = Object.fromEntries(Object.entries(a.inputs).map(([k, v]) => [k, fillTemplate(v, vars)]));
+      const r = await this.runWorkflow(wf.id, inputs, { mate: teammate });
+      text = r.output; did = r.did;
+    }
+    if (!text.trim() || text.includes(QUIET)) return { quiet: true };
+    const prefs = await this.prefs();
+    const home = t.threadId ? await this.store.get<Thread>("threads", t.threadId) : null;
+    const threadId = home && !home.archivedAt ? home.id : teammate ? (await this.dmThread(teammate.id)).id : await this.updatesThread();
+    const msg = await this.addMessage({
+      role: "assistant", teammateId: teammate?.id, threadId, fromThreadId: home && home.id !== threadId ? home.id : undefined, text: e.test ? `(Test) ${text}` : text,
+      proactive: { hookId: t.id, title: t.name, trigger: e.sourceName === "time" ? `timer ${e.variables.time_to_run}` : `event from ${e.sourceName}`, why: t.why || `Trigger ${t.name}: ${t.formula}` },
+      did: did.length ? did : undefined,
+    });
+    await this.touchThread(msg.threadId!, { preview: msg.text.slice(0, 120) });
+    // Said in quiet hours without a buzz: the message is there in the morning.
+    if (!inQuietHours(this.clock(), prefs.tz, prefs.quietStart, prefs.quietEnd)) await this.push?.send({ title: t.name, body: msg.text.slice(0, 180), tag: t.id, url: threadLink(msg.threadId!) });
+    return { text };
+  }
+
   // ---------- your data ----------
 
   async exportAll() {
@@ -3182,6 +3333,7 @@ export class Hub {
   }
 
   async wipePersonal() {
+    this.pipeline.clearEvents(); // events carry message text; sources, triggers and timers are setup, like scripts
     for (const f of await this.store.all<StoredFile>("files")) await this.files.remove(f.id);
     for (const col of ["threads", "messages", "jobs", "approvals", "hooks", "memory", "notebooks", "places", "locations", "activity", "apps", "appState", "ideas", "days", "people"] as const) await this.store.clear(col);
     await this.setPrefs({ about: undefined, aboutUpdatedAt: undefined });

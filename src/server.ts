@@ -300,6 +300,20 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       if (!(await hub.webhook(seg[2], text))) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(404, "No webhook here."); }
       return json({ ok: true }, 202);
     }
+    // An event-pipeline source's secret URL: anything can POST JSON here; it's saved as an event and matched to triggers.
+    if (seg[1] === "events" && seg[2] && seg[3] && !seg[4]) {
+      if (method !== "POST") throw new HttpError(405, "POST to this address.");
+      if (badToken.blocked(ip)) throw banned();
+      if (!webhookLimiter.allow(`events:${seg[2]}`)) throw new HttpError(429, "Too many calls. Wait a minute.");
+      if (Number(req.headers.get("content-length") || 0) > 64_000) throw new HttpError(413, "Too large.");
+      const text = (await req.text()).slice(0, 64_001);
+      const headers: Record<string, string> = {};
+      req.headers.forEach((v, k) => { if (!/^(authorization|cookie|x-hearth-)/i.test(k)) headers[k] = v.slice(0, 500); });
+      const r = hub.pipeline.push(decodeURIComponent(seg[2]), decodeURIComponent(seg[3]), text, headers);
+      if (!r) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(404, "No source here."); }
+      if (r.error) throw new HttpError(r.error === "Too large." ? 413 : 409, r.error);
+      return json({ ok: true, event: r.value!.id }, 202);
+    }
     // The agent's hearth-plaid command (from this machine, with the hub's agent key): read-only bank questions.
     // Only straight from this machine: the key is written in the brain's tool, so a copy leaked off the box (or a request
     // through the public proxy, which adds X-Forwarded-For) is refused.
@@ -890,6 +904,48 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (method === "POST" && seg[3] === "run") { const h = await store.get<Hook>("hooks", id); if (!h) break; hub.fire({ ...h, cooldownMin: 0 }, "You tapped Run now"); return json({ ok: true }); }
         if (method === "PATCH" && id) { const h = await hub.updateHook(id, await body(req)); if (!h) throw new HttpError(400, "Couldn't update that hook."); return json(h); }
         if (method === "DELETE" && id) { const h = await store.get<Hook>("hooks", id); if (h?.source === "system") throw new HttpError(400, "Pause system hooks instead."); return json({ ok: await hub.removeHook(id) }); }
+        break;
+      }
+      // The event pipeline: sources, triggers, timers and the event log. Reading is for any device; changes are the owner's.
+      case "pipeline": {
+        const p = hub.pipeline;
+        const sub = seg[2], key = seg[3] ? decodeURIComponent(seg[3]) : "";
+        const ok = <T,>(r: { value?: T; error?: string; conflict?: unknown }) => { if (r.error) return json({ error: r.error, conflict: r.conflict ?? null }, 409); return json(r.value); };
+        const withUrl = (src: ReturnType<typeof p.sources>[number]) => ({ ...src, pushPath: src.kind === "push" && owner ? `/api/events/${src.name}/${p.secretOf(src.id)}` : null });
+        if (method === "GET" && !sub) return json({ sources: p.sources().map(withUrl), triggers: p.triggers(), timers: p.timers() });
+        if (method === "GET" && sub === "events" && key) { const e = p.getEvent(key); if (!e) break; return json(e); }
+        if (method === "GET" && sub === "events") {
+          const q = url.searchParams;
+          return json(p.events({ source: q.get("source") || undefined, status: q.get("status") || undefined, limit: Number(q.get("limit")) || 50, before: q.get("before") || undefined }));
+        }
+        ownerOnly();
+        if (sub === "sources") {
+          if (method === "POST" && !key) { const r = p.createSource(await body(req), "you"); return r.value ? json({ ...withUrl(r.value.source) }) : ok(r); }
+          if (method === "PATCH" && key) return ok(p.updateSource(key, await body(req)));
+          if (method === "POST" && seg[4] === "rotate") { const r = p.rotateSecret(key); return r.value ? json(withUrl(r.value.source)) : ok(r); }
+          if (method === "POST" && seg[4] === "test") {
+            const r = p.publish(key, (await body(req)).payload ?? {}, {}, true);
+            if (!r.value) return ok(r);
+            await p.drain();
+            return json(p.getEvent(r.value.id));
+          }
+          if (method === "DELETE" && key) return ok(p.removeSource(key, url.searchParams.get("purge") === "1"));
+        }
+        if (sub === "triggers") {
+          if (method === "POST" && key === "dryrun") { const b = await body(req); return ok(p.dryrun(String(b.source || ""), String(b.formula || ""))); }
+          if (method === "POST" && !key) return ok(await p.addTrigger(await body(req), "you"));
+          if (method === "PATCH" && key) return ok(await p.updateTrigger(key, await body(req)));
+          if (method === "DELETE" && key) return json({ ok: p.removeTrigger(key) });
+        }
+        if (sub === "timers") {
+          if (method === "POST" && !key) return ok(await p.addTimer(await body(req), "you"));
+          if (method === "PATCH" && key) return ok(await p.updateTimer(key, await body(req)));
+          if (method === "DELETE" && key) return json({ ok: p.removeTimer(key) });
+        }
+        if (sub === "events" && method === "DELETE") {
+          if (key) return json({ ok: p.removeEvent(key) });
+          return json({ removed: p.clearEvents({ source: url.searchParams.get("source") || undefined, status: url.searchParams.get("status") || undefined }) });
+        }
         break;
       }
       case "ideas": {
