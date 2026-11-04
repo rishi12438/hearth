@@ -10,6 +10,7 @@ import { readClaudeToken } from "./brains/logins.ts";
 import { describeSkillStep, hubSkills, installCodexRules, installSkills, skillCatalog, skillFlags, type Skill } from "./brains/skills.ts";
 import { BrainHealth, signInProblem } from "./brains/health.ts";
 import { jailArgs, jailWorks } from "./brains/jail.ts";
+import { loginsFile } from "./brains/browser-logins.ts";
 import { masterKeyPath } from "./vault.ts";
 
 /** Each trigger module's own description of its config, for the hook docs below. */
@@ -550,9 +551,13 @@ export class Brain {
   /** The bubblewrap prefix for brain runs on this hub, or null when there's no jail here (see brains/jail.ts). */
   jail(): string[] | null {
     if (this.jailState !== undefined) return this.jailState;
-    const args = jailArgs({ dataDir: this.config.dataDir, workDir: this.workDir, hideFiles: [join(process.cwd(), ".env"), masterKeyPath()] });
+    // The browser's logins file too: only the browser daemon (outside the jail) reads it, never the brain.
+    const args = jailArgs({ dataDir: this.config.dataDir, workDir: this.workDir, hideFiles: [join(process.cwd(), ".env"), masterKeyPath(), loginsFile()] });
     return (this.jailState = jailWorks(args) ? args : null);
   }
+
+  /** Set by the hub: write your connected logins where the brain's browser loads them (brains/browser-logins.ts). */
+  beforeBrowse: (() => void) | null = null;
 
   private skillState: { at: number; key: string; skills: Skill[]; paths: string[] } | null = null;
   /** Look again on the next call (a connector that brings a skill just connected or left). */
@@ -696,6 +701,10 @@ export class Brain {
     // Codex has no system prompt flag: the skills catalog goes at the top of its message.
     const codexSkills = harness === "codex" && !NO_TOOLS.has(b.mode) ? this.skills().skills : [];
     const web = !NO_TOOLS.has(b.mode);
+    // Before the jail is set up (it hides the logins file, so the file must be there by then).
+    if (web && (harness === "claude" || harness === "codex") && this.skills().skills.some((s) => s.name === "enkidu-browser")) {
+      try { this.beforeBrowse?.(); } catch (e: any) { console.warn(`couldn't give the browser your logins: ${String(e?.message || e).slice(0, 200)}`); }
+    }
     // Working calls in the jail can run code: a shell, files and the open internet (the jail hides the hub's secrets).
     const jail = web && (harness === "claude" || harness === "codex") ? this.jail() : null;
     const coder = jail ? (harness as "claude" | "codex") : null;

@@ -44,8 +44,13 @@ const TOOLS: Tool[] = [
     name: "enkidu-browser", off: "HEARTH_BROWSER",
     description: "Use Chrome: open a website, read a page that needs JavaScript or clicking through, fill a search, take a screenshot of a page. Prefer WebFetch for a plain page.",
     rules: `# Hearth: browser on this hub
-Only \`enkidu-browser ...\` (and \`hearth-skill\`) commands run here. Name your session \`hearth-<short-topic>-<4 random letters>\` and close it when you're done.
-The \`enkidu browser logins\` commands aren't on this hub; if a site needs a login, say so.
+Only \`enkidu-browser ...\` (and \`hearth-skill\`) commands run here, by that bare name (not a full path). Name your session
+\`hearth-<short-topic>-<4 random letters>\`; if \`session new\` says that id already exists, pick different letters. Close it when you're done.
+Sites the user connected in Hearth (Connectors) open already signed in. The \`enkidu browser logins\` commands aren't here: if a site
+still shows you signed out, say which site and to reconnect it in Connectors.
+If a command fails, read the \`message\` in its JSON and act on it (a new session for a canceled or expired one, other letters for a taken
+id). If you're still stuck, say what the tool said, word for word, in \`why\`. The user doesn't run Enkidu: never tell them to open or
+restart it.
 ${SAFE}`,
   },
   {
