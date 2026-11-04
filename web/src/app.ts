@@ -1389,20 +1389,25 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
   if (!j) { clear(el, h("p", { class: "muted center" }, "Loading…")); return; }
   const t = mate(j.teammateId);
   const follow = S.chat.jobs.filter((x: any) => x.followsUp === j.id);
-  const n = (j.status === "done" || j.status === "failed" ? 1 : 0) + follow.length * 2;
+  // One timeline, in the order things happened: every message you sent here (also the ones added to a run that was
+  // still going, which have no job of their own) and each answer where it landed. A run still going sits at the bottom.
+  const asks = new Set(follow.map((f: any) => f.messageId));
+  const yours = S.chat.messages.filter((m: any) => m.role === "user" && (m.replyTo === j.id || asks.has(m.id)));
+  const live = (x: any) => x.status === "queued" || x.status === "working";
+  const when = (x: any) => (live(x) ? Infinity : Date.parse(x.finishedAt || x.updatedAt || x.createdAt) || 0);
+  const items = [
+    ...yours.map((m: any) => ({ at: Date.parse(m.createdAt) || 0, node: () => row(youWho(), m.createdAt, [h("div", { class: "mtext" }, m.text)]) })),
+    ...[j, ...follow].map((x: any) => ({ at: when(x), node: () => answer(x) })),
+  ].sort((a, b) => a.at - b.at);
+  const n = items.filter((x) => x.at !== Infinity).length;
   // The ramble's other threads, one tap away (like switching threads in Slack).
   const switcher = threadTabs(S.chat, j.id, 2);
   const nodes: (Node | null)[] = [
     switcher,
-    row(mateWho("hearth"), j.createdAt, [h("div", { class: "ttitle" }, jobLabel(j)), h("div", { class: "brief" }, withMentions(`@${t.name} ${j.task}`))]),
+    row(mateWho("hearth"), j.createdAt, [h("div", { class: "ttitle" }, jobLabel(j)), h("div", { class: "brief" }, withMentions(`@${t.name} ${String(j.task).split("\n\nThe user added: ")[0]}`))]),
     h("div", { class: "repdiv" }, n ? `${n} repl${n === 1 ? "y" : "ies"}` : "No replies yet"),
-    answer(j),
+    ...items.map((x) => x.node()),
   ];
-  for (const f of follow) {
-    const m = S.chat.messages.find((x: any) => x.id === f.messageId);
-    if (m) nodes.push(row(youWho(), m.createdAt, [h("div", { class: "mtext" }, m.text)]));
-    nodes.push(answer(f));
-  }
   clear(el, nodes);
   if (stick) requestAnimationFrame(() => { const s = document.getElementById("scroll")!; s.scrollTop = s.scrollHeight; });
 }
