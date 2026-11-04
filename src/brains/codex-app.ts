@@ -20,7 +20,7 @@ export type CodexAppOptions = {
   model?: string;
   /** The thread to carry on, from an earlier run in this job's thread. */
   resume?: string;
-  /** Working calls search the web. */
+  /** Working calls search the web and run commands. Anything else (writing up notes, planning) gets no shell at all. */
   web: boolean;
   /** No thread kept on disk (a quick call that nothing follows up). */
   ephemeral: boolean;
@@ -35,6 +35,9 @@ import type { CallTokens } from "./prices.ts";
 type Rpc = { id?: number | string; method?: string; params?: any; result?: any; error?: { message?: string } };
 
 const VERSION = "1";
+
+/** Codex's command tools, off (its `-c features.…=false`). */
+const NO_SHELL = { "features.shell_tool": false, "features.unified_exec": false, web_search: "disabled" };
 
 export class CodexAppTurn {
   /** The thread this turn ran on: save it to resume next time. */
@@ -113,10 +116,12 @@ export class CodexAppTurn {
     const tuning = {
       cwd: o.cwd,
       ...(o.model ? { model: o.model } : {}),
-      // No sandbox, no approvals (like `codex exec --dangerously-bypass-approvals-and-sandbox`): nobody can approve.
-      sandbox: "danger-full-access",
+      // Working calls: no sandbox, no approvals (like `codex exec --dangerously-bypass-approvals-and-sandbox`): nobody can
+      // approve. Calls with no tools (the lead writing up the legwork, planning) get no shell either, like Claude's
+      // `--tools ""`. With one, the lead went back through the workspace's files and looked like it was redoing the job.
+      sandbox: o.web ? "danger-full-access" : "read-only",
       approvalPolicy: "never",
-      config: o.web ? { web_search: "live" } : {},
+      config: o.web ? { web_search: "live" } : NO_SHELL,
     };
     const fresh = () => this.request("thread/start", { ...tuning, ...(o.ephemeral ? { ephemeral: true } : {}) }, (m) => this.opened(m, false));
     if (!o.resume) return fresh();
