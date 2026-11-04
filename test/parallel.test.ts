@@ -336,6 +336,26 @@ test("asking more about a finished task goes straight to its thread, with no pla
   expect(msgs.filter((m) => m.role === "assistant" && m.teammateId === "hearth" && !m.taskJobId).length).toBe(1); // no planner reply
 });
 
+test("asking a stuck task where it's stuck goes on in its thread and settles the stuck card", async () => {
+  await setup();
+  process.env.FAKE_MS = "20";
+  plan([{ label: "AliExpress orders", task: "check my AliExpress orders", teammate: "Research" }]);
+  const r = await hub.ramble("check my aliexpress orders");
+  const thread = r.value!.thread.id;
+  await until(() => allDone(1));
+  const root = (await jobs())[0];
+  await store.put<Job>("jobs", { ...root, status: "blocked", blocked: { need: "Order details", why: "Not logged in", unblock: "Try again" } } as any);
+  process.env.FAKE_PLAN = "not json: the planner must not be asked";
+  await hub.ramble("did u get the login from the mac? where r u stuck?", thread);
+  await until(() => allDone(2));
+  const all = await jobs();
+  const next = all.find((j) => j.id !== root.id)!;
+  expect([next.followsUp, next.teammateId]).toEqual([root.id, root.teammateId]);
+  const settled = all.find((j) => j.id === root.id)!;
+  expect([settled.status, settled.blocked]).toEqual(["done", undefined]);
+  expect((await store.all<any>("messages")).filter((m) => m.taskJobId).length).toBe(1); // no second task post
+});
+
 test("a new subject sent to the latest thread is handed back and planned as a new task", async () => {
   await setup();
   process.env.FAKE_MS = "20";

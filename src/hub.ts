@@ -540,7 +540,8 @@ export class Hub {
     return { value: { thread, message: m } };
   }
 
-  /** The ramble's most recently active task thread, if nothing in it is still going and it was active in the last 3 hours. */
+  /** The ramble's most recently active task thread, if nothing in it is still going and it was active in the last 3 hours.
+   *  A stuck (blocked) thread counts: "where are you stuck?" belongs in it, not in a new task. */
   private async latestTask(threadId: string): Promise<Job | null> {
     const jobs = (await this.store.all<Job>("jobs")).filter((j) => j.threadId === threadId && !j.parentId);
     let best: Job | null = null, bestAt = "";
@@ -550,7 +551,7 @@ export class Hub {
       if (at > bestAt) { best = root; bestAt = at; }
     }
     if (!best) return null;
-    if (jobs.some((j) => (j.id === best!.id || j.followsUp === best!.id) && !["done", "failed"].includes(j.status))) return null;
+    if (jobs.some((j) => (j.id === best!.id || j.followsUp === best!.id) && !["done", "failed", "blocked"].includes(j.status))) return null;
     return this.clock().getTime() - new Date(bestAt).getTime() < 3 * 3600_000 ? best : null;
   }
 
@@ -659,12 +660,15 @@ export class Hub {
       const openTasks = (await this.store.all<Job>("jobs"))
         .filter((j) => j.threadId === thread.id && !j.parentId && !j.followsUp && (j.status === "queued" || j.status === "working"))
         .map((j) => ({ id: j.id, label: j.label || shortLabel(undefined, j.task), teammate: team0.find((t) => t.id === j.teammateId)?.name, status: j.status, task: j.task.slice(0, 400) }));
-      // Finished tasks in this ramble, so a follow-up about one goes on in its thread instead of starting a new one.
+      // Finished or stuck tasks in this ramble, so a follow-up about one goes on in its thread instead of starting a new one.
       const all0 = await this.store.all<Job>("jobs");
-      const recentTasks = all0.filter((j) => j.threadId === thread.id && !j.parentId && !j.followsUp && !declined.has(j.id) && (j.status === "done" || j.status === "failed")).slice(-8)
+      const recentTasks = all0.filter((j) => j.threadId === thread.id && !j.parentId && !j.followsUp && !declined.has(j.id) && ["done", "failed", "blocked"].includes(j.status)).slice(-8)
         .map((j) => {
-          const last = all0.filter((x) => x.followsUp === j.id && x.result).at(-1);
-          return { id: j.id, label: j.label || shortLabel(undefined, j.task), teammate: team0.find((t) => t.id === j.teammateId)?.name, task: j.task.slice(0, 300), answer: String(last?.result || j.result || "").slice(0, 300) };
+          const line = all0.filter((x) => x.followsUp === j.id);
+          const last = line.filter((x) => x.result).at(-1);
+          const stuck = [j, ...line].filter((x) => x.status === "blocked").at(-1)?.blocked;
+          return { id: j.id, label: j.label || shortLabel(undefined, j.task), teammate: team0.find((t) => t.id === j.teammateId)?.name, task: j.task.slice(0, 300), answer: String(last?.result || j.result || "").slice(0, 300),
+            ...(stuck ? { stuck: `${stuck.need}${stuck.why ? `: ${stuck.why}` : ""}`.slice(0, 300) } : {}) };
         });
       const history = (await this.store.all<Message>("messages")).filter((x) => x.threadId === thread.id && !batch.some((b) => b.id === x.id)).slice(-10)
         .map((x) => ({ role: x.role, text: x.text.slice(0, 500) }));
@@ -955,6 +959,10 @@ export class Hub {
   private async followUp(root: Job, m: Message, task: string, mayHandBack = false): Promise<{ job: Job; folded: boolean }> {
     const busy = (await this.store.all<Job>("jobs")).filter((j) => (j.id === root.id || j.followsUp === root.id) && (j.status === "queued" || j.status === "working")).at(-1);
     if (busy && (await this.addToJob(busy.id, root.threadId, task))) return { job: busy, folded: true };
+    // Replying in a stuck thread picks it up: the stuck turn is settled (it stops saying "Stuck") and the new turn goes on from it.
+    for (const j of (await this.store.all<Job>("jobs")).filter((x) => (x.id === root.id || x.followsUp === root.id) && x.status === "blocked"))
+      await this.saveJob({ ...j, blocked: undefined, status: "done", finishedAt: j.finishedAt || this.clock().toISOString(),
+        result: j.result || `Got stuck: ${j.blocked?.need || "needed something"}${j.blocked?.why ? ` (${j.blocked.why})` : ""}. The user followed up.` });
     const job = await this.store.put<Job>("jobs", { ...this.doc({}), threadId: root.threadId, messageId: m.id, task: task.trim().slice(0, 4000), teammateId: root.teammateId, status: "queued", effort: root.effort, followsUp: root.id, ...(mayHandBack ? { mayHandBack: true } : {}) } as Job);
     return { job, folded: false };
   }
