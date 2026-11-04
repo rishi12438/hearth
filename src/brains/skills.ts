@@ -47,9 +47,11 @@ const TOOLS: Tool[] = [
 Only \`enkidu-browser ...\` (and \`hearth-skill\`) commands run here, by that bare name (not a full path). Name your session
 \`hearth-<short-topic>-<4 random letters>\`; if \`session new\` says that id already exists, pick different letters. Close it when you're done.
 Sites the user connected in Hearth (Connectors) open already signed in. The \`enkidu browser logins\` commands aren't here: if a site
-still shows you signed out (a Sign in / Register page where the account should be), stop and put a \`connection.refresh {site}\`
-action in your \`\`\`hearth block. Hearth checks the user's Mac for a fresh login and runs the job again with it, or tells the user
-what's needed. Don't tell them to reconnect it in Connectors.
+still shows you signed out (a Sign in / Register page where the account should be), first make sure it really is: open a new
+session, look for the account name or avatar, and try the site's other domain (aliexpress.com and aliexpress.us, say). Still signed
+out: put a \`connection.refresh {site}\` action in your \`\`\`hearth block. Hearth checks the user's Mac for a fresh login and runs the
+job again with it, or tells the user what's needed. Don't tell them to reconnect it in Connectors. Meanwhile, finish the parts of the
+job that don't need the login, so the rerun only has the signed-in part left.
 If a command fails, read the \`message\` in its JSON and act on it (a new session for a canceled or expired one, other letters for a taken
 id). If you're still stuck, say what the tool said, word for word, in \`why\`. The user doesn't run Enkidu: never tell them to open or
 restart it.
