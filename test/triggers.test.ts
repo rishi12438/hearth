@@ -235,7 +235,7 @@ test("a reminder isn't made twice when the brain looks something up and repeats 
   expect(r.text).toBe("Done.");
   expect(seen[1]).toContain("Already done this turn");
   expect(seen[1]).toContain("Reminder: 9:40 AM notification");
-  // The exact repeat is dropped, and the same reminder with other words around it is refused: one reminder.
+  // The repeats are refused where they land (a copy of a live reminder): one reminder.
   expect(hub.pipeline.triggers().map((t) => t.title)).toEqual(["9:40 AM notification"]);
   // Asked again for the very same one: refused, with what to do instead (force when they really want two).
   const again = await hub.pipeline.remind({ title: "9:40 AM notification", schedule: { at }, text: "It's 9:40" }, "you");
