@@ -538,6 +538,11 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (method === "POST" && seg[3] === "reply") { const r = await hub.replyToJob(id, String((await body(req)).text || "")); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "POST" && seg[3] === "stop") { const r = await hub.stopJob(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "POST" && seg[3] === "retry") { const r = await hub.retryJob(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "GET" && seg[3] === "frame") {
+          const f = hub.liveFrame(id);
+          if (!f) throw new HttpError(404, "No live view right now.");
+          return json({ n: f.n, at: f.at, src: `data:${f.mime};base64,${Buffer.from(f.data).toString("base64")}` });
+        }
         if (method === "POST" && seg[3] === "save-skill") { const r = await hub.saveJobAsSkill(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         break;
       }

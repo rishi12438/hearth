@@ -390,13 +390,19 @@ export class Hub {
       });
   }
 
+  /** A working job's latest live-view picture, or null. */
+  liveFrame(jobId: string) {
+    return this.frames.get(jobId) ?? null;
+  }
+
   async threadDetail(id: string) {
     const thread = await this.store.get<Thread>("threads", id);
     if (!thread) return null;
     const messages = (await this.store.all<Message>("messages")).filter((m) => m.threadId === id);
     const jobs = (await this.store.all<Job>("jobs")).filter((j) => j.threadId === id);
     return { thread, messages, jobs, steps: Object.fromEntries(jobs.filter((j) => this.steps.has(j.id)).map((j) => [j.id, this.steps.get(j.id)!.at(-1)!.text])),
-      stepLog: Object.fromEntries(jobs.filter((j) => this.steps.has(j.id)).map((j) => [j.id, this.steps.get(j.id)])) };
+      stepLog: Object.fromEntries(jobs.filter((j) => this.steps.has(j.id)).map((j) => [j.id, this.steps.get(j.id)])),
+      frames: Object.fromEntries(jobs.filter((j) => this.frames.has(j.id)).map((j) => [j.id, this.frames.get(j.id)!.n])) };
   }
 
   async removeThread(id: string) {
@@ -560,9 +566,11 @@ export class Hub {
   /** What each running job is doing right now, so a reload or another device sees it too. */
   /** Each working job's steps so far (newest last, capped), so the app can show the whole stream, not just the latest. */
   private steps = new Map<string, { at: string; text: string }[]>();
+  /** Each working job's latest live-view picture (memory only, gone when the job ends). */
+  private frames = new Map<string, { n: number; at: string; mime: string; data: Uint8Array }>();
   private handedBack = new Map<string, string>(); // message id -> the task thread that handed it back
   private async handBack(job: Job, meter: Meter) {
-    this.stops.delete(job.id); this.steps.delete(job.id);
+    this.stops.delete(job.id); this.steps.delete(job.id); this.frames.delete(job.id);
     await this.addSpend(job.messageId, meter.costUsd);
     await this.store.remove("jobs", job.id);
     this.emit("job", { ...job, handedBack: true });
@@ -819,12 +827,18 @@ export class Hub {
     const narrator = this.config.narrate === false ? null : new Narrator({ task: job.label || job.task, show,
       ask: async (prompt) => this.brain.narrate(prompt, (await this.brains()).quick) });
     const meter: Meter = { costUsd: 0, unknown: false, signal: stop.signal,
-      onProgress: (what) => { narrator?.step(what); show(what); }, onAction: (raw) => narrator?.action(raw) };
+      onProgress: (what) => { narrator?.step(what); show(what); }, onAction: (raw) => narrator?.action(raw),
+      // A picture of the page or window it's on: kept in memory; the app fetches it when told there's a new one.
+      onFrame: (f) => {
+        const n = (this.frames.get(job.id)?.n ?? 0) + 1, at = this.clock().toISOString();
+        this.frames.set(job.id, { n, at, mime: f.mime, data: f.data });
+        this.emit("frame", { jobId: job.id, threadId: job.threadId, n, at });
+      } };
     const mate = await this.teammate(job.teammateId);
     let cur: Job = await this.saveJob({ ...job, status: "working", startedAt: this.clock().toISOString() });
     const finish = async (patch: Partial<Job>) => {
       narrator?.stop();
-      this.stops.delete(job.id); this.steps.delete(job.id);
+      this.stops.delete(job.id); this.steps.delete(job.id); this.frames.delete(job.id);
       if (stop.signal.aborted && this.cancelled.delete(job.id)) {
         this.additions.delete(job.id); this.additions.delete(`${job.id}:label`);
         await this.addSpend(job.messageId, meter.costUsd);

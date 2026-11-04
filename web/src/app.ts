@@ -28,6 +28,7 @@ const S = {
   components: [] as any[],
   progress: new Map<string, string>(), // jobId -> what it's doing right now
   stepLog: new Map<string, { at: string; text: string }[]>(), // jobId -> every step so far, for the live list in the thread
+  frames: new Map<string, { n: number; src: string }>(), // jobId -> the latest live-view picture of its browser or app
   skills: [] as any[],
   workflows: [] as any[],
   hooks: [] as any[],
@@ -268,6 +269,10 @@ function onEvent(e: { type: string; data?: any }) {
     case "threads": if (open) markSeen(open); soon(); if (open && S.chat) call("/api/threads").then((l: any[]) => { const t = l.find((x) => x.id === open); if (t && S.chat) { S.chat.thread.title = t.title; drawHeader(); } }).catch(() => {}); return;
     case "teammates": loadTeammates().then(soon); return;
     case "skills": loadSkills(); return;
+    case "frame": {
+      if (document.querySelector(`[data-frame="${e.data.jobId}"]`)) loadFrame(e.data.jobId, e.data.n);
+      return;
+    }
     case "progress": {
       S.progress.set(e.data.jobId, e.data.text);
       for (const el of document.querySelectorAll<HTMLElement>(`[data-progress="${e.data.jobId}"]`)) el.textContent = e.data.text;
@@ -1178,7 +1183,7 @@ function openJump() {
 async function loadChat(id: string) {
   if (id !== "new") markSeen(id);
   if (id === "new") { S.chat = { thread: { id: "new", title: "" }, messages: [], jobs: [], approvals: [] }; drawChat(); setTimeout(() => document.getElementById("composer")?.focus(), 80); return; }
-  try { S.chat = await call(`/api/threads/${id}`); for (const [k, v] of Object.entries(S.chat.steps || {})) S.progress.set(k, String(v)); for (const [k, v] of Object.entries(S.chat.stepLog || {})) S.stepLog.set(k, v as any); drawChat(); if (S.chat.jobs.some(unseenStuck)) seeStuck(`/api/threads/${id}/seen`); }
+  try { S.chat = await call(`/api/threads/${id}`); for (const [k, v] of Object.entries(S.chat.steps || {})) S.progress.set(k, String(v)); for (const [k, v] of Object.entries(S.chat.stepLog || {})) S.stepLog.set(k, v as any); for (const [k, n] of Object.entries(S.chat.frames || {})) loadFrame(k, Number(n)); drawChat(); if (S.chat.jobs.some(unseenStuck)) seeStuck(`/api/threads/${id}/seen`); }
   catch (e) { if (e instanceof ApiError && e.status === 404) { location.hash = ""; return; } handleError(e); }
 }
 
@@ -1360,6 +1365,25 @@ function taskMessage(m: any) {
   return row(mateWho(j.teammateId, jobState(latest)), m.createdAt, body, false, st === "failed" ? "err" : "");
 }
 
+/** A working job's live view: the latest picture of the page or window it's using. */
+function liveView(jobId: string) {
+  const f = S.frames.get(jobId);
+  const img = h("img", { alt: "What it's looking at right now", src: f?.src || undefined });
+  return h("figure", { class: "liveview", "data-frame": jobId, hidden: !f, on: { click: (e: Event) => (e.currentTarget as HTMLElement).classList.toggle("big") } },
+    img, h("figcaption", null, h("i"), "Live"));
+}
+const frameLoading = new Set<string>();
+/** Fetch a job's newest picture (one request at a time per job; a newer one is picked up by the next event). */
+async function loadFrame(jobId: string, n: number) {
+  if (frameLoading.has(jobId) || (S.frames.get(jobId)?.n ?? 0) >= n) return;
+  frameLoading.add(jobId);
+  try {
+    const f = await call<{ n: number; src: string }>(`/api/jobs/${jobId}/frame`);
+    S.frames.set(jobId, { n: f.n, src: f.src });
+    for (const el of document.querySelectorAll<HTMLElement>(`[data-frame="${jobId}"]`)) { el.querySelector("img")!.src = f.src; el.hidden = false; }
+  } catch {} finally { frameLoading.delete(jobId); }
+}
+
 /** One line in a working job's live step list: the time, then what it did. */
 function stepRow(s: { at: string; text: string }) {
   return h("li", null, h("time", null, clockTime(s.at)), h("span", null, s.text));
@@ -1441,6 +1465,8 @@ function answer(j: any) {
   if (j.status === "queued" || j.status === "working") return row(who, at, [h("div", { class: "typing live" }, h("i"), h("i"), h("i"),
     h("span", { "data-progress": j.id }, j.status === "working" ? S.progress.get(j.id) || (j.tier === "heavy" ? "Thinking it through" : "On it") : "Up next"),
     j.status === "working" && j.startedAt ? h("time", { "data-since": j.startedAt }, elapsed(j.startedAt)) : null),
+    // What's on its browser page or app window right now (hidden until there's a picture). Tap to see it bigger.
+    j.status === "working" ? liveView(j.id) : null,
     // Every step so far, newest on top, so you can see how it's going and not just the latest line.
     j.status === "working" ? h("ol", { class: "steplog", "data-steplog": j.id }, (S.stepLog.get(j.id) || []).slice().reverse().map(stepRow)) : null]);
   if (j.status === "waiting") {

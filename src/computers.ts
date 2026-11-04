@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { sha256 } from "./auth.ts";
 import { lastRefresh } from "./brains/logins.ts";
 import { cleanToolStatus, type ToolStatus } from "./brains/tools.ts";
+import { MAX_FRAME_BYTES } from "./brains/live-view.ts";
 import { ComputerGone, MODEL_RE, type BrainInput, type BrainProfile, type Meter, type Remote, type RemoteRunner } from "./brain.ts";
 
 // Computers linked to this hub (a Mac at home, say). The hub has a public address and the computer doesn't, so the
@@ -114,6 +115,12 @@ export class Computers implements Remote {
         return;
       case "step": link.running.get(m.id)?.meter?.onProgress?.(String(m.text || "").slice(0, 120)); return;
       case "act": link.running.get(m.id)?.meter?.onAction?.(String(m.text || "").slice(0, 300)); return;
+      case "frame": {
+        const meter = link.running.get(m.id)?.meter;
+        if (!meter?.onFrame || typeof m.data !== "string" || m.data.length > MAX_FRAME_BYTES * 1.4) return;
+        meter.onFrame({ data: new Uint8Array(Buffer.from(m.data, "base64")), mime: m.mime === "image/jpeg" ? "image/jpeg" : "image/png" });
+        return;
+      }
       case "done": case "error": {
         const p = link.running.get(m.id);
         if (!p) return;

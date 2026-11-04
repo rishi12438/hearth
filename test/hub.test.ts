@@ -561,3 +561,29 @@ test("a working job keeps every step so the thread can show the whole stream", a
   await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done"));
   expect((await hub.threadDetail(job.threadId) as any).stepLog[job.id]).toBeUndefined(); // cleared once it's finished
 });
+
+test("a working job's live view keeps only the latest picture, and drops it when the job ends", async () => {
+  await hub.ensureTeammates();
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const events: any[] = [];
+  hub.on((e: any) => { if (e.type === "frame") events.push(e.data); });
+  (hub.brain as any).think = async (b: any, _p: any, meter: any) => {
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "check my orders", teammate: "Hearth", effort: "light" }] });
+    if (b.mode === "narrate") return "";
+    meter?.onFrame?.({ data: new Uint8Array([1]), mime: "image/png" });
+    meter?.onFrame?.({ data: new Uint8Array([2]), mime: "image/jpeg" });
+    await gate;
+    return "Done.";
+  };
+  await hub.ramble("check my aliexpress orders");
+  await until(async () => events.length === 2);
+  const job = (await store.all<Job>("jobs")).find((j) => j.status === "working")!;
+  expect(events.map((e) => e.n)).toEqual([1, 2]);
+  expect(JSON.stringify(events)).not.toContain("data"); // events say there's a new one; the picture itself is fetched
+  expect(hub.liveFrame(job.id)).toMatchObject({ n: 2, mime: "image/jpeg" });
+  expect(((await hub.threadDetail(job.threadId)) as any).frames[job.id]).toBe(2);
+  release();
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done"));
+  expect(hub.liveFrame(job.id)).toBeNull();
+});
