@@ -1,0 +1,21 @@
+src/mcp.ts
+  s_81de28bb38e5dd::t_8b1597c4b710b7 110-111
+test/mcp.test.ts
+  s_81de28bb38e5dd::t_bb57c369fece30 202-203
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "e4948a696523e01d384ba24bc70e153a1248d9e2",
+  "prompts": {},
+  "sessions": {
+    "s_81de28bb38e5dd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6927f66a-ef71-4a16-8da5-d10f7c2ae2e8",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
