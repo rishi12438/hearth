@@ -1,0 +1,70 @@
+test/computers.test.ts
+  s_78fe918d54a81c::t_66a94aa713f6ca 243-254
+  s_78fe918d54a81c::t_3c93f9b394c49e 227-242
+  s_78fe918d54a81c::t_f4f3418804c82b 260
+  s_78fe918d54a81c::t_a78b18fa2f321c 255-259,261-274
+src/server.ts
+  s_78fe918d54a81c::t_1512e80260e4ae 1030-1031
+  s_78fe918d54a81c::t_e7aba0ceaa5586 112
+  s_78fe918d54a81c::t_46d8b171a1da59 272
+  s_78fe918d54a81c::t_0433bfcd9cbbaf 21-41
+  s_78fe918d54a81c::t_fb7e75d58fde9a 372
+  s_78fe918d54a81c::t_d8beff96a4d085 939-962
+  s_78fe918d54a81c::t_7113df14ca5834 963
+  s_78fe918d54a81c::t_3b440c8b78ad7a 363
+  s_78fe918d54a81c::t_5d5e5df9daef6f 1161
+  s_78fe918d54a81c::t_d3a573dca4fbcc 4
+  s_78fe918d54a81c::t_b9936b886ede04 279
+  s_78fe918d54a81c::t_49975832ae3321 915-920
+web/src/app.ts
+  s_78fe918d54a81c::t_25da6245d28c49 523
+  s_78fe918d54a81c::t_0567135c9be55c 3715
+  s_78fe918d54a81c::t_12c2ae73eeeedc 3496
+  s_78fe918d54a81c::t_8ccd141cae91ad 3763-3777,3779-3781
+  s_78fe918d54a81c::t_dfced953b73988 3136
+  s_78fe918d54a81c::t_e7c6b954bd3e65 3480-3481
+  s_78fe918d54a81c::t_c947343d10527a 3468
+  s_78fe918d54a81c::t_6c2892395de0ad 3706
+  s_78fe918d54a81c::t_677c6dc195e977 208
+  s_78fe918d54a81c::t_d2280c93e21377 2786
+  s_78fe918d54a81c::t_4b34e4a69459ef 91
+  s_78fe918d54a81c::t_c88837a242c3ae 2398
+  s_78fe918d54a81c::t_5cf76dbf602cd4 3782-3824
+  s_78fe918d54a81c::t_88db749f39a099 3778
+web/src/api.ts
+  s_78fe918d54a81c::t_5e39a2fa75b2c2 90
+  s_78fe918d54a81c::t_5f418c26c47a49 81
+  s_78fe918d54a81c::t_f99926ebcd6517 97
+src/client.ts
+  s_78fe918d54a81c::t_e8f03263a5b468 210
+src/types.ts
+  s_78fe918d54a81c::t_4d388bfa094481 8-9
+  s_78fe918d54a81c::t_d7afb5d2a2fe25 10-11
+src/auth.ts
+  s_78fe918d54a81c::t_e6a81b83cf9612 68-72
+src/computer.ts
+  s_78fe918d54a81c::t_73a77310f8024e 33
+  s_78fe918d54a81c::t_766ec1243b205f 26
+mac/Hearth/main.swift
+  s_78fe918d54a81c::t_9e5f85a77c52f4 409
+  s_78fe918d54a81c::t_276c84b319e459 42
+  s_78fe918d54a81c::t_6d282a47018600 69,75-123
+  s_78fe918d54a81c::t_c070290db5a1bc 20-23
+  s_78fe918d54a81c::t_748f00ee7d982c 250-260
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "c8e73328f84cbf1e86fc70ebed1313741bf50a92",
+  "prompts": {},
+  "sessions": {
+    "s_78fe918d54a81c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "41eae39d-862e-4b57-be36-7551cabfb15a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
