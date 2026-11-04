@@ -1193,7 +1193,8 @@ function drawActivity() {
     const t = mate(it.teammateId);
     const line = it.kind === "approval" ? `${t.name} needs your OK` : it.kind === "blocked" ? `${t.name} is stuck` : it.kind === "proactive" ? `${t.name} · ${it.title}` : it.kind === "failed" ? `${t.name} couldn't finish` : `${t.name} replied`;
     return h("div", { class: `actrow ${it.kind === "approval" || it.kind === "blocked" ? "hot" : ""}` },
-      h("button", { class: "actmain", on: { click: go(it) } }, face(t, 40, it.kind === "approval" ? "waiting" : it.kind === "blocked" ? "blocked" : "idle"),
+      // An ask that isn't in any chat opens on its own, so the tap shows what it is instead of doing nothing.
+      h("button", { class: "actmain", on: { click: it.kind === "approval" && !it.threadId ? () => openApproval(it.approval, renderActivity) : go(it) } }, face(t, 40, it.kind === "approval" ? "waiting" : it.kind === "blocked" ? "blocked" : "idle"),
         h("span", { class: "grow" },
           h("span", { class: "l1" }, h("b", null, line), h("small", null, chan(it.threadId)), h("time", null, shortAgo(it.at))),
           h("span", { class: "l2" }, it.kind === "done" || it.kind === "failed" ? `${it.summary}${it.result ? ` — ${it.result}` : ""}` : it.kind === "blocked" ? `${it.summary}. ${it.unblock || ""}` : it.summary))),
@@ -1512,7 +1513,36 @@ setInterval(() => {
   }
 }, 1000);
 
-async function decide(id: string, yes: boolean, always = false) { try { await call(`/api/approvals/${id}/${yes ? "approve" : "reject"}`, { body: { always } }); } catch (e) { handleError(e); } }
+async function decide(id: string, yes: boolean, always = false): Promise<any> { try { return await call(`/api/approvals/${id}/${yes ? "approve" : "reject"}`, { body: { always } }); } catch (e) { handleError(e); return null; } }
+const approvalState = (a: any) => a.status === "done" ? "Approved and done" : a.status === "failed" ? "Approved, but it failed" : a.status === "rejected" ? "You said no" : a.status === "expired" ? "Expired: nobody answered within a day, so it didn't run" : a.status === "approved" ? "Approved" : "Waiting for you";
+
+/**
+ * An ask on its own: what exactly it would do, where it came from, and (once decided) what came back. For an ask that
+ * isn't in any chat (an agent call that didn't say which job it was), so tapping it in Activity still shows you something.
+ */
+function openApproval(a0: any, then?: () => void) {
+  const box = h("div");
+  const draw = (a: any) => {
+    const act = a.action || {};
+    const what = act.type === "mcp" ? `MCP · ${act.server} · ${act.tool}` : act.type === "message" ? `${CHANNEL_NAME[act.channel] || act.channel} to ${act.to}` : act.type === "google" ? `Google · ${GOOGLE_KINDS[act.kind] || act.kind}` : act.type === "script" ? `Script · ${act.script}` : "";
+    const done = (r: any) => { if (r) draw(r); then?.(); };
+    clear(box,
+      h("p", { class: "muted" }, [what, `asked ${shortAgo(a.createdAt)}`, a.threadId ? null : "not from any chat"].filter(Boolean).join(" · ")),
+      a.details ? h("pre", { class: "code" }, a.details) : null,
+      codeToApprove(a),
+      a.status === "pending"
+        ? h("div", { class: "blockbtns" },
+          h("button", { class: "sbtn", on: { click: async () => done(await decide(a.id, false)) } }, "No"),
+          h("button", { class: "sbtn primary", on: { click: async () => done(await decide(a.id, true)) } }, "Approve"),
+          alwaysBtn(a, async () => { done((await call(`/api/approvals`).catch(() => [])).find((x: any) => x.id === a.id)); }))
+        : h("p", null, h("b", null, approvalState(a))),
+      a.result ? [h("small", null, "What came back"), h("pre", { class: "code" }, a.result)] : null,
+      a.threadId ? h("button", { class: "btn big", on: { click: () => { closeSheet(); location.hash = threadLink(a.threadId); } } }, "Open the chat it came from") : null);
+  };
+  draw(a0);
+  openSheet(a0.summary || "Needs your OK", box);
+}
+const threadLink = (id: string) => (id.startsWith("tm-") ? `#t/${id.slice(3)}` : `#c/${id}`);
 const CHANNEL_NAME: Record<string, string> = { whatsapp: "WhatsApp", slack: "Slack", gmail: "Gmail", instagram: "Instagram", linkedin: "LinkedIn", x: "X" };
 /** "Always allow": for a message to one chat, one kind of Google change, or one MCP tool (scripts and payments always ask). */
 const alwaysBtn = (ap: any, then?: () => void) => ap?.action?.type === "message" || ap?.action?.type === "mcp" || (ap?.action?.type === "google" && GOOGLE_KINDS[ap.action.kind])
@@ -1591,7 +1621,7 @@ function answer(j: any) {
     return row(who, at, [j.result ? richText(j.result) : null, aps.map((a: any) => h("div", { class: "block" },
       h("div", { class: "blockhead" }, icon("lock", 15), h("b", null, a.summary)), a.details ? h("p", null, a.details) : null, codeToApprove(a),
       a.status === "pending" ? h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => decide(a.id, true) } }, "Approve"), alwaysBtn(a), h("button", { class: "sbtn", on: { click: () => decide(a.id, false) } }, "No"))
-        : h("small", { class: "muted" }, a.status === "done" ? "Approved and done" : a.status === "rejected" ? "You said no" : a.status)))]);
+        : h("small", { class: "muted" }, approvalState(a))))]);
   }
   if (j.status === "blocked") return row(who, at, [h("div", { class: "block" }, h("div", { class: "blockhead" }, h("b", null, j.blocked?.need)), j.blocked?.why ? h("p", null, j.blocked.why) : null,
     h("p", null, j.blocked?.unblock), h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => retry(j.id) } }, "Try again"),

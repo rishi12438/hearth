@@ -300,7 +300,8 @@ export type Approval = Doc & {
     | { type: "google"; service: "gmail" | "drive" | "calendar"; args: string[]; body?: string; kind: string }
     /** A call to an MCP tool that asks first (mcp.ts); "Always allow" lets that tool run without asking. */
     | { type: "mcp"; server: string; tool: string; args: unknown };
-  status: "pending" | "approved" | "rejected" | "done" | "failed";
+  /** expired: nobody answered within a day (APPROVAL_TTL_MS), so it didn't run and no longer asks. */
+  status: "pending" | "approved" | "rejected" | "done" | "failed" | "expired";
   result?: string;
   decidedAt?: string;
   /** Done without asking, because you'd said "Always allow" for that chat (or that kind of Google change). */
