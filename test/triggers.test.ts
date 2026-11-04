@@ -242,3 +242,53 @@ test("a reminder isn't made twice when the brain looks something up and repeats 
   expect(again.conflict?.kind).toBe("duplicate");
   expect((await hub.pipeline.remind({ title: "x", schedule: { at }, text: "It's 9:40", force: true }, "you")).value).toBeTruthy();
 });
+
+test("who handles a trigger: Hearth picks the teammate, or a named teammate, and it posts where you said", async () => {
+  await hub.ensureTeammates();
+  const p = hub.pipeline;
+  const soon = new Date(now.getTime() + 60_000).toISOString();
+  // Hearth picks: it fires as a message from the trigger in a new ramble, and Hearth plans it like one.
+  const a = await hub.applyActions([{ type: "remind", title: "Dinner ideas", schedule: { at: soon }, prompt: "find a cheap dinner spot", to: "hearth", post: "new" },
+    { type: "remind", title: "Bill check", schedule: { at: soon }, prompt: "Look over this week's bills", to: "Bills", post: "dm" },
+    { type: "remind", title: "x", schedule: { at: soon }, text: "x", to: "Nobody" }], "test");
+  expect(a.runs.map((r) => r.args[0]).join("\n")).toContain('No teammate called "Nobody"');
+  expect(p.findTrigger("dinner-ideas")!.route).toEqual({ who: "hearth", where: "new" });
+  expect(p.findTrigger("bill-check")).toMatchObject({ teammateId: "money", route: { who: "self", where: "dm" } });
+  const before = (await hub.prefs()).lastUserAt;
+  now = new Date(now.getTime() + 2 * 60_000);
+  await hub.tick();
+  for (let i = 0; i < 200 && (await store.all<any>("jobs")).filter((j) => j.status === "done").length < 2; i++) await Bun.sleep(10);
+  const msgs = await store.all<any>("messages");
+  const handoff = msgs.find((m) => m.fromTrigger)!;
+  expect(handoff).toMatchObject({ role: "user", fromTrigger: { title: "Dinner ideas" } });
+  expect(handoff.text).toContain("find a cheap dinner spot");
+  expect((await store.get<any>("threads", handoff.threadId)).title).toBe("Dinner ideas"); // its own new ramble
+  const jobs = await store.all<any>("jobs");
+  expect(jobs.find((j) => j.threadId === handoff.threadId)!.teammateId).toBe("scout"); // Hearth handed it to Research
+  expect((await hub.prefs()).lastUserAt).toBe(before); // a trigger talking isn't you talking
+  // A named teammate in their DM.
+  expect(jobs.some((j) => j.threadId === "tm-money") || msgs.some((m) => m.threadId === "tm-money" && m.proactive)).toBe(true);
+});
+
+test('to: "this" wakes the same task thread when it fires: same teammate, same conversation', async () => {
+  await hub.ensureTeammates();
+  const r = await hub.ramble("find a cheap dinner spot");
+  for (let i = 0; i < 200 && !(await store.all<any>("jobs")).some((j) => j.status === "done"); i++) await Bun.sleep(10);
+  const root = (await store.all<any>("jobs")).find((j) => !j.followsUp)!;
+  // The teammate, inside that task, says "check back in an hour".
+  const soon = new Date(now.getTime() + 60_000).toISOString();
+  await hub.applyActions([{ type: "remind", title: "Check the booking", schedule: { at: soon }, prompt: "Did the booking go through?", to: "this" }], "test", { teammateId: root.teammateId, threadId: r.value!.thread.id, jobId: root.id });
+  const t = hub.pipeline.findTrigger("check-the-booking")!;
+  expect(t).toMatchObject({ teammateId: "scout", route: { who: "session", session: root.id } });
+  // Outside a task there's no "this".
+  const bad = await hub.applyActions([{ type: "remind", title: "x", schedule: { at: soon }, text: "x", to: "this" }], "test");
+  expect(bad.runs[0].args[0]).toContain("no task thread");
+  now = new Date(now.getTime() + 2 * 60_000);
+  await hub.tick();
+  for (let i = 0; i < 200 && (await store.all<any>("jobs")).filter((j) => j.followsUp === root.id && j.status === "done").length < 1; i++) await Bun.sleep(10);
+  const next = (await store.all<any>("jobs")).find((j) => j.followsUp === root.id)!;
+  expect(next).toMatchObject({ threadId: root.threadId, teammateId: "scout" });
+  expect(next.task).toContain("Did the booking go through?");
+  const m = (await store.all<any>("messages")).find((x) => x.fromTrigger)!;
+  expect(m).toMatchObject({ threadId: root.threadId, continues: [root.id], fromTrigger: { title: "Check the booking" } });
+});

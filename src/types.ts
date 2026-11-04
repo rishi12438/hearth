@@ -21,6 +21,8 @@ export type Message = Doc & {
   text: string;
   /** Set on messages the assistant sent first. */
   proactive?: { hookId: string; title: string; trigger: string; why: string };
+  /** Posted by a trigger handing what happened to Hearth (route who "hearth"): shown as the trigger, not as you. */
+  fromTrigger?: { id: string; title: string };
   /** A DM about an archived ramble (e.g. its watch fired): which ramble, so the app can link back. */
   fromThreadId?: string;
   /** What the brain changed while answering. */
