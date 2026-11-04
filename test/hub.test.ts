@@ -651,3 +651,9 @@ test("a working job's live view keeps only the latest picture, and drops it when
   await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done"));
   expect(hub.liveFrame(job.id)).toBeNull();
 });
+
+test("models are told a page read or their own code never needs the user's permission, and recipe limits don't carry over", () => {
+  const p = buildPrompt({ mode: "job", context: {}, input: "x" });
+  expect(p).toContain("Not for permission to use your own tools");
+  expect(p).toContain("never to later work, even if NOTES.md says otherwise");
+});

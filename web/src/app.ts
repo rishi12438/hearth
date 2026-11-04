@@ -1496,7 +1496,9 @@ function answer(j: any) {
         : h("small", { class: "muted" }, a.status === "done" ? "Approved and done" : a.status === "rejected" ? "You said no" : a.status)))]);
   }
   if (j.status === "blocked") return row(who, at, [h("div", { class: "block" }, h("div", { class: "blockhead" }, h("b", null, j.blocked?.need)), j.blocked?.why ? h("p", null, j.blocked.why) : null,
-    h("p", null, j.blocked?.unblock), h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => retry(j.id) } }, "Try again"), dismissBtn(j.id)))]);
+    h("p", null, j.blocked?.unblock), h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => retry(j.id) } }, "Try again"),
+    // Answer it in your own words: a reply picks the thread up from here (the stuck card settles).
+    h("button", { class: "sbtn", on: { click: () => (document.getElementById("composer") as HTMLTextAreaElement | null)?.focus() } }, "Reply"), dismissBtn(j.id)))]);
   const tiles = j.status === "done" ? (j.tiles || []) : [];
   const did = (j.did || []).filter((d: any) => ["hook", "memory", "skill", "place"].includes(d.kind)).map((d: any) => d.label);
   const canSave = j.status === "done" && !j.followsUp && (j.how === "fresh" || j.how === "repaired") && !(j.did || []).some((d: any) => d.kind === "skill");
