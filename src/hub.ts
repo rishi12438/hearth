@@ -1093,8 +1093,9 @@ export class Hub {
     // has everything said, read and found so far, so there's no coach before it and no write-up after (both were extra
     // cold model calls on every turn, which made "so he isn't a trillionaire anymore?" take as long as the first job).
     const first = brains[job.effort === "heavy" ? "heavy" : job.effort === "quick" ? "quick" : "workhorse"];
-    const direct = !!job.followsUp && !job.parentId && !!meter.thread && (first.harness === "claude" || first.harness === "codex")
-      && !!this.brain.sessions.get(meter.thread, first.harness);
+    // Whichever brain holds the session (the pool may have run the thread on Codex though the role says Claude): the run
+    // goes back to it (Brain.think), so that's the one to check.
+    const direct = !!job.followsUp && !job.parentId && !!(await this.brain.sessionBrain(meter.thread, first));
     const hybrid = !direct && (await this.prefs()).hybrid !== false && label(brains.heavy) !== label(brains.workhorse);
     const attempt = async (tier: Tier) => {
       cur = await this.saveJob({ ...cur, status: "working", tier });

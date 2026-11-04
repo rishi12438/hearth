@@ -851,6 +851,20 @@ export class Brain {
     // A brain that's signed out sits out while another can do the work (it's tried again once you reconnect it).
     const healthy = picked.filter((h) => !this.health.problem(h));
     const pool = healthy.length ? healthy : picked;
+    // A thread's working run goes back to the brain that holds its session, so a follow-up carries on with everything
+    // so far instead of starting over on whichever brain has more room (see brains/sessions.ts).
+    const held = !NO_TOOLS.has(b.mode) ? await this.sessionBrain(meter?.thread, asked) : undefined;
+    if (held) {
+      try { return await this.thinkOn(b, this.onBrain(asked, held), meter); }
+      catch (e: any) {
+        // Out of room or signed out there: the run starts over on another brain rather than not at all.
+        if (!(e instanceof SignedOut) && !isLimitError(String(e?.message || ""))) throw e;
+        if (!(e instanceof SignedOut)) this.usage.noteRefused(held);
+        const rest = pool.filter((h) => h !== held);
+        if (!rest.length) throw e;
+        return this.thinkOn(b, this.onBrain(asked, rest.includes(asked.harness) ? asked.harness : rest[0]), meter);
+      }
+    }
     if (pool.length === 1 && pool[0] !== asked.harness && picked.includes(asked.harness)) return this.thinkOn(b, this.onBrain(asked, pool[0]), meter);
     if (pool.length < 2 || !pool.includes(asked.harness)) return this.thinkOn(b, asked, meter);
     // Two or more brains: the one with the most room on its live limits takes it; a refusal on a limit moves it on once.
@@ -877,6 +891,16 @@ export class Brain {
         preferred = undefined;
       }
     }
+  }
+
+  /** The brain holding this thread's session, if it's one that may run now (picked and healthy; with no picks, the one
+   *  asked for): a follow-up in the thread goes back to it. */
+  async sessionBrain(thread: string | undefined, asked: BrainProfile): Promise<SessionHarness | undefined> {
+    if (!thread) return undefined;
+    const picked = (await this.pool().catch(() => [] as string[])).filter((h) => (POOL_HARNESSES as readonly string[]).includes(h));
+    const may = picked.length ? picked.filter((h) => !this.health.problem(h)) : [asked.harness];
+    const order = [asked.harness, ...may.filter((h) => h !== asked.harness)].filter((h) => may.includes(h));
+    return order.find((h): h is SessionHarness => (h === "claude" || h === "codex") && !!this.sessions.get(thread, h));
   }
 
   /** The same tier on another brain. */
