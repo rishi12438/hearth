@@ -222,16 +222,58 @@ test("the list survives a restart; off servers aren't given to runs; remove forg
   expect(vault.get("mcp-client:linear")).toBeNull();
 });
 
-test("hearth-mcp: add prints the sign-in link for the user; list, tools and call work", async () => {
+test("an agent's server waits for you: never contacted, never in a run, no sign-in, until you approve", async () => {
+  let asked: string[] = [];
+  mcp = new Mcp({ dataDir: dir, vault, redirectUri: () => "https://hub.example.com/api/mcp/callback", fetch: fakeFetch as typeof fetch, now: () => now, onPending: (s) => asked.push(s.name) });
   const out = await mcpAgent(mcp, ["add", MCP, "linear"], "an agent");
-  expect(out).toContain("It needs a sign-in");
-  expect(out).toContain("https://auth.example.com/authorize?");
-  expect(await mcpAgent(mcp, ["add", OPEN, "open"], "an agent")).toContain("open  connected");
+  expect(out).toContain("Asked the user to approve linear");
+  expect(out).not.toContain("authorize");
+  expect(asked).toEqual(["linear"]);
+  expect(calls).toEqual([]); // the hub hasn't touched it: no probe, no login service, no registration
+  expect(mcp.view("linear")!.state).toBe("pending");
+  expect(mcp.waiting().map((s) => s.name)).toEqual(["linear"]);
+  expect((await mcp.signIn("linear")).error).toContain("waiting for the user");
+  expect(await mcpAgent(mcp, ["signin", "linear"], "an agent")).toContain("waiting for the user");
+  await expect(mcp.call("linear", "search", {})).rejects.toThrow("waiting for the user");
+  expect((await mcp.forward("linear", new Request("http://h/x", { method: "POST", body: "{}" }))).status).toBe(404);
+  expect((await mcp.check("linear")).state).toBe("pending");
+  await mcp.checkAll();
+  expect((await mcp.setEnabled("linear", true)).error).toContain("approval");
+  expect(calls).toEqual([]);
+  // You approve it: now the hub contacts it, and it needs a sign-in like any other.
+  expect((await mcp.approve("linear")).value?.state).toBe("signin");
+  expect(mcp.waiting()).toEqual([]);
+  const s = await mcp.signIn("linear");
+  const { state, code } = approve((s.value as { url: string }).url);
+  await mcp.finish(state, code);
+  expect(mcp.forRun("http://h", "k").map((x) => x.name)).toEqual(["linear"]);
+});
+
+test("an agent can't change or replace a server that's already here", async () => {
+  await mcp.add({ url: OPEN, name: "open" }, "me");
+  expect((await mcp.add({ url: "https://evil.example.com/mcp", name: "open" }, "an agent", { agent: true })).error).toContain("Only the user can change it");
+  expect(mcp.get("open")!.url).toBe(OPEN);
+  // The same address again is just the one that's here, untouched.
+  expect(await mcpAgent(mcp, ["add", OPEN, "other"], "an agent")).toContain("Already added");
+  expect(mcp.list().map((s) => s.name)).toEqual(["open"]);
+  // Denying one an agent asked for is removing it.
+  await mcpAgent(mcp, ["add", "https://evil.example.com/mcp", "evil"], "an agent");
+  expect(mcp.remove("evil").value).toBe(true);
+  expect(mcp.waiting()).toEqual([]);
+  // You adding it yourself skips the wait.
+  expect((await mcp.add({ url: MCP, name: "linear" }, "me")).value?.state).toBe("signin");
+});
+
+test("hearth-mcp: list, tools and call work on servers you have", async () => {
+  await mcp.add({ url: MCP, name: "linear" }, "me");
+  await mcp.add({ url: OPEN, name: "open" }, "me");
   expect(await mcpAgent(mcp, ["list"], "an agent")).toContain("linear  signin");
+  expect(await mcpAgent(mcp, ["list"], "an agent")).toContain("open  connected");
   expect(await mcpAgent(mcp, ["tools", "open"], "an agent")).toContain("search: Search issues");
   expect(await mcpAgent(mcp, ["call", "open", "create", '{"title":"t"}'], "an agent")).toContain('called create with {\\"title\\":\\"t\\"}');
   expect(await mcpAgent(mcp, ["call", "open", "create", "not json"], "an agent")).toContain("must be JSON");
   expect(await mcpAgent(mcp, ["call", "nope", "x"], "an agent")).toContain("No MCP server called nope");
+  expect(await mcpAgent(mcp, ["signin", "linear"], "an agent")).toContain("https://auth.example.com/authorize?");
 });
 
 test("run config: Claude's --mcp-config and Codex's per-server keys", () => {

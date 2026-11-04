@@ -810,7 +810,11 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           if (method === "GET") return json({ at: await hub.inboxSeen() });
           break;
         }
-        return json(await hub.inbox());
+        {
+          // MCP servers an agent asked for wait here too ("Needs you"), next to approvals.
+          const asked = connect.mcp.waiting().map((s) => ({ kind: "mcp", at: s.addedAt, id: `mcp:${s.name}`, summary: `${s.name} · ${s.url}`, server: { name: s.name, url: s.url, addedBy: s.addedBy }, teammateId: "hearth" }));
+          return json([...asked, ...(await hub.inbox())]);
+        }
       case "teammates": {
         if (method === "GET" && id) { const d = await hub.teammateDetail(id); if (!d) break; return json(d); }
         if (method === "POST" && id && seg[3] === "seen") return json({ at: await hub.markChatSeen(`tm-${id}`), marked: await hub.markStuckSeen({ teammateId: id }) });
@@ -914,10 +918,23 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           const v = res(await connect.mcp.signIn(name, process.env.HEARTH_PUBLIC_URL ? undefined : `${proto}://${host}/api/mcp/callback`));
           return json({ ...v, server: connect.mcp.view(name) });
         }
+        // A server an agent asked for: you approve it (the hub contacts it for the first time) or deny it (DELETE).
+        if (method === "POST" && verb === "approve") {
+          const v = res(await connect.mcp.approve(name));
+          await hub.log("mcp.approved", `MCP: ${name} approved by ${device.name}`);
+          hub.emit("inbox");
+          return json({ server: v });
+        }
         if (method === "POST" && verb === "signout") { res(connect.mcp.signOut(name)); return json({ server: connect.mcp.view(name) }); }
         if (method === "POST" && verb === "check") { await connect.mcp.check(name); return json({ server: connect.mcp.view(name) }); }
         if (method === "PATCH" && !verb) return json({ server: res(await connect.mcp.setEnabled(name, (await body(req)).enabled !== false)) });
-        if (method === "DELETE" && !verb) { res(connect.mcp.remove(name)); await hub.log("mcp.removed", `MCP: ${name} removed by ${device.name}`); return json({ ok: true }); }
+        if (method === "DELETE" && !verb) {
+          const asked = !!connect.mcp.get(name)?.pending;
+          res(connect.mcp.remove(name));
+          await hub.log("mcp.removed", `MCP: ${name} ${asked ? "denied" : "removed"} by ${device.name}`);
+          if (asked) hub.emit("inbox");
+          return json({ ok: true });
+        }
         throw new HttpError(404, "Not here.");
       }
       case "google": {

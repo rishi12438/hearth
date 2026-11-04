@@ -77,6 +77,12 @@ export class Connect {
       dataDir: hub.config.dataDir, vault,
       redirectUri: () => `${(process.env.HEARTH_PUBLIC_URL || base).replace(/\/$/, "")}/api/mcp/callback`,
       onChange: () => hub.emit("mcp"),
+      // An agent asked for a server: it waits in Activity ("Needs you") and /mcp, and you get a notification.
+      onPending: (s) => {
+        hub.emit("inbox");
+        void hub.log("mcp.requested", `MCP: ${s.addedBy} asked to add ${s.name} (${s.url})`).catch(() => {});
+        void hub.push?.send({ title: "An agent wants to add an MCP server", body: `${s.name} · ${s.url}. Approve it or deny it in Hearth.`, tag: `mcp-${s.name}`, url: "/#activity" }).catch(() => {});
+      },
     });
     registerSkills(() => [mcpSkill(base, this.agentKey)]);
     hub.brain.mcpServers = () => this.mcp.forRun(base, this.agentKey);

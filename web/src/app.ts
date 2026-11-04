@@ -335,7 +335,10 @@ function onEvent(e: { type: string; data?: any }) {
       return;
     case "scripts": refreshState(); return;
     case "connections": refreshState().then(drawSide); return; // a Google account signed in or out: the Connectors warning follows
-    case "mcp": if (S.panel === "mcp") void drawMcp(); return; // a server signed in, renewed, added (by an agent too)
+    case "mcp": // a server signed in, renewed, added (an agent asking for one shows in Activity)
+      if (S.panel === "mcp") void drawMcp();
+      if (r.view === "activity") void renderActivity(); else loadInbox();
+      return;
     case "inbox": if (r.view !== "activity") loadInbox(); return; // seen on another device: clear the badge here too
     case "reset": refresh(); return;
   }
@@ -831,7 +834,9 @@ let actVisit: string | null = null; // what was already seen when you opened Act
 const isFresh = (it: any, since = actSeen) => (it.kind === "done" || it.kind === "failed" || it.kind === "proactive") &&
   String(it.at) > since && String(it.at) > seenAt(it.threadId);
 const unseenCount = () => (S.inbox || []).filter((it: any) => isFresh(it)).length;
-const activityBadge = () => needsYouCount() + (route().view === "activity" ? 0 : unseenCount());
+/** MCP servers an agent asked for, waiting for you to approve (they're in Activity's "Needs you"). */
+const mcpAsks = () => (S.inbox || []).filter((it: any) => it.kind === "mcp").length;
+const activityBadge = () => needsYouCount() + mcpAsks() + (route().view === "activity" ? 0 : unseenCount());
 function markActivitySeen() {
   // Only tell the hub when there's something new to clear, so redraws don't keep pinging it.
   if (!(S.inbox || []).some((it: any) => String(it.at) > actSeen || (it.kind === "blocked" && !it.seen))) return;
@@ -1171,6 +1176,19 @@ function drawActivity() {
           h("span", { class: "l2 live" }, on ? h("i", { class: "spin" }) : null, h("span", { "data-progress": it.id }, on ? S.progress.get(it.id) || "On it" : "Waiting its turn")))),
       h("div", { class: "actbtns" }, stopBtn(it)));
   };
+  // An agent asked for an MCP server: nothing contacts it until you approve. Approve goes straight on to its sign-in.
+  const mcpAskRow = (it: any) => {
+    const s = it.server;
+    const host = (() => { try { return new URL(s.url).host; } catch { return s.url; } })();
+    return h("div", { class: "actrow hot" },
+      h("button", { class: "actmain", on: { click: () => openMcp() } }, face(mate("hearth"), 40, "waiting"),
+        h("span", { class: "grow" },
+          h("span", { class: "l1" }, h("b", null, `An agent wants to add ${s.name}`), h("small", null, `MCP · ${host}`), h("time", null, shortAgo(it.at))),
+          h("span", { class: "l2" }, `${s.url} · every job would get its tools. Approve only if you know this address.`))),
+      h("div", { class: "actbtns" },
+        h("button", { class: "sbtn", on: { click: async () => { try { await call(`/api/mcp/${encodeURIComponent(s.name)}`, { method: "DELETE" }); toast(`Denied ${s.name}`); } catch (e) { handleError(e); } renderActivity(); } } }, "Deny"),
+        h("button", { class: "sbtn primary", on: { click: async () => { try { await approveMcp(s.name); } catch (e) { handleError(e); } renderActivity(); } } }, "Approve")));
+  };
   const row = (it: any) => {
     const t = mate(it.teammateId);
     const line = it.kind === "approval" ? `${t.name} needs your OK` : it.kind === "blocked" ? `${t.name} is stuck` : it.kind === "proactive" ? `${t.name} · ${it.title}` : it.kind === "failed" ? `${t.name} couldn't finish` : `${t.name} replied`;
@@ -1192,7 +1210,7 @@ function drawActivity() {
   markActivitySeen();
   const secs = [
     sec("Working now", running, runRow),
-    sec("Needs you", of("approval", "blocked"), row),
+    sec("Needs you", [...of("mcp"), ...of("approval", "blocked")], (it: any) => (it.kind === "mcp" ? mcpAskRow(it) : row(it))),
     sec("New", fresh, row),
   ].filter(Boolean) as Node[];
   clear(el, secs.length ? secs : h("p", { class: "hempty" }, "You're all caught up."));
@@ -1853,6 +1871,14 @@ const SLASH: SlashCommand[] = [
 
 // ---------------- MCP servers (/mcp) ----------------
 
+/** You approve a server an agent asked for. If it needs a login, its sign-in opens right away (from your tap). */
+async function approveMcp(name: string) {
+  const r = await call(`/api/mcp/${encodeURIComponent(name)}/approve`, { body: {} });
+  if (r.server.state !== "signin") return void toast(r.server.state === "connected" ? `${name} approved` : `${name} approved · ${r.server.error || r.server.state}`);
+  const s = await call(`/api/mcp/${encodeURIComponent(name)}/signin`, { body: {} });
+  if (s.url) location.href = s.url; else toast(`${name} approved`);
+}
+
 /** Every MCP server the hub has, for every brain: its state and tools, Sign in / Reconnect, on/off, and adding one. */
 function openMcp() {
   S.panel = "mcp";
@@ -1861,7 +1887,7 @@ function openMcp() {
 }
 
 const MCP_STATE: Record<string, [string, string]> = {
-  connected: ["ok", "Connected"], signin: ["warn", "Needs sign-in"], failed: ["danger", "Failed"], off: ["muted", "Off"], checking: ["muted", "Checking…"],
+  pending: ["warn", "Waiting for you"], connected: ["ok", "Connected"], signin: ["warn", "Needs sign-in"], failed: ["danger", "Failed"], off: ["muted", "Off"], checking: ["muted", "Checking…"],
 };
 
 async function drawMcp() {
@@ -1880,6 +1906,15 @@ async function drawMcp() {
     const [tone, label] = MCP_STATE[s.state] || ["muted", s.state];
     const host = (() => { try { return new URL(s.url).host; } catch { return s.url; } })();
     const detail = [label, s.state === "connected" ? `${s.tools.length} tool${s.tools.length === 1 ? "" : "s"}` : s.error, host, s.auth === "key" ? "API key" : null].filter(Boolean).join(" · ");
+    if (s.state === "pending") {
+      return h("div", { class: "item mcprow" },
+        h("span", { class: "mcpdot warn", "aria-hidden": "true" }),
+        h("span", { class: "grow left" }, h("b", { class: "light" }, s.name), h("small", { class: "sub" }, `Waiting for you · ${s.addedBy || "an agent"} asked for it`),
+          h("small", { class: "sub mcptools" }, s.url)),
+        h("span", { class: "row gap" },
+          btn("Approve", "primary", () => approveMcp(s.name)),
+          btn("Deny", "danger-ghost", () => call(`/api/mcp/${encodeURIComponent(s.name)}`, { method: "DELETE" }).then(() => { toast(`Denied ${s.name}`); }))));
+    }
     const actions = [
       s.state === "signin" ? btn("Sign in", "primary", () => signIn(s.name))
         : s.state === "failed" || (s.state === "connected" && s.auth === "oauth") ? btn("Reconnect", "", () => (s.auth === "oauth" ? signIn(s.name) : call(`/api/mcp/${encodeURIComponent(s.name)}/check`, { body: {} }).then(() => {}))) : null,

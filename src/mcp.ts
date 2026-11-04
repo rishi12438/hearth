@@ -17,8 +17,9 @@ import type { Vault } from "./vault.ts";
 //
 // The list (names and URLs, nothing secret) is <data>/mcp.json; tokens and API keys are in the vault as mcp:<name>.
 
-export type McpServer = { name: string; url: string; enabled: boolean; addedBy: string; addedAt: string };
-export type McpState = "connected" | "signin" | "failed" | "off" | "checking";
+/** pending: an agent added it and you haven't approved it. The hub doesn't contact it, and no run or command can use it. */
+export type McpServer = { name: string; url: string; enabled: boolean; addedBy: string; addedAt: string; pending?: boolean };
+export type McpState = "connected" | "signin" | "failed" | "off" | "checking" | "pending";
 export type McpStatus = { state: McpState; tools: string[]; error?: string; checkedAt?: string };
 export type McpView = McpServer & McpStatus & { auth: "oauth" | "key" | "none" };
 export type McpTool = { name: string; description?: string; inputSchema?: unknown };
@@ -62,6 +63,8 @@ export type McpOptions = {
   /** Where the login service sends the browser back: <public hub URL>/api/mcp/callback. */
   redirectUri: () => string;
   onChange?: () => void;
+  /** An agent asked for a server: tell the user (a notification, and Activity). */
+  onPending?: (s: McpServer) => void;
   fetch?: typeof fetch;
   now?: () => number;
 };
@@ -96,15 +99,21 @@ export class Mcp {
   list(): McpView[] {
     return this.servers.map((s) => {
       const c = this.creds(s.name);
-      const st = !s.enabled ? { state: "off" as const, tools: this.status.get(s.name)?.tools || [] } : this.status.get(s.name) ?? { state: "checking" as const, tools: [] };
+      const st = s.pending ? { state: "pending" as const, tools: [] }
+        : !s.enabled ? { state: "off" as const, tools: this.status.get(s.name)?.tools || [] } : this.status.get(s.name) ?? { state: "checking" as const, tools: [] };
       return { ...s, ...st, auth: c?.kind === "key" ? "key" : c?.kind === "oauth" || this.status.get(s.name)?.state === "signin" ? "oauth" : "none" };
     });
   }
   get(name: string) { return this.servers.find((s) => s.name === name) ?? null; }
   view(name: string) { return this.list().find((s) => s.name === name) ?? null; }
+  /** Servers an agent asked for, waiting for you (Activity's "Needs you"). */
+  waiting(): McpServer[] { return this.servers.filter((s) => s.pending); }
 
-  /** Add one (or change its address). An API key goes in a header; without one, the hub signs in with OAuth if asked to. */
-  async add(input: { name?: string; url: string; header?: string; key?: string }, by: string): Promise<Result<McpView>> {
+  /**
+   * Add one (or change its address). An API key goes in a header; without one, the hub signs in with OAuth if asked to.
+   * agent: an agent asked (hearth-mcp add). It waits for you, untouched, and it can't change a server that's already here.
+   */
+  async add(input: { name?: string; url: string; header?: string; key?: string }, by: string, opts: { agent?: boolean } = {}): Promise<Result<McpView>> {
     let url: URL;
     try { url = new URL(String(input.url || "").trim()); } catch { return { error: "That isn't a web address." }; }
     // https only: no plain-http server, local ones included (the hub would be calling its own machine's services).
@@ -112,6 +121,16 @@ export class Mcp {
     if (url.username || url.password) return { error: "Put the key in the key field, not in the address." };
     const name = (input.name || nameFromUrl(url.href)).trim().toLowerCase();
     if (!NAME_RE.test(name)) return { error: "Names are lowercase letters, numbers, - and _ (up to 31)." };
+    if (opts.agent) {
+      const same = this.servers.find((s) => s.url === url.href);
+      if (same) return { value: this.view(same.name)! };
+      if (this.get(name)) return { error: `There's already a server called ${name}. Only the user can change it (in /mcp); pick another name to ask for a new one.` };
+      const s: McpServer = { name, url: url.href, enabled: true, addedBy: by, addedAt: new Date(this.now()).toISOString(), pending: true };
+      this.servers = [...this.servers, s].sort((a, b) => a.name.localeCompare(b.name));
+      this.save();
+      try { this.o.onPending?.(s); } catch {}
+      return { value: this.view(name)! };
+    }
     if (input.key) {
       if (!this.o.vault) return { error: "This hub has no key vault." };
       const header = (input.header || "Authorization").trim();
@@ -121,6 +140,7 @@ export class Mcp {
     }
     const old = this.get(name);
     if (old && old.url !== url.href && !input.key) this.forget(name); // a new address: the old sign-in isn't for it
+    // You adding it (yourself, or again over one an agent asked for) is your approval.
     const s: McpServer = { name, url: url.href, enabled: true, addedBy: old?.addedBy || by, addedAt: old?.addedAt || new Date(this.now()).toISOString() };
     this.servers = [...this.servers.filter((x) => x.name !== name), s].sort((a, b) => a.name.localeCompare(b.name));
     this.save();
@@ -138,9 +158,21 @@ export class Mcp {
     return { value: true };
   }
 
+  /** You approved a server an agent asked for: the hub contacts it for the first time (it may need a sign-in next). */
+  async approve(name: string): Promise<Result<McpView>> {
+    const s = this.get(name);
+    if (!s) return { error: `No MCP server called ${name}.` };
+    if (!s.pending) return { value: this.view(name)! };
+    delete s.pending;
+    this.save();
+    await this.check(name);
+    return { value: this.view(name)! };
+  }
+
   async setEnabled(name: string, on: boolean): Promise<Result<McpView>> {
     const s = this.get(name);
     if (!s) return { error: `No MCP server called ${name}.` };
+    if (s.pending) return { error: `${name} is waiting for your approval.` };
     s.enabled = on;
     this.save();
     if (on) await this.check(name); else this.changed();
@@ -157,7 +189,7 @@ export class Mcp {
 
   /** What a working run gets: each server that's on and usable, as this hub's proxy. */
   forRun(base: string, key: string): { name: string; url: string; headers: Record<string, string> }[] {
-    return this.servers.filter((s) => s.enabled && this.status.get(s.name)?.state === "connected")
+    return this.servers.filter((s) => s.enabled && !s.pending && this.status.get(s.name)?.state === "connected")
       .map((s) => ({ name: s.name, url: `${base}/api/agent/mcp/${s.name}`, headers: { "X-Hearth-Agent": key } }));
   }
 
@@ -167,6 +199,7 @@ export class Mcp {
   async signIn(name: string, redirectUri = this.o.redirectUri()): Promise<Result<{ url: string } | { connected: true }>> {
     const s = this.get(name);
     if (!s) return { error: `No MCP server called ${name}.` };
+    if (s.pending) return { error: `${name} is waiting for the user to approve it (in Activity or /mcp). There's no sign-in until they do.` };
     if (!this.o.vault) return { error: "This hub has no key vault." };
     // Reconnect: a refresh is enough when the login service still honours it.
     const c = this.creds(name);
@@ -241,12 +274,13 @@ export class Mcp {
 
   // ---- talking to servers ----
 
-  async checkAll() { await Promise.all(this.servers.filter((s) => s.enabled).map((s) => this.check(s.name).catch(() => {}))); }
+  async checkAll() { await Promise.all(this.servers.filter((s) => s.enabled && !s.pending).map((s) => this.check(s.name).catch(() => {}))); }
 
   /** Connect for real (initialize, tools/list) and keep what happened: connected with its tools, needs sign-in, or failed. */
   async check(name: string): Promise<McpStatus> {
     const s = this.get(name);
     if (!s) return { state: "failed", tools: [], error: "Not on the list." };
+    if (s.pending) return { state: "pending", tools: [] }; // not contacted until you approve it
     if (!s.enabled) return { state: "off", tools: [] };
     try {
       const tools = await this.tools(name);
@@ -284,7 +318,7 @@ export class Mcp {
    */
   async forward(name: string, req: Request): Promise<Response> {
     const s = this.get(name);
-    if (!s || !s.enabled) return new Response(JSON.stringify({ error: `No MCP server called ${name} is on.` }), { status: 404, headers: { "Content-Type": "application/json" } });
+    if (!s || !s.enabled || s.pending) return new Response(JSON.stringify({ error: `No MCP server called ${name} is on.` }), { status: 404, headers: { "Content-Type": "application/json" } });
     const headers: Record<string, string> = {};
     for (const h of PASS_UP) { const v = req.headers.get(h); if (v) headers[h] = v; }
     const body = req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer();
@@ -343,7 +377,9 @@ export class Mcp {
 
   /** An MCP session over streamable HTTP: initialize, then fn's requests, then close it. */
   private async session(name: string, fn: (rpc: (method: string, params: unknown) => Promise<any>) => Promise<void>) {
-    const s = this.get(name)!;
+    const s = this.get(name);
+    if (!s) throw new Error(`No MCP server called ${name}.`);
+    if (s.pending) throw new Error(`${name} is waiting for the user to approve it (in Activity or /mcp).`);
     let sid: string | null = null;
     let id = 0;
     const post = async (msg: Record<string, unknown>) => {
@@ -509,9 +545,10 @@ tools (named mcp__<server>__<tool> on Claude). This command reaches all of them,
 - \`hearth-mcp list\`: every server, whether it's connected, and its tools
 - \`hearth-mcp tools <server>\`: its tools with what each takes
 - \`hearth-mcp call <server> <tool> '<json arguments>'\` (or \`-\` to read the JSON from stdin): prints the result
-- \`hearth-mcp add <https url> [name]\`: add a server. If it needs a login, this prints a sign-in link: give the user
-  that link (or tell them to type /mcp in Hearth). You can't sign in for them. Once they have, \`call\` works right away.
-- \`hearth-mcp signin <server>\`: a fresh sign-in link for one that's signed out
+- \`hearth-mcp add <https url> [name]\`: ask for a new server. The user approves it first (Activity or /mcp); until
+  then it's off. Use the server's official address, and say in your reply what it's for. You can't approve or sign in
+  for them. Once they have, \`call\` works right away.
+- \`hearth-mcp signin <server>\`: a fresh sign-in link for an approved server that's signed out (give the user the link)
 
 Use the server's own tools when you have them; \`call\` is for a server added after this run started.`,
   };
@@ -540,13 +577,10 @@ export async function mcpAgent(mcp: Mcp, argv: string[], by: string): Promise<st
     }
     case "add": {
       if (!a) return "usage: hearth-mcp add <https url> [name]";
-      const r = await mcp.add({ url: a, name: b }, by);
+      const r = await mcp.add({ url: a, name: b }, by, { agent: true });
       if (!r.value) return r.error;
-      const added = r.value;
-      if (added.state !== "signin") return line(added);
-      const s = await mcp.signIn(added.name);
-      if (!s.value) return `${added.name} needs a sign-in, but: ${s.error}`;
-      return "url" in s.value ? `Added ${added.name}. It needs a sign-in: give the user this link (or tell them to type /mcp in Hearth):\n${s.value.url}` : line(mcp.view(added.name)!);
+      if (r.value.state !== "pending") return `Already added:\n${line(r.value)}`;
+      return `Asked the user to approve ${r.value.name} (${r.value.url}). It stays off until they do: they got a notification, and it's in Activity and /mcp. Tell them in your reply what it's for. Once they approve (and sign in, if it needs one), \`hearth-mcp call\` works.`;
     }
     case "signin": {
       if (!a) return "usage: hearth-mcp signin <server>";
