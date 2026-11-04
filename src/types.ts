@@ -23,6 +23,8 @@ export type Message = Doc & {
   proactive?: { hookId: string; title: string; trigger: string; why: string };
   /** Posted by a trigger handing what happened to Hearth (route who "hearth"): shown as the trigger, not as you. */
   fromTrigger?: { id: string; title: string };
+  /** Posted by the hub when something you approved failed: the agent hears what came back and carries on. Not from you. */
+  fromApproval?: { id: string; summary: string };
   /** A DM about an archived ramble (e.g. its watch fired): which ramble, so the app can link back. */
   fromThreadId?: string;
   /** What the brain changed while answering. */
@@ -289,7 +291,8 @@ export type Approval = Doc & {
   jobId?: string;
   summary: string;
   details?: string;
-  action: { type: "script"; script: string; args: string[] } | { type: "message"; channel: Channel; to: string; text: string; subject?: string; threadId?: string; from?: string }
+  /** sha256: set when the script's code wasn't approved yet at ask time. Approving this run approves exactly that code too. */
+  action: { type: "script"; script: string; args: string[]; sha256?: string } | { type: "message"; channel: Channel; to: string; text: string; subject?: string; threadId?: string; from?: string }
     /** A Gmail/Drive/Calendar command that changes or removes something (connectors/google-agent.ts); kind is what "Always allow" remembers. */
     | { type: "google"; service: "gmail" | "drive" | "calendar"; args: string[]; body?: string; kind: string };
   status: "pending" | "approved" | "rejected" | "done" | "failed";
