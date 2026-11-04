@@ -810,6 +810,11 @@ export class Hub {
     const continues = [...new Set(continued.map((c) => c.followsUp || c.id))];
     await this.addMessage({ role: "assistant", teammateId: "hearth", threadId: thread.id, text: reply.slice(0, 1000), jobIds: jobs.map((j) => j.id), ...(continues.length ? { continues } : {}) });
     for (const j of jobs) await this.addMessage({ role: "assistant", teammateId: "hearth", threadId: thread.id, text: j.label || j.task, taskJobId: j.id });
+    // Hearth answered itself (no task for a teammate): that's the end of the turn, so say so like a finished job does.
+    // With tasks, each one's "finished" notification is the one that matters.
+    if (!jobs.length && !continued.length) {
+      this.push?.send({ title: "Hearth replied", body: reply.slice(0, 180), tag: `reply-${thread.id}`, url: threadLink(thread.id) }).catch(() => {});
+    }
     for (const j of [...jobs, ...continued]) this.emit("job", j);
     if (movedOut) this.emit("thinking", { threadId: thread.id, on: false });
     this.pump(m.id); // runs in the background; a new ramble is handled right away
