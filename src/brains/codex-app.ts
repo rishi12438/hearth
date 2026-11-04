@@ -6,9 +6,9 @@
 //   -> initialize {clientInfo}        <- result
 //   -> initialized
 //   -> thread/start {cwd, model, sandbox, approvalPolicy, config}  or  thread/resume {threadId, ...same}
-//   <- result {thread: {id}}          (a resume of a thread it can't find falls back to thread/start)
+//   <- result {thread: {id}, model}   (a resume of a thread it can't find falls back to thread/start)
 //   -> turn/start {threadId, input: [{type: "text", text}]}
-//   <- item/started, item/completed, error ...   <- turn/completed {turn: {status, error}}
+//   <- item/started, item/completed, thread/tokenUsage/updated, error ...   <- turn/completed {turn: {status, error}}
 // Nobody is there to approve anything (approvalPolicy "never"); an approval it asks for anyway is declined.
 //
 // Its notifications are turned into `codex exec --json` events ({type: "item.completed", item: {type: "agent_message"}}),
@@ -24,6 +24,10 @@ export type CodexAppOptions = {
   web: boolean;
   /** No thread kept on disk (a quick call that nothing follows up). */
   ephemeral: boolean;
+  /** The model the thread really runs on (Codex picks its own default when we don't name one). */
+  onModel?: (model: string) => void;
+  /** Tokens one model call just used (Codex is on a plan: tokens, not dollars). */
+  onTokens?: (tokens: number) => void;
 };
 
 type Rpc = { id?: number | string; method?: string; params?: any; result?: any; error?: { message?: string } };
@@ -80,6 +84,11 @@ export class CodexAppTurn {
         // It retries some errors itself (a dropped stream); only a final one counts.
         if (p.willRetry) return [];
         return [JSON.stringify({ type: "error", message: String(p.error?.message || "Codex reported an error") })];
+      case "thread/tokenUsage/updated": {
+        const n = Number(p.tokenUsage?.last?.totalTokens);
+        if (n > 0) this.o.onTokens?.(n);
+        return [];
+      }
       case "turn/completed": {
         const t = p.turn || {};
         if (t.status === "failed" || t.status === "interrupted") this.failure = String(t.error?.message || `the turn ${t.status === "failed" ? "failed" : "was interrupted"}`);
@@ -116,6 +125,8 @@ export class CodexAppTurn {
     if (m.error || typeof id !== "string") return this.fail(`Codex couldn't open a thread: ${m.error?.message || "no thread id"}`);
     this.threadId = id;
     this.resumed = resumed;
+    const model = m.result?.model ?? m.result?.thread?.model;
+    if (typeof model === "string" && model) this.o.onModel?.(model);
     this.request("turn/start", { threadId: id, input: [{ type: "text", text: this.o.prompt, text_elements: [] }] }, (r) => {
       if (r.error) this.fail(`Codex couldn't start the turn: ${r.error.message || "turn/start failed"}`);
     });

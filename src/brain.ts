@@ -537,8 +537,13 @@ export type Meter = { costUsd: number; unknown: boolean; signal?: AbortSignal; o
   lead?: boolean;
   /** Set by Brain when a run carried on the thread's earlier session instead of starting a new one. */
   resumed?: boolean;
-  /** Called as each model starts on the call: the brain that actually runs it (after any swap) and where. */
-  onBrain?: (who: { harness: string; model: string; ranOn?: string }) => void };
+  /** Called as each model starts on the call: the brain that actually runs it (after any swap) and where. Called again
+   * with the exact model once the harness says which (Codex picks its own default). */
+  onBrain?: (who: { harness: string; model: string; ranOn?: string }) => void;
+  /** Tokens used so far, for brains on a plan that report no dollar cost (Codex). */
+  tokens?: number;
+  /** The cost or tokens just went up. */
+  onUsage?: () => void };
 
 /** Somewhere else that can run a brain call: a computer linked to this hub (see computers.ts). */
 export type RemoteRunner = { name: string; run(b: BrainInput, p: BrainProfile, meter?: Meter): Promise<string> };
@@ -934,7 +939,9 @@ export class Brain {
     if (harness === "codex") {
       const sink = proc.stdin as import("bun").FileSink;
       const turn = (app = new CodexAppTurn((l) => { sink.write(l); sink.flush(); },
-        { cwd, prompt, model, resume, web, ephemeral: !thread }));
+        { cwd, prompt, model, resume, web, ephemeral: !thread,
+          onModel: (m) => { if (m !== model) meter?.onBrain?.({ harness, model: m, ranOn: meter.ranOn }); },
+          onTokens: (n) => { if (!meter) return; meter.tokens = (meter.tokens ?? 0) + n; meter.onUsage?.(); } }));
       turn.done.then(() => { try { sink.end(); } catch {} proc.kill(); });
       proc.exited.then(() => turn.closed(), () => turn.closed());
       turn.start();
@@ -1036,7 +1043,7 @@ export class Brain {
         reply = String(j.result ?? "");
         if (j.is_error) failed = true;
         if (typeof j.session_id === "string") session = j.session_id;
-        if (meter && typeof j.total_cost_usd === "number") meter.costUsd += j.total_cost_usd;
+        if (meter && typeof j.total_cost_usd === "number") { meter.costUsd += j.total_cost_usd; meter.onUsage?.(); }
         else if (meter) meter.unknown = true;
       } catch { if (meter) meter.unknown = true; }
     } else if (meter) meter.unknown = true;
