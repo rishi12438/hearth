@@ -228,6 +228,29 @@ test("the lead's redo that still can't do it fails with its reason, never posts 
   expect(job.escalations?.map((e) => e.why)).toEqual(["the lead redid it: missing most of the orders"]);
 });
 
+test("the working card names the exact model and what it's used so far, the lead's tips included", async () => {
+  await hub.ensureTeammates();
+  const running: string[] = [];
+  hub.on((e: any) => { if (e.type === "running") running.push(e.data.text); });
+  (hub.brain as any).think = async (b: any, p: any, meter: any) => {
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "List my orders", teammate: "Research", effort: "light" }] });
+    // Like Codex: it starts as just "Codex", then says which model it is, then reports tokens.
+    meter?.onBrain?.({ harness: "codex", model: "" });
+    meter?.onBrain?.({ harness: "codex", model: "gpt-6.1-sol" });
+    if (meter) { meter.tokens = (meter.tokens ?? 0) + 1000; meter.unknown = true; meter.onUsage?.(); }
+    if (b.mode === "coach") return "Check every order page.";
+    return b.mode === "legwork" ? "NOTES: 3 orders." : "You have 3 orders.";
+  };
+  await hub.setBrains({ workhorse: { harness: "echo", model: "small" }, heavy: { harness: "echo", model: "big" } });
+  await hub.ramble("list my orders");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done"));
+  const [job] = await store.all<Job>("jobs");
+  expect(running[0]).toBe("Codex"); // the lead's tips show on the card too
+  expect(running).toContain("Codex gpt-6.1-sol · 1k tokens");
+  expect(running.at(-1)).toBe("Codex gpt-6.1-sol · 3k tokens"); // tips + legwork + voice
+  expect([job.models, job.tokens, job.costUsd]).toEqual([["Codex gpt-6.1-sol"], 3000, null]);
+});
+
 test("the top model's prompt says nobody is above it; a lower one is asked for a reason", () => {
   const low = buildPrompt({ mode: "job", context: {}, input: "x" });
   const top = buildPrompt({ mode: "job", context: {}, input: "x", top: true });

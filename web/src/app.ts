@@ -1519,12 +1519,12 @@ function answer(j: any) {
 function metaLine(j: any) {
   if (j.how === "skill" || j.how === "workflow") {
     const n = (j.skillId ? S.skills.find((x) => x.id === j.skillId) : S.workflows.find((x) => x.id === j.workflowId))?.name;
-    return `${n ? `used ${n} · ` : ""}${secs(j.durationMs)} · ${money(j.costUsd)}`;
+    return [n ? `used ${n}` : null, j.models?.length ? j.models.join(" → ") : null, secs(j.durationMs), spend(j)].filter(Boolean).join(" · ");
   }
   // The models that actually ran ("Claude sonnet → Claude opus"); older jobs only kept the tier.
   const model = j.models?.length ? j.models.join(" → ")
     : j.voiced ? `${j.tier === "quick" ? "quick" : "workhorse"} + heavy` : j.tier === "quick" ? "quick" : j.tier === "heavy" ? "heavy" : null;
-  return [j.escalated ? "moved up" : null, model, j.ranOn ? `on ${j.ranOn === "cloud" ? "the cloud" : j.ranOn}` : null, secs(j.durationMs), money(j.costUsd)].filter(Boolean).join(" · ");
+  return [j.escalated ? "moved up" : null, model, j.ranOn ? `on ${j.ranOn === "cloud" ? "the cloud" : j.ranOn}` : null, secs(j.durationMs), spend(j)].filter(Boolean).join(" · ");
 }
 
 function chatMenu() {
@@ -1887,6 +1887,13 @@ function mapView(stops: { name: string; lat: number; lon: number; when?: string;
 function secs(ms?: number) {
   if (!ms) return "";
   return ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))}s` : `${Math.round(ms / 60_000)}m`;
+}
+
+/** A job's cost: dollars, or tokens for brains on a plan (Codex), or both when it used each. */
+function spend(j: any) {
+  if (!j.tokens) return money(j.costUsd);
+  const t = j.tokens >= 1_000_000 ? `${(j.tokens / 1_000_000).toFixed(1)}M` : j.tokens >= 1000 ? `${Math.round(j.tokens / 1000)}k` : String(j.tokens);
+  return `${j.costUsd ? `${money(j.costUsd)} + ` : ""}${t} tokens`;
 }
 
 function money(c: number | null | undefined) {

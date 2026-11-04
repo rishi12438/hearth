@@ -63,6 +63,12 @@ const label = (p: BrainProfile) => `${p.harness}${p.model ? `/${p.model}` : ""}`
 /** A model in words for the app: "Claude opus", "Codex gpt-5.5", "Claude" (its default model). */
 export const brainName = (w: { harness: string; model?: string }) =>
   `${w.harness === "claude" ? "Claude" : w.harness === "codex" ? "Codex" : w.harness}${w.model ? ` ${w.model.replace(/^claude-/, "")}` : ""}`;
+/** What a job has cost so far, in words: "$0.42", "340k tokens", "$0.42 + 340k tokens", or "" before anything is known. */
+export function usageText(costUsd?: number | null, tokens?: number): string {
+  const usd = costUsd ? `$${costUsd < 0.01 ? costUsd.toFixed(3) : costUsd.toFixed(2)}` : "";
+  const tok = tokens ? `${tokens >= 1_000_000 ? `${(tokens / 1_000_000).toFixed(1)}M` : tokens >= 1000 ? `${Math.round(tokens / 1000)}k` : tokens} tokens` : "";
+  return [usd, tok].filter(Boolean).join(" + ");
+}
 /** Where a call ran, in words: "on the cloud", "on Rishi's MacBook Pro", or nothing on a laptop hub. */
 const whereName = (ranOn?: string) => (ranOn ? ` on ${ranOn === "cloud" ? "the cloud" : ranOn}` : "");
 
@@ -829,12 +835,22 @@ export class Hub {
   }
 
   /** The lead's brief before a cheaper model starts a job: the task, what came before, and the workspace's notes. */
-  private async leadTips(job: Job, earlier: string, place?: WorkPlace): Promise<string> {
+  private async leadTips(job: Job, earlier: string, place?: WorkPlace, meter?: Meter): Promise<string> {
     const notes = this.brain.sessions.notes(job.parentId ? job.id : job.followsUp || job.id, place);
     const input = [`JOB: ${job.task}`, earlier ? `\nWHAT CAME BEFORE:\n<untrusted>\n${earlier.slice(0, 4000)}\n</untrusted>` : "",
       notes ? `\nTHEIR WORKSPACE'S NOTES.md (what earlier work left):\n<untrusted>\n${notes}\n</untrusted>` : ""].join("\n");
-    const out = (await this.brain.think({ mode: "coach", context: {}, input }, (await this.brains()).heavy)).trim();
-    return out.slice(0, 3000);
+    // Its own meter: it shows on the job's card (which model) and adds to its cost, but never joins the job's session.
+    const tips: Meter = { costUsd: 0, unknown: false, signal: meter?.signal, onBrain: meter?.onBrain };
+    try {
+      return (await this.brain.think({ mode: "coach", context: {}, input }, (await this.brains()).heavy, tips)).trim().slice(0, 3000);
+    } finally {
+      if (meter) {
+        meter.costUsd += tips.costUsd;
+        if (tips.tokens) meter.tokens = (meter.tokens ?? 0) + tips.tokens;
+        if (tips.unknown) meter.unknown = true;
+        meter.onUsage?.();
+      }
+    }
   }
 
   /** A job asked the lead mid-run (hearth-lead): the heavy model answers. See brains/lead.ts. */
@@ -889,13 +905,28 @@ export class Hub {
       // Which model is on it right now, and where: the working card shows it, the step log keeps each change.
       onBrain: (w) => {
         const name = brainName(w);
-        if (!models.includes(name)) models.push(name);
-        const text = `${name}${whereName(w.ranOn)}`;
-        if (this.running.get(job.id) === text) return;
-        this.running.set(job.id, text);
-        this.emit("running", { jobId: job.id, threadId: job.threadId, text });
-        show(`${text} started`);
-      } };
+        // The exact model arrived for a run that started as just "Codex": it's the same run, so swap the name in place.
+        const bare = brainName({ harness: w.harness });
+        const exact = name !== bare && models.at(-1) === bare;
+        if (exact) { models.pop(); if (!models.includes(name)) models.push(name); }
+        else if (!models.includes(name)) models.push(name);
+        const who = `${name}${whereName(w.ranOn)}`;
+        if (onIt === who) return;
+        onIt = who;
+        showRunning();
+        if (!exact) show(`${who} started`);
+      },
+      onUsage: () => showRunning() };
+    // The working card's line: the model on it, where, and what it's cost so far ("Codex gpt-6.1-sol on the cloud · 340k tokens").
+    let onIt = "";
+    const showRunning = () => {
+      if (!onIt) return;
+      const spent = usageText(meter.costUsd, meter.tokens);
+      const text = spent ? `${onIt} · ${spent}` : onIt;
+      if (this.running.get(job.id) === text) return;
+      this.running.set(job.id, text);
+      this.emit("running", { jobId: job.id, threadId: job.threadId, text });
+    };
     const models: string[] = [];
     const mate = await this.teammate(job.teammateId);
     let cur: Job = await this.saveJob({ ...job, status: "working", startedAt: this.clock().toISOString() });
@@ -924,7 +955,9 @@ export class Hub {
       await this.addSpend(job.messageId, meter.costUsd);
       cur = await this.saveJob({
         ...cur, ...patch, blocked, relogged: stored?.relogged, status, ranOn: meter.ranOn, ...(models.length ? { models } : {}),
-        durationMs: Date.now() - started, costUsd: meter.unknown ? null : +meter.costUsd.toFixed(4),
+        // A job that ran partly on a plan (Codex) keeps the dollars it did report, plus its tokens.
+        durationMs: Date.now() - started, costUsd: meter.unknown && !meter.costUsd ? null : +meter.costUsd.toFixed(4),
+        ...(meter.tokens ? { tokens: meter.tokens } : {}),
         finishedAt: status === "done" || status === "failed" ? this.clock().toISOString() : undefined,
       });
       // It pulled a fresh login from your Mac mid-run: go again with it, without you tapping anything.
@@ -994,7 +1027,7 @@ export class Hub {
     // Only with hybrid on (Settings → Brains): off means one model does the job by itself.
     if (hybrid && ladder[0] !== "heavy" && job.effort !== "quick" && label(brains[ladder[0]]) !== label(brains.heavy) && !stop.signal.aborted) {
       meter.onProgress?.("Getting tips from the lead");
-      const tips = await this.leadTips(job, earlier, meter.workspace).catch(() => "");
+      const tips = await this.leadTips(job, earlier, meter.workspace, meter).catch(() => "");
       if (tips) input += `\n\nTIPS FROM THE LEAD (a stronger model on your team, before you started):\n${tips}`;
     }
     try {
@@ -1284,7 +1317,9 @@ export class Hub {
         usedModel = true;
         const recipe = [`Follow this saved recipe exactly ("${sk.name}": ${sk.description}).`,
           ...sk.steps!.map((x, i) => `${i + 1}. ${x}`),
-          `Inputs: ${JSON.stringify(inputs)}`, `You may only run these scripts: ${(sk.uses || []).join(", ") || "none"}. Don't write new code.`].join("\n");
+          `Inputs: ${JSON.stringify(inputs)}`, `You may only run these scripts: ${(sk.uses || []).join(", ") || "none"}. Don't write new code.`,
+          // A rule for this recipe run only: written into NOTES.md, it bound every later job in the workspace.
+          "That limit is for this recipe run only: don't record it in NOTES.md or as a rule for later work."].join("\n");
         const r = await this.turn("job", recipe, ctx.job?.task || sk.name, { teammate: ctx.mate, threadId: ctx.job?.threadId, jobId: ctx.job?.id, meter: ctx.meter, allowedScripts: sk.uses || [] });
         if (!r.text.trim() || r.text.includes(ESCALATE)) throw new Error("The recipe didn't work this time.");
         output = r.text; did = r.did; tiles = r.tiles || [];
