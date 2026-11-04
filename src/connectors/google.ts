@@ -10,7 +10,10 @@ export const google: Connector = {
     if (!g.connected) return { state: "off", detail: null };
     const who = g.accounts.length > 1 ? `${g.accounts.length} accounts` : g.accounts[0].email;
     const noDrive = g.accounts.filter((a) => !a.canDrive).length;
-    return { state: "connected", detail: `${who} · Gmail, Calendar${noDrive < g.accounts.length ? ", Drive" : ""}${noDrive ? ` · reconnect ${noDrive > 1 ? `${noDrive} accounts` : g.accounts.length > 1 ? g.accounts.find((a) => !a.canDrive)!.email : "it"} for Drive` : ""}` };
+    // Sign-ins from before Hearth could save to Drive or add events: reconnecting asks Google for those too.
+    const noWrite = g.accounts.filter((a) => a.canDrive && (!a.canDriveWrite || !a.canCalendarWrite)).length;
+    // An account to reconnect (signed out, or missing a permission): "Needs you" on the tile, and a warning on Connectors.
+    return { state: g.accounts.some((a) => a.problem) || hub.google.needs().length ? "needs-you" : "connected", detail: `${who} · Gmail, Calendar${noDrive < g.accounts.length ? ", Drive" : ""}${noDrive ? ` · reconnect ${noDrive > 1 ? `${noDrive} accounts` : g.accounts.length > 1 ? g.accounts.find((a) => !a.canDrive)!.email : "it"} for Drive` : ""}${noWrite ? ` · reconnect ${noWrite > 1 ? `${noWrite} accounts` : g.accounts.length > 1 ? g.accounts.find((a) => a.canDrive && (!a.canDriveWrite || !a.canCalendarWrite))!.email : "it"} to save to Drive and add events` : ""}` };
   },
   async add() { return "Connect Google from Settings → Connectors → Google (it signs in with Google)."; },
   async remove({ hub }) { await hub.google.disconnect(); return null; }, // every account; the sheet removes one at a time

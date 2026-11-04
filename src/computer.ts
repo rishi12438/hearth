@@ -9,6 +9,8 @@ import { requiredFor, labelFor, isValidDomain } from "./cookie-sites.ts";
 import type { Config } from "./config.ts";
 import { TOKEN_RE } from "./tokenmint.ts";
 import { checkTools, type ToolStatus } from "./brains/tools.ts";
+import { registerSkills } from "./brains/skills.ts";
+import { googleSkills } from "./connectors/google-agent.ts";
 
 // The computer side of a link (run on your Mac): join a hub once, then keep a line open to it and run the work it sends,
 // with this computer's own Claude/Codex login. The hub never gets a shell here: it can only ask for a brain call, which
@@ -163,6 +165,9 @@ export function connect(opts: Opts) {
   let cookieWant: { sites: string[]; have: Record<string, string> } = { sites: [], have: {} };
   const send = (m: unknown) => { try { ws?.send(JSON.stringify(m)); } catch {} };
   const url = link.hub.replace(/^http/, "ws") + "/computer";
+  // The hub's agent skills for jobs run here (Gmail, Drive, Calendar), pointed back at the hub with this connection's key.
+  let agentSkills: { key: string; google: boolean } | null = null;
+  registerSkills(() => (agentSkills?.google ? googleSkills(link.hub, agentSkills.key) : []));
 
   // Copy up only what changed since the hub last got it.
   const copyUp = () => {
@@ -240,6 +245,7 @@ export function connect(opts: Opts) {
       else if (m.t === "run" && typeof m.id === "string") run(m);
       else if (m.t === "stop") runs.get(m.id)?.abort();
       else if (m.t === "want") { want = { items: (m.items || []).filter(isCopyItem), have: m.have || {} }; copyUp(); }
+      else if (m.t === "skills" && typeof m.key === "string") { agentSkills = { key: m.key, google: m.google === true }; brain.refreshSkills?.(); }
       else if (m.t === "wantCookies") { cookieWant = { sites: (m.sites || []).filter(isValidDomain), have: m.have || {} }; copyCookiesUp(); }
       else if (m.t === "logins" && link.cloud && m.items && typeof m.items === "object") {
         const wrote = writeLogins(opts.home || homedir(), m.items);
@@ -247,6 +253,7 @@ export function connect(opts: Opts) {
       }
     };
     ws.onclose = (ev) => {
+      if (agentSkills) { agentSkills = null; brain.refreshSkills?.(); } // that connection's key is dead now
       if (alive) clearInterval(alive);
       if (copyTimer) clearInterval(copyTimer);
       if (toolsTimer) clearInterval(toolsTimer);

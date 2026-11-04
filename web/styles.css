@@ -1005,6 +1005,7 @@ a.item { color: inherit; text-decoration: none; }
 .snav.on { background: rgba(30, 25, 20, .07); color: var(--ink); font-weight: var(--fw-semibold); }
 .snav .grow { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .snav em { font-style: normal; font-size: 11.5px; font-weight: var(--fw-semibold); color: #fff; background: var(--badge); border-radius: 999px; padding: 1px 7px; }
+.snav em.warn, .mi em.warn { background: #d97706; }
 .snav svg { flex: none; opacity: .8; }
 .shash { width: 18px; text-align: center; color: var(--muted); font-weight: var(--fw-semibold); flex: none; }
 .slabel { display: flex; align-items: center; justify-content: space-between; font-size: 12px; font-weight: var(--fw-semibold); color: var(--muted); padding: 16px 10px 4px; }

@@ -5,7 +5,8 @@ import type { Vault } from "./vault.ts";
 // Google Cloud, paste its ID and secret, tap Connect, and Google hands this hub a refresh token. Connect again to add
 // another account (personal and work Gmail…): one client, a token per account; reads cover all of them unless told one. The client secret and
 // the tokens live in the hub's encrypted vault (vault.ts) with every other key, and never reach the model, the app or
-// an export. Gmail (read, and send after your Approve), Calendar (read) and Drive (read).
+// an export. Gmail (read, and send after your Approve), Calendar (read, and add events to your own calendar) and Drive
+// (read everything; make new folders, Sheets and Docs, and change only the files Hearth made).
 
 export const GOOGLE_SCOPES = [
   "openid", "email",
@@ -13,8 +14,13 @@ export const GOOGLE_SCOPES = [
   // Sending only ever happens after you tap Approve on the exact email (hub.requestMessage).
   "https://www.googleapis.com/auth/gmail.send",
   "https://www.googleapis.com/auth/calendar.readonly",
-  // Find and read your files; nothing in Drive is changed, shared or deleted.
+  // Add, move and remove events on your calendars. Moving or removing one waits for your Approve (connectors/google-agent.ts).
+  "https://www.googleapis.com/auth/calendar.events",
+  // Find and read your files; nothing you made is changed, shared or deleted.
   "https://www.googleapis.com/auth/drive.readonly",
+  // Make new files and folders, and change only those: Google itself keeps drive.file to the files this app created.
+  // Replacing or trashing one of them waits for your Approve.
+  "https://www.googleapis.com/auth/drive.file",
 ];
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -28,6 +34,11 @@ export type CalEvent = { id: string; account: string; title: string; start: stri
 export type DriveFile = { id: string; account: string; name: string; mimeType: string; modified: string; owner: string; link: string; size: number };
 const canSendWith = (scopes: string[]) => scopes.some((x) => x.endsWith("/gmail.send"));
 const canDriveWith = (scopes: string[]) => scopes.some((x) => /\/auth\/drive(\.readonly)?$/.test(x));
+const canDriveWriteWith = (scopes: string[]) => scopes.some((x) => /\/auth\/drive(\.file)?$/.test(x));
+const canCalWriteWith = (scopes: string[]) => scopes.some((x) => /\/auth\/calendar(\.events)?$/.test(x));
+/** Marks the events Hearth adds (shown in the Approve card: "an event Hearth added"). */
+const MINE = "hearth";
+export type NewEvent = { title: string; start: string; end: string; allDay?: boolean; location?: string; notes?: string };
 // Google's own formats export to text; everything else is read only if it's text already.
 const EXPORTS: Record<string, string> = {
   "application/vnd.google-apps.document": "text/plain", "application/vnd.google-apps.spreadsheet": "text/csv",
@@ -98,7 +109,17 @@ export class Google {
     const c = this.client(), accounts = this.accounts();
     return { hasClient: !!c, clientFromEnv: !!this.env.HEARTH_GOOGLE_CLIENT_ID, clientIdHint: c ? `${c.id.slice(0, 12)}…` : null,
       connected: accounts.length > 0, email: accounts[0]?.email || null, connectedAt: accounts[0]?.connectedAt || null, scopes: accounts[0]?.scopes || [],
-      accounts: accounts.map((a) => ({ email: a.email, connectedAt: a.connectedAt, canSend: canSendWith(a.scopes), canDrive: canDriveWith(a.scopes), problem: this.problems.get(a.email) ?? null })) };
+      accounts: accounts.map((a) => ({ email: a.email, connectedAt: a.connectedAt, canSend: canSendWith(a.scopes), canDrive: canDriveWith(a.scopes), canDriveWrite: canDriveWriteWith(a.scopes), canCalendarWrite: canCalWriteWith(a.scopes), problem: this.problems.get(a.email) ?? null })) };
+  }
+
+  /** What the owner needs to fix, one line per account: signed out, or signed in before Hearth could send, read Drive,
+   * save to Drive or add events (a sign-in only covers what Google showed on its consent screen then). */
+  needs(): string[] {
+    return this.status().accounts.flatMap((a) => {
+      if (a.problem) return [a.problem];
+      const missing = [!a.canSend && "sending email", !a.canDrive && "reading Drive", !a.canDriveWrite && "saving to Drive", !a.canCalendarWrite && "adding calendar events"].filter(Boolean);
+      return missing.length ? [`Reconnect ${a.email} to allow ${missing.join(", ").replace(/, ([^,]*)$/, " and $1")}.`] : [];
+    });
   }
 
   setClient(id: string, secret: string) {
@@ -301,5 +322,144 @@ export class Google {
     if (res.status === 401) this.access.delete(a.email);
     if (!res.ok) return "";
     return (await res.text()).replace(/\r/g, "").replace(/\n{3,}/g, "\n\n").trim().slice(0, max);
+  }
+
+  // ---------- for the agent's Gmail, Drive and Calendar commands (connectors/google-agent.ts) ----------
+
+  private async call(a: Account, url: string, init: RequestInit = {}): Promise<any> {
+    const res = await this.fetch(url, { ...init, headers: { Authorization: `Bearer ${await this.token(a)}`, ...(init.headers as any) }, signal: AbortSignal.timeout(60_000) });
+    if (res.status === 401) this.access.delete(a.email);
+    if (!res.ok) {
+      const text = await res.text();
+      // The owner's Google Cloud project has this API switched off (each API is off until turned on there).
+      if (res.status === 403 && /SERVICE_DISABLED|has not been used in project|is disabled/.test(text)) {
+        const u = new URL(url);
+        const [api, name] = u.host.startsWith("sheets") ? ["sheets", "Sheets API"] : u.host.startsWith("gmail") ? ["gmail", "Gmail API"] : u.pathname.includes("/calendar/") ? ["calendar-json", "Calendar API"] : ["drive", "Drive API"];
+        const project = text.match(/project[ =](\d+)/)?.[1];
+        throw new Error(`The ${name} is switched off in the owner's Google Cloud project. They turn it on once at https://console.cloud.google.com/apis/library/${api}.googleapis.com${project ? `?project=${project}` : ""}, wait a minute, then ask again.`);
+      }
+      throw new Error(`Google answered ${res.status} for ${a.email}: ${text.slice(0, 300)}`);
+    }
+    return res.status === 204 ? {} : res.json().catch(() => ({}));
+  }
+
+  /** The first account (or the named one) whose sign-in allows `ok`; else an error that says to reconnect and allow it. */
+  private writer(account: string | undefined, ok: (scopes: string[]) => boolean, what: string): Account {
+    const a = this.pick(account).find((x) => ok(x.scopes));
+    if (!a) throw new Error(`Google doesn't let Hearth ${what}${account ? ` for ${account}` : ""} yet. The owner reconnects ${account || "the account"} in Connectors → Google and allows it.`);
+    return a;
+  }
+
+  /** Every email in a conversation, oldest first. */
+  async thread(threadId: string, account?: string): Promise<Mail[]> {
+    const a = this.pick(account)[0];
+    const t = await this.get(a, `https://gmail.googleapis.com/gmail/v1/users/me/threads/${encodeURIComponent(threadId)}?format=full`);
+    return (t.messages || []).map((m: any): Mail => ({ id: m.id, threadId: m.threadId, account: a.email, from: header(m, "from"), to: header(m, "to"), subject: header(m, "subject"),
+      date: header(m, "date"), snippet: String(m.snippet || ""), text: mailText(m.payload, 8000), labels: m.labelIds || [] }));
+  }
+
+  /** One file's details by id, from whichever account can see it. */
+  async file(id: string, account?: string): Promise<DriveFile> {
+    const fields = "id,name,mimeType,modifiedTime,owners(emailAddress),webViewLink,size";
+    let last: unknown = null;
+    for (const a of this.driveAccounts(account)) {
+      try {
+        const f = await this.get(a, `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?fields=${fields}&supportsAllDrives=true`);
+        return { id: f.id, account: a.email, name: f.name || "(untitled)", mimeType: f.mimeType || "", modified: f.modifiedTime || "", owner: f.owners?.[0]?.emailAddress || "", link: f.webViewLink || "", size: Number(f.size) || 0 };
+      } catch (e) { last = e; }
+    }
+    throw last instanceof Error ? last : new Error(`No connected account can see file ${id}.`);
+  }
+
+  /** A new file in Drive (in `folder`, else My Drive). `as` turns the content into a Google Sheet (from CSV) or Doc (from
+   * text); without it the content is saved as it is. A folder when mimeType is a folder and there's no content. */
+  async createFile(o: { name: string; content?: string | Uint8Array; contentType?: string; as?: "sheet" | "doc" | "folder"; folder?: string; account?: string }): Promise<DriveFile> {
+    const a = this.writer(o.account, canDriveWriteWith, "save to Drive");
+    const target = o.as === "sheet" ? "application/vnd.google-apps.spreadsheet" : o.as === "doc" ? "application/vnd.google-apps.document" : o.as === "folder" ? "application/vnd.google-apps.folder" : undefined;
+    const meta = { name: o.name, ...(target ? { mimeType: target } : {}), ...(o.folder ? { parents: [o.folder] } : {}) };
+    const fields = "id,name,mimeType,modifiedTime,owners(emailAddress),webViewLink,size";
+    let f: any;
+    if (o.as === "folder") {
+      f = await this.call(a, `https://www.googleapis.com/drive/v3/files?fields=${fields}&supportsAllDrives=true`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(meta) });
+    } else {
+      const boundary = `hearth${randomBytes(12).toString("hex")}`;
+      const type = o.contentType || (o.as === "sheet" ? "text/csv" : "text/plain");
+      const body = Buffer.concat([
+        Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${boundary}\r\nContent-Type: ${type}\r\n\r\n`),
+        Buffer.from(o.content ?? ""), Buffer.from(`\r\n--${boundary}--`)]);
+      f = await this.call(a, `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=${fields}&supportsAllDrives=true`,
+        { method: "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body });
+    }
+    return { id: f.id, account: a.email, name: f.name || o.name, mimeType: f.mimeType || "", modified: f.modifiedTime || "", owner: f.owners?.[0]?.emailAddress || "", link: f.webViewLink || "", size: Number(f.size) || 0 };
+  }
+
+  /** Replace a file's content (one Hearth made: Google refuses the rest). A Sheet takes CSV, a Doc takes text. */
+  async replaceFile(id: string, content: string, account?: string): Promise<DriveFile> {
+    const a = this.writer(account, canDriveWriteWith, "change files in Drive");
+    const cur = await this.file(id, a.email);
+    const type = cur.mimeType === "application/vnd.google-apps.spreadsheet" ? "text/csv" : cur.mimeType.startsWith("application/vnd.google-apps.") ? "text/plain" : cur.mimeType || "text/plain";
+    await this.call(a, `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(id)}?uploadType=media&supportsAllDrives=true`, { method: "PATCH", headers: { "Content-Type": type }, body: content });
+    return this.file(id, a.email);
+  }
+
+  /** Add rows to the end of a Google Sheet's first tab (or `tab`). Values are read as if typed (numbers, dates). */
+  async appendRows(id: string, rows: string[][], tab?: string, account?: string): Promise<{ updatedRange: string; rows: number }> {
+    const a = this.writer(account, canDriveWriteWith, "change files in Drive");
+    const range = encodeURIComponent(tab ? `'${tab.replace(/'/g, "''")}'!A1` : "A1");
+    const j = await this.call(a, `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(id)}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ values: rows }) });
+    return { updatedRange: String(j.updates?.updatedRange || ""), rows: Number(j.updates?.updatedRows) || rows.length };
+  }
+
+  /** Add an event to the owner's own calendar. No guests: inviting people emails them, which the owner approves themselves. */
+  async addEvent(e: NewEvent, account?: string): Promise<CalEvent> {
+    const a = this.writer(account, canCalWriteWith, "add calendar events");
+    const when = (v: string) => (e.allDay ? { date: v.slice(0, 10) } : { dateTime: new Date(v).toISOString() });
+    const body = { summary: e.title, start: when(e.start), end: when(e.end), ...(e.location ? { location: e.location } : {}), ...(e.notes ? { description: e.notes } : {}),
+      extendedProperties: { private: { [MINE]: "1" } } };
+    const j = await this.call(a, "https://www.googleapis.com/calendar/v3/calendars/primary/events?sendUpdates=none", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    return this.calEvent(a, j);
+  }
+
+  /** One event on the primary calendar, with what an Approve card needs to say: other guests, who organizes it, Hearth's or not. */
+  async event(id: string, account?: string): Promise<CalEvent & { guests: number; organizerSelf: boolean; hearths: boolean }> {
+    const a = this.writer(account, canCalWriteWith, "change calendar events");
+    const e = await this.call(a, `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(id)}`);
+    return { ...this.calEvent(a, e), guests: (e.attendees || []).filter((x: any) => !x.self && !x.resource).length, organizerSelf: !!e.organizer?.self || !e.organizer, hearths: e.extendedProperties?.private?.[MINE] === "1" };
+  }
+
+  /** Move, rename or remove an event (only after the owner's Approve; see google-agent.ts). When the owner organizes a
+   * meeting with guests, Google emails them the change, so their calendars aren't changed silently. Removing a meeting
+   * someone else organizes takes it off the owner's calendar (Google tells the organizer they declined). */
+  async changeEvent(id: string, change: Partial<NewEvent> | "delete", account?: string): Promise<CalEvent | { deleted: string }> {
+    const a = this.writer(account, canCalWriteWith, "change calendar events");
+    const url = `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(id)}`;
+    const cur = await this.call(a, url);
+    const notify = (cur.attendees || []).some((x: any) => !x.self && !x.resource) && (cur.organizer?.self ?? true) ? "all" : "none";
+    if (change === "delete") { await this.call(a, `${url}?sendUpdates=${notify}`, { method: "DELETE" }); return { deleted: id }; }
+    const allDay = change.allDay ?? !cur.start?.dateTime;
+    const when = (v: string) => (allDay ? { date: v.slice(0, 10) } : { dateTime: new Date(v).toISOString() });
+    const patch = { ...(change.title ? { summary: change.title } : {}), ...(change.start ? { start: when(change.start) } : {}), ...(change.end ? { end: when(change.end) } : {}),
+      ...(change.location !== undefined ? { location: change.location } : {}), ...(change.notes !== undefined ? { description: change.notes } : {}) };
+    const j = await this.call(a, `${url}?sendUpdates=${notify}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+    return this.calEvent(a, j);
+  }
+
+  /** Move a file Hearth made to Drive's trash (the owner can restore it there for 30 days). Others' files: Google refuses. */
+  async trashFile(id: string, account?: string): Promise<{ trashed: string }> {
+    const a = this.writer(account, canDriveWriteWith, "change files in Drive");
+    try {
+      await this.call(a, `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?supportsAllDrives=true`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ trashed: true }) });
+    } catch (e: any) {
+      if (/answered (403|404)/.test(String(e?.message))) throw new Error("Hearth can only trash files it made. The owner can trash this one in Drive.");
+      throw e;
+    }
+    return { trashed: id };
+  }
+
+  private calEvent(a: Account, e: any): CalEvent {
+    return { id: e.id, account: a.email, title: e.summary || "(no title)", start: e.start?.dateTime || e.start?.date || "", end: e.end?.dateTime || e.end?.date || "",
+      allDay: !e.start?.dateTime, location: e.location || "", organizer: e.organizer?.email || "", created: e.created || "", updated: e.updated || "", status: e.status || "",
+      myResponse: e.organizer?.self ? "organizer" : "", link: e.htmlLink || "", description: String(e.description || "").slice(0, 800) };
   }
 }

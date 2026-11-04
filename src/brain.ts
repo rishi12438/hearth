@@ -149,6 +149,8 @@ ${sourceDocs()}
                  https://www.instagram.com/direct/t/…, https://www.linkedin.com/messaging/thread/…, https://x.com/messages/…
                  Only replies in existing conversations; you can't start a new one on these.
     If it says the app isn't connected (or Google can't send yet), tell the user what to connect instead of retrying.
+- google.change {id}   a Gmail/Drive/Calendar change that waits for the user's Approve; the hearth-drive / hearth-calendar
+    command gives you this exact action (needsApprove). Copy it as given; say it's waiting for their Approve.
 - skill.save {name, description, inputs:[{name,description}], kind, ...}   save how you did this so nobody works it out again:
     kind "recipe": steps:[...] in plain language, uses:[approved script names it needs]  (a recipe can't use anything else)
     kind "script": script:"<approved or just-proposed script name>"  (runs directly, no model, inputs become args in order)

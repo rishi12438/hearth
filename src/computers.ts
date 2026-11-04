@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { sha256 } from "./auth.ts";
@@ -38,6 +38,8 @@ type Link = {
   connectedAt: number; lastAlive: number; rttMs: number | null; running: Map<string, Pending>; want: CopyItem[];
   /** The hub set this computer up (a sandbox or your VM), so it gets the hub's logins. */
   cloud: boolean;
+  /** Opens the agent's Google commands for jobs this computer runs; made fresh for each connection, dead when it closes. */
+  agentKey: string;
 };
 export type ComputerStatus = {
   deviceId: string; name: string; state: "online" | "asleep" | "offline"; level: 0 | 1 | 2 | 3 | 4;
@@ -73,7 +75,9 @@ export class Computers implements Remote {
   /** readLogin reads a login's secret (only when handing it to a cloud computer); hasLogin just checks it's there. */
   constructor(private opts: { dataDir: string; homeDir: string; acceptCopies: boolean; now?: () => number; readLogin?: (item: CopyItem) => string | null; hasLogin?: (item: CopyItem) => boolean;
     /** Which browser logins (cookie sites) the hub wants Macs to copy up, the hash it already has, and where they go. */
-    cookieSites?: () => string[]; cookieHave?: (site: string) => string | undefined; onCookies?: (site: string, data: string) => void }) {}
+    cookieSites?: () => string[]; cookieHave?: (site: string) => string | undefined; onCookies?: (site: string, data: string) => void;
+    /** Which of the hub's agent skills a computer's jobs get (Google while it's connected). */
+    agentSkills?: () => { google: boolean } }) {}
   private now() { return this.opts.now ? this.opts.now() : Date.now(); }
 
   start() { this.timer ??= setInterval(() => this.tick(), 5000); }
@@ -83,7 +87,7 @@ export class Computers implements Remote {
   attach(deviceId: string, name: string, ws: Socket, want: CopyItem[] = [], cloud = false) {
     if (this.links.has(deviceId)) this.drop(deviceId, "replaced by a new connection");
     const t = this.now();
-    this.links.set(deviceId, { deviceId, name, ws, harnesses: [], platform: "", tools: [], connectedAt: t, lastAlive: t, rttMs: null, running: new Map(), want, cloud });
+    this.links.set(deviceId, { deviceId, name, ws, harnesses: [], platform: "", tools: [], connectedAt: t, lastAlive: t, rttMs: null, running: new Map(), want, cloud, agentKey: randomBytes(24).toString("hex") });
     this.seen.set(deviceId, t);
     this.send(deviceId, { t: "ping", ts: t });
   }
@@ -101,6 +105,7 @@ export class Computers implements Remote {
         link.platform = String(m.platform || "").slice(0, 20);
         this.sendWant(link);
         this.sendCookieWant(link);
+        this.sendSkills(link);
         if (link.cloud) this.sendLogins(link);
         this.changed();
         this.onOnline(deviceId);
@@ -226,6 +231,22 @@ export class Computers implements Remote {
     const have: Record<string, string> = {};
     for (const i of link.want) if (c[i]?.from === link.deviceId) have[i] = c[i].hash;
     this.send(link.deviceId, { t: "want", items: this.opts.acceptCopies ? link.want : [], have });
+  }
+
+  /** Tell a computer which of the hub's agent skills its jobs get, and the key they use. Again whenever that changes. */
+  private sendSkills(link: Link) {
+    this.send(link.deviceId, { t: "skills", key: link.agentKey, ...(this.opts.agentSkills?.() || { google: false }) });
+  }
+  skillsChanged() { for (const link of this.links.values()) this.sendSkills(link); }
+
+  /** The name of the connected computer this agent key belongs to, or null. */
+  agentKeyOwner(key: string | null): string | null {
+    const k = Buffer.from(String(key || ""));
+    for (const link of this.links.values()) {
+      const b = Buffer.from(link.agentKey);
+      if (k.length === b.length && timingSafeEqual(k, b)) return link.name;
+    }
+    return null;
   }
 
   /** Tell a Mac which browser logins to copy up, and the hash the hub already holds (so it only re-sends on change). */

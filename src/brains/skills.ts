@@ -193,6 +193,13 @@ export function describeSkillStep(command: unknown): string | null {
   if (/(^|[\s;&|/])hearth-open\s/.test(c)) return "Opening an app";
   const bank = c.match(/(?:^|[\s;&|/])hearth-plaid\s+(\w+)/)?.[1];
   if (bank) return bank === "refresh" ? "Asking your bank for fresh data" : `Checking your bank${bank === "balances" ? " balances" : bank === "cards" ? " cards" : bank === "spending" ? ": spending" : bank === "holdings" || bank === "investments" ? ": investments" : ""}`;
+  const g = c.match(/(?:^|[\s;&|/])hearth-(gmail|drive|calendar)\s+(\w+)/);
+  if (g) {
+    const [, svc, cmd] = g;
+    if (svc === "gmail") return cmd === "search" ? "Searching your email" : cmd === "accounts" ? "Checking your Google accounts" : "Reading an email";
+    if (svc === "drive") return cmd === "search" ? "Searching your Drive" : cmd === "read" ? "Reading a file from Drive" : cmd === "append" ? "Adding rows to a Google Sheet" : cmd === "folder" ? "Making a Drive folder" : "Saving to your Drive";
+    return cmd === "list" ? "Checking your calendar" : cmd === "add" ? "Adding to your calendar" : "Changing a calendar event";
+  }
   const find = c.match(/(?:^|[\s;&|/])hearth-skill\s+(search|show)\s+(.+)/);
   if (find) return find[1] === "search" ? `Looking for a skill: ${find[2].replace(/["']/g, "").trim().slice(0, 50)}` : `Reading the ${find[2].replace(/["']/g, "").trim().slice(0, 40)} skill`;
   const tool = c.match(/(?:^|[\s;&|/])(enkidu-browser|enkidu-cua)\s/)?.[1];

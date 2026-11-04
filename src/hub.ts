@@ -20,6 +20,7 @@ import { recall, isActive, validateFact } from "./memory.ts";
 import { describeLocal, inQuietHours, quietEndsAt, localDate, distanceMeters } from "./time.ts";
 import { CHANNELS, CHANNEL_LABEL, type Channel } from "./types.ts";
 import { badChatLink } from "./connectors/web-senders.ts";
+import { googleAgent, CHANGE_KINDS, type GoogleChange } from "./connectors/google-agent.ts";
 import type { Project } from "./types.ts";
 import type { ConnAudit, TriggerRecipe, Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
 import { Library, validateSkill, validateWorkflow, validateTriggerRecipe, fillDeep, fill, type LibraryItem } from "./library.ts";
@@ -1455,6 +1456,50 @@ export class Hub {
     return { value: ap };
   }
 
+  // ---------- Google changes that wait for your Approve (connectors/google-agent.ts) ----------
+
+  /** Changes a command staged, by id, until the agent's google.change action turns one into an Approve card. A day at most. */
+  private stagedGoogle = new Map<string, GoogleChange & { until: number }>();
+  stageGoogleChange(c: GoogleChange): string {
+    const now = Date.now();
+    for (const [k, v] of this.stagedGoogle) if (v.until < now) this.stagedGoogle.delete(k);
+    const id = `gc_${randomUUID().slice(0, 12)}`;
+    this.stagedGoogle.set(id, { ...c, until: now + 86_400_000 });
+    return id;
+  }
+  /** "Always allow" for this kind of Google change ("google:calendar:move"). */
+  async googleAllowed(kind: string) { return (await this.alwaysAllowed()).includes(`google:${kind}`); }
+
+  /** Run an approved Google change. JSON of what Google answered (a link, the moved event…). */
+  private async runGoogle(act: { service: "gmail" | "drive" | "calendar"; args: string[]; body?: string }) {
+    return googleAgent(this.google, act.service, act.args, { body: act.body }).then((r) => ({ ok: true, output: JSON.stringify(r) }), (e: any) => ({ ok: false, output: String(e?.message || e) }));
+  }
+
+  /** The agent's google.change {id}: an Approve card for the staged change, or done now if you said "Always allow" for its kind. */
+  async requestGoogleChange(a: any, where: { threadId?: string; jobId?: string }) {
+    const c = this.stagedGoogle.get(String(a?.id || ""));
+    if (!c) return { error: "That change expired or was never staged. Run the command again to get a fresh action." };
+    this.stagedGoogle.delete(String(a.id));
+    const action = { type: "google" as const, service: c.service, args: c.args, ...(c.body != null ? { body: c.body } : {}), kind: c.kind };
+    const base = { ...this.doc({}), threadId: where.threadId, jobId: where.jobId, summary: c.summary, details: c.details, action };
+    if (await this.googleAllowed(c.kind)) {
+      const out = await this.runGoogle(action);
+      const ap = await this.store.put<Approval>("approvals", { ...base, status: out.ok ? "done" : "failed", result: out.output.slice(0, 2000), decidedAt: this.clock().toISOString(), auto: true } as Approval);
+      await this.log(out.ok ? "google.changed" : "google.failed", `${ap.summary} (always allowed)`);
+      this.emit("approval", ap);
+      return out.ok ? { value: ap } : { error: `Couldn't: ${out.output}` };
+    }
+    const ap = await this.store.put<Approval>("approvals", { ...base, status: "pending" } as Approval);
+    if (where.jobId) {
+      const job = await this.store.get<Job>("jobs", where.jobId);
+      if (job) await this.saveJob({ ...job, approvalIds: [...(job.approvalIds || []), ap.id] });
+    }
+    await this.log("approval.requested", ap.summary);
+    this.emit("approval", ap);
+    await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: ap.threadId ? threadLink(ap.threadId) : "/" });
+    return { value: ap };
+  }
+
   /** Chats you've said "Always allow" for: a teammate's message there sends without asking ("whatsapp:<to>"). */
   async alwaysAllowed(): Promise<string[]> { return ((await this.store.get<any>("settings", "always-allow"))?.keys as string[]) || []; }
   async setAlwaysAllowed(keys: string[]) {
@@ -1469,11 +1514,16 @@ export class Hub {
       await this.setAlwaysAllowed([...(await this.alwaysAllowed()), allowKey(ap.action.channel, ap.action.to)]);
       await this.log("approval.always", `Always allow ${CHANNEL_LABEL[ap.action.channel]} messages to ${ap.action.to}`);
     }
+    if (yes && always && ap.action.type === "google" && CHANGE_KINDS[ap.action.kind]) {
+      await this.setAlwaysAllowed([...(await this.alwaysAllowed()), `google:${ap.action.kind}`]);
+      await this.log("approval.always", `Always allow: ${CHANGE_KINDS[ap.action.kind]}`);
+    }
     let next: Approval = { ...ap, status: yes ? "approved" : "rejected", decidedAt: this.clock().toISOString() };
     await this.store.put("approvals", next);
     if (yes) {
       const act = ap.action;
-      const out = act.type === "message"
+      const out = act.type === "google" ? await this.runGoogle(act)
+        : act.type === "message"
         ? await (this.senders[act.channel]?.send(act.to, act.text, { subject: act.subject, threadId: act.threadId, from: act.from }).then(() => ({ ok: true, output: "Sent." }), (e: any) => ({ ok: false, output: String(e?.message || e) }))
           ?? { ok: false, output: `${act.channel} isn't connected.` })
         : await this.scripts.run(act.script, act.args, { approvedRun: true });
@@ -1741,6 +1791,12 @@ export class Hub {
             if (where.recipe) break;
             const r = await this.requestMessage(a, where);
             done.push({ kind: "approval", label: r.value ? `Waiting for your Approve: ${r.value.summary}` : `Couldn't draft: ${r.error}`, id: r.value?.id });
+            break;
+          }
+          case "google.change": {
+            if (where.recipe) break;
+            const r = await this.requestGoogleChange(a, where);
+            done.push({ kind: "approval", label: r.value ? (r.value.status === "pending" ? `Waiting for your Approve: ${r.value.summary}` : `Done (always allowed): ${r.value.summary}`) : `Couldn't: ${r.error}`, id: r.value?.id });
             break;
           }
           case "approval.request": {
