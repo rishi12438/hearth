@@ -1183,3 +1183,6 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 .trigav { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; background: rgba(47, 111, 235, .12); color: var(--blue); }
 .trigdata { margin-top: 4px; font-size: 13px; color: var(--muted); }
 .trigdata summary { cursor: pointer; }
+
+.hubload .warm { color: var(--warn); font-weight: var(--fw-semibold); }
+.hubload .hot { color: var(--danger); font-weight: var(--fw-semibold); }
