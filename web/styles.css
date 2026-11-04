@@ -192,6 +192,13 @@ code { font-family: var(--mono); font-size: .86em; background: var(--surface); p
 .rich ul, .rich ol { margin: 2px 0 6px; padding-left: 22px; }
 .rich a { color: var(--blue); text-decoration: none; }
 .mrow.err .rich { color: var(--danger); }
+/* Sent while the teammate was mid-run: greyed until it goes out (Send now / Edit / × beside it). */
+.mrow.queued .mav, .mrow.queued .mhead, .mrow.queued .mtext { opacity: .5; }
+.mrow.queued .mtext { border-left: 3px dashed var(--line); padding-left: 10px; }
+.qbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.qbar small { font-size: 13px; color: var(--muted); margin-right: auto; }
+.qbtn { display: inline-flex; align-items: center; height: 28px; padding: 0 10px; border-radius: 7px; border: 1px solid var(--line); font-size: 13.5px; font-weight: var(--fw-semibold); color: var(--ink-2); background: var(--bg); }
+.qbtn:first-of-type { color: var(--ink); }
 .mention { color: var(--blue); background: var(--mention-bg); padding: 0 3px; border-radius: 4px; font: inherit; }
 .proline { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); margin-bottom: 2px; }
 .whybtn { font-size: 13px; color: var(--muted); margin-top: 4px; }

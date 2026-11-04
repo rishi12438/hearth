@@ -596,8 +596,14 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (method === "DELETE" && !seg[3]) { await hub.apps.remove(a.id); hub.emit("apps"); return json({ ok: true }); }
         break;
       }
+      case "messages": {
+        // A message queued behind a run that's going: send it now (into the run), or take it back.
+        if (method === "POST" && id && seg[3] === "send") { const r = await hub.sendQueuedNow(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "DELETE" && id) { const r = await hub.unqueueMessage(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        break;
+      }
       case "jobs": {
-        if (method === "POST" && seg[3] === "reply") { const r = await hub.replyToJob(id, String((await body(req)).text || "")); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "POST" && seg[3] === "reply") { const b = await body(req); const r = await hub.replyToJob(id, String(b.text || ""), { queue: b.queue === true }); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "POST" && seg[3] === "stop") { const r = await hub.stopJob(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "POST" && seg[3] === "retry") { const r = await hub.retryJob(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "GET" && seg[3] === "frame") {
@@ -739,7 +745,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       case "teammates": {
         if (method === "GET" && id) { const d = await hub.teammateDetail(id); if (!d) break; return json(d); }
         if (method === "POST" && id && seg[3] === "seen") return json({ marked: await hub.markStuckSeen({ teammateId: id }) });
-        if (method === "POST" && id && seg[3] === "messages") { const r = await hub.askTeammate(id, String((await body(req)).text || "")); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "POST" && id && seg[3] === "messages") { const b = await body(req); const r = await hub.askTeammate(id, String(b.text || ""), { queue: b.queue === true }); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "GET") return json(await store.all<Teammate>("teammates"));
         if (method === "POST") { const r = await hub.addTeammate(await body(req)); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "PATCH" && id) { const r = await hub.updateTeammate(id, await body(req)); if (r.error) throw new HttpError(400, r.error); return json(r.value); }

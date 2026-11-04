@@ -146,6 +146,7 @@ export class Hub {
   private stops = new Map<string, AbortController>(); // running jobs, so a new message can restart one
   private cancelled = new Set<string>();              // running jobs you tapped Stop on
   private running = new Map<string, string>();     // job id -> the model on it now and where ("Claude opus on the cloud")
+  private flushing = new Set<string>();               // threads whose queued messages are going out right now
   private additions = new Map<string, string[]>();    // what the user added to a running job, applied when it restarts
   private inflight = 0;                   // orchestrations, splits and retries still running
   private rambleSpend = new Map<string, number>(); // message id -> USD
@@ -1107,21 +1108,87 @@ export class Hub {
   }
 
   /** Reply inside a job's thread: the same teammate picks it up, with the thread so far as context. */
-  async replyToJob(rootId: string, text: string) {
+  /** Reply inside a job's thread: the same teammate picks it up, with the thread so far as context. queue: wait for a run that's going instead of restarting it. */
+  async replyToJob(rootId: string, text: string, opts: { queue?: boolean } = {}) {
     const root = await this.store.get<Job>("jobs", rootId);
     const clean = text.trim().slice(0, 4000);
     if (!root || root.followsUp || root.parentId) return { error: "No such thread." };
     if (!clean) return { error: "Say something first." };
     const m = await this.addMessage({ role: "user", text: clean, threadId: root.threadId, replyTo: root.id, teammateId: root.teammateId });
     await this.setPrefs({ lastUserAt: m.createdAt });
-    const { job, folded } = await this.followUp(root, m, clean);
-    if (!folded) { await this.store.put<Message>("messages", { ...m, jobIds: [job.id] }); this.emit("job", job); this.pump(m.id); }
-    return { value: { message: m, job } };
+    return { value: await this.deliverReply(root, m, clean, opts.queue) };
   }
 
-  /** The next turn in a task's thread: folded into the teammate's current run if it's still going, else a new follow-up job. */
-  private async followUp(root: Job, m: Message, task: string, mayHandBack = false): Promise<{ job: Job; folded: boolean }> {
+  private async deliverReply(root: Job, m: Message, text: string, queue = false) {
+    const { job, folded, held } = await this.followUp(root, m, text, false, queue);
+    if (held) return { message: held, job };
+    if (!folded) { await this.store.put<Message>("messages", { ...m, jobIds: [job.id] }); this.emit("job", job); this.pump(m.id); }
+    return { message: m, job };
+  }
+
+  /** Holds a message for the run it would interrupt: it goes out when the run ends (see sendQueued), or on Send now. */
+  private async holdMessage(m: Message) {
+    const held = await this.store.put<Message>("messages", { ...m, queued: true });
+    this.emit("message", held);
+    return held;
+  }
+
+  /** A run is going (not just waiting its turn), so folding a message in would stop it and start over. */
+  private midRun(j: Job) { return j.status === "working" && this.stops.has(j.id); }
+
+  /** You tapped Send now on a queued message: it goes in the way it would have without the queue (into the run, which starts over with it). */
+  async sendQueuedNow(id: string) {
+    const m = await this.store.get<Message>("messages", id);
+    if (!m?.queued) return { error: "That's already sent." };
+    const sent = await this.store.put<Message>("messages", { ...m, queued: undefined });
+    this.emit("message", sent);
+    if (sent.replyTo) {
+      const root = await this.store.get<Job>("jobs", sent.replyTo);
+      if (!root) return { error: "No such thread." };
+      return { value: await this.deliverReply(root, sent, sent.text) };
+    }
+    return { value: await this.deliverDm(sent.teammateId || "hearth", sent.threadId!, sent, sent.text) };
+  }
+
+  /** Took a queued message back (× or Edit): it's deleted, never sent. */
+  async unqueueMessage(id: string) {
+    const m = await this.store.get<Message>("messages", id);
+    if (!m?.queued) return { error: "That's already sent." };
+    await this.store.remove("messages", id);
+    this.emit("message", { ...m, deleted: true });
+    return { value: { ok: true } };
+  }
+
+  /** A run in a thread ended: whatever you queued for it goes out together as the next turn (unless another run there is still going). */
+  private async sendQueued(done: Job) {
+    const rootId = done.followsUp || done.id;
+    const key = `${done.threadId}:${rootId}`;
+    if (this.flushing.has(key)) return;
+    this.flushing.add(key);
+    try {
+      const dm = done.threadId.startsWith("tm-"); // a DM: each message is its own job, no thread root
+      const inScope = (j: Job) => !j.parentId && j.threadId === done.threadId && (dm ? true : j.id === rootId || j.followsUp === rootId);
+      if ((await this.store.all<Job>("jobs")).some((j) => inScope(j) && (j.status === "queued" || j.status === "working"))) return;
+      const held = (await this.store.all<Message>("messages")).filter((m) => m.queued && m.threadId === done.threadId && (dm ? !m.replyTo : m.replyTo === rootId))
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      if (!held.length) return;
+      for (const m of held) this.emit("message", await this.store.put<Message>("messages", { ...m, queued: undefined }));
+      // One turn for all of them, filed under the last one (so it reads in order: your messages, then the answer).
+      const last = { ...held.at(-1)!, queued: undefined };
+      const text = held.map((m) => m.text).join("\n\n").slice(0, 4000);
+      await this.log("message.unqueued", `${held.length} queued → ${text.slice(0, 80)}`);
+      if (dm) await this.deliverDm(last.teammateId || done.teammateId, done.threadId, last, text);
+      else {
+        const root = await this.store.get<Job>("jobs", rootId);
+        if (root) await this.deliverReply(root, last, text);
+      }
+    } finally { this.flushing.delete(key); }
+  }
+
+  /** The next turn in a task's thread: folded into the teammate's current run if it's still going, else a new follow-up job. queue: held for a run that's going instead. */
+  private async followUp(root: Job, m: Message, task: string, mayHandBack = false, queue = false): Promise<{ job: Job; folded: boolean; held?: Message }> {
     const busy = (await this.store.all<Job>("jobs")).filter((j) => (j.id === root.id || j.followsUp === root.id) && (j.status === "queued" || j.status === "working")).at(-1);
+    if (busy && queue && this.midRun(busy)) return { job: busy, folded: true, held: await this.holdMessage(m) };
     if (busy && (await this.addToJob(busy.id, root.threadId, task))) return { job: busy, folded: true };
     // Replying in a stuck thread picks it up: the stuck turn is settled (it stops saying "Stuck") and the new turn goes on from it.
     for (const j of (await this.store.all<Job>("jobs")).filter((x) => (x.id === root.id || x.followsUp === root.id) && x.status === "blocked"))
@@ -1706,6 +1773,7 @@ export class Hub {
     if (!saved.parentId && (saved.status === "done" || saved.status === "failed")) {
       this.pump(saved.messageId).catch((e) => console.error("pump failed", e));
       this.touchThread(saved.threadId, {}).catch(() => {});
+      this.sendQueued(saved).catch((e) => console.error("queued messages failed", e));
     }
     return saved;
   }
@@ -2150,7 +2218,7 @@ export class Hub {
   }
 
   /** Message one teammate directly: no orchestrator, the job goes straight to them in their own thread. */
-  async askTeammate(id: string, text: string) {
+  async askTeammate(id: string, text: string, opts: { queue?: boolean } = {}) {
     const mate = await this.teammate(id);
     const clean = text.trim().slice(0, 4000);
     if (!mate) return { error: "No such teammate." };
@@ -2158,14 +2226,19 @@ export class Hub {
     const tid = (await this.dmThread(mate.id)).id;
     const m = await this.addMessage({ role: "user", text: clean, threadId: tid, teammateId: mate.id });
     await this.setPrefs({ lastUserAt: m.createdAt });
-    // Still working on your last message? This one goes into that task, so you get one answer.
+    return { value: await this.deliverDm(mate.id, tid, m, clean, opts.queue) };
+  }
+
+  private async deliverDm(mateId: string, tid: string, m: Message, text: string, queue = false) {
+    // Still working on your last message? This one goes into that task, so you get one answer (or, queued, waits for it).
     const busy = (await this.store.all<Job>("jobs")).filter((j) => j.threadId === tid && !j.parentId && (j.status === "queued" || j.status === "working")).at(-1);
-    if (busy && (await this.addToJob(busy.id, tid, clean))) return { value: { message: m, job: busy } };
-    const job = await this.store.put<Job>("jobs", { ...this.doc({}), threadId: tid, messageId: m.id, task: clean, teammateId: mate.id, status: "queued", effort: "light" } as Job);
+    if (busy && queue && this.midRun(busy)) return { message: await this.holdMessage(m), job: busy };
+    if (busy && (await this.addToJob(busy.id, tid, text))) return { message: m, job: busy };
+    const job = await this.store.put<Job>("jobs", { ...this.doc({}), threadId: tid, messageId: m.id, task: text, teammateId: mateId, status: "queued", effort: "light" } as Job);
     await this.store.put<Message>("messages", { ...m, jobIds: [job.id] });
     this.emit("job", job);
     this.pump(m.id);
-    return { value: { message: m, job } };
+    return { message: m, job };
   }
 
   /**
