@@ -3465,8 +3465,7 @@ async function openWelcome() {
 async function openDevices() {
   try {
     const primary = !!S.state?.device.primary;
-    const [devices, waiting, cloud, hubInfo] = await Promise.all([call("/api/devices"), call("/api/access"), primary ? call("/api/machines").catch(() => null) : Promise.resolve(null),
-      call("/api/devices/hub").catch(() => null)]);
+    const [devices, waiting, cloud] = await Promise.all([call("/api/devices"), call("/api/access"), primary ? call("/api/machines").catch(() => null) : Promise.resolve(null)]);
     const codeBox = h("div");
     const decide = async (r: any, verb: "approve" | "deny") => {
       try {
@@ -3493,12 +3492,6 @@ async function openDevices() {
         primary && !d.primary ? h("button", { class: "btn small ghost", on: { click: () => confirmSheet(`Make ${d.name} primary?`, "It will be the one that lets new devices in. This device stays paired.", "Make primary", async () => { await call(`/api/devices/${d.id}/primary`, { body: {} }); toast(`${d.name} is primary`); refreshState(); }) } }, "Make primary") : null,
         primary || d.current ? h("button", { class: "btn small danger-ghost", on: { click: () => confirmSheet(`Sign out ${d.name}?`, "It will need to be let in again to come back.", "Sign out", async () => { await call(`/api/devices/${d.id}`, { method: "DELETE" }); if (d.current) { removeHub(activeHub()!.id); location.reload(); } toast("Signed out"); }) } }, "Sign out") : null))),
       codeBox,
-      hubInfo?.tools?.length ? h("div", null, h("h4", null, "Hub"),
-        h("div", { class: "ccard online" }, h("div", { class: "cchead" },
-          h("span", { class: "ccicon" }, icon("server", 20)),
-          h("span", { class: "grow" }, h("b", null, hubInfo.name || "Hearth", h("span", { class: "tag soft" }, hubInfo.target === "lightsail" ? "Server" : "This computer")),
-            h("small", { class: "cstate online" }, "Work runs here when no computer is online"))),
-          toolTags(hubInfo.tools))) : null,
       computersSection(devices.filter((d: any) => d.role === "computer"), primary, cloud),
       h("button", { class: "btn ghost", on: { click: () => showPairCode(codeBox) } }, icon("plus", 16), "Add a device (phone, iPad, another computer)"),
     ]);
@@ -3796,7 +3789,7 @@ async function ensureMacLinked() {
   } catch (e) { console.warn("Linking this Mac didn't work:", e); }
 }
 
-/** The top-left hub name: everything connected to this hub — the hub itself, your devices, linked computers — with addresses. */
+/** The top-left hub name: one list of everything on this hub. Tap a row for its details and the tools it has. */
 async function openConnectedDevices() {
   try {
     const [hubInfo, devices, waiting] = await Promise.all([
@@ -3804,35 +3797,68 @@ async function openConnectedDevices() {
     ]);
     const codeBox = h("div");
     const isComputerName = (n: string) => /mac|computer|laptop|pc\b|desktop/i.test(n);
-    const ipLine = (ip?: string | null) => (ip ? ip.replace(/^::ffff:/, "") : "IP not seen yet");
-    const mine = devices.filter((d: any) => d.role !== "computer");
-    const comps = devices.filter((d: any) => d.role === "computer");
-    const row = (ic: string, title: any[], sub: string, dot?: string, extra?: any) => h("div", { class: "item" },
-      h("div", { class: "hicon" }, icon(ic, 16)),
-      h("div", { class: "grow" }, h("div", { class: "title" }, ...title), h("div", { class: "sub" }, sub), extra || null),
-      dot ? h("i", { class: `status ${dot}` }) : null);
+    const ip = (x?: string | null) => (x ? x.replace(/^::ffff:/, "") : null);
     const tag = (t: string) => h("span", { class: "tag soft" }, t);
+    // Your Mac is two entries on the hub (the app you're signed in on, and the computer that runs work): one row here.
+    const comps = devices.filter((d: any) => d.role === "computer");
+    const used = new Set<string>();
+    const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+    const people = devices.filter((d: any) => d.role !== "computer").map((d: any) => {
+      const c = comps.find((x: any) => !used.has(x.id) && same(x.name, d.name));
+      if (c) used.add(c.id);
+      return { ...d, computer: c || null };
+    });
+    const online = (l: any) => l?.state === "online";
+    const dotFor = (l: any) => (online(l) ? "live" : l?.state === "asleep" ? "connecting" : "offline");
+    const toolsBlock = (tools: any[] | undefined, none: string) => tools?.length
+      ? h("div", { class: "devtools" }, tools.map((t: any) => h("div", { class: "devtool" },
+          h("i", { class: `tdot ${t.state}` }), h("b", null, t.label), h("span", { class: "muted" }, t.detail || TOOL_WORD[t.state] || t.state))))
+      : h("p", { class: "muted small" }, none);
+    const facts = (...xs: (string | null | false | undefined)[]) => h("p", { class: "muted small" }, xs.filter(Boolean).join(" · "));
+
+    const row = (ic: string, name: string, kind: string, sub: string, dot: string | null, body: () => any[]) => {
+      const details = h("div", { class: "devdetails", hidden: true });
+      const el = h("div", { class: "devrow" },
+        h("button", { class: "item", on: { click: () => {
+          if (details.hidden && !details.childNodes.length) details.append(...body().filter(Boolean));
+          details.hidden = !details.hidden; el.classList.toggle("open", !details.hidden);
+        } } },
+          h("div", { class: "hicon" }, icon(ic, 16)),
+          h("div", { class: "grow" }, h("div", { class: "title" }, name, tag(kind)), h("div", { class: "sub" }, sub)),
+          dot ? h("i", { class: `status ${dot}` }) : null,
+          h("span", { class: "chev" }, "›")),
+        details);
+      return el;
+    };
+
+    const hubRow = row("server", hubInfo?.name || S.state?.hub?.name || "Hearth", "Hub",
+      hubInfo?.address || (activeHub()?.url || location.origin).replace(/^https?:\/\//, ""), S.conn, () => [
+        facts(hubInfo?.target === "lightsail" ? "A server" : "This computer", ip(hubInfo?.ip), hubInfo?.upSince && `up ${relTime(hubInfo.upSince).replace(/ ago$/, "")}`),
+        h("small", { class: "cclabel" }, "Tools"),
+        toolsBlock(hubInfo?.tools, "Couldn't check the hub's tools."),
+      ]);
+    const personRow = (d: any) => {
+      const c = d.computer, l = c?.link;
+      const sub = c ? (online(l) ? "Online · runs your teammates' work" : `Seen ${relTime(l?.lastAliveAt || d.lastSeenAt)}`) : `Seen ${relTime(d.lastSeenAt)}`;
+      return row(d.passkey ? "lock" : c || isComputerName(d.name) ? "laptop" : "phone", d.name, "Personal device", sub, c ? dotFor(l) : null, () => [
+        facts(d.current && "You're using it now", d.primary && "Lets new devices in", ip(d.ip)),
+        c ? h("small", { class: "cclabel" }, "Tools") : null,
+        c ? (online(l) ? toolsBlock(l.tools, "This Mac hasn't reported its tools. Update Hearth on it to see them.") : h("p", { class: "muted small" }, "Offline, so its tools can't be checked."))
+          : h("p", { class: "muted small" }, "Just the app: work doesn't run here."),
+      ]);
+    };
+    const computerRow = (c: any) => row(c.machine ? "cloud" : "laptop", c.name, c.machine ? "Cloud computer" : "Computer",
+      online(c.link) ? "Online · runs your teammates' work" : `Seen ${relTime(c.link?.lastAliveAt || c.lastSeenAt)}`, dotFor(c.link), () => [
+        facts(ip(c.ip)),
+        h("small", { class: "cclabel" }, "Tools"),
+        online(c.link) ? toolsBlock(c.link.tools, "It hasn't reported its tools. Update Hearth on it to see them.") : h("p", { class: "muted small" }, "Offline, so its tools can't be checked."),
+      ]);
+
     openSheet("Connected devices", [
-      h("h4", null, "Hub"),
-      h("div", { class: "list" }, row("server",
-        [hubInfo?.name || S.state?.hub?.name || "Hearth", tag(hubInfo?.target === "lightsail" ? "Server" : "This computer")],
-        [hubInfo?.address || (activeHub()?.url || location.origin).replace(/^https?:\/\//, ""), hubInfo ? ipLine(hubInfo.ip) : null,
-          hubInfo?.upSince ? `up ${relTime(hubInfo.upSince).replace(/ ago$/, "")}` : null].filter(Boolean).join(" · "), S.conn)),
-      toolTags(hubInfo?.tools, "Tools on the hub"),
+      h("div", { class: "list devlist" }, hubRow, ...people.map(personRow), ...comps.filter((c: any) => !used.has(c.id)).map(computerRow)),
       waiting.length ? h("button", { class: "btn ghost", on: { click: openDevices } }, `${waiting.length} waiting to join · review`) : null,
-      h("h4", null, `Your devices (${mine.length})`),
-      h("div", { class: "list" }, mine.map((d: any) => row(d.passkey ? "lock" : isComputerName(d.name) ? "laptop" : "phone",
-        [d.name, d.primary ? tag("Main device") : null, d.current ? tag("This device") : null],
-        `${ipLine(d.ip)} · seen ${relTime(d.lastSeenAt)}`))),
-      h("h4", null, `Computers (${comps.length})`),
-      comps.length
-        ? h("div", { class: "list" }, comps.map((d: any) => row(d.machine ? "cloud" : "laptop", [d.name],
-          `${STATE_LABEL[d.link?.state] || "Offline"} · ${ipLine(d.ip)} · ${d.link?.state === "online" ? "can read your browser logins and run work" : `last seen ${relTime(d.link?.lastAliveAt || d.lastSeenAt)}`}`,
-          d.link?.state || "offline", d.link?.state === "online" ? toolTags(d.link?.tools) : null)))
-        : h("p", { class: "muted small" }, "No computer linked yet. Link your Mac so teammates can use your browser logins (AliExpress, LinkedIn…) and run work there."),
       codeBox,
       h("button", { class: "btn primary big", on: { click: () => showPairCode(codeBox) } }, icon("plus", 16), "Connect another device"),
-      h("p", { class: "hint" }, "To link a computer instead, run ", h("code", null, `bun run join ${activeHub()?.url || location.origin}`), " on it and approve it here."),
       h("div", { class: "row" },
         h("button", { class: "btn ghost", on: { click: openDevices } }, "Manage devices"),
         h("button", { class: "btn ghost", on: { click: openHubs } }, icon("server", 16), "Switch hub")),
