@@ -64,6 +64,47 @@ ${SAFE}`,
   },
 ];
 
+/**
+ * Guides: skills that are only know-how (no command of their own), always there and listed by name, so every working run
+ * sees them. Your own skill file with the same name replaces one.
+ */
+export const GUIDES: Skill[] = [{
+  name: "automate-repetitive-work", common: true, commands: [], reads: [],
+  description: "Doing the same thing many times (many pages, orders, rows, files, sites) or again later? How to automate it with code and still get every item right.",
+  body: `# Automating repetitive work, accurately
+
+## When
+- The same step 3+ times, more than ~10 items, or a check that will come back (tracking, prices, statements): automate it.
+- One or two items, or where judging each one IS the job: do it by hand. Still use code to collect and line things up; you judge.
+
+## How
+1. Do ONE item fully by hand first. Learn where the data really is, what it looks like, and what goes wrong.
+2. Find the cleanest source: an API, an export (CSV, JSON), or the JSON a page loads (network calls, embedded state) beats
+   scraping its HTML; plain HTTP beats a browser. Use the browser (enkidu-browser) only for logins or pages that need clicks,
+   and script those steps too if they repeat.
+3. Write it as: a list of inputs -> one function per item -> one output file (CSV/JSON), one row per item, with a status and
+   error column. Save raw inputs in data/ as you fetch them, so a rerun doesn't fetch again.
+4. Run it on 2-3 items and compare with the one you did by hand. Only then run everything.
+5. Tools: Python stdlib first (re, json, csv, html.parser, urllib, concurrent.futures), jq, grep -E / rg, awk, sort, uniq.
+   Run requests in parallel (4-8 at a time), with timeouts and a retry with backoff; be polite to the site.
+
+## Accuracy (the part that matters)
+- Count everything, every run: items in, done, failed, skipped. Print them. If in != done + failed + skipped, find out why.
+- Spot-check by hand: open 3+ results (the first, the last, a random one, and an odd one) and compare with the source.
+- Parse structure with structure: json, the csv module and an HTML parser, not regex on markup. When you do use a regex,
+  anchor it, and test it on real samples including the weird ones (a missing field, two values, another format, unicode).
+- Failures are loud: a failed item stays in the output with its error. Never drop it silently, never fill a guess in as data.
+- Normalize on purpose (dates to ISO, money with its currency, units) and keep the original text next to the parsed value.
+- Dedupe by a real key (order id, tracking number), not by a name or title.
+- Make it resumable: skip items already done (check out/), so a rerun after a stop carries on instead of starting over.
+- Never automate what changes things (send, buy, submit, delete, post). Those go to the user's Approve, one at a time.
+
+## After
+- Say what you automated, the counts, what you checked by hand, and what's still uncertain.
+- Keep it: the script in scripts/, a skills/<name>.md in your workspace (how to run it, inputs, what breaks it), and
+  skill.save if it will come back outside this subject. Next time, rerun it and only check what changed.`,
+}];
+
 /** Where a tool lives: ~/.enkidu/bin (what install-tools.sh does), else PATH. */
 export function findTool(name: string, home = homedir()): string | null {
   const own = join(home, ".enkidu", "bin", name);
@@ -113,7 +154,9 @@ export function hubSkills(dataDir: string, env: Record<string, string | undefine
   }
   for (const fn of EXTRA) { try { out.push(...fn()); } catch {} }
   const taken = new Set(out.map((s) => s.name));
-  for (const s of ownSkills(dataDir)) if (!taken.has(s.name)) out.push(s);
+  const own = ownSkills(dataDir).filter((s) => !taken.has(s.name));
+  const mine = new Set(own.map((s) => s.name));
+  out.push(...GUIDES.filter((g) => !taken.has(g.name) && !mine.has(g.name)), ...own);
   return out;
 }
 
