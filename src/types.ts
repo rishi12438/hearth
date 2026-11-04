@@ -325,11 +325,13 @@ export type Approval = Doc & {
   jobId?: string;
   summary: string;
   details?: string;
-  action: { type: "script"; script: string; args: string[] } | { type: "message"; channel: Channel; to: string; text: string; subject?: string; threadId?: string; from?: string };
+  action: { type: "script"; script: string; args: string[] } | { type: "message"; channel: Channel; to: string; text: string; subject?: string; threadId?: string; from?: string }
+    /** A Gmail/Drive/Calendar command that changes or removes something (connectors/google-agent.ts); kind is what "Always allow" remembers. */
+    | { type: "google"; service: "gmail" | "drive" | "calendar"; args: string[]; body?: string; kind: string };
   status: "pending" | "approved" | "rejected" | "done" | "failed";
   result?: string;
   decidedAt?: string;
-  /** Sent without asking, because you'd said "Always allow" for that chat. */
+  /** Done without asking, because you'd said "Always allow" for that chat (or that kind of Google change). */
   auto?: boolean;
 };
 

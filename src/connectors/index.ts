@@ -13,6 +13,7 @@ import { serper, serperKey } from "./serper.ts";
 import { deepgram } from "./deepgram.ts";
 import { instagram, linkedin } from "./cookies.ts";
 import { google } from "./google.ts";
+import { googleSkills } from "./google-agent.ts";
 import { claude, codex, takeLogin } from "./brains.ts";
 import { whatsappSource } from "./whatsapp-source.ts";
 import { registerSource } from "../sources/index.ts";
@@ -63,9 +64,11 @@ export class Connect {
     // only the read-only Plaid questions. The skill is there only while a bank is connected.
     const h = hub.config.host, local = !h || h === "0.0.0.0" || h === "::" ? "127.0.0.1" : h.includes(":") ? `[${h}]` : h;
     registerSkills(() => (this.plaid.connected() ? [plaidSkill(`http://${local}:${hub.config.port}`, this.agentKey)] : []));
+    // Gmail, Drive and Calendar for the agent, while Google is connected, with the same key (google-agent.ts).
+    registerSkills(() => (hub.google.connected ? googleSkills(`http://${local}:${hub.config.port}`, this.agentKey) : []));
   }
 
-  /** The key hearth-plaid sends. */
+  /** The key hearth-plaid and the Google commands send from this machine. */
   private readonly agentKey = randomBytes(24).toString("hex");
   isAgentKey(k: string | null) {
     const a = Buffer.from(String(k || "")), b = Buffer.from(this.agentKey);

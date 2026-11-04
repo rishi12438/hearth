@@ -299,6 +299,7 @@ function onEvent(e: { type: string; data?: any }) {
       if (S.panel === "shares") openShares(); else if (S.panel?.startsWith("share:")) openShare(S.panel.slice(6));
       return;
     case "scripts": refreshState(); return;
+    case "connections": refreshState().then(drawSide); return; // a Google account signed in or out: the Connectors warning follows
     case "inbox": if (r.view !== "activity") loadInbox(); return; // seen on another device: clear the badge here too
     case "reset": refresh(); return;
   }
@@ -519,8 +520,9 @@ function drawSide() {
   const el = document.getElementById("side");
   if (!el) return;
   const r = route(), tab = tabOf(r);
-  const nav = (ic: string, label: string, on: boolean, go: () => void, badge?: number) =>
-    h("button", { class: `snav ${on ? "on" : ""}`, on: { click: go } }, icon(ic, 18), h("span", { class: "grow" }, label), badge ? h("em", null, String(badge)) : null);
+  const nav = (ic: string, label: string, on: boolean, go: () => void, badge?: number | string, title?: string) =>
+    h("button", { class: `snav ${on ? "on" : ""}`, on: { click: go }, ...(title ? { title } : {}) }, icon(ic, 18), h("span", { class: "grow" }, label), badge ? h("em", { class: typeof badge === "string" ? "warn" : "" }, String(badge)) : null);
+  const warns: string[] = S.state?.connectorWarnings || [];
   // A ramble row: drag it onto a project (or onto Rambles to take it out); the folder button or right-click files it too.
   const ramble = (t: any, nested = false) => h("div", { class: "srow", draggable: "true",
       on: { dragstart: (e: DragEvent) => { e.dataTransfer?.setData("text/hearth-thread", t.id); e.dataTransfer!.effectAllowed = "move"; },
@@ -547,7 +549,7 @@ function drawSide() {
       nav("home", "Home", r.view === "home", () => { location.hash = ""; }),
       nav("dms", "DMs", tab === "dms", () => { location.hash = "#dms"; }),
       nav("bell", "Activity", tab === "activity", () => { location.hash = "#activity"; }, activityBadge()),
-      nav("plug", "Connectors", r.view === "connectors", () => { location.hash = "#connectors"; })),
+      nav("plug", "Connectors", r.view === "connectors", () => { location.hash = "#connectors"; }, warns.length ? "!" : undefined, warns.join("\n") || undefined)),
     h("div", { class: "slabel" }, "Projects", h("button", { class: "sadd", "aria-label": "New project", on: { click: newProject } }, icon("plus", 14))),
     h("nav", { class: "sgroup" }, S.projects.length ? S.projects.map((p: any) => [
       h("button", { class: `snav ${r.view === "project" && r.id === p.id ? "on" : ""}`, on: { click: () => { location.hash = `#p/${p.id}`; }, ...dropTo(p.id) } },
@@ -1409,10 +1411,19 @@ setInterval(() => {
 
 async function decide(id: string, yes: boolean, always = false) { try { await call(`/api/approvals/${id}/${yes ? "approve" : "reject"}`, { body: { always } }); } catch (e) { handleError(e); } }
 const CHANNEL_NAME: Record<string, string> = { whatsapp: "WhatsApp", slack: "Slack", gmail: "Gmail", instagram: "Instagram", linkedin: "LinkedIn", x: "X" };
-/** "Always allow": only for a message to one chat (scripts and payments always ask). */
-const alwaysBtn = (ap: any, then?: () => void) => ap?.action?.type === "message"
-  ? h("button", { class: "sbtn", title: `Send future ${CHANNEL_NAME[ap.action.channel] || ""} messages to ${ap.action.to} without asking`, on: { click: async () => { await decide(ap.id, true, true); then?.(); } } }, "Always allow")
+/** "Always allow": for a message to one chat, or one kind of Google change (scripts and payments always ask). */
+const alwaysBtn = (ap: any, then?: () => void) => ap?.action?.type === "message" || (ap?.action?.type === "google" && GOOGLE_KINDS[ap.action.kind])
+  ? h("button", { class: "sbtn", title: ap.action.type === "google" ? `${GOOGLE_KINDS[ap.action.kind]}: do it without asking from now on` : `Send future ${CHANNEL_NAME[ap.action.channel] || ""} messages to ${ap.action.to} without asking`, on: { click: async () => { await decide(ap.id, true, true); then?.(); } } }, "Always allow")
   : null;
+/** The Google changes that wait for Approve (connectors/google-agent.ts CHANGE_KINDS), as Settings → Always allowed names them. */
+const GOOGLE_KINDS: Record<string, string> = {
+  "calendar:move": "Moving or editing events on your calendar (no other guests)",
+  "calendar:move-guests": "Moving or editing meetings with other guests",
+  "calendar:remove": "Removing events from your calendar (no other guests)",
+  "calendar:remove-guests": "Removing meetings with other guests",
+  "drive:replace": "Replacing the content of files Hearth made in Drive",
+  "drive:trash": "Moving files Hearth made to Drive's trash",
+};
 async function retry(id: string) { try { await call(`/api/jobs/${id}/retry`, { body: {} }); } catch (e) { handleError(e); } }
 /** Let a stuck job go, so it stops waiting on you (and stops counting in the badges). */
 async function dismiss(id: string) { try { await call(`/api/jobs/${id}/stop`, { body: {} }); loadRoster(); loadInbox(); } catch (e) { handleError(e); } }
@@ -2216,7 +2227,8 @@ function conversationsSheet(c: any, st: any, auditAll: any[]) {
 
 /** What one account let Hearth do, and what a reconnect would add. */
 const googleAllows = (a: any) => {
-  const missing = [!a.canSend && "sending", !a.canDrive && "Drive"].filter(Boolean);
+  // canDriveWrite / canCalendarWrite come from hubs that know about saving; an older hub leaves them out (undefined).
+  const missing = [!a.canSend && "sending", !a.canDrive && "Drive", a.canDriveWrite === false && "saving to Drive", a.canCalendarWrite === false && "adding events"].filter(Boolean);
   return `Mail, calendar${a.canDrive ? ", Drive" : ""}${a.canSend ? " · sends after you Approve" : ""}${missing.length ? ` · reconnect to allow ${missing.join(" and ")}` : ""}`;
 };
 
@@ -2270,13 +2282,13 @@ async function openGoogleSetup() {
     ] : [
       h("ol", { class: "steps" },
         h("li", null, "In Google Cloud, ", cloud("projectcreate", "create a project"), " (any name, like “Hearth”)."),
-        h("li", null, "Turn on the ", cloud("apis/library/gmail.googleapis.com", "Gmail API"), ", the ", cloud("apis/library/calendar-json.googleapis.com", "Calendar API"), " and the ", cloud("apis/library/drive.googleapis.com", "Drive API"), "."),
+        h("li", null, "Turn on the ", cloud("apis/library/gmail.googleapis.com", "Gmail API"), ", the ", cloud("apis/library/calendar-json.googleapis.com", "Calendar API"), ", the ", cloud("apis/library/drive.googleapis.com", "Drive API"), " and the ", cloud("apis/library/sheets.googleapis.com", "Sheets API"), "."),
         h("li", null, "Set up the ", cloud("auth/branding", "consent screen"), ": External, add your own email as a test user. Then publish it (“In production”) so the sign-in doesn't expire every 7 days. Google will warn it's unverified; that's fine for your own account."),
         h("li", null, "Create an ", cloud("auth/clients/create", "OAuth client"), ": Web application. Under Authorized redirect URIs, add:", h("div", { class: "hookurl" }, copyRow(g.redirectUri))),
         h("li", null, "Paste the client ID and secret here.")),
       id, secret, err, save,
     ],
-    h("p", { class: "muted small" }, "Each sign-in stays on your hub in a private file. It never goes to the model, this app or your exports. Hearth reads mail, calendars and Drive files, and only sends an email after you tap Approve. It can't delete, share or change anything."),
+    h("p", { class: "muted small" }, "Each sign-in stays on your hub in a private file. It never goes to the model, this app or your exports. Hearth reads mail, calendars and Drive files, and only sends an email after you tap Approve. It can save new folders, Sheets and Docs to your Drive (and change only those), and add events to your own calendar without inviting anyone. It can't delete your mail or files, or share anything."),
   ]);
 }
 
@@ -2460,7 +2472,7 @@ function openMenu() {
     h("nav", null,
       item("search", "Jump to…", "Find a teammate, chat or task (⌘K)", openJump),
       item("bell", "Plans", "Reminders, routines, triggers", openPlans),
-      item("clip", "Connectors", "Gmail, Calendar and more for your teammates", () => openConnections()),
+      item("clip", "Connectors", st?.connectorWarnings?.length ? st.connectorWarnings[0] : "Gmail, Calendar and more for your teammates", () => openConnections(), st?.connectorWarnings?.length ? "!" : undefined),
       item("brain", "Memory", "What I know about you", openMemory),
       item("dms", "People", "Your relationship map", openPeople),
       item("users", "Teammates", "Who the orchestrator can hand work to", openTeammates),
@@ -3472,9 +3484,13 @@ function openScript(s: any) {
 async function openAlwaysAllowed() {
   try {
     const { keys } = await call("/api/always-allow");
-    const nice = (k: string) => { const [ch, ...rest] = k.split(":"); const to = rest.join(":"); return { app: CHANNEL_NAME[ch] || ch, to: ch === "whatsapp" ? to.replace(/@.*/, "") : to }; };
+    const nice = (k: string) => {
+      const [ch, ...rest] = k.split(":"); const to = rest.join(":");
+      if (ch === "google") return { app: to.startsWith("calendar") ? "Google Calendar" : "Google Drive", to: GOOGLE_KINDS[to] || to };
+      return { app: CHANNEL_NAME[ch] || ch, to: ch === "whatsapp" ? to.replace(/@.*/, "") : to };
+    };
     openSheet("Always allowed", [
-      h("p", { class: "wlede" }, "Teammates send messages to these chats without asking first. Everything else still waits for your Approve."),
+      h("p", { class: "wlede" }, "Teammates send messages to these chats, and make these kinds of Google changes, without asking first. Everything else still waits for your Approve."),
       keys.length ? h("div", { class: "wcard" }, keys.map((k: string) => h("div", { class: "wrow" },
         h("span", { class: "grow" }, h("b", null, nice(k).to), h("small", null, nice(k).app)),
         h("button", { class: "wa-btn", on: { click: async () => { await call(`/api/always-allow?key=${encodeURIComponent(k)}`, { method: "DELETE" }); openAlwaysAllowed(); } } }, "Ask again"))))

@@ -14,6 +14,7 @@ import { Connect } from "./connectors/index.ts";
 import { sourceById } from "./sources/index.ts";
 import { chromeWorkspaces, slackCookie } from "./connectors/slack.ts";
 import { webhookOk } from "./connectors/plaid.ts";
+import { changeFor, googleAgent, GoogleAgentError, type GoogleService } from "./connectors/google-agent.ts";
 import { cleanFingerprint } from "./browser.ts";
 import { adminToken, isAdminRequest } from "./admin.ts";
 import { detectBrains } from "./brains/logins.ts";
@@ -122,7 +123,11 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
     // Browser logins (LinkedIn, X) the user chose to feed from their Mac: the Mac decrypts and copies them up here.
     cookieSites: () => hub.connections.macSites(),
     cookieHave: (site) => hub.connections.cookieHave(site),
-    onCookies: (site, data) => { hub.connections.receiveFromMac(site, data); hub.emit("connections"); hub.audit("mac-copy", site, "your Mac", { ok: true }).catch(() => {}); } });
+    onCookies: (site, data) => { hub.connections.receiveFromMac(site, data); hub.emit("connections"); hub.audit("mac-copy", site, "your Mac", { ok: true }).catch(() => {}); },
+    // Jobs that run on a linked computer get the Google commands too, while Google is connected (connectors/google-agent.ts).
+    agentSkills: () => ({ google: hub.google.connected }) });
+  // A connection came or went (Google signed in or out…): the skills that depend on it follow, here and on computers.
+  hub.on((e) => { if (e.type === "connections") { computers.skillsChanged(); hub.brain.refreshSkills?.(); } });
   const linkedComputers = async () => (await store.all<Device>("devices")).filter((d) => d.role === "computer");
   const recount = async () => { computers.known = (await linkedComputers()).length; };
   await recount();
@@ -307,6 +312,48 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         return new Response(JSON.stringify(r, null, 1), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
       } catch (e: any) { throw new HttpError(400, e.message); }
     }
+    // The agent's hearth-gmail / hearth-drive / hearth-calendar commands. Two keys open them: the hub's agent key, only
+    // straight from this machine (like hearth-plaid), or a linked computer's key, which lives only as long as that
+    // computer's line to the hub is open (a job running on your Mac). Neither key opens anything else.
+    const agentGoogle = path.match(/^\/api\/agent\/google\/(gmail|drive|calendar)$/);
+    if (agentGoogle && method === "POST") {
+      const key = req.headers.get("x-hearth-agent");
+      const from = fromThisMachine(req, server) && connect.isAgentKey(key) ? "hub" : computers.agentKeyOwner(key);
+      if (!from) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not the agent's key."); }
+      if (Number(req.headers.get("content-length") || 0) > 30_000_000) throw new HttpError(413, "Too large (30 MB at most).");
+      let form: FormData;
+      try { form = await req.formData(); } catch { throw new HttpError(400, "Send the command's words as form fields."); }
+      const argv = form.getAll("a").slice(0, 40).map((a) => String(a).slice(0, 2000));
+      const body = form.get("body"), file = form.get("file");
+      const input = {
+        ...(body != null ? { body: (typeof body === "string" ? body : await body.text()).slice(0, 5_000_000) } : {}),
+        ...(file && typeof file !== "string" ? { file: { name: file.name || "upload", type: file.type, data: new Uint8Array(await file.arrayBuffer()) } } : {}),
+      };
+      const service = agentGoogle[1] as GoogleService;
+      try {
+        // A change or removal waits for the owner: stage it and hand the agent the action for its ```hearth block,
+        // unless they said "Always allow" for this kind, in which case it runs now (and is logged as an approval).
+        const change = await changeFor(hub.google, service, argv, input);
+        if (change) {
+          const id = hub.stageGoogleChange(change);
+          const out = { needsApprove: true, kind: change.kind, summary: change.summary, action: { type: "google.change", id },
+            say: "Put this action in your ```hearth block exactly as given. The owner taps Approve before it happens: tell them it's waiting for them." };
+          if (await hub.googleAllowed(change.kind)) {
+            const r = await hub.requestGoogleChange({ id }, {});
+            await hub.log("google.agent", `hearth-${service} ${argv.join(" ").slice(0, 120)} (always allowed)`);
+            return new Response(JSON.stringify(r.value ? { done: true, alwaysAllowed: true, summary: change.summary, result: JSON.parse(r.value.result || "null") } : { error: r.error }, null, 1),
+              { status: r.value ? 200 : 502, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+          }
+          await hub.log("google.agent", `hearth-${service} ${argv.join(" ").slice(0, 120)} (staged for Approve)`);
+          return new Response(JSON.stringify(out, null, 1), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+        }
+        const r = await googleAgent(hub.google, service, argv, input);
+        await hub.log("google.agent", `hearth-${service} ${argv.join(" ").slice(0, 120)}${from === "hub" ? "" : ` (from ${from})`}`);
+        return new Response(JSON.stringify(r, null, 1), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: String(e?.message || e) }, null, 1), { status: e instanceof GoogleAgentError ? 400 : 502, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+      }
+    }
     // Plaid says a bank has news (new transactions, signed out). Only a body Plaid signed counts; answer fast, work after.
     if (path === "/api/plaid/webhook") {
       if (method !== "POST") throw new HttpError(405, "POST to this address.");
@@ -377,6 +424,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           computers: await computerSummary(),
           brainProblems: await hub.brainProblems(),
           brains: await hub.brainStatus(),
+          // Shown as a warning on Connectors (a Google account to reconnect).
+          connectorWarnings: hub.google.needs(),
           tileKey,
         });
       }
