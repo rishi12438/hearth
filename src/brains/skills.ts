@@ -43,7 +43,7 @@ const TOOLS: Tool[] = [
   {
     name: "enkidu-browser", off: "HEARTH_BROWSER",
     description: "Use Chrome: open a website, read a page that needs JavaScript or clicking through, fill a search, take a screenshot of a page. Prefer WebFetch for a plain page.",
-    rules: `# Hearth: browser on this hub
+    rules: `# Hearth: browser on this computer
 Only \`enkidu-browser ...\` (and \`hearth-skill\`) commands run here, by that bare name (not a full path). Name your session
 \`hearth-<short-topic>-<4 random letters>\`; if \`session new\` says that id already exists, pick different letters. Close it when you're done.
 Sites the user connected in Hearth (Connectors) open already signed in. The \`enkidu browser logins\` commands aren't here: if a site
