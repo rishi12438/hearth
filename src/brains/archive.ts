@@ -4,7 +4,7 @@ import { dirname, join, relative } from "node:path";
 // Keeps workspaces (brains/sessions.ts) from filling up the hub, once a day:
 //   - NOTES.md: the playbook at the top stays; dated sections past the newest KEEP_SECTIONS move to archive/NOTES-old.md
 //     once the file is over NOTES_MAX bytes.
-//   - data/ and out/: files nobody touched for FILE_DAYS are gzipped into archive/<yyyy-mm>/<path>.gz.
+//   - data/, out/ and history/: files nobody touched for FILE_DAYS are gzipped into archive/<yyyy-mm>/<path>.gz.
 //     scripts/, skills/ and NOTES.md are never touched: they're what the next run reuses.
 //   - a whole workspace nobody used for WORKSPACE_DAYS is packed into <brain>/archive/<its path>-<date>.tar.gz and removed.
 //     A thread pinned to it gets an empty folder again next time (its session starts over; the files are in the tarball).
@@ -16,7 +16,7 @@ export const FILE_DAYS = 30;
 export const WORKSPACE_DAYS = 90;
 const DAY = 86_400_000;
 /** Folders whose old files are archived; everything else in a workspace is left alone. */
-const BULKY = ["data", "out"];
+const BULKY = ["data", "out", "history"];
 
 export type TidyReport = { notes: string[]; files: number; packed: string[] };
 
