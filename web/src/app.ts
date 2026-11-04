@@ -224,7 +224,8 @@ function onEvent(e: { type: string; data?: any }) {
         return;
       }
       if (open && S.chat && e.data.threadId === open) {
-        upsert(S.chat.messages, e.data); drawChat();
+        if (e.data.deleted) S.chat.messages = S.chat.messages.filter((x: any) => x.id !== e.data.id); else upsert(S.chat.messages, e.data);
+        drawChat();
         if (e.data.newTopic && new Date(e.data.newTopic.until).getTime() > Date.now()) offerTopicMove(e.data);
         else if (e.data.role === "user") countdowns.get(e.data.id)?.(); // decided (or kept) elsewhere
       }
@@ -1455,7 +1456,8 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
   // One timeline, in the order things happened: every message you sent here (also the ones added to a run that was
   // still going, which have no job of their own) and each answer where it landed. A run still going sits at the bottom.
   const asks = new Set(follow.map((f: any) => f.messageId));
-  const yours = S.chat.messages.filter((m: any) => m.role === "user" && (m.replyTo === j.id || asks.has(m.id)));
+  const mine = S.chat.messages.filter((m: any) => m.role === "user" && (m.replyTo === j.id || asks.has(m.id)));
+  const yours = mine.filter((m: any) => !m.queued);
   const live = (x: any) => x.status === "queued" || x.status === "working";
   const when = (x: any) => (live(x) ? Infinity : Date.parse(x.finishedAt || x.updatedAt || x.createdAt) || 0);
   const items = [
@@ -1470,6 +1472,7 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
     row(mateWho("hearth"), j.createdAt, [h("div", { class: "ttitle" }, jobLabel(j)), h("div", { class: "brief" }, withMentions(`@${t.name} ${String(j.task).split("\n\nThe user added: ")[0]}`))]),
     h("div", { class: "repdiv" }, n ? `${n} repl${n === 1 ? "y" : "ies"}` : "No replies yet"),
     ...items.map((x) => x.node()),
+    ...queuedRows(mine.filter((m: any) => m.queued), [j, ...follow]),
   ];
   clear(el, nodes);
   if (stick) requestAnimationFrame(() => { const s = document.getElementById("scroll")!; s.scrollTop = s.scrollHeight; });
@@ -1595,7 +1598,7 @@ function drawDm(stick = true) {
   const items: { at: string; nodes: Node[] }[] = [];
   const saved = S.chat;
   S.chat = { approvals: d.approvals, jobs: d.jobs, messages: d.messages, thread: { id: `tm-${t.id}` } };
-  for (const m of d.messages) if (!d.jobs.some((j: any) => j.messageId === m.id)) items.push({ at: m.createdAt, nodes: [plainMessage(m)] });
+  for (const m of d.messages) if (!m.queued && !d.jobs.some((j: any) => j.messageId === m.id)) items.push({ at: m.createdAt, nodes: [plainMessage(m)] });
   for (const j of d.jobs.filter((j: any) => direct.has(j.messageId))) {
     const m = d.messages.find((x: any) => x.id === j.messageId);
     items.push({ at: j.createdAt, nodes: [row(youWho(), m.createdAt, [h("div", { class: "mtext" }, m.text)]), answer(j)] });
@@ -1610,8 +1613,36 @@ function drawDm(stick = true) {
         h("button", { class: `routine ${r.status}`, on: { click: () => openHook(r) } }, icon(r.trigger.type === "at" ? "clock" : "repeat", 14), h("span", null, r.title), h("small", null, r.status === "paused" ? "paused" : r.when)))) : null,
       elsewhere.length ? h("div", { class: "routines" }, h("small", null, "In rambles"), elsewhere.map((j: any) =>
         h("button", { class: "routine", on: { click: () => { location.hash = `#c/${j.threadId}/${j.id}`; } } }, face(t, 18, jobState(j)), h("span", null, j.task), h("small", null, j.status === "done" ? shortAgo(j.finishedAt || j.updatedAt) : j.status)))) : null),
-    items.flatMap((x) => x.nodes));
+    items.flatMap((x) => x.nodes),
+    queuedRows(d.messages.filter((m: any) => m.queued), d.jobs.filter((j: any) => !j.parentId && direct.has(j.messageId))));
   if (stick) requestAnimationFrame(() => { const s = document.getElementById("scroll")!; s.scrollTop = s.scrollHeight; });
+}
+
+/**
+ * Messages you sent while the teammate was mid-run: greyed under the run, going out together as its next turn when it
+ * ends. Send now puts one into the run straight away (it starts over with it); Edit takes it back into the box; × drops it.
+ */
+function queuedRows(held: any[], runs: any[]) {
+  if (!held.length) return [];
+  const run = runs.filter((x: any) => x.status === "working" || x.status === "queued").at(-1);
+  const stuck = !run && runs.find((x: any) => x.status === "blocked" || x.status === "waiting");
+  const name = mate(held[0].teammateId || run?.teammateId || "hearth").name;
+  const why = run ? `Queued · goes to ${name} when this run ends` : stuck ? `Not sent · ${name} is ${stuck.status === "waiting" ? "waiting on you" : "stuck"}` : "Sending…";
+  const act = (m: any, how: "send" | "edit" | "drop") => async () => {
+    try {
+      if (how === "send") await call(`/api/messages/${m.id}/send`, { body: {} });
+      else {
+        await call(`/api/messages/${m.id}`, { method: "DELETE" });
+        if (how === "edit") { const box = document.getElementById("composer") as HTMLTextAreaElement | null; if (box) { box.value = box.value.trim() ? `${box.value}\n${m.text}` : m.text; box.dispatchEvent(new Event("input")); box.focus(); } }
+      }
+    } catch (e) { handleError(e); }
+    const r = route(); if (r.view === "chat") loadChat(r.id); else if (r.view === "dm") loadDm(r.id);
+  };
+  return held.map((m: any, i: number) => row(youWho(), m.createdAt, [h("div", { class: "mtext" }, m.text),
+    h("div", { class: "qbar" }, i === held.length - 1 ? h("small", null, why) : null,
+      h("button", { class: "qbtn", title: run ? `Stops ${name}'s run and starts it over with this` : `Send it to ${name}`, on: { click: act(m, "send") } }, "Send now"),
+      h("button", { class: "qbtn", on: { click: act(m, "edit") } }, "Edit"),
+      h("button", { class: "qbtn", "aria-label": "Don't send", title: "Don't send", on: { click: act(m, "drop") } }, icon("x", 13)))], false, "queued"));
 }
 
 // ---------------- composer ----------------
@@ -1679,8 +1710,8 @@ async function send(text: string, threadJob?: string) {
   if (!t && !fileIds.length) return;
   const r = route();
   try {
-    if (threadJob) { await call(`/api/jobs/${threadJob}/reply`, { body: { text: t } }); if (r.view === "chat") loadChat(r.id); return; }
-    if (r.view === "dm") { await call(`/api/teammates/${r.id}/messages`, { body: { text: t } }); loadDm(r.id); return; }
+    if (threadJob) { await call(`/api/jobs/${threadJob}/reply`, { body: { text: t, queue: true } }); if (r.view === "chat") loadChat(r.id); return; }
+    if (r.view === "dm") { await call(`/api/teammates/${r.id}/messages`, { body: { text: t, queue: true } }); loadDm(r.id); return; }
     let inChat = r.view === "chat" && r.id !== "new";
     let into = r.view === "chat" ? r.id : "";
     // A new ramble that's really about an earlier one (even a closed one): offer to carry it on there, and do it after 5s.
