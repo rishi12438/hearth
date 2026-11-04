@@ -318,20 +318,36 @@ every job, and light jobs escalate on their own if they can't do it, so heavy is
  * For calls that can run code (in the jail): do many things with a script, not by hand, and on Claude hand wide searching
  * to the scout (a small fast model) so the expensive model only thinks and writes.
  */
-function atScale(code: "claude" | "codex" | null | undefined): string[] {
+/** A job thread's own folder, kept across its follow-ups (see brains/sessions.ts): how to leave it useful for next time. */
+export const WORKSPACE = [
+  "", "YOUR WORKSPACE: your current folder belongs to this job's thread and is KEPT. Every follow-up in this thread (\"try again\",",
+  "\"now save it in a sheet\") works in this same folder, and this conversation carries on. Leave it so next time starts where you",
+  "stopped, not from nothing:",
+  "- Look first: `ls -la` and read NOTES.md before doing anything. Reuse the data you already pulled and the scripts that worked;",
+  "  only fetch again what may have changed (a tracking status), and say when something comes from an earlier run.",
+  "- Save as you go: raw data you fetched (pages, JSON, CSV, exports) in data/, scripts that worked in scripts/ (rerunnable as is,",
+  "  e.g. `python3 scripts/orders.py`), results in out/.",
+  "- Keep NOTES.md current (short): the task, what worked (which tool, login, URL, command), what failed and why, what's still",
+  "  open, and where each file is.",
+  "PARSE WITH CODE, NOT BY EYE: don't read big pages or files and pick things out by hand. Write code to extract, count, dedupe, sort,",
+  "join and compare: Python (re, json, csv, html.parser), jq, `grep -E`/rg, sed/awk. Write the regex or selector, test it on a",
+  "sample, run it on everything, print a short summary and check it (counts add up, nothing dropped) before you rely on it.",
+];
+
+function atScale(code: "claude" | "codex" | null | undefined, workspace = false): string[] {
   if (!code) return [];
-  return ["", "WORKING AT SCALE: you have a shell, files and the open internet in a sandbox (your current folder is scratch space; nothing",
-    "there is kept). When a job covers many items (every holding, every product, a dozen sites), don't do them one by one by hand:",
-    "write a short script (Python or bash) that fetches or computes them all, with the requests running in parallel, and read its",
-    "output. Use the hub's tools (hearth-*) for the user's own data. Check what a script printed before relying on it.",
+  return ["", "WORKING AT SCALE: you have a shell, files and the open internet in a sandbox.",
+    workspace ? "Your current folder is kept for this thread (see YOUR WORKSPACE)." : "Your current folder is scratch space; nothing there is kept.",
+    "When a job covers many items (every holding, every product, a dozen sites), don't do them one by one by hand: write a short",
+    "script (Python or bash) that fetches or computes them all, with the requests running in parallel, and read its output. Use the hub's tools (hearth-*) for the user's own data. Check what a script printed before relying on it.",
     ...(code === "claude" ? ["For wide searching, hand pieces to the scout agent (a small fast model), several at once in one message, and keep the",
       "judgement and the answer for yourself."] : []),
     "Well-known facts (a large company's sector, a capital city) you may state from knowledge; say so where it matters. Mark only",
-    "what you truly couldn't find as missing, and never invent numbers."];
+    "what you truly couldn't find as missing, and never invent numbers.", ...(workspace ? WORKSPACE : [])];
 }
 
-/** code: which brain can run code in this call (in the jail), else null. */
-export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = null) {
+/** code: which brain can run code in this call (in the jail), else null. workspace: it works in a job thread's kept folder. */
+export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = null, workspace = false) {
   if (b.mode === "clean") return [CLEAN, "", "DICTATED:", b.input].join("\n");
   if (b.mode === "narrate") return b.input; // built by narratePrompt (brains/narrate.ts)
   if (b.mode === "describe") return ["Write ONE sentence describing this reusable UI component for a library: what it shows and when to use it, so a",
@@ -348,7 +364,7 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
     parts.push("", "You were handed ONE job from the user's ramble by the orchestrator. Do it fully now: use actions for reminders,",
       "routines, watches and memory; search the web if you need to. Then reply with the result in 1-5 short lines, written to the user.",
       `If the job is clearly beyond you or you can't do it well, reply exactly ${ESCALATE} and a stronger model will take it.`,
-      ...atScale(code), "JOB:", b.input);
+      ...atScale(code, workspace), "JOB:", b.input);
   } else if (b.mode === "legwork") {
     parts.push("", "You were handed ONE job from the user's ramble. You do the LEGWORK; a stronger model on the team (the lead) will read",
       "your notes and write the reply the user sees. Do the job fully now: search the web, read pages, and take the actions it needs",
@@ -357,7 +373,7 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
       "- what you did: actions taken and their results",
       "- anything uncertain or missing, and what you'd ask the user",
       `Be complete and factual; the lead can't search again cheaply. If the job is beyond you, reply exactly ${ESCALATE}.`,
-      ...atScale(code), "JOB:", b.input);
+      ...atScale(code, workspace), "JOB:", b.input);
   } else if (b.mode === "voice") {
     parts.push("", "You are the lead on ONE job. A teammate on a cheaper model already did the legwork (searches, actions); their notes are",
       "below. Write the reply the user sees, in your teammate voice. They read it on a PHONE: the answer first in 1-3 short lines,",
@@ -766,7 +782,7 @@ export class Brain {
     // Working calls in the jail can run code: a shell, files and the open internet (the jail hides the hub's secrets).
     const jail = web && (harness === "claude" || harness === "codex") ? this.jail() : null;
     const coder = jail ? (harness as "claude" | "codex") : null;
-    const prompt = (codexSkills.length ? skillCatalog(codexSkills, "codex").trim() + "\n\n" : "") + buildPrompt(b, coder);
+    const prompt = (codexSkills.length ? skillCatalog(codexSkills, "codex").trim() + "\n\n" : "") + buildPrompt(b, coder, !!thread);
     const planning = b.mode === "orchestrate";
     const name = `${harness}${model ? ` (${model})` : ""}`;
     let cmd: string[];
