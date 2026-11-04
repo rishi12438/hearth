@@ -201,13 +201,13 @@ test("a job keeps why it moved up, and only the top model is told nobody is abov
   (hub.brain as any).think = async (b: any, p: any) => {
     if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "Plan a trip", teammate: "Planner", effort: "light" }] });
     if (b.mode === "legwork" || b.mode === "job") tops[`${b.mode}:${p.model}`] = !!b.top;
-    return p.model === "small" ? "[[escalate]] the booking site needs a login I don't have" : "Here's your plan.";
+    return p.model === "small" ? "[[escalate]] the booking site needs a login I don't have\n\nNOTES FOR THE LEAD:\n- found 3 hotels" : "Here's your plan.";
   };
   await hub.setBrains({ workhorse: { harness: "echo", model: "small" }, heavy: { harness: "echo", model: "big" } });
   await hub.ramble("plan my trip");
   await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done"));
   const [job] = await store.all<Job>("jobs");
-  expect(job.escalations?.map(({ from, to, why }) => ({ from, to, why }))).toEqual([{ from: "echo small", to: "echo big", why: "the booking site needs a login I don't have" }]);
+  expect(job.escalations?.map(({ from, to, why }) => ({ from, to, why }))).toEqual([{ from: "echo small", to: "heavy model", why: "the booking site needs a login I don't have" }]);
   expect(tops).toEqual({ "legwork:small": false, "job:big": true });
   expect((await store.all<any>("activity")).some((a) => a.kind === "job.escalated" && a.text.includes("needs a login"))).toBe(true);
 });

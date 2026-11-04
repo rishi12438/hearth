@@ -26,9 +26,11 @@ export type CodexAppOptions = {
   ephemeral: boolean;
   /** The model the thread really runs on (Codex picks its own default when we don't name one). */
   onModel?: (model: string) => void;
-  /** Tokens one model call just used (Codex is on a plan: tokens, not dollars). */
-  onTokens?: (tokens: number) => void;
+  /** What one model call just used, and on which model (Codex is on a plan: tokens, not dollars). */
+  onTokens?: (call: CallTokens, model: string) => void;
 };
+
+import type { CallTokens } from "./prices.ts";
 
 type Rpc = { id?: number | string; method?: string; params?: any; result?: any; error?: { message?: string } };
 
@@ -47,6 +49,8 @@ export class CodexAppTurn {
   private next = 1;
   private waiting = new Map<number, (m: Rpc) => void>();
   private over = false;
+  /** The model its thread runs on, once it has said. */
+  private model = "";
 
   constructor(private write: (line: string) => void, private o: CodexAppOptions) {
     this.done = new Promise((r) => (this.finish = r));
@@ -85,8 +89,8 @@ export class CodexAppTurn {
         if (p.willRetry) return [];
         return [JSON.stringify({ type: "error", message: String(p.error?.message || "Codex reported an error") })];
       case "thread/tokenUsage/updated": {
-        const n = Number(p.tokenUsage?.last?.totalTokens);
-        if (n > 0) this.o.onTokens?.(n);
+        const last = p.tokenUsage?.last;
+        if (Number(last?.totalTokens) > 0) this.o.onTokens?.(last, this.model || this.o.model || "");
         return [];
       }
       case "turn/completed": {
@@ -126,7 +130,7 @@ export class CodexAppTurn {
     this.threadId = id;
     this.resumed = resumed;
     const model = m.result?.model ?? m.result?.thread?.model;
-    if (typeof model === "string" && model) this.o.onModel?.(model);
+    if (typeof model === "string" && model) { this.model = model; this.o.onModel?.(model); }
     this.request("turn/start", { threadId: id, input: [{ type: "text", text: this.o.prompt, text_elements: [] }] }, (r) => {
       if (r.error) this.fail(`Codex couldn't start the turn: ${r.error.message || "turn/start failed"}`);
     });
