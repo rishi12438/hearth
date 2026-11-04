@@ -308,3 +308,41 @@ test("the hub's lead answers a mid-job question on the heavy brain", async () =>
   expect(await hub.askLead("orders page only shows 20 at a time")).toContain("count rows before and after");
   await store.close();
 });
+
+test("a follow-up in a thread with a session is that session answering: no lead tips before it, no write-up after", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "hearth-direct-"));
+  const store = await createStore("sqlite::memory:", dir);
+  for (const c of COLLECTIONS) await store.clear(c);
+  const config = { ...loadConfig({ HEARTH_AGENT: "echo" }), dataDir: dir };
+  const brain = new Brain(config);
+  const hub = new Hub(config, store, brain, new Scripts(store, dir, join(import.meta.dir, "../scripts")), null);
+  const h = hub as any;
+  const base = await h.brains();
+  h.brains = async () => ({ ...base, workhorse: { harness: "codex", model: "gpt-6.1-sol" }, heavy: { harness: "claude", model: "claude-opus-5-5" } });
+  const modes: string[] = [];
+  let tips = 0;
+  h.turn = async (mode: string) => { modes.push(mode); return { text: "nope, about $871B", did: [], used: [], tiles: [], fileIds: [] }; };
+  h.leadTips = async () => { tips++; return "tip"; };
+  const now = new Date().toISOString();
+  const job = (id: string, extra: Partial<Job> = {}) => store.put<Job>("jobs", { id, createdAt: now, threadId: "t1", messageId: "m1", task: "Musk's net worth", teammateId: "hearth", status: "queued", effort: "light", ...extra } as Job);
+
+  // The thread's first job: the lead briefs it, the cheaper model does the legwork, the lead writes it up.
+  await h.runJob(await job("j-root"), "musk net worth");
+  expect(modes).toEqual(["legwork", "voice"]);
+  expect(tips).toBe(1);
+
+  // "so he isn't a trillionaire anymore?": its session is there, so it just answers.
+  brain.sessions.set("j-root", "codex", "thr-abc123");
+  modes.length = 0; tips = 0;
+  await h.runJob(await job("j-f1", { followsUp: "j-root" }), "so he isn't a trillionaire anymore?");
+  expect(modes).toEqual(["job"]);
+  expect(tips).toBe(0);
+  expect((await store.get<Job>("jobs", "j-f1"))!.result).toBe("nope, about $871B");
+
+  // No session to resume (gone, or it ran on your Mac): the full pipeline, as before.
+  brain.sessions.forget("j-root", "codex");
+  modes.length = 0;
+  await h.runJob(await job("j-f2", { followsUp: "j-root" }), "and now?");
+  expect(modes).toEqual(["legwork", "voice"]);
+  await store.close();
+});

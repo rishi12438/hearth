@@ -1089,7 +1089,13 @@ export class Hub {
     let input = `${job.task}${depNote}${handNote}${repairNote}${splitNote}${attached}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")`;
     type Tier = "quick" | "workhorse" | "heavy";
     // Hybrid (on by default): a cheaper model does the legwork and the heavy model writes what you read.
-    const hybrid = (await this.prefs()).hybrid !== false && label(brains.heavy) !== label(brains.workhorse);
+    // A follow-up in a thread whose session is still there: that session just answers, the way a chat goes on. It already
+    // has everything said, read and found so far, so there's no coach before it and no write-up after (both were extra
+    // cold model calls on every turn, which made "so he isn't a trillionaire anymore?" take as long as the first job).
+    const first = brains[job.effort === "heavy" ? "heavy" : job.effort === "quick" ? "quick" : "workhorse"];
+    const direct = !!job.followsUp && !job.parentId && !!meter.thread && (first.harness === "claude" || first.harness === "codex")
+      && !!this.brain.sessions.get(meter.thread, first.harness);
+    const hybrid = !direct && (await this.prefs()).hybrid !== false && label(brains.heavy) !== label(brains.workhorse);
     const attempt = async (tier: Tier) => {
       cur = await this.saveJob({ ...cur, status: "working", tier });
       meter.lead = hybrid && tier !== "heavy" && label(brains[tier]) !== label(brains.heavy);
