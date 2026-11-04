@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store, Collection } from "./store/index.ts";
-import type { Brain, BrainInput, BrainProfile, Brains, Meter } from "./brain.ts";
+import type { Brain, BrainImage, BrainInput, BrainProfile, Brains, Meter } from "./brain.ts";
 import { QUIET, ESCALATE, escalateWhy, HAND_BACK, REDO, HARNESSES, MODEL_RE, availableHarnesses, NeedsComputer, BrainsFull, POOL_HARNESSES } from "./brain.ts";
 import type { Scripts } from "./scripts.ts";
 import type { Push } from "./push.ts";
@@ -58,7 +58,7 @@ const IDEAS_MARKER = "[[ideas]]";
 const MAX_OPEN_IDEAS = 4;
 const LOCATION_KEEP_DAYS = 7;
 
-type TurnOpts = { teammate?: Teammate | null; threadId?: string; jobId?: string; extra?: string; profile?: BrainProfile; meter?: Meter; allowedScripts?: string[]; top?: boolean };
+type TurnOpts = { teammate?: Teammate | null; threadId?: string; jobId?: string; extra?: string; profile?: BrainProfile; meter?: Meter; allowedScripts?: string[]; top?: boolean; images?: BrainImage[] };
 const label = (p: BrainProfile) => `${p.harness}${p.model ? `/${p.model}` : ""}`;
 /** A model in words for the app: "Claude opus", "Codex gpt-5.5", "Claude" (its default model). */
 export const brainName = (w: { harness: string; model?: string }) =>
@@ -302,7 +302,7 @@ export class Hub {
     const profile = opts.profile || (await this.brains()).workhorse;
     const where = { teammateId: teammate?.id, threadId: opts.threadId, jobId: opts.jobId, recipe: opts.allowedScripts };
     const ctx = await this.context(input, mode, teammate, opts.threadId);
-    const first = parseReply(await this.brain.think({ mode, context: ctx, input, toolResults: extra, top: opts.top }, profile, opts.meter));
+    const first = parseReply(await this.brain.think({ mode, context: ctx, input, toolResults: extra, top: opts.top, ...(opts.images?.length ? { images: opts.images } : {}) }, profile, opts.meter));
     // Keeps the model's reason with the marker: nothing it proposed is applied.
     if (first.text.includes(ESCALATE)) return { text: `${ESCALATE} ${escalateWhy(first.text)}`, did: [] as Done[], used: [] as string[] };
     if (first.text.includes(HAND_BACK)) return { text: HAND_BACK, did: [] as Done[], used: [] as string[] }; // nothing it proposed is applied
@@ -658,9 +658,26 @@ export class Hub {
       const f = await this.store.get<StoredFile>("files", id);
       if (!f) continue;
       const text = this.files.textOf(f);
-      parts.push(text ? `### ${f.name}\n${text}` : `### ${f.name} (${f.mime}, ${Math.round(f.size / 1024)} KB; you can't open this type yet, say so if you need its contents)`);
+      parts.push(text ? `### ${f.name}\n${text}`
+        : f.mime.startsWith("image/") ? `### ${f.name} (a picture, ${Math.round(f.size / 1024)} KB; if it isn't in your working folder's attachments/, you can't see it: say so if you need to)`
+        : `### ${f.name} (${f.mime}, ${Math.round(f.size / 1024)} KB; you can't open this type yet, say so if you need its contents)`);
     }
     return parts.length ? `\n\nAttached files:\n<untrusted>\n${parts.join("\n\n")}\n</untrusted>` : "";
+  }
+
+  /** The pictures among a job's attachments, for its teammate to look at (brain.ts saves them in its folder). */
+  private async jobImages(ids: string[]): Promise<BrainImage[]> {
+    const out: BrainImage[] = [];
+    let budget = 12 * 1024 * 1024; // what one run carries (it goes over the wire to a linked computer)
+    for (const id of [...new Set(ids)].slice(0, 5)) {
+      const f = await this.store.get<StoredFile>("files", id);
+      if (!f?.mime.startsWith("image/") || f.size > budget) continue;
+      const bytes = this.files.bytes(f.id);
+      if (!bytes) continue;
+      budget -= bytes.length;
+      out.push({ name: f.name, mime: f.mime, data: Buffer.from(bytes).toString("base64") });
+    }
+    return out;
   }
 
   /** Send as many messages as you like: if this ramble is being planned, the new one waits and joins the next batch. */
@@ -1000,7 +1017,11 @@ export class Hub {
     const depNote = earlier ? `\n\nResults from earlier jobs you depend on:\n<untrusted>\n${earlier.slice(0, 6000)}\n</untrusted>` : "";
     const splitNote = job.effort === "heavy" && !job.depth ? "\n\nThis is a heavy job: if it has 2-4 parts that can be done independently, you may use jobs.split." : "";
     const ask = await this.store.get<Message>("messages", job.messageId);
-    const attached = await this.attachmentNote(ask?.fileIds);
+    const later = (await this.store.all<Message>("messages")).filter((m) => m.role === "user" && m.replyTo === (job.followsUp || job.id) && m.id !== ask?.id && m.createdAt >= job.createdAt);
+    // What came with it: the files on the message that started it, and on replies sent into it while it ran.
+    const fileIds = [...(ask?.fileIds || []), ...later.flatMap((m) => m.fileIds || [])];
+    const attached = await this.attachmentNote(fileIds);
+    const images = await this.jobImages(fileIds);
     const handNote = job.mayHandBack ? `\n\nFIRST, before any work or tools: the user sent this in the ramble's channel and it came straight to you because you had the latest thread. If it isn't a follow-up on that thread's subject (a new request, or partly about something else), don't do it: reply with only ${HAND_BACK} and Hearth will route it.` : "";
     let input = `${job.task}${depNote}${handNote}${repairNote}${splitNote}${attached}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")`;
     type Tier = "quick" | "workhorse" | "heavy";
@@ -1009,7 +1030,7 @@ export class Hub {
     const attempt = async (tier: Tier) => {
       cur = await this.saveJob({ ...cur, status: "working", tier });
       meter.lead = hybrid && tier !== "heavy" && label(brains[tier]) !== label(brains.heavy);
-      return this.turn(hybrid && tier !== "heavy" ? "legwork" : "job", input, job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains[tier], meter, top: tier === "heavy" });
+      return this.turn(hybrid && tier !== "heavy" ? "legwork" : "job", input, job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains[tier], meter, top: tier === "heavy", images });
     };
     // Start on the cheapest model the plan allows; move up a step when a model can't do it.
     const ladder: Tier[] = job.effort === "heavy" ? ["heavy"] : job.effort === "quick" ? ["quick", "workhorse", "heavy"] : ["workhorse", "heavy"];
@@ -1109,12 +1130,15 @@ export class Hub {
 
   /** Reply inside a job's thread: the same teammate picks it up, with the thread so far as context. */
   /** Reply inside a job's thread: the same teammate picks it up, with the thread so far as context. queue: wait for a run that's going instead of restarting it. */
-  async replyToJob(rootId: string, text: string, opts: { queue?: boolean } = {}) {
+  async replyToJob(rootId: string, text: string, opts: { queue?: boolean; fileIds?: string[] } = {}) {
     const root = await this.store.get<Job>("jobs", rootId);
-    const clean = text.trim().slice(0, 4000);
     if (!root || root.followsUp || root.parentId) return { error: "No such thread." };
+    const files = (await Promise.all((opts.fileIds || []).slice(0, 5).map((id) => this.store.get<StoredFile>("files", id)))).filter(Boolean) as StoredFile[];
+    const clean = text.trim().slice(0, 4000) || (files.length ? "Have a look at this." : "");
     if (!clean) return { error: "Say something first." };
-    const m = await this.addMessage({ role: "user", text: clean, threadId: root.threadId, replyTo: root.id, teammateId: root.teammateId });
+    // The files belong to this ramble now (they show under it in Files).
+    for (const f of files) if (!f.threadId) await this.store.put<StoredFile>("files", { ...f, threadId: root.threadId });
+    const m = await this.addMessage({ role: "user", text: clean, threadId: root.threadId, replyTo: root.id, teammateId: root.teammateId, ...(files.length ? { fileIds: files.map((f) => f.id) } : {}) });
     await this.setPrefs({ lastUserAt: m.createdAt });
     return { value: await this.deliverReply(root, m, clean, opts.queue) };
   }

@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import { wallParts, zonedToUtc } from "./time.ts";
@@ -37,7 +37,34 @@ export type BrainInput = {
   toolResults?: string;
   /** The strongest model on the team is doing it: there's no one to hand it up to. */
   top?: boolean;
+  /** Pictures the user attached (a pasted screenshot): saved in the run's folder for the model to look at. */
+  images?: BrainImage[];
 };
+export type BrainImage = { name: string; mime: string; data: string /* base64 */ };
+
+/** Saves attached pictures in the run's folder (attachments/), so a coding brain can open them; returns their paths. */
+export function saveImages(cwd: string, images: BrainImage[] = []): string[] {
+  const out: string[] = [];
+  for (const img of images.slice(0, 5)) {
+    const name = basename(String(img.name || "")).replace(/[^\w.\- ]/g, "_").slice(0, 80) || "image.png";
+    if (!/^image\//.test(img.mime) || typeof img.data !== "string") continue;
+    const dir = join(cwd, "attachments");
+    mkdirSync(dir, { recursive: true });
+    // Two pastes are often both "screenshot.png": a later one never overwrites an earlier one.
+    let path = join(dir, name), n = 1;
+    while (existsSync(path) && !readFileSync(path).equals(Buffer.from(img.data, "base64"))) path = join(dir, name.replace(/(\.\w+)?$/, `-${++n}$1`));
+    writeFileSync(path, Buffer.from(img.data, "base64"));
+    out.push(path);
+  }
+  return out;
+}
+
+export function imagesNote(paths: string[], cwd: string, harness: string) {
+  if (!paths.length) return "";
+  const rel = paths.map((p) => relative(cwd, p));
+  return `\n\nThe user attached ${rel.length === 1 ? "a picture" : `${rel.length} pictures`} (a screenshot, most likely), saved in your working folder: ${rel.join(", ")}.` +
+    (harness === "codex" ? " They're attached to this message too; look at them before you start." : " Open each one with your Read tool before you start: that's how you see it.");
+}
 
 export const QUIET = "[[quiet]]";
 export const ESCALATE = "[[escalate]]";
@@ -898,7 +925,9 @@ export class Brain {
     // A cheaper model doing a job gets the lead on hand: an Opus sub-agent on Claude (it can read the files), and the
     // hearth-lead command on either brain (see brains/lead.ts).
     const lead = !!(web && meter?.lead && coder);
-    const prompt = (codexSkills.length ? skillCatalog(codexSkills, "codex").trim() + "\n\n" : "") + buildPrompt(b, coder, thread ? this.sessions.placeOf(thread) || true : false, lead);
+    // Pictures only go to a brain that can open files (a working call on Claude or Codex).
+    const images = web && (harness === "claude" || harness === "codex") ? saveImages(cwd, b.images) : [];
+    const prompt = (codexSkills.length ? skillCatalog(codexSkills, "codex").trim() + "\n\n" : "") + buildPrompt(b, coder, thread ? this.sessions.placeOf(thread) || true : false, lead) + imagesNote(images, cwd, harness);
     const planning = b.mode === "orchestrate";
     const name = `${harness}${model ? ` (${model})` : ""}`;
     let cmd: string[];
@@ -911,8 +940,9 @@ export class Brain {
         const { skills } = web ? this.skills() : { skills: [] };
         const sf = skillFlags(skills);
         const coding = coder ? CODE_TOOLS : [];
-        const tools = web ? [...new Set(["WebSearch", "WebFetch", ...sf.tools, ...coding])] : [];
-        const allowed = web ? [...new Set(["WebSearch", "WebFetch", ...(coder ? [] : sf.allowed), ...coding])] : [];
+        const look = images.length ? ["Read"] : []; // to see the pictures
+        const tools = web ? [...new Set(["WebSearch", "WebFetch", ...sf.tools, ...coding, ...look])] : [];
+        const allowed = web ? [...new Set(["WebSearch", "WebFetch", ...(coder ? [] : sf.allowed), ...coding, ...look])] : [];
         cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose",
           ...(thread ? (resume ? ["--resume", resume] : []) : ["--no-session-persistence"]), ...(model ? ["--model", model] : []),
           "--system-prompt", SYSTEM_PROMPT + skillCatalog(skills), "--strict-mcp-config", "--setting-sources", "project",
@@ -949,7 +979,7 @@ export class Brain {
     if (harness === "codex") {
       const sink = proc.stdin as import("bun").FileSink;
       const turn = (app = new CodexAppTurn((l) => { sink.write(l); sink.flush(); },
-        { cwd, prompt, model, resume, web, ephemeral: !thread,
+        { cwd, prompt, images, model, resume, web, ephemeral: !thread,
           onModel: (m) => { if (m !== model) meter?.onBrain?.({ harness, model: m, ranOn: meter.ranOn }); },
           onTokens: (t, m) => {
             if (!meter) return;

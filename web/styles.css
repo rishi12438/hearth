@@ -1117,3 +1117,4 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 .devtools { display: grid; gap: 6px; }
 .devtool { display: flex; align-items: center; gap: 8px; font-size: 14px; }
 .devtool b { font-weight: var(--fw-semibold); }
+.composer.drop { outline: 1.5px dashed var(--muted); outline-offset: -1.5px; }
