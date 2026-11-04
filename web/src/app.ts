@@ -234,7 +234,7 @@ function onEvent(e: { type: string; data?: any }) {
         else if (e.data.role === "user") countdowns.get(e.data.id)?.(); // decided (or kept) elsewhere
       }
       else if (r.view === "dm" && e.data.threadId === `tm-${r.id}`) loadDm(r.id);
-      else if (e.data.proactive) toast(e.data.proactive.title);
+      else if (e.data.proactive) { toast(e.data.proactive.title); if (r.view === "home") drawHome(); }
       soon();
       return;
     case "job": {
@@ -1069,18 +1069,23 @@ function suggKeys(e: KeyboardEvent) {
   if (next) next.focus(); else if (e.key === "ArrowUp") document.getElementById("composer")?.focus();
 }
 
-/** Home's suggestions: anything waiting on you, the newest idea, and your last two rambles. One line each. */
+/** Home's suggestions: anything waiting on you, what just went off, the newest idea, and your last two rambles. One line each. */
 async function fillHome(el: HTMLElement) {
-  let b: any = { needsYou: [] };
-  try { b = await call("/api/board"); } catch {}
+  let b: any = { needsYou: [] }, today: any = { proactive: [] };
+  try { [b, today] = await Promise.all([call("/api/board"), call("/api/today")]); } catch {}
+  // A reminder or trigger that went off in the last 12 hours and you haven't looked at: its own row, on top.
+  const seenKey = (threadId: string) => (threadId?.startsWith("tm-") ? threadId.slice(3) : threadId);
+  const fired = (today.proactive || []).filter((m: any) => m.threadId && Date.now() - new Date(m.createdAt).getTime() < 12 * 3.6e6 && m.createdAt > (seen[seenKey(m.threadId)] || "")).slice(0, 2);
   const row = (ic: Node, text: string, meta: string | null, fn: () => void, hover = "") =>
     h("button", { class: "sugg", title: hover, on: { click: fn } }, h("span", { class: "suggic" }, ic), h("span", { class: "grow" }, text), meta ? h("small", null, meta) : null);
   const fill = (text: string) => { const box = document.getElementById("composer") as HTMLTextAreaElement | null; if (box) { box.value = text; box.dispatchEvent(new Event("input")); box.focus(); } };
   const when = (t: any) => t.updatedAt || t.createdAt || "";
-  const recent = [...S.threads].sort((a: any, b: any) => when(b).localeCompare(when(a))).slice(0, 2);
+  const recent = [...S.threads].filter((t: any) => !fired.some((m: any) => m.threadId === t.id)).sort((a: any, b: any) => when(b).localeCompare(when(a))).slice(0, 2);
   const idea = S.ideas[0];
   const rows = [
     ...(b.needsYou || []).slice(0, 1).map((c: any) => row(icon("lock", 16), c.title, "Needs you", () => { location.hash = c.threadId?.startsWith("tm-") ? `#t/${c.teammateId}` : `#c/${c.threadId}/${c.root}`; })),
+    ...fired.map((m: any) => h("button", { class: "sugg fired", title: m.text, on: { click: () => { location.hash = m.threadId.startsWith("tm-") ? `#t/${m.threadId.slice(3)}` : `#c/${m.threadId}`; } } },
+      h("span", { class: "suggic" }, icon("bell", 16)), h("span", { class: "grow" }, m.proactive.title), h("i", { class: "udot" }), h("small", null, `went off ${shortAgo(m.createdAt)}`))),
     idea ? row(icon("sparkle", 16), String(idea.title || "").replace(/^i can\s+/i, "").replace(/^./, (c) => c.toUpperCase()), null, () => fill(idea.prompt), idea.body || "") : null,
     ...recent.map((t: any) => row(icon("history", 16), t.title || channelName(t), shortAgo(when(t)), () => { location.hash = `#c/${t.id}`; }, "Continue this ramble")),
   ].filter(Boolean) as Node[];
