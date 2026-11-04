@@ -1086,3 +1086,13 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 .mintstep > b { width: 28px; height: 28px; border-radius: 50%; background: var(--primary); color: #fff; display: grid; place-items: center; flex: none; font-size: 14px; }
 
 
+
+/* Connected devices: one list, tap a row for details */
+.devrow > .item { cursor: pointer; }
+.devrow .chev { color: var(--muted); font-size: 18px; transition: transform .15s; }
+.devrow.open .chev { transform: rotate(90deg); }
+.devdetails { padding: 4px 14px 14px 58px; border-bottom: 1px solid var(--line); display: grid; gap: 6px; }
+.devdetails[hidden] { display: none; }
+.devtools { display: grid; gap: 6px; }
+.devtool { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.devtool b { font-weight: var(--fw-semibold); }
