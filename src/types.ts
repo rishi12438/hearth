@@ -127,6 +127,8 @@ export type Job = Doc & {
   effort: "quick" | "light" | "heavy";
   /** How it was done: reused a skill/workflow, or worked out fresh by a model. */
   how?: "skill" | "workflow" | "fresh" | "repaired";
+  /** The workspace the planner put it in (a folder shared with earlier work on the subject; see brains/sessions.ts). */
+  workspace?: string;
   skillId?: string;
   workflowId?: string;
   inputs?: Record<string, string>;

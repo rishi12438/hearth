@@ -13,8 +13,9 @@ import { jailArgs, jailWorks } from "./brains/jail.ts";
 import { loginsFile } from "./brains/browser-logins.ts";
 import { masterKeyPath } from "./vault.ts";
 import { liveOwner, watchLive, type Frame } from "./brains/live-view.ts";
-import { Sessions, type SessionHarness } from "./brains/sessions.ts";
+import { Sessions, type Place, type SessionHarness } from "./brains/sessions.ts";
 import { CodexAppTurn } from "./brains/codex-app.ts";
+import { tidyWorkspaces, type TidyReport } from "./brains/archive.ts";
 
 /** Each trigger module's own description of its config, for the hook docs below. */
 /** Each trigger module's own description, read when a prompt is built (the hub adds WhatsApp and Slack at start). */
@@ -268,10 +269,16 @@ NAMING a new teammate: the user should know what it does from the name alone, li
 
 Reply with ONLY a JSON object, no prose, no code fence:
 {"title":"3-6 word chat title","newTopic":true?,"channel":"lowercase-dashed name for this ramble, at most 3 words and 24 characters, that covers EVERY topic in it (thisChat, openTasks and this message): one short word per topic when there are several, e.g. japan-trip, knee-gym, landlord-gift-tickets. CONTEXT.thisChannel is the current name: keep it if it still covers everything, otherwise update it. Always give one","reply":"...","facts":[{"fact":"...","notebook":"...","importance":1|2|3}],
- "jobs":[{"id":"j1","label":"2-6 words the user sees","task":"...","teammate":"<existing name>","effort":"quick|light|heavy","dependsOn":["<earlier job id>"]?,"use":{"skill|workflow":"<library name>","inputs":{...}}?}
-       | {"label":"...","task":"...","teammate":"<new name>","effort":"light|heavy","newTeammate":{"name":"...","description":"...","emoji":"🏋️"}}
+ "jobs":[{"id":"j1","label":"2-6 words the user sees","task":"...","teammate":"<existing name>","effort":"quick|light|heavy","workspace":"<name>","dependsOn":["<earlier job id>"]?,"use":{"skill|workflow":"<library name>","inputs":{...}}?}
+       | {"label":"...","task":"...","teammate":"<new name>","effort":"light|heavy","workspace":"<name>","newTeammate":{"name":"...","description":"...","emoji":"🏋️"}}
        | {"addTo":"<open task id>","task":"..."} | {"continue":"<recent task id>","task":"..."}],
  "newWorkflows":[{"name","description","inputs","steps":[{"skill","inputs"}]}]?}
+WORKSPACES: every job works in a folder on the hub that's kept, shared by all the work on one subject, so a new job starts
+with what earlier ones saved there (data they pulled, scripts that worked, NOTES.md). CONTEXT.workspaces are the ones there
+are (in this ramble's project, if it's in one), each with when it was last used and the start of its notes. Give every job a
+"workspace": the existing one on the same subject (more about AliExpress orders, their customs or tracking -> the workspace
+where orders were checked before), else a new lowercase-dashed name for its subject, broad enough to come back to
+("aliexpress-orders", not "aliexpress-order-8812"; "japan-trip", not "kyoto-day-3").
 VISUALS FIRST (the user reads on a phone): in each task brief, say what the answer should look like so it's comfortable on a
 small screen: a map for trips and places (each stop with when, one line on what to do, and how you get there + how long), a
 checklist, a weather/stat tile, or an artifact (a small interactive view) for anything with structure, like days, options to
@@ -319,22 +326,45 @@ every job, and light jobs escalate on their own if they can't do it, so heavy is
  * to the scout (a small fast model) so the expensive model only thinks and writes.
  */
 /** A job thread's own folder, kept across its follow-ups (see brains/sessions.ts): how to leave it useful for next time. */
-export const WORKSPACE = [
-  "", "YOUR WORKSPACE: your current folder belongs to this job's thread and is KEPT. Every follow-up in this thread (\"try again\",",
-  "\"now save it in a sheet\") works in this same folder, and this conversation carries on. Leave it so next time starts where you",
-  "stopped, not from nothing:",
-  "- Look first: `ls -la` and read NOTES.md before doing anything. Reuse the data you already pulled and the scripts that worked;",
-  "  only fetch again what may have changed (a tracking status), and say when something comes from an earlier run.",
-  "- Save as you go: raw data you fetched (pages, JSON, CSV, exports) in data/, scripts that worked in scripts/ (rerunnable as is,",
-  "  e.g. `python3 scripts/orders.py`), results in out/.",
-  "- Keep NOTES.md current (short): the task, what worked (which tool, login, URL, command), what failed and why, what's still",
-  "  open, and where each file is.",
-  "PARSE WITH CODE, NOT BY EYE: don't read big pages or files and pick things out by hand. Write code to extract, count, dedupe, sort,",
-  "join and compare: Python (re, json, csv, html.parser), jq, `grep -E`/rg, sed/awk. Write the regex or selector, test it on a",
-  "sample, run it on everything, print a short summary and check it (counts add up, nothing dropped) before you rely on it.",
-];
+/**
+ * A job thread's folder, kept across its follow-ups and shared with earlier threads on the same subject (see
+ * brains/sessions.ts): how to use what's there and leave it useful for next time. place: the workspace it's in, if any.
+ */
+export function workspaceNote(place?: Place): string[] {
+  const where = !place ? "YOUR WORKSPACE: your current folder belongs to this job's thread, and it is KEPT. Every follow-up in this thread works here."
+    : place.project ? `YOUR WORKSPACE: your current folder is the "${place.workspace}" workspace of the user's "${place.project}" project, and it is KEPT.`
+    : `YOUR WORKSPACE: your current folder is the "${place.workspace}" workspace, and it is KEPT.`;
+  return ["", where,
+    ...(place ? ["Earlier threads on this subject worked here and left their files; follow-ups and later threads on it work here too."] : []),
+    ...(place?.project ? [`The folder above it (..) is the project: its other workspaces are next to this one, each with its own NOTES.md. Read`,
+      "the ones that bear on this job and reuse their data and scripts (copy what you need here; don't change their files)."] : []),
+    "This conversation carries on when the user follows up. Start where the work stopped, and leave it so the next one can:",
+    "- LOOK FIRST: `ls -la`, read NOTES.md, then the files it points to, before doing anything. Reuse the data already pulled and",
+    "  the scripts that worked; only fetch again what may have changed (a tracking status), and say when something is from earlier.",
+    "- SAVE AS YOU GO, not just at the end: you can be stopped at any moment (a restart, a new message from the user), and what",
+    "  isn't in a file is lost. Write raw data to data/ the moment you fetch it (pages, JSON, CSV, exports), scripts that work to",
+    "  scripts/ (rerunnable as is, e.g. `python3 scripts/orders.py`), results to out/. Don't overwrite another thread's files with",
+    "  something different; add a dated file next to them.",
+    "- NOTES.md has two parts. On top, \"## Playbook\": how to do this job here NOW (the steps, tools, logins, URLs and scripts that",
+    "  work, and the traps to avoid). Rewrite it whenever you learn a better way, so it gets better each time; don't just add to it.",
+    "  Below it, a dated log: after each step that worked or failed, a line or two under \"## yyyy-mm-dd <task>\" (what you did,",
+    "  what happened, what's still open, where the files are). Old log sections get moved to archive/ by themselves.",
+    "- SKILLS: when a way of doing something works and will come back (checking these orders, parsing this export, logging in",
+    "  here), write it up as skills/<name>.md: when to use it, the steps, the script to run (in scripts/) and its inputs, and what",
+    "  breaks it. Use the skills already there (and, in a project, the other workspaces' skills/) before working it out again, and",
+    "  improve one in place when you find a better way, with a dated line saying what changed. If it's useful beyond this subject,",
+    "  also save it with skill.save.",
+    "- archive/ holds what's old: notes moved out of NOTES.md and data or results nobody touched for a month (gzipped). Look there",
+    "  when you need something from long ago (`zcat archive/<month>/<file>.gz`).",
+    "PARSE WITH CODE, NOT BY EYE: don't read big pages or files and pick things out by hand. Write code to extract, count, dedupe, sort,",
+    "join and compare: Python (re, json, csv, html.parser), jq, `grep -E`/rg, sed/awk. Write the regex or selector, test it on a",
+    "sample, run it on everything, print a short summary and check it (counts add up, nothing dropped) before you rely on it.",
+    "BEFORE YOU REPLY (required, every time, even for a quick job): 1) the Playbook in NOTES.md says how to do this job here now,",
+    "rewritten with what you learned, not left as the template; 2) every script that worked has a skills/<name>.md (when to use it,",
+    "the exact command, its inputs and output, what breaks it), new or updated; 3) today's log section is there. Then reply."];
+}
 
-function atScale(code: "claude" | "codex" | null | undefined, workspace = false): string[] {
+function atScale(code: "claude" | "codex" | null | undefined, workspace: Place | boolean = false): string[] {
   if (!code) return [];
   return ["", "WORKING AT SCALE: you have a shell, files and the open internet in a sandbox.",
     workspace ? "Your current folder is kept for this thread (see YOUR WORKSPACE)." : "Your current folder is scratch space; nothing there is kept.",
@@ -343,11 +373,14 @@ function atScale(code: "claude" | "codex" | null | undefined, workspace = false)
     ...(code === "claude" ? ["For wide searching, hand pieces to the scout agent (a small fast model), several at once in one message, and keep the",
       "judgement and the answer for yourself."] : []),
     "Well-known facts (a large company's sector, a capital city) you may state from knowledge; say so where it matters. Mark only",
-    "what you truly couldn't find as missing, and never invent numbers.", ...(workspace ? WORKSPACE : [])];
+    "what you truly couldn't find as missing, and never invent numbers.", ...(workspace ? workspaceNote(typeof workspace === "object" ? workspace : undefined) : [])];
 }
 
-/** code: which brain can run code in this call (in the jail), else null. workspace: it works in a job thread's kept folder. */
-export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = null, workspace = false) {
+/**
+ * code: which brain can run code in this call (in the jail), else null. workspace: it works in a job thread's kept folder
+ * (true), or in the workspace (in a project or not) it shares with earlier threads on the subject.
+ */
+export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = null, workspace: Place | boolean = false) {
   if (b.mode === "clean") return [CLEAN, "", "DICTATED:", b.input].join("\n");
   if (b.mode === "narrate") return b.input; // built by narratePrompt (brains/narrate.ts)
   if (b.mode === "describe") return ["Write ONE sentence describing this reusable UI component for a library: what it shows and when to use it, so a",
@@ -450,6 +483,8 @@ export type Meter = { costUsd: number; unknown: boolean; signal?: AbortSignal; o
   onFrame?: (f: Frame) => void; ranOn?: string;
   /** The job thread this call works for: its working runs share one session and folder (see brains/sessions.ts). */
   thread?: string;
+  /** Where its thread should work (the ramble's project; workspace from the planner or channel); pinned on first use. */
+  workspace?: Place;
   /** Set by Brain when a run carried on the thread's earlier session instead of starting a new one. */
   resumed?: boolean };
 
@@ -589,6 +624,9 @@ export class Brain {
 
   /** Each job thread's session ids and its own folder (see brains/sessions.ts). */
   readonly sessions: Sessions;
+
+  /** Archives what's old in the workspaces so they don't fill the hub (see brains/archive.ts). */
+  tidyWorkspaces(now = Date.now()): TidyReport { return tidyWorkspaces(this.workDir, now); }
 
   private jailState: string[] | null | undefined;
   /** The bubblewrap prefix for brain runs on this hub, or null when there's no jail here (see brains/jail.ts). */
@@ -770,7 +808,7 @@ export class Brain {
     // A working run for a job's thread keeps one session for the whole thread, in the thread's own folder; anything else
     // (planning, a quick call, a hook) is a throwaway in the brain's folder, as before.
     const kept = web && meter?.thread && (harness === "claude" || harness === "codex") ? meter.thread : null;
-    const folder = kept ? this.sessions.folder(kept) : null;
+    const folder = kept ? this.sessions.folder(kept, meter?.workspace) : null;
     const thread = folder ? kept : null;
     const cwd = folder || this.workDir;
     const resume = thread && !fresh ? this.sessions.get(thread, harness as SessionHarness) : undefined;
@@ -782,7 +820,7 @@ export class Brain {
     // Working calls in the jail can run code: a shell, files and the open internet (the jail hides the hub's secrets).
     const jail = web && (harness === "claude" || harness === "codex") ? this.jail() : null;
     const coder = jail ? (harness as "claude" | "codex") : null;
-    const prompt = (codexSkills.length ? skillCatalog(codexSkills, "codex").trim() + "\n\n" : "") + buildPrompt(b, coder, !!thread);
+    const prompt = (codexSkills.length ? skillCatalog(codexSkills, "codex").trim() + "\n\n" : "") + buildPrompt(b, coder, thread ? this.sessions.placeOf(thread) || true : false);
     const planning = b.mode === "orchestrate";
     const name = `${harness}${model ? ` (${model})` : ""}`;
     let cmd: string[];

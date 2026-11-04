@@ -22,6 +22,7 @@ import { CHANNELS, CHANNEL_LABEL, type Channel } from "./types.ts";
 import { badChatLink } from "./connectors/web-senders.ts";
 import { googleAgent, CHANGE_KINDS, type GoogleChange } from "./connectors/google-agent.ts";
 import type { Project } from "./types.ts";
+import { channelWorkspace, workspaceName, type Place as WorkPlace } from "./brains/sessions.ts";
 import type { ConnAudit, TriggerRecipe, Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Hook, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
 import { Library, validateSkill, validateWorkflow, validateTriggerRecipe, fillDeep, fill, type LibraryItem } from "./library.ts";
 import { cleanTile, cleanOptions, extractTiles, type Tile } from "./tiles.ts";
@@ -683,7 +684,10 @@ export class Hub {
         });
       const history = (await this.store.all<Message>("messages")).filter((x) => x.threadId === thread.id && !batch.some((b) => b.id === x.id)).slice(-10)
         .map((x) => ({ role: x.role, text: x.text.slice(0, 500) }));
-      const raw = await this.brain.think({ mode: "orchestrate", context: { ...ctx, thisChat: history, openTasks, recentTasks, thisChannel: thread.id.startsWith("tm-") ? undefined : (await this.store.get<Thread>("threads", thread.id))?.channel || null }, input: said + attached }, brains.orchestrator);
+      // Workspaces (folders where earlier work left its files): this ramble's project's, or those outside any project.
+      const project = workspaceName((await this.projectOf(thread.id))?.name);
+      const workspaces = this.brain.sessions.workspaces(project);
+      const raw = await this.brain.think({ mode: "orchestrate", context: { ...ctx, thisChat: history, openTasks, recentTasks, workspaces, thisChannel: thread.id.startsWith("tm-") ? undefined : (await this.store.get<Thread>("threads", thread.id))?.channel || null }, input: said + attached }, brains.orchestrator);
       plan = parsePlan(raw);
     } catch (err: any) {
       await this.log("orchestrator.failed", err.message);
@@ -720,7 +724,7 @@ export class Hub {
       jobs.push(await this.store.put<Job>("jobs", {
         ...this.doc({}), threadId: thread.id, messageId: m.id, task: j.task.trim().slice(0, 1000), label: shortLabel(j.label, j.task), teammateId: mate.id,
         status: "queued", effort: j.effort === "heavy" ? "heavy" : j.effort === "quick" ? "quick" : "light",
-        skillId: skill?.status === "active" ? skill.id : undefined, workflowId: workflow?.id, inputs,
+        skillId: skill?.status === "active" ? skill.id : undefined, workflowId: workflow?.id, inputs, workspace: workspaceName(j.workspace),
       } as Job));
       const made = jobs[jobs.length - 1];
       if (typeof j.id === "string") keyToId.set(j.id, made.id);
@@ -810,6 +814,22 @@ export class Hub {
     return true;
   }
 
+  /**
+   * Where a job's thread works (see brains/sessions.ts): inside the ramble's project, if it's filed in one; in the
+   * workspace the planner picked for it (or for the job it follows up / is part of), else the ramble's channel
+   * ("aliexpress-orders-3" -> "aliexpress-orders"). A ramble with only a default name ("ramble-15") gets the project's
+   * "general" workspace, or none (its own folder).
+   */
+  private async placeFor(job: Job): Promise<WorkPlace | undefined> {
+    const up = job.followsUp || job.parentId;
+    const root = up ? (await this.store.get<Job>("jobs", up)) || job : job;
+    const t = job.threadId.startsWith("tm-") ? null : await this.store.get<Thread>("threads", job.threadId);
+    const project = workspaceName((await this.projectOf(job.threadId))?.name);
+    const named = t?.channel && !/^ramble(-\d+)?$/.test(t.channel) ? channelWorkspace(t.channel) : undefined;
+    const workspace = workspaceName(job.workspace) || workspaceName(root.workspace) || named || (project ? "general" : undefined);
+    return workspace ? { ...(project ? { project } : {}), workspace } : undefined;
+  }
+
   private async runJob(job: Job, ramble: string, earlier = "") {
     const started = Date.now();
     const stop = new AbortController();
@@ -829,7 +849,7 @@ export class Hub {
       ask: async (prompt) => this.brain.narrate(prompt, (await this.brains()).quick) });
     // Its thread's runs are one session on the hub: a follow-up resumes where the last one left off. A part of a split
     // job runs alongside its siblings, so it gets its own.
-    const meter: Meter = { costUsd: 0, unknown: false, signal: stop.signal, thread: job.parentId ? job.id : job.followsUp || job.id,
+    const meter: Meter = { costUsd: 0, unknown: false, signal: stop.signal, thread: job.parentId ? job.id : job.followsUp || job.id, workspace: await this.placeFor(job),
       onProgress: (what) => { narrator?.step(what); show(what); }, onAction: (raw) => narrator?.action(raw),
       // A picture of the page or window it's on: kept in memory; the app fetches it when told there's a new one.
       onFrame: (f) => {
@@ -2570,8 +2590,18 @@ export class Hub {
     }
   }
 
+  /** When workspaces were last tidied (see brains/archive.ts): once a day, starting soon after the hub starts. */
+  private tidiedAt = 0;
+
   async tick() {
     await this.archiveQuietRambles();
+    if (Date.now() - this.tidiedAt > 86_400_000) {
+      this.tidiedAt = Date.now();
+      try {
+        const r = this.brain.tidyWorkspaces();
+        if (r.packed.length || r.notes.length || r.files) await this.log("workspaces.tidied", `packed ${r.packed.length} unused (${r.packed.join(", ").slice(0, 200)}), trimmed notes in ${r.notes.length}, archived ${r.files} old files`);
+      } catch (e: any) { console.warn(`couldn't tidy workspaces: ${String(e?.message || e).slice(0, 200)}`); }
+    }
     const now = this.clock();
     const prefs = await this.prefs();
     for (const h of await this.store.all<Hook>("hooks")) {
