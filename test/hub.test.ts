@@ -367,7 +367,7 @@ test("Approve on a run card for a new script approves its code too; a failed run
 
   // The agent hears it failed and carries on in the same thread.
   await until(async () => seen.length === 2 && (await store.all<Job>("jobs")).every((j) => j.status === "done"));
-  expect(seen[1]).toContain("failed: Send Ramitha the GIF");
+  expect(seen[1]).toContain("Failed: Send Ramitha the GIF");
   expect(seen[1]).toContain("bad media url");
   const note = (await messages()).find((m) => m.fromApproval)!;
   expect(note.fromApproval!.id).toBe(ap.id);
@@ -447,6 +447,54 @@ test("a held MCP call is an Approve card in its job's thread; Approve makes that
   expect(done.status).toBe("done");
   expect(done.result).toContain("Done: parley: send message\nsent ok");
   (hub as any).connect = null;
+});
+
+test("an approved read goes back to the agent, which carries on instead of saying it's still waiting", async () => {
+  (hub as any).connect = { mcp: { get: () => ({}), call: async () => ({ content: [{ type: "text", text: '{"messages":[{"text":"At least I can see you"}]}' }] }), setGate: () => {} } };
+  await hub.ensureTeammates();
+  const seen: string[] = [];
+  (hub.brain as any).think = async (b: any) => {
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "Reply to Ramitha", teammate: "Hearth", effort: "light" }] });
+    seen.push(String(b.input));
+    if (seen.length > 1) return "Wrote the reply to what she said.";
+    const [job] = await store.all<Job>("jobs");
+    await hub.requestMcp({ server: "parley", tool: "read_inbox", args: {}, jobId: job.id });
+    return "Asked to read her messages. It's waiting for your Approve.";
+  };
+  await hub.ramble("reply to ramitha");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "waiting"));
+  const [ap] = await store.all<any>("approvals");
+  expect((await hub.decideApproval(ap.id, true)).value!.status).toBe("done");
+
+  await until(async () => seen.length === 2 && (await store.all<Job>("jobs")).every((j) => j.status === "done"));
+  expect(seen[1]).toContain("Done: parley: read inbox");
+  expect(seen[1]).toContain("At least I can see you"); // what came back, for the reply it was writing
+  expect(seen[1]).toContain("Carry on with the task");
+  const note = (await messages()).find((m) => m.fromApproval)!;
+  expect(note.fromApproval).toMatchObject({ id: ap.id, ok: true });
+  const jobs = await store.all<Job>("jobs");
+  const root = jobs.find((j) => !j.followsUp && !j.parentId)!;
+  expect(jobs.find((j) => j.followsUp === root.id)?.result).toContain("Wrote the reply");
+  (hub as any).connect = null;
+});
+
+test("saying no to everything a job asked for doesn't start another turn", async () => {
+  await hub.ensureTeammates();
+  let turns = 0;
+  (hub.brain as any).think = async (b: any) => {
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "Send Sam a note", teammate: "Hearth", effort: "light" }] });
+    turns++;
+    const [job] = await store.all<Job>("jobs");
+    await hub.requestMcp({ server: "parley", tool: "send_message", args: { to: "1" }, jobId: job.id });
+    return "Waiting for your Approve.";
+  };
+  await hub.ramble("send sam a note");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "waiting"));
+  const [ap] = await store.all<any>("approvals");
+  await hub.decideApproval(ap.id, false);
+  await Bun.sleep(50);
+  expect(turns).toBe(1);
+  expect((await messages()).some((m) => m.fromApproval)).toBe(false);
 });
 
 test("Hearth's tool check asks the quick model and keeps only clear answers", async () => {

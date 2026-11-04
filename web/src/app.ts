@@ -1362,13 +1362,14 @@ function withMentions(text: string) {
   return h("div", { class: "mtext" }, out);
 }
 
-/** You talking, or the hub passing back something you approved that failed (that isn't you, so it isn't shown as you). */
+/** You talking, or the hub passing back what came of something you approved (that isn't you, so it isn't shown as you). */
 function userRow(m: any, extra: any[] = [], grouped = false) {
   if (m.fromApproval) {
-    const back = /<untrusted>\n?([\s\S]*?)\n?<\/untrusted>/.exec(String(m.text))?.[1] || "";
+    const back = [...String(m.text).matchAll(/<untrusted>\n?([\s\S]*?)\n?<\/untrusted>/g)].map((x) => x[1]).join("\n\n");
+    const ok = m.fromApproval.ok === true;
     return row({ face: h("span", { class: "trigav" }, icon("lock", 18)), name: "Hearth", badge: h("span", { class: "apptag" }, "APPROVAL") }, m.createdAt,
-      [h("div", { class: "mtext" }, `You approved "${m.fromApproval.summary}", but it failed. Handed back to be fixed.`),
-        back ? h("details", { class: "trigdata", open: true }, h("summary", null, "What came back"), h("pre", { class: "output" }, back)) : null, ...extra], grouped);
+      [h("div", { class: "mtext" }, ok ? `You approved "${m.fromApproval.summary}". It ran, and was handed back to carry on.` : `You approved "${m.fromApproval.summary}", but it failed. Handed back to be fixed.`),
+        back ? h("details", { class: "trigdata", open: !ok }, h("summary", null, "What came back"), h("pre", { class: "output" }, back)) : null, ...extra], grouped);
   }
   return row(youWho(), m.createdAt, [h("div", { class: "mtext" }, m.text), ...extra], grouped);
 }

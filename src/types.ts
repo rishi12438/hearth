@@ -23,8 +23,11 @@ export type Message = Doc & {
   proactive?: { hookId: string; title: string; trigger: string; why: string };
   /** Posted by a trigger handing what happened to Hearth (route who "hearth"): shown as the trigger, not as you. */
   fromTrigger?: { id: string; title: string };
-  /** Posted by the hub when something you approved failed: the agent hears what came back and carries on. Not from you. */
-  fromApproval?: { id: string; summary: string };
+  /**
+   * Posted by the hub once what you approved for a job has run: the agent hears what came back and carries on.
+   * Not from you. ok is false when any of it failed (older messages without ok were all failures).
+   */
+  fromApproval?: { id: string; summary: string; ok?: boolean };
   /** A DM about an archived ramble (e.g. its watch fired): which ramble, so the app can link back. */
   fromThreadId?: string;
   /** What the brain changed while answering. */
