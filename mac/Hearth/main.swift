@@ -231,6 +231,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             c.userInfo = ["url": (m["url"] as? String) ?? "/"]
             let tag = (m["tag"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? UUID().uuidString
             UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: tag, content: c, trigger: nil))
+        case "notif-status":
+            // Whether macOS will actually show Hearth's notifications: allowed at all, as banners or alerts, in the list.
+            guard let id = m["id"] as? String else { return }
+            notifStatus { [weak self] json in self?.reply(id, json) }
+        case "notif-settings":
+            // Never asked yet: ask now (macOS shows its prompt). Otherwise open Hearth's page in System Settings.
+            guard let id = m["id"] as? String else { return }
+            UNUserNotificationCenter.current().getNotificationSettings { st in
+                DispatchQueue.main.async {
+                    if st.authorizationStatus == .notDetermined {
+                        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in
+                            self.notifStatus { json in self.reply(id, json) }
+                        }
+                    } else {
+                        let pane = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=app.hearth.mac")
+                            ?? URL(string: "x-apple.systempreferences:com.apple.preference.notifications")!
+                        NSWorkspace.shared.open(pane)
+                        self.notifStatus { json in self.reply(id, json) }
+                    }
+                }
+            }
         case "chrome-logins", "chrome-cookies":
             // Only your hub's own page (main frame), never the setup page or anything it links to.
             guard message.frameInfo.isMainFrame, let id = m["id"] as? String, isHubPage(message.frameInfo.request.url ?? web.url) else { return }
@@ -348,6 +369,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
         done()
     }
+    /// What macOS will do with Hearth's notifications, as JSON for the page:
+    /// {"auth":"authorized|denied|notDetermined|provisional","alerts":true,"style":"none|banner|alert","center":true,"sound":true}
+    func notifStatus(_ done: @escaping (String) -> Void) {
+        UNUserNotificationCenter.current().getNotificationSettings { st in
+            let auth: String
+            switch st.authorizationStatus {
+            case .authorized: auth = "authorized"
+            case .denied: auth = "denied"
+            case .provisional: auth = "provisional"
+            case .notDetermined: auth = "notDetermined"
+            default: auth = "other"
+            }
+            let style = st.alertStyle == .banner ? "banner" : st.alertStyle == .alert ? "alert" : "none"
+            let out: [String: Any] = ["auth": auth, "alerts": st.alertSetting == .enabled, "style": style,
+                                      "center": st.notificationCenterSetting == .enabled, "sound": st.soundSetting == .enabled]
+            let json = (try? JSONSerialization.data(withJSONObject: out)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            DispatchQueue.main.async { done(json) }
+        }
+    }
+
     /// Show it even while Hearth is in front.
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent n: UNNotification, withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void) {
         done([.banner, .sound])

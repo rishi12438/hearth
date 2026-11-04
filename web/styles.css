@@ -1172,3 +1172,5 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 .composer.drop { outline: 1.5px dashed var(--muted); outline-offset: -1.5px; }
 .item .sub.warn { color: var(--danger); }
 .sugg.fired .grow { font-weight: var(--fw-semibold); color: var(--ink); }
+.sugg.warn .grow { color: var(--danger); font-weight: var(--fw-semibold); }
+.sugg.warn small { color: var(--danger); font-weight: var(--fw-semibold); }
