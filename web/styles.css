@@ -1225,3 +1225,7 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 .mcpchip { font: 12px/1.2 var(--mono); padding: 4px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--card); color: var(--muted); cursor: pointer; }
 .mcpchip.ask { color: var(--ink); border-color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
 .mcpchip:disabled { opacity: .5; }
+
+/* The ask a link from Activity or a notification points at: scrolled to and lit up for a moment. */
+.block.flash { animation: apflash 2.4s ease-out; }
+@keyframes apflash { 0%, 30% { box-shadow: 0 0 0 3px var(--accent, #e8a25c); } 100% { box-shadow: 0 0 0 3px transparent; } }
