@@ -54,8 +54,8 @@ const settled = async () => (await store!.all<Job>("jobs")).every((j) => j.statu
 test("a screenshot sent with a ramble reaches the teammate doing the job", async () => {
   const { working } = await setup();
   process.env.FAKE_PLAN = JSON.stringify({ title: "t", reply: "On it", jobs: [{ task: "fix what's in the screenshot", teammate: "Scout" }] });
-  const shot = (await hub!.files.save(PNG, { name: "Screenshot 2026-11-04 at 01.30.00.png", source: "user" })).value!;
-  const doc = (await hub!.files.save(new TextEncoder().encode("notes"), { name: "notes.txt", source: "user" })).value!;
+  const shot = (await hub!.files.save(PNG, { name: "Screenshot 2026-11-04 at 01.30.00.png", source: "you" })).value!;
+  const doc = (await hub!.files.save(new TextEncoder().encode("notes"), { name: "notes.txt", source: "you" })).value!;
   await hub!.ramble("this is broken", undefined, [shot.id, doc.id]);
   await until(async () => (await store!.all<Job>("jobs")).length === 1 && (await settled()));
   const b = working()[0];
@@ -70,7 +70,7 @@ test("a reply in a task's thread can be just a pasted screenshot, and the next t
   await until(async () => (await store!.all<Job>("jobs")).length === 1 && (await settled()));
   const root = (await store!.all<Job>("jobs"))[0];
   expect(working()).toHaveLength(0);
-  const shot = (await hub!.files.save(PNG, { name: "Screenshot.png", source: "user" })).value!;
+  const shot = (await hub!.files.save(PNG, { name: "Screenshot.png", source: "you" })).value!;
   const r = await hub!.replyToJob(root.id, "", { fileIds: [shot.id] });
   expect(r.error).toBeUndefined();
   const m = await store!.get<Message>("messages", r.value!.message.id);
