@@ -270,3 +270,35 @@ echo '{"type":"result","is_error":false,"result":"done","session_id":"sess-hist1
   expect(all).toContain("jq .orders data/o.json");
   expect(existsSync(join(data, "brain/history"))).toBe(false);
 });
+
+test("a cheaper model doing a job is told the lead is on hand, and how to ask it", async () => {
+  const { buildPrompt } = await import("../src/brain.ts");
+  const { leadSkill } = await import("../src/brains/lead.ts");
+  const job = { mode: "legwork" as const, context: {}, input: "check 85 orders" };
+  const claude = buildPrompt(job, "claude", true, true);
+  expect(claude).toContain("THE LEAD (a stronger model on your team) is on hand");
+  expect(claude).toContain("use the lead agent (it can read your files)");
+  expect(claude).toContain('hearth-lead "<question>"');
+  const codex = buildPrompt(job, "codex", true, true);
+  expect(codex).toContain('hearth-lead "<question>"');
+  expect(codex).not.toContain("lead agent");
+  expect(buildPrompt(job, "claude", true, false)).not.toContain("is on hand");
+  // The command: the question to the hub's lead endpoint with the agent key, from args or stdin.
+  const sk = leadSkill("http://127.0.0.1:8790", "k123");
+  expect(sk.common).toBe(true);
+  expect(sk.scripts["hearth-lead"]).toContain('-H "X-Hearth-Agent: k123"');
+  expect(sk.scripts["hearth-lead"]).toContain("http://127.0.0.1:8790/api/agent/lead");
+  // The coach and advise prompts are the lead's, with what they're given.
+  expect(buildPrompt({ mode: "coach", context: {}, input: "JOB: x" })).toContain("A cheaper teammate is about to do the job below");
+  expect(buildPrompt({ mode: "advise", context: {}, input: "stuck on pagination" })).toContain("<untrusted>\nstuck on pagination\n</untrusted>");
+});
+
+test("the hub's lead answers a mid-job question on the heavy brain", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "hearth-lead-"));
+  const store = await createStore("sqlite::memory:", dir);
+  for (const c of COLLECTIONS) await store.clear(c);
+  const config = { ...loadConfig({ HEARTH_AGENT: "echo" }), dataDir: dir };
+  const hub = new Hub(config, store, new Brain(config), new Scripts(store, dir, join(import.meta.dir, "../scripts")), null);
+  expect(await hub.askLead("orders page only shows 20 at a time")).toContain("count rows before and after");
+  await store.close();
+});

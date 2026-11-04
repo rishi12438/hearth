@@ -192,7 +192,7 @@ test("light jobs escalate to the heavy model when the workhorse gives up", async
   expect(job.escalated).toBe(true);
   expect(job.tier).toBe("heavy");
   expect(job.result).toBe("Here's your plan.");
-  expect(calls.filter((c) => !c.startsWith("orchestrate"))).toEqual(["legwork:small", "job:big"]); // heavy does it all, no extra voice step
+  expect(calls.filter((c) => !c.startsWith("orchestrate"))).toEqual(["coach:big", "legwork:small", "job:big"]); // the lead's tips first; then heavy does it all, no extra voice step
 });
 
 test("hybrid: the cheap model does the legwork, the heavy model writes what you read (or redoes it)", async () => {
@@ -211,7 +211,7 @@ test("hybrid: the cheap model does the legwork, the heavy model writes what you 
   await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done"));
   let [job] = await store.all<Job>("jobs");
   expect([job.voiced, job.tier, job.result]).toEqual([true, "workhorse", "Two good picks: a $60 Clayroom gift card, or a $45 handmade mug set."]);
-  expect(calls.slice(1)).toEqual(["legwork:small", "voice:big"]);
+  expect(calls.slice(1)).toEqual(["coach:big", "legwork:small", "voice:big"]);
 
   redo = true; calls.length = 0;
   for (const c of COLLECTIONS) if (c === "jobs") await store.clear(c);
@@ -219,7 +219,7 @@ test("hybrid: the cheap model does the legwork, the heavy model writes what you 
   await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done"));
   [job] = await store.all<Job>("jobs");
   expect([job.voiced, job.tier, job.escalated, job.result]).toEqual([false, "heavy", true, "Heavy did it all: a $60 Clayroom gift card."]);
-  expect(calls.slice(1)).toEqual(["legwork:small", "voice:big", "job:big"]);
+  expect(calls.slice(1)).toEqual(["coach:big", "legwork:small", "voice:big", "job:big"]);
 
   await hub.setBrains({ hybrid: false }); calls.length = 0;
   await store.clear("jobs");

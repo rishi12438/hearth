@@ -312,6 +312,19 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         return new Response(JSON.stringify(r, null, 1), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
       } catch (e: any) { throw new HttpError(400, e.message); }
     }
+    // The agent's hearth-lead: a job asks the lead (the heavy model) for advice mid-run (brains/lead.ts). Same keys as Google's.
+    if (path === "/api/agent/lead" && method === "POST") {
+      const key = req.headers.get("x-hearth-agent");
+      const from = fromThisMachine(req, server) && connect.isAgentKey(key) ? "hub" : computers.agentKeyOwner(key);
+      if (!from) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not the agent's key."); }
+      let q = "";
+      try { q = String((await req.formData()).get("q") || ""); } catch { throw new HttpError(400, "Send the question as q."); }
+      if (!q.trim()) throw new HttpError(400, "Ask something.");
+      try {
+        const answer = await hub.askLead(q.slice(0, 20_000));
+        return new Response(answer + "\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
+      } catch (e: any) { throw new HttpError(503, `The lead couldn't answer: ${String(e?.message || e).slice(0, 200)}`); }
+    }
     // The agent's hearth-gmail / hearth-drive / hearth-calendar commands. Two keys open them: the hub's agent key, only
     // straight from this machine (like hearth-plaid), or a linked computer's key, which lives only as long as that
     // computer's line to the hub is open (a job running on your Mac). Neither key opens anything else.

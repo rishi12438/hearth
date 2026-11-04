@@ -2,7 +2,9 @@ import { expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describeSkillStep, hubSkills, installSkills, skillCatalog, skillFlags } from "../src/brains/skills.ts";
+import { describeSkillStep, hubSkills as allSkills, installSkills, skillCatalog, skillFlags } from "../src/brains/skills.ts";
+// hearth-lead is registered by any hub another test started (a global registry, like the hub's): left out of these lists.
+const hubSkills = (...a: Parameters<typeof allSkills>) => allSkills(...a).filter((s) => s.name !== "hearth-lead");
 
 /** A home with fake enkidu-browser / enkidu-cua that print a skill, and a data dir with one skill of your own. */
 function hub() {
