@@ -603,7 +603,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         break;
       }
       case "jobs": {
-        if (method === "POST" && seg[3] === "reply") { const b = await body(req); const r = await hub.replyToJob(id, String(b.text || ""), { queue: b.queue === true }); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "POST" && seg[3] === "reply") { const b = await body(req); const r = await hub.replyToJob(id, String(b.text || ""), { queue: b.queue === true, fileIds: Array.isArray(b.fileIds) ? b.fileIds.map(String).slice(0, 5) : [] }); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "POST" && seg[3] === "stop") { const r = await hub.stopJob(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "POST" && seg[3] === "retry") { const r = await hub.retryJob(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "GET" && seg[3] === "frame") {

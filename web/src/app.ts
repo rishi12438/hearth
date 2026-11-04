@@ -1663,17 +1663,25 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
     on: {
       input: () => { autosize(box); sessionStorage.setItem(draftKey, box.value); swap(); },
       keydown: (e: KeyboardEvent) => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); submit(); } },
+      // A screenshot on the clipboard (⌘⇧⌃4, or Copy on any picture) goes in as an attachment; text still pastes as text.
+      paste: (e: ClipboardEvent) => {
+        const files = Array.from(e.clipboardData?.files || []);
+        if (!files.length || !canAttach) return;
+        e.preventDefault();
+        upload(files);
+      },
     } }) as HTMLTextAreaElement;
   if (targetId === "composerwrap") box.id = "composer";
   const submit = () => { const v = box.value; box.value = ""; sessionStorage.removeItem(draftKey); box.dispatchEvent(new Event("input")); send(v, inThread); };
   const action = h("button", { class: "act", "aria-label": "Hold to talk" });
-  const canAttach = !inThread && r.view !== "dm";
+  const canAttach = r.view !== "dm";
   const pending: any[] = [];
   const chips = h("div", { class: "attach-chips" });
   const drawChips = () => clear(chips, pending.map((f) => h("span", { class: "chip" }, f.name, h("button", { "aria-label": `Remove ${f.name}`, on: { click: () => { pending.splice(pending.indexOf(f), 1); drawChips(); swap(); } } }, icon("x", 12)))));
-  const picker = h("input", { type: "file", multiple: true, hidden: true, on: { change: async () => {
-    for (const file of Array.from(picker.files || []).slice(0, 5)) {
+  const upload = async (files: File[]) => {
+    for (const raw of files.slice(0, Math.max(0, 5 - pending.length))) {
       try {
+        const file = await forUpload(raw);
         const hub = activeHub()!;
         const res = await fetch(`${hub.url}/api/files`, { method: "POST", headers: { ...authHeaders(hub), "X-File-Name": encodeURIComponent(file.name), "Content-Type": file.type || "application/octet-stream" }, body: file });
         const data = await res.json();
@@ -1681,8 +1689,8 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
         S.files.set(data.id, data); pending.push(data); drawChips(); swap();
       } catch (e) { handleError(e); }
     }
-    picker.value = "";
-  } } }) as HTMLInputElement;
+  };
+  const picker = h("input", { type: "file", multiple: true, hidden: true, on: { change: async () => { await upload(Array.from(picker.files || [])); picker.value = ""; } } }) as HTMLInputElement;
   const clip = h("button", { class: "plus", "aria-label": "Attach a file", title: "Attach a file", disabled: !canAttach, on: { click: () => picker.click() } }, icon("clip", 20));
   attachments = () => pending.splice(0).map((f) => f.id);
   const swap = () => {
@@ -1695,9 +1703,38 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
   action.addEventListener("pointerdown", (e) => { if (box.value.trim() || pending.length || dict) return; e.preventDefault(); micTarget = inThread; onMicDown(box, swap, wrap); });
   action.addEventListener("pointerup", () => { if (recording && Date.now() - pressAt > 600) finishDictation(true); });
   action.addEventListener("click", () => { if (box.value.trim() || pending.length) { submit(); drawChips(); } });
-  clear(wrap, h("div", { class: "rec", id: targetId === "composerwrap" ? "rec" : undefined, hidden: true }), chips, h("div", { class: "composer", id: targetId === "composerwrap" ? "composerbox" : undefined }, clip, box, action, picker));
+  // Files dragged onto the message box attach too.
+  const dropping = (on: boolean) => (e: DragEvent) => { if (!canAttach || !e.dataTransfer?.types.includes("Files")) return; e.preventDefault(); bar.classList.toggle("drop", on); };
+  const bar = h("div", { class: "composer", id: targetId === "composerwrap" ? "composerbox" : undefined, on: {
+    dragover: dropping(true), dragleave: dropping(false),
+    drop: (e: DragEvent) => { if (!canAttach || !e.dataTransfer?.files.length) return; e.preventDefault(); bar.classList.remove("drop"); upload(Array.from(e.dataTransfer.files)); },
+  } }, clip, box, action, picker);
+  clear(wrap, h("div", { class: "rec", id: targetId === "composerwrap" ? "rec" : undefined, hidden: true }), chips, bar);
   swap();
   autosize(box);
+}
+
+/**
+ * A pasted screenshot comes in as "image.png" at full Retina size (often 5 MB+). Name it for when it was taken, and
+ * shrink very large ones to 2400px on the long side: still sharp enough to read every word, and quick to send.
+ */
+async function forUpload(file: File): Promise<File> {
+  if (!/^image\/(png|jpeg|webp)$/.test(file.type)) return file;
+  const pasted = /^image\.\w+$/i.test(file.name) || !file.name;
+  const stamp = new Date().toTimeString().slice(0, 8).replace(/:/g, ".");
+  const name = pasted ? `Screenshot ${new Date().toISOString().slice(0, 10)} at ${stamp}.png` : file.name;
+  try {
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, 2400 / Math.max(bmp.width, bmp.height));
+    if (scale === 1 && file.size < 4_000_000) return pasted ? new File([file], name, { type: file.type }) : file;
+    const c = document.createElement("canvas");
+    c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
+    c.getContext("2d")!.drawImage(bmp, 0, 0, c.width, c.height);
+    let out = await new Promise<Blob | null>((ok) => c.toBlob(ok, "image/png"));
+    let ext = "png";
+    if (!out || out.size > 4_000_000) { out = await new Promise<Blob | null>((ok) => c.toBlob(ok, "image/jpeg", 0.9)); ext = "jpg"; }
+    return out ? new File([out], name.replace(/\.\w+$/, `.${ext}`), { type: out.type }) : file;
+  } catch { return file; }
 }
 
 let micTarget: string | undefined;
@@ -1706,11 +1743,11 @@ let attachments: () => string[] = () => [];
 
 async function send(text: string, threadJob?: string) {
   const t = text.trim();
-  const fileIds = threadJob || route().view === "dm" ? [] : attachments();
+  const fileIds = route().view === "dm" ? [] : attachments();
   if (!t && !fileIds.length) return;
   const r = route();
   try {
-    if (threadJob) { await call(`/api/jobs/${threadJob}/reply`, { body: { text: t, queue: true } }); if (r.view === "chat") loadChat(r.id); return; }
+    if (threadJob) { await call(`/api/jobs/${threadJob}/reply`, { body: { text: t, queue: true, fileIds } }); if (r.view === "chat") loadChat(r.id); return; }
     if (r.view === "dm") { await call(`/api/teammates/${r.id}/messages`, { body: { text: t, queue: true } }); loadDm(r.id); return; }
     let inChat = r.view === "chat" && r.id !== "new";
     let into = r.view === "chat" ? r.id : "";
