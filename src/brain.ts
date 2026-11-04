@@ -13,6 +13,8 @@ import { jailArgs, jailWorks } from "./brains/jail.ts";
 import { loginsFile } from "./brains/browser-logins.ts";
 import { masterKeyPath } from "./vault.ts";
 import { liveOwner, watchLive, type Frame } from "./brains/live-view.ts";
+import { Sessions, type SessionHarness } from "./brains/sessions.ts";
+import { CodexAppTurn } from "./brains/codex-app.ts";
 
 /** Each trigger module's own description of its config, for the hook docs below. */
 /** Each trigger module's own description, read when a prompt is built (the hub adds WhatsApp and Slack at start). */
@@ -429,7 +431,11 @@ export class BrainsFull extends Error { constructor(msg: string, readonly until:
 /** ranOn: set by Brain to the linked computer that ran the call, or "cloud" when this hub ran it while computers are linked. */
 export type Meter = { costUsd: number; unknown: boolean; signal?: AbortSignal; onProgress?: (what: string) => void; onAction?: (raw: string) => void;
   /** The latest picture of the browser page or app window a working job is using, for the live view. */
-  onFrame?: (f: Frame) => void; ranOn?: string };
+  onFrame?: (f: Frame) => void; ranOn?: string;
+  /** The job thread this call works for: its working runs share one session and folder (see brains/sessions.ts). */
+  thread?: string;
+  /** Set by Brain when a run carried on the thread's earlier session instead of starting a new one. */
+  resumed?: boolean };
 
 /** Somewhere else that can run a brain call: a computer linked to this hub (see computers.ts). */
 export type RemoteRunner = { name: string; run(b: BrainInput, p: BrainProfile, meter?: Meter): Promise<string> };
@@ -440,6 +446,14 @@ export class NeedsComputer extends Error {}
 export class SignedOut extends Error { constructor(msg: string, readonly harness: string) { super(msg); } }
 /** The computer running a call dropped off mid-way. */
 export class ComputerGone extends Error {}
+
+/** The jail's prefix, starting the run in this folder instead of the brain's (a job thread's own folder, under it). */
+export function inFolder(jail: string[], cwd: string): string[] {
+  const out = [...jail];
+  const i = out.lastIndexOf("--chdir");
+  if (i >= 0 && i + 1 < out.length) out[i + 1] = cwd;
+  return out;
+}
 
 /** The folder a skill's command lives in (~/.enkidu/bin for Enkidu's tools), for PATH. */
 function findCommandDir(cmd: string): string | null {
@@ -554,7 +568,11 @@ export class Brain {
     this.workDir = join(config.dataDir, "brain");
     this.usage = new BrainUsage(undefined, undefined, join(config.dataDir, "brain-usage.json"));
     mkdirSync(this.workDir, { recursive: true, mode: 0o700 });
+    this.sessions = new Sessions(join(config.dataDir, "brain-sessions.json"), this.workDir);
   }
+
+  /** Each job thread's session ids and its own folder (see brains/sessions.ts). */
+  readonly sessions: Sessions;
 
   private jailState: string[] | null | undefined;
   /** The bubblewrap prefix for brain runs on this hub, or null when there's no jail here (see brains/jail.ts). */
@@ -688,15 +706,25 @@ export class Brain {
     finally { this.running--; own?.release(); this.global.release(); }
   }
 
-  /** A linked computer if one is online with this harness, else this hub (the cloud). */
+  /**
+   * This hub first, always: a job's whole thread then lives in one place, with its sessions and its folder (see
+   * brains/sessions.ts). A linked computer only takes a call this hub can't run: that brain isn't installed here, or
+   * it's signed out here.
+   */
   private async dispatch(b: BrainInput, p: BrainProfile, meter?: Meter): Promise<string> {
-    const r = this.remote?.pick(p);
+    const here = availableHarnesses(this.config).includes(p.harness);
+    const away = () => this.remote?.pick(p) ?? null;
+    if (here && !(this.health.problem(p.harness) && away())) {
+      if (meter) meter.ranOn = this.remote?.linked() ? "cloud" : undefined;
+      try { return await this.run(b, p, meter); }
+      catch (e) { if (!(e instanceof SignedOut) || !away()) throw e; }
+    }
+    const r = away();
     if (r) {
       if (meter) meter.ranOn = r.name;
       try { return await r.run(b, p, meter); }
       catch (e) { if (!(e instanceof ComputerGone)) throw e; }
     }
-    const here = availableHarnesses(this.config).includes(p.harness);
     if (!here && this.remote?.linked()) {
       throw new NeedsComputer(`No linked computer is online to run ${p.harness}, and this hub can't run it. Open your Mac, or copy your ${p.harness} login to the cloud.`);
     }
@@ -704,13 +732,22 @@ export class Brain {
     return this.run(b, p, meter);
   }
 
-  private async run(b: BrainInput, profile: BrainProfile, meter?: Meter): Promise<string> {
+  /** fresh: don't resume the thread's session (it was gone, so this is the retry with a new one). */
+  private async run(b: BrainInput, profile: BrainProfile, meter?: Meter, fresh = false): Promise<string> {
     const { harness } = profile;
     const model = MODEL_RE.test(profile.model) ? profile.model : "";
     if (harness === "echo") return b.mode === "orchestrate" ? echoOrchestrator(b) : echoBrain(b);
     // Codex has no system prompt flag: the skills catalog goes at the top of its message.
     const codexSkills = harness === "codex" && !NO_TOOLS.has(b.mode) ? this.skills().skills : [];
     const web = !NO_TOOLS.has(b.mode);
+    // A working run for a job's thread keeps one session for the whole thread, in the thread's own folder; anything else
+    // (planning, a quick call, a hook) is a throwaway in the brain's folder, as before.
+    const kept = web && meter?.thread && (harness === "claude" || harness === "codex") ? meter.thread : null;
+    const folder = kept ? this.sessions.folder(kept) : null;
+    const thread = folder ? kept : null;
+    const cwd = folder || this.workDir;
+    const resume = thread && !fresh ? this.sessions.get(thread, harness as SessionHarness) : undefined;
+    if (resume) console.log(`brain: resuming ${harness} session ${resume} for thread ${thread}`);
     // Before the jail is set up (it hides the logins file, so the file must be there by then).
     if (web && (harness === "claude" || harness === "codex") && this.skills().skills.some((s) => s.name === "enkidu-browser")) {
       try { this.beforeBrowse?.(); } catch (e: any) { console.warn(`couldn't give the browser your logins: ${String(e?.message || e).slice(0, 200)}`); }
@@ -721,7 +758,6 @@ export class Brain {
     const prompt = (codexSkills.length ? skillCatalog(codexSkills, "codex").trim() + "\n\n" : "") + buildPrompt(b, coder);
     const planning = b.mode === "orchestrate";
     const name = `${harness}${model ? ` (${model})` : ""}`;
-    let outFile: string | null = null;
     let cmd: string[];
     switch (harness) {
       case "claude": {
@@ -734,7 +770,8 @@ export class Brain {
         const coding = coder ? CODE_TOOLS : [];
         const tools = web ? [...new Set(["WebSearch", "WebFetch", ...sf.tools, ...coding])] : [];
         const allowed = web ? [...new Set(["WebSearch", "WebFetch", ...(coder ? [] : sf.allowed), ...coding])] : [];
-        cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence", ...(model ? ["--model", model] : []),
+        cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose",
+          ...(thread ? (resume ? ["--resume", resume] : []) : ["--no-session-persistence"]), ...(model ? ["--model", model] : []),
           "--system-prompt", SYSTEM_PROMPT + skillCatalog(skills), "--strict-mcp-config", "--setting-sources", "project",
           "--tools", tools.join(","), ...(allowed.length ? ["--allowedTools", ...allowed] : []),
           // No permission checks: `claude -p` can't ask anyone, so a tool call outside --allowedTools was just refused.
@@ -744,14 +781,10 @@ export class Brain {
         break;
       }
       case "codex":
-        outFile = join(this.workDir, `${randomUUID()}.txt`);
-        // Working calls search the web. Codex runs with no sandbox and no approvals: `codex exec` can't ask anyone, so
-        // with a sandbox any command its rules didn't cover (a heredoc, a pipe into hearth-drive) was refused outright
-        // ("approval required by policy, but AskForApproval is set to Never").
-        cmd = ["codex", "exec", ...(model ? ["-m", model] : []), "--skip-git-repo-check", "--ephemeral",
-          ...(web ? ["-c", 'web_search="live"'] : []),
-          "--dangerously-bypass-approvals-and-sandbox",
-          "--color", "never", "--json", "-o", outFile, "-"];
+        // Its app-server, which has threads to resume (brains/codex-app.ts). The model and web search go in the thread's
+        // settings. No sandbox and no approvals (the app-server's danger-full-access + never): nobody is there to approve,
+        // so with a sandbox any command its rules didn't cover (a heredoc, a pipe into hearth-drive) was refused outright.
+        cmd = ["codex", "app-server"];
         break;
       case "custom":
         if (!this.config.agentCmd?.length) throw new Error("The custom harness needs HEARTH_AGENT_CMD in the hub's .env");
@@ -760,14 +793,24 @@ export class Brain {
       default:
         throw new Error(`Unknown harness: ${harness}`);
     }
-    if (jail) cmd = [...jail, ...cmd];
+    if (jail) cmd = [...inFolder(jail, cwd), ...cmd];
     const env = agentEnv(harness, harness === "claude" || harness === "codex" ? this.skills().paths : []);
     // Live view: this run's browser and computer-use sessions get their own owner, so we can show what's on them.
     const owner = web && meter?.onFrame && (harness === "claude" || harness === "codex") ? liveOwner() : null;
     if (owner) env.ENKIDU_OWNER = owner;
-    const proc = Bun.spawn(cmd, { cwd: this.workDir, env, stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe" });
+    const proc = Bun.spawn(cmd, { cwd, env, stdin: harness === "codex" ? "pipe" : new Blob([prompt]), stdout: "pipe", stderr: "pipe" });
     const stopLive = owner && meter?.onFrame ? watchLive(owner, meter.onFrame) : () => {};
     proc.exited.then(stopLive, stopLive);
+    // Codex: one turn over its app-server's stdio; the server stays up until we close it once the turn is over.
+    let app: CodexAppTurn | null = null;
+    if (harness === "codex") {
+      const sink = proc.stdin as import("bun").FileSink;
+      const turn = (app = new CodexAppTurn((l) => { sink.write(l); sink.flush(); },
+        { cwd, prompt, model, resume, web, ephemeral: !thread }));
+      turn.done.then(() => { try { sink.end(); } catch {} proc.kill(); });
+      proc.exited.then(() => turn.closed(), () => turn.closed());
+      turn.start();
+    }
     let timedOut = false;
     // Planning and chat should answer fast. Real jobs (browsing, logging in, research) run until done, unless
     // HEARTH_JOB_TIMEOUT_SEC sets a cap; a new message from the user still stops them.
@@ -809,7 +852,7 @@ export class Brain {
         let i: number;
         while ((i = buf.indexOf("\n")) >= 0) {
           const line = buf.slice(0, i); buf = buf.slice(i + 1);
-          if (harness === "codex") { codexLine(line); continue; }
+          if (app) { for (const l of app.line(line)) codexLine(l); continue; }
           if (line.includes('"rate_limit_event"')) { try { this.usage.noteClaudeEvent(JSON.parse(line)?.rate_limit_info); } catch {} continue; }
           // A tool call that failed (a skill command's error): into the log, so "it couldn't" always has the real reason.
           if (line.includes('"is_error":true')) {
@@ -841,19 +884,32 @@ export class Brain {
     if (meter?.signal?.aborted) throw new Error("Restarted with your new message.");
     if (timedOut) throw new Error(`${name} took longer than ${limitMs >= 120_000 ? `${Math.round(limitMs / 60_000)} min` : `${limitMs / 1000}s`}.`);
     let reply = out;
-    let failed = code !== 0;
+    // Codex's app-server is closed by us once the turn ends, so its exit code says nothing: the turn's own end does.
+    let failed = app ? !!app.failure : code !== 0;
+    if (app?.failure) codexErrors += `${app.failure}\n`;
+    let session: string | undefined;
     if (harness === "claude") {
       try {
-        // stream-json: the last "result" event has the answer and the cost.
+        // stream-json: the last "result" event has the answer and the cost (and the session it ran in).
         const j = JSON.parse(out.trim().split("\n").reverse().find((l) => l.includes('"type":"result"')) || out);
         reply = String(j.result ?? "");
         if (j.is_error) failed = true;
+        if (typeof j.session_id === "string") session = j.session_id;
         if (meter && typeof j.total_cost_usd === "number") meter.costUsd += j.total_cost_usd;
         else if (meter) meter.unknown = true;
       } catch { if (meter) meter.unknown = true; }
     } else if (meter) meter.unknown = true;
-    if (harness === "codex") reply = codexLast; // stdout is the event stream, never the answer
-    if (outFile) { try { reply = readFileSync(outFile, "utf8") || reply; } catch {} rmSync(outFile, { force: true }); }
+    if (app) { reply = codexLast; session = app.threadId ?? undefined; } // stdout is the event stream, never the answer
+    // The saved session is gone (its files were cleared, or it's from another machine): start a new one, once.
+    if (thread && resume && failed && harness === "claude" && /no conversation found/i.test(`${reply}\n${err}`)) {
+      console.warn(`brain: ${harness} session ${resume} for thread ${thread} is gone; starting a new one`);
+      this.sessions.forget(thread, harness);
+      return this.run(b, profile, meter, true);
+    }
+    if (thread && session) {
+      this.sessions.set(thread, harness as SessionHarness, session);
+      if (meter && resume && (app ? app.resumed : !failed)) meter.resumed = true;
+    }
     // Signed out: say so plainly (never hand "Failed to authenticate" back as the answer) and flag it for Home/Connectors.
     if (harness === "claude" || harness === "codex") {
       const problem = failed ? signInProblem(`${reply}\n${err}\n${codexErrors}`) : null;
@@ -863,7 +919,8 @@ export class Brain {
       }
       if (!failed) this.health.fine(harness);
     }
-    if (code !== 0 && !reply.trim()) throw new Error(`${name} exited with ${code}: ${(codexErrors.trim() || err.trim()).slice(-300)}`);
+    if (app && failed && !reply.trim()) throw new Error(`${name} failed: ${(codexErrors.trim() || err.trim()).slice(-300)}`);
+    if (!app && code !== 0 && !reply.trim()) throw new Error(`${name} exited with ${code}: ${(codexErrors.trim() || err.trim()).slice(-300)}`);
     return reply.trim();
   }
 }

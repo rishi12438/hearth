@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fakeCodex } from "./fixtures/codex.ts";
 import { BrainHealth, signInProblem } from "../src/brains/health.ts";
 import { Brain, SignedOut } from "../src/brain.ts";
 import { loadConfig } from "../src/config.ts";
@@ -36,12 +37,8 @@ cat >/dev/null
 echo '{"type":"result","is_error":true,"result":"Failed to authenticate. API Error: 401 OAuth access token is invalid."}'
 exit 1
 `);
-  writeFileSync(join(dir, "codex"), `#!/bin/sh
-cat >/dev/null
-while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
-echo "codex here" > "$out"
-`);
-  chmodSync(join(dir, "claude"), 0o755); chmodSync(join(dir, "codex"), 0o755);
+  chmodSync(join(dir, "claude"), 0o755);
+  fakeCodex(dir, { answer: "codex here" });
   return dir;
 }
 
@@ -68,20 +65,22 @@ test("a signed-out brain says so (never as the answer), and the other brain take
   } finally { process.env.PATH = oldPath; }
 });
 
-test("Codex's streamed events show as progress while it works, and the answer still comes from its output file", async () => {
+test("Codex's events (through its app-server) show as progress while it works, and its last message is the answer", async () => {
   const dir = mkdtempSync(join(tmpdir(), "hearth-cx-"));
-  writeFileSync(join(dir, "codex"), `#!/bin/sh
-cat >/dev/null
-while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
-echo '{"type":"item.completed","item":{"type":"agent_message","text":"I will check fares from SFO to PHX first."}}'
-echo '{"type":"item.started","item":{"type":"web_search","query":"","action":{"type":"other"}}}'
-echo '{"type":"item.completed","item":{"type":"web_search","query":"SFO to PHX flights Friday","action":{"type":"search","query":"SFO to PHX flights Friday"}}}'
-echo '{"type":"item.started","item":{"type":"command_execution","command":"/bin/zsh -lc '"'"'curl -sL https://www.frontier.com/fares | head -3'"'"'"}}'
-echo '{"type":"item.started","item":{"type":"command_execution","command":"/bin/zsh -lc '"'"'python3 fares.py'"'"'"}}'
-echo '{"type":"item.started","item":{"type":"command_execution","command":"/bin/zsh -lc '"'"'mkdir -p out'"'"'"}}'
-echo "Cheapest is \\$89 on Frontier." > "$out"
-`);
-  chmodSync(join(dir, "codex"), 0o755);
+  const item = (kind: "started" | "completed", item: object) => ({ method: `item/${kind}`, params: { item } });
+  fakeCodex(dir, {
+    answer: "Cheapest is $89 on Frontier.",
+    events: [
+      item("completed", { type: "agentMessage", id: "m0", text: "I will check fares from SFO to PHX first." }),
+      item("started", { type: "webSearch", id: "w1", query: "", action: { type: "other" } }),
+      item("completed", { type: "webSearch", id: "w1", query: "SFO to PHX flights Friday", action: { type: "search", query: "SFO to PHX flights Friday" } }),
+      item("started", { type: "commandExecution", id: "c1", command: "/bin/zsh -lc 'curl -sL https://www.frontier.com/fares | head -3'", status: "inProgress" }),
+      item("started", { type: "commandExecution", id: "c2", command: "/bin/zsh -lc 'python3 fares.py'", status: "inProgress" }),
+      item("started", { type: "commandExecution", id: "c3", command: "/bin/zsh -lc 'mkdir -p out'", status: "inProgress" }),
+      // One it retries by itself isn't a failure.
+      { method: "error", params: { error: { message: "stream dropped" }, willRetry: true } },
+    ],
+  });
   const oldPath = process.env.PATH;
   process.env.PATH = `${dir}:${oldPath}`;
   try {
@@ -91,6 +90,6 @@ echo "Cheapest is \\$89 on Frontier." > "$out"
     const out = await brain.think({ mode: "clean", context: {}, input: "hi" }, { harness: "codex", model: "" }, { costUsd: 0, unknown: false, onProgress: (s) => steps.push(s) });
     expect(out).toBe("Cheapest is $89 on Frontier.");
     expect(steps).toEqual(["I will check fares from SFO to PHX first", "Searching the web", "Searching: SFO to PHX flights Friday",
-      "Reading frontier.com", "Running code", "Working it out"]);
+      "Reading frontier.com", "Running code", "Working it out", "Cheapest is $89 on Frontier"]);
   } finally { process.env.PATH = oldPath; }
 });

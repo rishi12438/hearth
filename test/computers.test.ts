@@ -101,25 +101,37 @@ test("stopping a job tells the computer to stop it", async () => {
   await expect(p).rejects.toThrow("stopped");
 });
 
-test("Brain runs on the computer when one can, falls back to the cloud, and parks when neither can", async () => {
+test("Brain runs on this hub whenever it can, on a computer only what the hub can't, and parks when neither can", async () => {
   const dir = mkdtempSync(join(tmpdir(), "hearth-br-"));
   const config = { ...loadConfig({ HEARTH_AGENT: "echo" }), dataDir: dir };
   const brain = new Brain(config);
-  let gone = false;
+  let gone = false, macHas = ["echo", "custom"];
   brain.remote = {
     linked: () => true,
-    pick: (p) => (p.harness === "custom" ? null : { name: "Mac", run: async () => { if (gone) throw new ComputerGone("x"); return "from the mac"; } }),
+    pick: (p) => (!macHas.includes(p.harness) ? null : { name: "Mac", run: async () => { if (gone) throw new ComputerGone("x"); return "from the mac"; } }),
   };
+  // The hub has it: the hub runs it, even with the Mac online (one place for a thread's sessions).
   const m1: Meter = { costUsd: 0, unknown: false };
-  expect(await brain.think(input, { harness: "echo", model: "" }, m1)).toBe("from the mac");
-  expect(m1.ranOn).toBe("Mac");
+  expect(await brain.think(input, { harness: "echo", model: "" }, m1)).toContain("demo brain");
+  expect(m1.ranOn).toBe("cloud");
 
-  gone = true; // dropped mid-call: the cloud does it instead
+  // custom isn't set up on this hub: the Mac does it.
   const m2: Meter = { costUsd: 0, unknown: false };
-  expect(await brain.think(input, { harness: "echo", model: "" }, m2)).toContain("demo brain");
-  expect(m2.ranOn).toBe("cloud");
+  expect(await brain.think(input, { harness: "custom", model: "" }, m2)).toBe("from the mac");
+  expect(m2.ranOn).toBe("Mac");
 
-  // custom isn't set up on this hub and no computer has it
+  // Signed out here: the Mac takes it until the hub's login is fixed.
+  brain.health.signedOut("echo", "401");
+  const m3: Meter = { costUsd: 0, unknown: false };
+  expect(await brain.think(input, { harness: "echo", model: "" }, m3)).toBe("from the mac");
+  expect(m3.ranOn).toBe("Mac");
+  brain.health.fine("echo");
+
+  // The Mac dropped mid-call, and the hub can't run custom: it parks.
+  gone = true;
+  await expect(brain.think(input, { harness: "custom", model: "" })).rejects.toBeInstanceOf(NeedsComputer);
+  // No computer has it at all: parks too.
+  macHas = [];
   await expect(brain.think(input, { harness: "custom", model: "" })).rejects.toBeInstanceOf(NeedsComputer);
 });
 
