@@ -748,7 +748,12 @@ the attachment) and get it right first time.`,
 /** o.approved: the call comes from a script run the user approved, so a tool that asks first runs without a second card. o.jobId: the run's job. */
 export async function mcpAgent(mcp: Mcp, argv: string[], by: string, o: { approved?: boolean; jobId?: string } = {}): Promise<string> {
   const [cmd = "list", a, b, c] = argv;
-  const line = (s: McpView) => `${s.name}  ${s.state}${s.error ? ` (${s.error})` : ""}  ${s.url}${s.tools.length ? `\n  tools: ${s.tools.join(", ")}` : ""}`;
+  // What to do next, in each answer, so an agent never needs the user to explain it.
+  const next = (s: McpView) => s.state === "signin" ? `\n  next: you sign in: run hearth-mcp signin ${s.name} and open the link in your browser`
+    : s.state === "pending" ? `\n  next: waiting for the user's Approve (its card in the conversation that asked)`
+    : s.state === "failed" ? `\n  next: run hearth-mcp signin ${s.name} to reconnect it, or save an API key: hearth-mcp key ${s.name} <key>` : "";
+  const line = (s: McpView) => `${s.name}  ${s.state}${s.error ? ` (${s.error})` : ""}  ${s.url}${s.tools.length ? `\n  tools: ${s.tools.join(", ")}` : ""}${next(s)}`;
+  const keyWay = (name: string) => `Get an API key instead: in your browser, open ${name}'s website, sign in (your browser has the user's logins; if it asks for a password you don't have, ask the user to sign in on that page while they watch), copy the API key or token from its dashboard, and save it: hearth-mcp key ${name} <key>. That checks it right away.`;
   switch (cmd) {
     case "list": {
       const all = mcp.list();
@@ -778,8 +783,10 @@ export async function mcpAgent(mcp: Mcp, argv: string[], by: string, o: { approv
     case "signin": {
       if (!a) return "usage: hearth-mcp signin <server>";
       const s = await mcp.signIn(a);
-      if (!s.value) return s.error;
-      return "url" in s.value ? `Give the user this link to sign in to ${a}:\n${s.value.url}` : `${a} is connected.`;
+      if (!s.value) return mcp.get(a) && !mcp.get(a)!.pending ? `${s.error}\n\n${keyWay(a)}` : s.error;
+      return "url" in s.value
+        ? `Sign in to ${a} yourself: open this link in your browser and go through it (pick the account, allow access). It ends back on Hearth; then hearth-mcp list shows ${a} connected. Ask the user only for a password you don't have.\n${s.value.url}\n\nIf the sign-in page doesn't work: ${keyWay(a)}`
+        : `${a} is connected.`;
     }
     case "key": {
       if (!a || !b) return "usage: hearth-mcp key <server> <api key> [header]";

@@ -202,6 +202,7 @@ test("hearth-mcp key: an agent saves a key for an approved server that isn't con
   expect(await mcpAgent(mcp, ["key", "keyed", "sekret", "X-Api-Key"], "an agent")).toContain("waiting for the user");
   await mcp.approve("keyed");
   expect(mcp.view("keyed")!.state).toBe("signin");
+  expect(await mcpAgent(mcp, ["list"], "an agent")).toContain("next: you sign in: run hearth-mcp signin keyed");
   expect(await mcpAgent(mcp, ["key", "keyed", "wrong", "X-Api-Key"], "an agent")).toContain("didn't take that key");
   expect(vault.get("mcp:keyed")).toBeNull();
   const ready: string[] = [];
