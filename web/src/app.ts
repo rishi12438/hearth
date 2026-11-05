@@ -43,6 +43,9 @@ const S = {
   /** The event pipeline: sources, triggers (formula rules), timers, and recent events. */
   pipe: { sources: [], triggers: [], timers: [], watchers: [], held: 0 } as { sources: any[]; triggers: any[]; timers: any[]; watchers: any[]; held: number },
   pipeEvents: [] as any[],
+  /** Sources whose latest events are open in Triggers → Sources, and those events (newest first, up to 10). */
+  pipeSrcOpen: new Set<string>(),
+  pipeSrcEvents: {} as Record<string, any[] | undefined>,
   pipeTab: "triggers" as "triggers" | "timers" | "sources" | "events",
   /** Just made by a teammate: highlighted as it lands. */
   pipeFresh: new Set<string>(),
@@ -252,7 +255,7 @@ function onEvent(e: { type: string; data?: any }) {
     case "job": {
       if (r.view === "board") loadBoard();
       // The teammate said it's not about its thread: that reply is gone, and Hearth plans the message as a new task.
-      if (e.data.handedBack) {
+      if (e.data.handedBack || e.data.removed) {
         if (S.chat) S.chat.jobs = S.chat.jobs.filter((x: any) => x.id !== e.data.id);
         if (r.view === "chat" && r.job === e.data.followsUp && open === e.data.threadId) location.hash = `#c/${open}`; else if (open === e.data.threadId) drawChat(false);
         return;
@@ -3092,6 +3095,14 @@ async function loadPipeline() {
   } catch {}
 }
 
+/** Open or close a source's latest 10 events in Triggers → Sources (fetched fresh each time it opens). */
+async function toggleSourceEvents(id: string) {
+  if (S.pipeSrcOpen.delete(id)) { drawTriggers(); return; }
+  S.pipeSrcOpen.add(id); S.pipeSrcEvents[id] = undefined; drawTriggers();
+  try { S.pipeSrcEvents[id] = await call(`/api/pipeline/events?source=${encodeURIComponent(id)}&limit=10`); } catch (e) { S.pipeSrcOpen.delete(id); handleError(e); }
+  if (S.panel === "triggers") drawTriggers();
+}
+
 function openTriggers(tab?: typeof S.pipeTab) {
   S.panel = "triggers";
   if (tab) S.pipeTab = tab;
@@ -3242,15 +3253,22 @@ function drawTriggers() {
           s.claim ? h("small", { class: "sub" }, `For: ${s.claim.reason}`) : null,
           s.claim ? h("small", { class: "sub" }, `Called by ${s.claim.publisher} · claimed by ${s.claim.by} ${shortAgo(s.claim.at)}`,
             s.claim.threadId ? [" · ", h("a", { href: s.claim.threadId.startsWith("tm-") ? `#t/${s.claim.threadId.slice(3)}` : `#c/${s.claim.threadId}${s.claim.jobId ? `/${s.claim.jobId}` : ""}` }, "the task that took it")] : null) : null,
+          s.claim?.managed ? h("small", { class: "sub" }, `Fed by Hearth's ${s.claim.publisher} connection (verified), so there's no URL to copy.`) : null,
           s.claim?.releasedAt ? h("small", { class: "sub" }, `Released ${shortAgo(s.claim.releasedAt)} by ${s.claim.releasedBy}${s.claim.releaseReason ? `: ${s.claim.releaseReason}` : ""}`) : null,
           w ? h("small", { class: `sub ${w.lastError ? "warn" : ""}` }, w.lastError ? `Couldn't look: ${w.lastError}` : w.lastRunAt ? `looked ${shortAgo(w.lastRunAt)}${w.looked ? "" : " (first look saved)"}` : "first look soon") : null,
           h("small", { class: "sub" }, [!w && !s.claim && s.service ? `${s.service}${s.scope ? ` · ${s.scope}` : ""}` : null, `${s.eventCount} event${s.eventCount === 1 ? "" : "s"}`, s.lastEventAt ? `last ${shortAgo(s.lastEventAt)}` : null, builtin || s.claim ? null : by(s.createdBy)].filter(Boolean).join(" · "))),
         w && owner ? h("button", { class: "iconbtn", "aria-label": "Check now", title: "Check now", on: { click: () => pipeDo(() => call(`/api/pipeline/watchers/${w.id}/check`, { body: {} }), "Looked") } }, icon("refresh", 16)) : null,
+        // A live port: pause it, or release it (the URL stops; the record stays). Only a released one can be deleted.
+        // A port the hub feeds itself (Plaid) only pauses: it comes and goes with its connection.
         w ? pause(w, `/api/pipeline/watchers/${w.id}`) : s.kind === "push" && !s.claim?.releasedAt ? pause(s, `/api/pipeline/sources/${s.id}`) : null,
-        owner && s.kind === "push" && !s.claim?.releasedAt ? h("button", { class: "btn small ghost", on: { click: () => confirmSheet(`Release ${s.name}?`, "Its URL stops working right away. Its record, triggers and events stay, so you can see what it was for.", "Release", async () => { await call(`/api/pipeline/sources/${s.id}/release`, { body: { reason: "released in Triggers" } }); reopen("sources"); }) } }, "Release") : null,
+        owner && s.kind === "push" && !s.claim?.releasedAt && !s.claim?.managed ? h("button", { class: "btn small ghost", title: "Stop this URL working; keep the record", on: { click: () => confirmSheet(`Release ${s.name}?`, "Its URL stops working right away and its triggers stop. The record stays under Released ports, so you can see what it was for; delete it there.", "Release", async () => { await call(`/api/pipeline/sources/${s.id}/release`, { body: { reason: "released in Triggers" } }); reopen("sources"); }) } }, "Release") : null,
         w ? del(s.name, "It stops looking, and its triggers go too. Past events stay in the log.", () => call(`/api/pipeline/watchers/${w.id}`, { method: "DELETE" }))
-          : s.kind === "push" ? del(s.name, "Its triggers go too, and its URL stops working. Past events stay in the log.", () => call(`/api/pipeline/sources/${s.id}`, { method: "DELETE" })) : null),
+          : s.kind === "push" && s.claim?.releasedAt ? del(s.name, "The record and its triggers go. Past events stay in the log.", () => call(`/api/pipeline/sources/${s.id}`, { method: "DELETE" })) : null),
       h("div", { class: "vars" }, s.variables.map((v: any) => h("span", { class: "varchip", title: v.description || "" }, v.name))),
+      // What came in lately: the last 10 events, each opening to what was sent and what its triggers did.
+      s.eventCount ? h("button", { class: "link small", on: { click: () => toggleSourceEvents(s.id) } },
+        S.pipeSrcOpen.has(s.id) ? "Hide latest events" : `Latest events (${Math.min(10, s.eventCount)})`) : null,
+      S.pipeSrcOpen.has(s.id) ? (S.pipeSrcEvents[s.id] ? h("div", { class: "list" }, S.pipeSrcEvents[s.id]!.map(eventRow)) : h("p", { class: "muted small" }, "Loading…")) : null,
       url ? h("div", { class: "row gap" },
         h("button", { class: "codeline grow", title: "Copy", on: { click: () => { navigator.clipboard?.writeText(url); toast("URL copied"); } } }, url),
         h("button", { class: "btn small ghost", on: { click: () => pipeDo(() => call(`/api/pipeline/sources/${s.id}/test`, { body: { payload: { test: true } } }), "Test event sent") } }, "Test"),
@@ -3303,6 +3321,7 @@ function drawTriggers() {
       const rest = sources.filter((s: any) => s.kind !== "push");
       return [
         h("h4", null, "Ports"),
+        h("p", { class: "muted small" }, "Callback URLs for webhooks, each with what it's for. Release one to stop its URL; it moves to Released ports, where you can delete it."),
         ports.length ? h("div", { class: "list" }, ports.map(sourceRow))
           : h("p", { class: "empty" }, "No ports yet. A port is a callback URL for a webhook: ask Hearth (“give me a URL Stripe can call when a payment fails”) and it claims one, saying what it's for."),
         rest.length ? [h("h4", null, "Other sources"), h("div", { class: "list" }, rest.map(sourceRow))] : null,

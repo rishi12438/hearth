@@ -655,6 +655,35 @@ export class Hub {
   /** Each working job's latest live-view picture (memory only, gone when the job ends). */
   private frames = new Map<string, { n: number; at: string; mime: string; data: Uint8Array }>();
   private handedBack = new Map<string, string>(); // message id -> the task thread that handed it back
+
+  /**
+   * A job a trigger started (the event went on in a task thread, or Hearth planned it) finished with [[quiet]]: it
+   * looked and there was nothing worth saying, so the run leaves no trace in the thread. Once every task from that
+   * trigger message is quiet, the message, Hearth's reply and the task posts go (and a ramble it made just for this).
+   * If another task from it did speak, this one just says so plainly. True when it handled the job (no notification).
+   */
+  private async quietTriggerRun(job: Job): Promise<boolean> {
+    const m = job.messageId ? await this.store.get<Message>("messages", job.messageId) : null;
+    if (!m?.fromTrigger) return false;
+    const jobs = (await this.store.all<Job>("jobs")).filter((j) => j.messageId === m.id);
+    const quiet = (j: Job) => j.status === "done" && (j.quiet || String(j.result || "").includes(QUIET));
+    const label = `${m.fromTrigger.title}: nothing worth telling you`;
+    if (!jobs.every((j) => j.id === job.id || quiet(j))) {
+      // Another task from it spoke up (or is still going): this one stays, said plainly; the last quiet one tidies up.
+      await this.saveJob({ ...job, quiet: true, result: "Nothing worth telling you." });
+      return true;
+    }
+    const ids = new Set(jobs.map((j) => j.id));
+    const msgs = (await this.store.all<Message>("messages")).filter((x) => x.threadId === m.threadId);
+    const drop = msgs.filter((x) => x.id === m.id || (x.taskJobId && ids.has(x.taskJobId)) || (x.role === "assistant" && x.jobIds?.length && x.jobIds.every((id) => ids.has(id))));
+    for (const x of drop) { await this.store.remove("messages", x.id); this.emit("message", { ...x, deleted: true }); }
+    for (const j of jobs) { this.steps.delete(j.id); this.frames.delete(j.id); await this.store.remove("jobs", j.id); this.emit("job", { ...j, removed: true }); }
+    // A fresh ramble made only for this ("post": "new") that now has nothing in it goes too.
+    const thread = await this.store.get<Thread>("threads", m.threadId!);
+    if (thread && !thread.id.startsWith("tm-") && msgs.length === drop.length) await this.removeThread(thread.id);
+    await this.log("trigger.quiet", label);
+    return true;
+  }
   private async handBack(job: Job, meter: Meter) {
     this.stops.delete(job.id); this.steps.delete(job.id); this.frames.delete(job.id);
     await this.addSpend(job.messageId, meter.costUsd);
@@ -1053,6 +1082,9 @@ export class Hub {
       });
       // It pulled a fresh login from your Mac mid-run: go again with it, without you tapping anything.
       if (this.rerunAfterLogin.delete(job.id) && status === "blocked") { await this.retryJob(job.id, { refreshed: true }); return; }
+      // A trigger's run that had nothing to say ([[quiet]]): nothing shows and nothing buzzes.
+      if (status === "done" && String(cur.result || "").includes(QUIET) && await this.quietTriggerRun(cur)) return;
+      // The last task from a trigger finished and spoke, but earlier ones were quiet: they stay, labelled (above).
       // Tell the phone: "Fitness finished: Knee before volleyball". Tapping it opens the task's thread.
       if (!job.parentId && (status === "done" || status === "failed")) {
         const first = String(cur.result || "").split("\n").map((x) => x.replace(/^[-*#>\s]+|\*\*/g, "").trim()).find(Boolean) || "";

@@ -8,6 +8,8 @@ import { Brain } from "../src/brain.ts";
 import { Scripts, langOf, detectEffects, describeScript } from "../src/scripts.ts";
 import { loadConfig } from "../src/config.ts";
 import { portsAgent, parseFlags } from "../src/events/ports.ts";
+import { PLAID_PORT } from "../src/connectors/plaid.ts";
+import { zonedToUtc } from "../src/time.ts";
 import type { Message } from "../src/types.ts";
 
 // Trigger ports: an agent claims a callback URL with a reason, an outside service calls it, and a trigger's script
@@ -40,6 +42,10 @@ beforeEach(async () => {
   scripts = new Scripts(store, dir, repo);
   await scripts.syncRepo();
   hub = new Hub(config, store, new Brain(config), scripts, null);
+  // Midday, so quiet hours never hold a run.
+  const noon = zonedToUtc(2026, 11, 4, 12, 0, "America/Los_Angeles");
+  hub.clock = () => noon;
+  await hub.setPrefs({ tz: "America/Los_Angeles" });
 });
 
 afterEach(async () => { hub.stop(); await hub.idle(20_000); await store.close(); });
@@ -149,4 +155,61 @@ test("a script that says `needs: plaid` gets the hub's address and a Plaid-only 
   const r = await scripts.propose({ name: "env-py", code: "#!/usr/bin/env python3\n# needs: plaid\nimport os\nprint(os.environ.get('HEARTH_PLAID_KEY'), os.environ.get('HEARTH_HUB'), os.environ.get('SERPER_API_KEY'))" });
   await scripts.approve(r.value!.id, r.value!.sha256);
   expect((await scripts.run("env-py")).output).toBe("plaid-key http://127.0.0.1:9 None");
+});
+
+test("the plaid port comes with the connection: no URL, can't be released or deleted, pauses when Plaid goes", async () => {
+  const p = hub.pipeline;
+  expect(p.ensureManagedPort(PLAID_PORT, false)).toBeNull(); // not connected: nothing made
+  const s = p.ensureManagedPort(PLAID_PORT, true)!;
+  expect(s.claim).toMatchObject({ managed: true, publisher: "plaid", by: "Hearth" });
+  expect(p.secretOf("plaid")).toBeNull();
+  expect(p.releasePort("plaid", "you").error).toContain("kept by the hub");
+  expect(p.removeSource("plaid").conflict?.kind).toBe("protected");
+  expect(p.rotateSecret("plaid").error).toContain("no outside URL");
+  // A verified ping lands as an event with its variables; a trigger acts on it.
+  await p.addTrigger({ name: "new-card", source: "plaid", formula: 'code == "NEW_ACCOUNTS_AVAILABLE"', action: { type: "notify", text: "New account at {{bank}}" } }, "Bills");
+  expect(p.forwardToPorts("plaid", { webhook_type: "ITEM", webhook_code: "NEW_ACCOUNTS_AVAILABLE", item_id: "i1", bank: "Chase" })).toBe(1);
+  await p.drain();
+  expect((await sent()).map((m) => m.text)).toEqual(["New account at Chase"]);
+  // Claiming another plaid port points at this one.
+  expect(portsAgent(p, ["claim", "--reason", "bank", "--source", "plaid"], who, BASE)).toContain("Already live for plaid: plaid");
+  // Disconnected: paused (its triggers and events stay); connected again: back on, same source.
+  expect(p.ensureManagedPort(PLAID_PORT, false)!.status).toBe("paused");
+  expect(p.forwardToPorts("plaid", { webhook_code: "X" })).toBe(1); // only the claimed one now
+  expect(p.ensureManagedPort(PLAID_PORT, true)!.id).toBe(s.id);
+});
+
+test("a trigger's run that says [[quiet]] leaves no trace; next to one that spoke, it's labelled plainly", async () => {
+  const put = (c: any, x: any) => store.put<any>(c, x);
+  const t0 = new Date().toISOString();
+  // Hearth's route: a fresh ramble with the trigger's message, Hearth's reply, the task post and the job.
+  await put("threads", { id: "r1", createdAt: t0, title: "Parley", updatedAt: t0 });
+  await put("messages", { id: "m1", createdAt: t0, role: "user", threadId: "r1", text: "Inspect this webhook…", fromTrigger: { id: "t1", title: "parley-incoming" } });
+  await put("messages", { id: "m2", createdAt: t0, role: "assistant", threadId: "r1", text: "On it.", jobIds: ["j1"] });
+  await put("messages", { id: "m3", createdAt: t0, role: "assistant", threadId: "r1", text: "Check it", taskJobId: "j1" });
+  const j1 = await put("jobs", { id: "j1", createdAt: t0, threadId: "r1", messageId: "m1", task: "x", teammateId: "hearth", status: "done", effort: "light", result: "[[quiet]]" });
+  expect(await (hub as any).quietTriggerRun(j1)).toBe(true);
+  expect(await store.get("messages", "m1")).toBeNull();
+  expect(await store.get("messages", "m3")).toBeNull();
+  expect(await store.get("jobs", "j1")).toBeNull();
+  expect(await store.get("threads", "r1")).toBeNull(); // made just for it, now empty
+  // A task thread that goes on (to: "this"): the thread stays, only the trigger's turn goes.
+  await put("threads", { id: "r2", createdAt: t0, title: "Booking", updatedAt: t0 });
+  await put("messages", { id: "u1", createdAt: t0, role: "user", threadId: "r2", text: "book it" });
+  await put("messages", { id: "m4", createdAt: t0, role: "user", threadId: "r2", text: "any news?", fromTrigger: { id: "t2", title: "booking" }, continues: ["root"] });
+  const j2 = await put("jobs", { id: "j2", createdAt: t0, threadId: "r2", messageId: "m4", task: "x", teammateId: "hearth", status: "done", effort: "light", result: "[[quiet]]", followsUp: "root" });
+  expect(await (hub as any).quietTriggerRun(j2)).toBe(true);
+  expect(await store.get("threads", "r2")).toBeTruthy();
+  expect(await store.get("messages", "u1")).toBeTruthy();
+  expect(await store.get("messages", "m4")).toBeNull();
+  // Two tasks, one spoke: the quiet one stays, said plainly.
+  await put("messages", { id: "m5", createdAt: t0, role: "user", threadId: "r2", text: "check", fromTrigger: { id: "t3", title: "two" } });
+  await put("jobs", { id: "j3", createdAt: t0, threadId: "r2", messageId: "m5", task: "a", teammateId: "hearth", status: "done", effort: "light", result: "Found one" });
+  const j4 = await put("jobs", { id: "j4", createdAt: t0, threadId: "r2", messageId: "m5", task: "b", teammateId: "hearth", status: "done", effort: "light", result: "[[quiet]]" });
+  expect(await (hub as any).quietTriggerRun(j4)).toBe(true);
+  expect(await store.get<any>("jobs", "j4")).toMatchObject({ quiet: true, result: "Nothing worth telling you." });
+  expect(await store.get("messages", "m5")).toBeTruthy();
+  // Not from a trigger: left alone.
+  await put("messages", { id: "m6", createdAt: t0, role: "user", threadId: "r2", text: "hi" });
+  expect(await (hub as any).quietTriggerRun({ id: "j5", messageId: "m6" })).toBe(false);
 });

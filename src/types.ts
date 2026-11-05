@@ -132,6 +132,8 @@ export type Job = Doc & {
   /** Each time it moved up a model, and why: the model's own reason, the lead's redo note, or the error it hit. */
   escalations?: { from: string; to: string; why: string; at: string }[];
   result?: string;
+  /** A trigger's run that found nothing worth saying ([[quiet]]). */
+  quiet?: boolean;
   did?: Done[];
   finishedAt?: string;
 };

@@ -159,7 +159,7 @@ WHO HANDLES IT (remind, trigger.add, watch.add, trigger.update all take these):
     BEFORE adding, look for one that already covers it: CONTEXT.eventPipeline.triggers and CONTEXT.library entries of
     kind "trigger" (a live one, its name in "id"). Already covered: say so, or change it with trigger.update / time.update.
 - watch.add {name, kind, ..., action?, formula?, judge?, why?, to?, post?}
-    A WATCHER: the hub looks at something every few minutes and pushes what's NEW into its own source (named like the
+    A WATCHER (polling: only when nothing can push it, see PUSH BEFORE POLLING): the hub looks at something every few minutes and pushes what's NEW into its own source (named like the
     watcher), where triggers act on it. Give action (and formula, default "true") to make its trigger in the same step.
     The first look only remembers what's there, so it tells the user about what's new from then on. Kinds:
       {"kind":"page","url":"https://…","everyMin":>=15}   when the page's text changes. Variables: url, changes (the
@@ -181,6 +181,10 @@ ${sourceDocs()}
 - PLACES: the built-in source "place" gets an event when the user arrives at or leaves a saved place (place.add saves
     one). Variables: place (lowercase name), event ("arrive"|"leave"). e.g. trigger.add {source:"place",
     formula:"place == \"office\" and event == \"arrive\"", action:{"type":"notify","text":"Grab the charger"}}.
+- PUSH BEFORE POLLING. To act when something happens, first look for a way to be TOLD: a port that already gets it
+    (CONTEXT.eventPipeline sources: "plaid" is fed by the Plaid connection), the service's own webhooks (claim a port),
+    or a built-in source (place). Poll with watch.add only when nothing can push it (a plain web page, an app with no
+    webhooks), and then at the slowest interval that's still useful. Say which you chose and why.
 - WEBHOOKS / TRIGGER PORTS: for "give me a URL that …" or any service that can call a webhook, claim a port
     (port.claim {name?, reason, publisher, variables?, mapping?}, or source.create with reason): a push source whose
     callback URL is made on the fly. reason (what it's for) and publisher (what will call it: "plaid", "stripe",

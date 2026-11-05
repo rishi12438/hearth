@@ -460,6 +460,24 @@ type Tx = { date: string; amount: number; currency: string; merchant: string; pe
 /** "$12.34 at Starbucks" (money out) or "+$500.00 from Payroll" (money in). */
 export const line = (t: Tx) => `${t.date} · ${t.amount >= 0 ? `${money(t.amount, t.currency)} at` : `+${money(-t.amount, t.currency)} from`} ${t.merchant}${t.pending ? " (pending)" : ""} · ${t.account}`;
 
+/**
+ * The port the hub keeps while Plaid is connected: every verified Plaid webhook lands here as an event, so triggers
+ * can act on it right away (a script fetches the new transactions and publishes them). Plaid calls the hub's own
+ * /api/plaid/webhook, so there's no URL to hand out.
+ */
+export const PLAID_PORT = {
+  name: "plaid", publisher: "plaid",
+  reason: "Plaid's updates about your banks: new transactions, new accounts, sign-outs (comes with the Plaid connection)",
+  description: "Every verified webhook from Plaid. It only says what changed; a trigger's script fetches the details (needs: plaid).",
+  variables: [
+    { name: "type", description: "webhook_type: TRANSACTIONS, ITEM, HOLDINGS…" },
+    { name: "code", description: "webhook_code: SYNC_UPDATES_AVAILABLE, NEW_ACCOUNTS_AVAILABLE, ERROR, LOGIN_REPAIRED…" },
+    { name: "bank", description: "the bank's name" },
+    { name: "item_id", description: "Plaid's id for that bank connection" },
+  ],
+  mapping: { type: "webhook_type", code: "webhook_code" },
+};
+
 /** Plaid as a trigger: new transactions, optionally only big ones. */
 export function plaidSource(plaid: () => Plaid): Source<{ minAmount: number }> {
   return {

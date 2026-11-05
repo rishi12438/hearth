@@ -467,7 +467,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       try { b = JSON.parse(raw); } catch { throw new HttpError(400, "Not JSON."); }
       const what = connect.plaid.handle(b);
       // Ports claimed for plaid get the ping too (item X has updates); their triggers' scripts fetch the details.
-      const ports = hub.pipeline.forwardToPorts("plaid", b);
+      const bank = connect.plaid.items().find((i) => i.itemId === b?.item_id)?.institution.name ?? null;
+      const ports = hub.pipeline.forwardToPorts("plaid", { ...b, bank });
       await hub.log("plaid.webhook", `${b.webhook_type || "?"} ${b.webhook_code || "?"}: ${what}${ports ? ` · to ${ports} port(s)` : ""}`);
       return json({ ok: true });
     }

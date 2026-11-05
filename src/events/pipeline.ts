@@ -48,6 +48,8 @@ export type PortClaim = {
   reason: string; publisher: string; by: string;
   jobId: string | null; threadId: string | null; teammateId: string | null; at: string;
   releasedAt?: string; releasedBy?: string; releaseReason?: string;
+  /** The hub feeds it itself from a connection it owns (Plaid's verified webhook): there's no outside URL to give out. */
+  managed?: boolean;
 };
 export type TriggerAction =
   | { type: "notify"; text: string }
@@ -502,6 +504,7 @@ export class EventPipeline {
     const s = this.findSource(idOrName);
     if (!s) return { error: `No source called "${idOrName}".` };
     if (s.kind !== "push") return { error: "Only push sources have a URL." };
+    if (s.claim?.managed) return { error: `"${s.name}" is fed by the hub itself; it has no outside URL.` };
     if (s.claim?.releasedAt) return { error: `"${s.name}" was released; claim a new port (with what it's for) instead.` };
     const secret = randomBytes(24).toString("base64url");
     this.db.query("UPDATE sources SET secret = ?, updated_at = ? WHERE id = ?").run(secret, this.now(), s.id);
@@ -547,6 +550,25 @@ export class EventPipeline {
     return n;
   }
 
+  /**
+   * A port the hub keeps for a connection of its own (Plaid): made when it's connected, paused when it isn't. It has no
+   * secret, so there's no outside URL; the hub's own verified webhook feeds it (forwardToPorts).
+   */
+  ensureManagedPort(input: { name: string; publisher: string; reason: string; description: string; variables: SourceVar[]; mapping?: Record<string, string> }, on: boolean): EventSource | null {
+    let s = this.findSource(input.name);
+    if (!s && !on) return null;
+    if (!s) {
+      const r = this.claimPort({ ...input, scope: `hub:${input.publisher}` }, { by: "Hearth" });
+      if (!r.value) { this.note("port.error", `Couldn't make the ${input.name} port: ${r.error}`); return null; }
+      s = r.value.source;
+      this.db.query("UPDATE sources SET secret = NULL, claim = ? WHERE id = ?").run(j({ ...s.claim!, managed: true }), s.id);
+    } else if (s.kind !== "push" || !s.claim?.managed) return s; // someone's own source by that name: leave it be
+    const status = on ? "active" : "paused";
+    if (s.status !== status) this.db.query("UPDATE sources SET status = ?, updated_at = ? WHERE id = ?").run(status, this.now(), s.id);
+    this.onChange("sources");
+    return this.findSource(s.id);
+  }
+
   /** Every port (push source), newest first; released ones too, so it's clear what each URL was for. */
   ports(): EventSource[] { return this.sources().filter((s) => s.kind === "push").reverse(); }
 
@@ -555,6 +577,7 @@ export class EventPipeline {
     const s = this.findSource(idOrName);
     if (!s) return { error: `No port called "${idOrName}".` };
     if (s.kind !== "push") return { error: `"${s.name}" isn't a port.` };
+    if (s.claim?.managed) return { error: `"${s.name}" is kept by the hub for its own connection; disconnect that connection to stop it.` };
     if (s.claim?.releasedAt) return { error: `"${s.name}" was already released (${s.claim.releasedAt} by ${s.claim.releasedBy}).` };
     const claim: PortClaim = { ...(s.claim || { reason: s.description || "(made before ports)", publisher: s.service || "?", by: s.createdBy, jobId: null, threadId: null, teammateId: null, at: s.createdAt }),
       releasedAt: this.now(), releasedBy: str(by, 60) || "you", ...(str(reason, 300) ? { releaseReason: str(reason, 300) } : {}) };
@@ -567,6 +590,7 @@ export class EventPipeline {
   removeSource(idOrName: string, purgeEvents = false): Result<{ triggers: number; events: number }> {
     const s = this.findSource(idOrName);
     if (!s) return { error: `No source called "${idOrName}".` };
+    if (s.claim?.managed) return this.conflict({ kind: "protected", message: `The ${s.name} port comes with its connection; it goes quiet when you disconnect that.`, existing: s, options: ["pause it", "delete its triggers instead"] });
     if (BUILT_IN.has(s.kind)) return this.conflict({ kind: "protected", message: `The ${s.name} source is built in and can't be deleted.`, existing: s, options: ["pause it", "delete its timers or triggers instead"] });
     const triggers = this.triggers(s.id).length;
     let events = 0;

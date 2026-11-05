@@ -7,7 +7,7 @@ import type { VoiceSettings } from "../voice.ts";
 import type { Connector, Ctx, Tile, AddInput } from "./types.ts";
 import { WhatsApp, whatsapp, type IgnoreRules } from "./whatsapp.ts";
 import { Slack, slack, slackSource } from "./slack.ts";
-import { Plaid, plaid, plaidSource, plaidSkill } from "./plaid.ts";
+import { Plaid, plaid, plaidSource, plaidSkill, PLAID_PORT } from "./plaid.ts";
 import { registerSkills } from "../brains/skills.ts";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { serper, serperKey } from "./serper.ts";
@@ -64,7 +64,10 @@ export class Connect {
     // A Plaid webhook: check the Plaid triggers now rather than at their next timer; a bank's state changed: redraw.
     this.plaid.onNews = (bank) => { void hub.pollNow("plaid", `${bank} has new transactions`).catch(() => {}); };
     this.plaid.onChange = () => hub.emit("connections");
-    this.plaid.onItems = () => hub.brain.refreshSkills?.();
+    // The plaid port comes and goes with the connection (first bank in: made or switched on; last one out: paused).
+    const plaidPort = () => hub.pipeline.ensureManagedPort(PLAID_PORT, this.plaid.connected());
+    this.plaid.onItems = () => { hub.brain.refreshSkills?.(); plaidPort(); };
+    plaidPort();
     // The agent's hearth-plaid command asks this hub on its own machine with a key made fresh each start, which opens
     // only the read-only Plaid questions. The skill is there only while a bank is connected.
     const h = hub.config.host, local = !h || h === "0.0.0.0" || h === "::" ? "127.0.0.1" : h.includes(":") ? `[${h}]` : h;
