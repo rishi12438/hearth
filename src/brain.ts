@@ -30,7 +30,7 @@ const sourceDocs = () => SOURCES.map((s) => `        ${s.id}: ${s.doc}`).join("\
 // with; elsewhere it gets the web tools only, in an empty folder.
 
 export type BrainInput = {
-  mode: "chat" | "hook" | "review" | "job" | "orchestrate" | "ideas" | "legwork" | "voice" | "clean" | "describe" | "narrate" | "coach" | "advise" | "judge" | "learn";
+  mode: "chat" | "hook" | "review" | "job" | "orchestrate" | "ideas" | "legwork" | "voice" | "clean" | "describe" | "narrate" | "coach" | "advise" | "judge" | "learn" | "keywords";
   context: Record<string, unknown>;
   input: string;
   toolResults?: string;
@@ -97,7 +97,7 @@ const handUp = (who: string) => `If the job is clearly beyond you or you can't d
 export const HAND_BACK = "[[hand-back]]";
 export const REDO = "[[redo]]";
 /** Calls that only read and write text: no web tools. */
-const NO_TOOLS = new Set<BrainInput["mode"]>(["orchestrate", "voice", "review", "ideas", "learn", "clean", "describe", "narrate", "coach", "advise", "judge"]);
+const NO_TOOLS = new Set<BrainInput["mode"]>(["orchestrate", "voice", "review", "ideas", "learn", "keywords", "clean", "describe", "narrate", "coach", "advise", "judge"]);
 /** Claude's tools for calls that can run code (in the jail). */
 const CODE_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent"];
 /** A helper on the small model that Claude fans wide searches out to. */
@@ -280,7 +280,7 @@ EVENT PIPELINE (CONTEXT.eventPipeline: sources, watchers, triggers, timers). Eve
   PROJECTS: when CONTEXT.project is set, this ramble is part of that project (a folder of rambles). Its notebook's facts
     come first in CONTEXT.memory; save anything learned about the project with notebook = CONTEXT.project.notebook, so the
     next ramble in it knows it too.
-- lesson.add {lesson, evidence}   a general rule learned the hard way about HOW to work, for every later job (not a fact
+- lesson.add {lesson, evidence, keywords?}   a general rule learned the hard way about HOW to work, for every later job (not a fact
     about the user, not tied to one task). Lessons are a library searched like skills (\`hearth-lesson search\`); the
     ones that best match this task are at the end of this prompt. The learn-from-mistakes skill says when to save one and
     how to word it. Sharpen one with memory.update {id, fact}; merge overlapping ones with memory.merge.
@@ -578,6 +578,10 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
   if (b.mode === "describe") return ["Write ONE sentence describing this reusable UI component for a library: what it shows and when to use it, so a",
     "teammate searching later can tell if it fits (e.g. \"Tabs per day with a zoomed map and a short list of things to do; use for any multi-day trip.\").",
     "Reply with only the sentence.", "", b.input].join("\n");
+  if (b.mode === "keywords") return ["An agent will search a library of lessons with a few words about what it's about to do. Write the search",
+    "keywords for the lesson below: 10-15 words or two-word phrases an agent would type in a situation where it applies. Cover the",
+    "kinds of task, the actions, the symptoms or failures, and everyday synonyms (\"price, cheapest, deal, quote, booking\"), not",
+    "just the lesson's own words. Lowercase, comma-separated. Reply with only the list.", "", "LESSON:", b.input].join("\n");
   if (b.mode === "orchestrate") {
     return [ORCHESTRATOR, "", "CONTEXT (JSON):", JSON.stringify(b.context, null, 1), "", "USER RAMBLE:", b.input].join("\n");
   }
@@ -655,9 +659,9 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
       "CONTEXT.lessons has every rule saved so far (with ids). Keep the list short and sharp: if a new one overlaps an old one,",
       "memory.update {id, fact} the old one to cover both, or memory.merge them; never add the same rule twice. Fix or",
       "memory.forget one this thread proved wrong. Otherwise lesson.add {lesson, evidence} (evidence: what happened, in a line).",
-      "BROKEN RULES: every job already sees CONTEXT.lessons. If the team broke one of them in this thread (the user had to correct",
-      "something a rule already covers), the rule didn't work as written: memory.update it so it says plainly WHEN it applies",
-      "and what to do first, and start your reply with \"Rule broken:\" and the rule.",
+      "BROKEN RULES: jobs find lessons by searching the library. If the team broke one in CONTEXT.lessons in this thread (the user",
+      "had to correct something a lesson already covers), record it with lesson.broken {id}, then memory.update it so it says",
+      "plainly WHEN it applies and what to do first, and start your reply with \"Rule broken:\" and the rule.",
       "Reply with one short line naming what you saved, or " + QUIET + " if the thread taught nothing new.", "", b.input);
   } else if (b.mode === "ideas") {
     parts.push("", "IDEAS: look at memory, aboutYou, recent days, CONTEXT.eventPipeline and recent messages, and suggest up to 2 things the team",
@@ -1402,6 +1406,7 @@ function echoBrain(b: BrainInput): string {
   if (b.mode === "coach") return "";
   if (b.mode === "advise") return "Try the export first, and count rows before and after.";
   if (b.mode === "voice") return (b.input.split("NOTES FROM THE LEGWORK:")[1] || b.input).replace(/<\/?untrusted>/g, "").trim();
+  if (b.mode === "keywords") return [...new Set(b.input.split("LESSON:").pop()!.toLowerCase().match(/[a-z]{4,}/g) || [])].slice(0, 12).join(", ");
   if (b.mode === "learn") {
     const m = /USER: (?:using |use |try )?(.{3,80}?) (?:worked|works|is better)/i.exec(b.input);
     if (!m) return QUIET;

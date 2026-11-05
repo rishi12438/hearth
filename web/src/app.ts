@@ -39,6 +39,7 @@ const S = {
   storeQuery: "", storeHits: null as any[] | null, storeBusy: false, storeError: "", installed: [] as any[],
   workflows: [] as any[],
   memory: null as any,
+  lessonStats: null as any,
   memoryQuery: "",
   today: null as any,
   conn: "connecting" as "live" | "connecting" | "offline",
@@ -3831,7 +3832,26 @@ function flyIn(what: string, id: string, next: () => void) {
 // ---------------- plans & memory panels ----------------
 
 async function loadMemory() {
-  try { S.memory = await call(`/api/memory?q=${encodeURIComponent(S.memoryQuery)}`); if (hubPage() === "memory") drawMemory(); } catch (e) { handleError(e); }
+  try {
+    S.memory = await call(`/api/memory?q=${encodeURIComponent(S.memoryQuery)}`);
+    // The lessons library's record (searches → found → followed), when there are lessons to show it for.
+    S.lessonStats = S.memory.facts.some((f: any) => f.notebook === "lessons") ? await call("/api/lessons/stats").catch(() => null) : null;
+    if (hubPage() === "memory") drawMemory();
+  } catch (e) { handleError(e); }
+}
+
+/** Under a lesson: how it's doing. Under anything else: its notebook and how often it was used. */
+const factSub = (f: any) => f.notebook !== "lessons" ? `${f.notebook}${f.useCount ? ` · used ${f.useCount}×` : ""}`
+  : ["lesson", `found ${f.found || 0}×`, `shown ${f.shown || 0}×`, `followed ${f.useCount || 0}×`, f.broken ? `broken ${f.broken}×` : null].filter(Boolean).join(" · ");
+
+function lessonsSummary() {
+  const s = S.lessonStats?.searches;
+  if (!s) return null;
+  const pct = (n: number) => (s.total ? ` (${Math.round((100 * n) / s.total)}%)` : "");
+  return h("div", { class: "aboutcard" },
+    h("div", { class: "row" }, emoji3d("🧭", "ideaicon small"), h("b", { class: "grow" }, "Lessons")),
+    h("p", { class: "muted small" }, `${s.total} search${s.total === 1 ? "" : "es"} · found something ${s.found}${pct(s.found)} · led to a lesson being followed ${s.followed}${pct(s.followed)}`),
+    s.empty.length ? h("small", { class: "muted" }, `Found nothing for: ${s.empty.slice(0, 5).map((q: string) => `"${q}"`).join(", ")}`) : null);
 }
 
 // ---------------- people: the relationship map ----------------
@@ -3946,9 +3966,9 @@ function drawMemory() {
   const el = document.getElementById("memory");
   if (!el || !S.memory) return;
   const facts = [...S.memory.facts].sort((a: any, b: any) => b.importance - a.importance || b.createdAt.localeCompare(a.createdAt));
-  clear(el,
+  clear(el, lessonsSummary(),
     facts.length ? h("div", { class: "list" }, facts.map((f: any) => h("div", { class: "item" },
-      h("button", { class: "grow left", on: { click: () => openFact(f) } }, h("b", { class: "light" }, f.fact), h("small", { class: "sub" }, `${f.notebook}${f.useCount ? ` · used ${f.useCount}×` : ""}`)),
+      h("button", { class: "grow left", on: { click: () => openFact(f) } }, h("b", { class: "light" }, f.fact), h("small", { class: "sub" }, factSub(f))),
       h("button", { class: `star ${f.importance === 3 ? "on" : ""}`, "aria-label": "Always keep in mind",
         on: { click: async () => { await call(`/api/memory/${f.id}`, { method: "PATCH", body: { importance: f.importance === 3 ? 2 : 3 } }); loadMemory(); } } }, icon("star", 18)))))
       : h("p", { class: "empty" }, S.memoryQuery ? "Nothing matches." : "Nothing yet. Tell me things and I'll keep them."),

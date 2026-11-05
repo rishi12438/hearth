@@ -5,7 +5,7 @@
  */
 export function lessonsSkill(hubUrl: string, key: string) {
   const script = `#!/usr/bin/env bash
-# hearth-lesson: the team's lessons. search <words...> | show <id> | list | add <rule> [--why <what happened>] | update <id> <rule> | used <id...>
+# hearth-lesson: the team's lessons. search <words...> | show <id> | list | stats | add <rule> [--why <what happened>] [--keywords <a, b>] | update <id> <rule> | used <id...>
 set -uo pipefail
 if [ $# -eq 0 ]; then set -- help; fi
 args=()
@@ -33,7 +33,8 @@ the few that best match this task. There may be more: search, the way you search
 - Search when you start a task, before you pick a tool or a way in, when something fails, and before you tell the user
   something is true, done, cheapest or available.
 - \`hearth-lesson show <id>\`: one lesson, what happened when it was learned, and how often it's been used.
-- \`hearth-lesson list\`: all of them, most used first.
+- \`hearth-lesson list\`: all of them, most used first. \`hearth-lesson stats\`: how often each was found, shown, followed
+  and broken, and the searches that found nothing.
 - A lesson that applies comes before habit and before what seems quicker. When you followed one, say so:
   \`hearth-lesson used <id> [<id>...]\` (that's how the team sees which lessons earn their place).
 - No shell in this run? Use the ones in your prompt, and put the ids you followed in memory.used.
@@ -46,7 +47,9 @@ the few that best match this task. There may be more: search, the way you search
 - The user told you a better way, and it worked.
 - You wasted real time or money on something a rule would have avoided.
 Search first: if a lesson already covers it, sharpen that one instead (\`hearth-lesson update <id> "<rule>"\`). Otherwise
-\`hearth-lesson add "<rule>" --why "<what happened, in a line>"\` (or the lesson.add action). Save it the moment you know
+\`hearth-lesson add "<rule>" --why "<what happened, in a line>" --keywords "<a, b, c>"\` (or the lesson.add action). Keywords
+are the words a job would search with when the lesson applies: the kind of task, the action, the symptom, everyday
+synonyms ("price, cheapest, deal, quote, booking"). Leave them out and the hub writes them. Save it the moment you know
 it, not at the end: you can be stopped at any time.
 
 ## Make it general

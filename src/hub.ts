@@ -15,14 +15,14 @@ import { readPage } from "./browser.ts";
 import { SignedOut } from "./sources/pages.ts";
 import type { Vault } from "./vault.ts";
 import { SOURCES, sourceById, formatItems, needOf, type Item } from "./sources/index.ts";
-import { recall, searchLessons, isActive, validateFact, LESSONS } from "./memory.ts";
+import { recall, searchLessons, parseKeywords, isActive, validateFact, LESSONS } from "./memory.ts";
 import { describeLocal, localDate, distanceMeters } from "./time.ts";
 import { CHANNELS, CHANNEL_LABEL, type Channel } from "./types.ts";
 import { badChatLink } from "./connectors/web-senders.ts";
 import { googleAgent, CHANGE_KINDS, type GoogleChange } from "./connectors/google-agent.ts";
 import type { Project } from "./types.ts";
 import { channelWorkspace, workspaceName, type Place as WorkPlace } from "./brains/sessions.ts";
-import type { ConnAudit, Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow } from "./types.ts";
+import type { ConnAudit, Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow, LessonSearch } from "./types.ts";
 import { Library, validateSkill, validateWorkflow, fillDeep, fill, type LibraryItem } from "./library.ts";
 import { cleanTile, cleanOptions, extractTiles, type Tile } from "./tiles.ts";
 import { Files, extractFiles } from "./files.ts";
@@ -187,6 +187,7 @@ export class Hub {
   private inflight = 0;                   // orchestrations, splits and retries still running
   private rambleSpend = new Map<string, number>(); // message id -> USD
   private lessonsSweptAt = 0;
+  private keywording = false;
   private learning = false;
   private rambleLooks = new Map<string, ReturnType<typeof setTimeout>>(); // thread id -> its pending "anything to set up?" look
 
@@ -276,7 +277,7 @@ export class Hub {
         you: teammate ? { name: teammate.name, role: teammate.prompt } : { name: "Hearth", role: "The user's main assistant." },
         now: describeLocal(now, prefs.tz), tz: prefs.tz, userName: prefs.userName || undefined, aboutYou: prefs.about || undefined,
         memory: recall((await this.store.all<Fact>("memory")).filter((f) => f.notebook !== LESSONS), query, 8, now).map((f) => f.fact),
-        lessons: searchLessons(await this.store.all<Fact>("memory"), query, 5, now).map((f) => ({ id: f.id, lesson: f.fact })),
+        lessons: (await this.countShown(searchLessons(await this.store.all<Fact>("memory"), query, 5, now))).map((f) => ({ id: f.id, lesson: f.fact })),
         components: (await this.searchLibrary(query)).filter((x) => x.kind === "component"), // ready-made visuals it can fill with data
       };
     }
@@ -285,6 +286,7 @@ export class Hub {
     const facts = mode === "review" ? all : all.filter((f) => f.notebook !== LESSONS);
     // Lessons are searched like skills: the few that best match this task go in the prompt; jobs search for more.
     const lessons = mode === "review" ? [] : mode === "learn" ? all.filter((f) => f.notebook === LESSONS && isActive(f, now)) : searchLessons(all, query, 6, now);
+    if (mode !== "review" && mode !== "learn") await this.countShown(lessons);
     // In a project's ramble: everything in its notebook comes first, then what's relevant from the rest.
     const project = await this.projectOf(threadId);
     const own = project ? facts.filter((f) => f.notebook === project.notebook && isActive(f, now)).slice(-30) : [];
@@ -2032,9 +2034,9 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
   }
 
   /** What `hearth-lesson <argv>` does, for /api/agent/lessons (brains/lessons.ts). Text back for the agent to read. */
-  async lessonsAgent(argv: string[], by: string): Promise<string> {
+  async lessonsAgent(argv: string[], by: string, jobId?: string): Promise<string> {
     const [cmd = "help", ...rest] = argv;
-    const usage = "usage: hearth-lesson search <words...> | show <id> | list | add <rule> [--why <what happened>] | update <id> <rule> | used <id...>";
+    const usage = "usage: hearth-lesson search <words...> | show <id> | list | stats | add <rule> [--why <what happened>] [--keywords <a, b, c>] | update <id> <rule> | used <id...>";
     const all = await this.store.all<Fact>("memory");
     const line = (f: Fact) => `${f.id}  ${f.fact}${f.useCount ? `  (used ${f.useCount}×)` : ""}`;
     const find = (id: string) => all.find((f) => f.notebook === LESSONS && !f.supersededBy && (f.id === id || f.id.startsWith(id)) && id.length >= 6);
@@ -2043,8 +2045,19 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
         const q = rest.join(" ").trim();
         if (!q) return "usage: hearth-lesson search <a few words about what you're about to do>";
         const hits = searchLessons(all, q, 8, this.clock());
+        for (const f of hits) await this.store.put("memory", { ...f, found: (f.found || 0) + 1 });
+        await this.store.put<LessonSearch>("lessonSearches", this.doc({ query: q.slice(0, 200), hits: hits.map((f) => f.id), by, jobId }));
+        await this.trim("lessonSearches", 2000);
         return hits.length ? hits.map(line).join("\n") + "\n\nRead one: hearth-lesson show <id>. Followed one: hearth-lesson used <id>."
           : `No lesson matches "${q}". Try other words (what you're doing, not the subject), or hearth-lesson list.`;
+      }
+      case "stats": {
+        const s = await this.lessonStats();
+        const t = s.searches;
+        return [`Searches: ${t.total}; found something ${t.found} (${t.total ? Math.round((100 * t.found) / t.total) : 0}%); a found lesson then followed ${t.followed}.`,
+          t.empty.length ? `Found nothing for: ${t.empty.slice(0, 10).map((q) => `"${q}"`).join(", ")}` : "",
+          "", "Per lesson (found in search · shown in a prompt · followed · broken):",
+          ...s.lessons.map((l) => `${l.id.slice(0, 8)}  ${l.found} · ${l.shown} · ${l.used} · ${l.broken}  ${l.fact.slice(0, 90)}`)].filter((x) => x !== "").join("\n");
       }
       case "list": {
         const every = searchLessons(all, "", 200, this.clock());
@@ -2053,21 +2066,32 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       case "show": {
         const f = rest[0] ? find(rest[0]) : undefined;
         if (!f) return "No such lesson. Find one: hearth-lesson search <words>";
-        return [f.fact, "", `Learned: ${f.createdAt.slice(0, 10)}${f.evidence ? `, when ${f.evidence}` : ""}`, `Used: ${f.useCount || 0}×${f.lastUsedAt ? `, last ${f.lastUsedAt.slice(0, 10)}` : ""}`, `id: ${f.id}`].join("\n");
+        return [f.fact, "", `Learned: ${f.createdAt.slice(0, 10)}${f.evidence ? `, when ${f.evidence}` : ""}`, ...(f.keywords?.length ? [`Keywords: ${f.keywords.join(", ")}`] : []),
+          `Found in search ${f.found || 0}× · shown in a prompt ${f.shown || 0}× · followed ${f.useCount || 0}×${f.lastUsedAt ? ` (last ${f.lastUsedAt.slice(0, 10)})` : ""} · broken ${f.broken || 0}×`, `id: ${f.id}`].join("\n");
       }
       case "used": {
         const ids = rest.map((id) => find(id)?.id).filter((x): x is string => !!x);
         if (!ids.length) return "No such lesson. The ids are in hearth-lesson search.";
         await this.markUsed(ids);
+        // Credit the searches by this job that turned them up (the last 6 hours): found, then followed.
+        if (jobId) {
+          const since = new Date(this.clock().getTime() - 6 * 3600e3).toISOString();
+          for (const s of (await this.store.all<LessonSearch>("lessonSearches")).filter((x) => x.jobId === jobId && x.createdAt >= since)) {
+            const used = ids.filter((id) => s.hits.includes(id) && !(s.used || []).includes(id));
+            if (used.length) await this.store.put("lessonSearches", { ...s, used: [...(s.used || []), ...used] });
+          }
+        }
         return `Noted: ${ids.length} lesson(s) used.`;
       }
       case "add": {
-        const i = rest.indexOf("--why");
-        const rule = (i >= 0 ? rest.slice(0, i) : rest).join(" ").trim();
-        const why = i >= 0 ? rest.slice(i + 1).join(" ").trim() : "";
+        const flag = (name: string) => { const i = rest.indexOf(name); if (i < 0) return ""; const end = rest.findIndex((x, j) => j > i && x.startsWith("--")); return rest.slice(i + 1, end < 0 ? undefined : end).join(" ").trim(); };
+        const firstFlag = rest.findIndex((x) => x.startsWith("--"));
+        const rule = (firstFlag >= 0 ? rest.slice(0, firstFlag) : rest).join(" ").trim();
+        const why = flag("--why");
         if (!rule) return "usage: hearth-lesson add \"<the rule>\" --why \"<what happened, in a line>\"";
         const r = await this.addFact({ fact: rule, notebook: LESSONS, evidence: why || `saved by ${by}` }, "assistant");
         if (!r.value) return r.error || "Couldn't save it.";
+        await this.lessonSaved(r.value.id, flag("--keywords") ? parseKeywords(flag("--keywords")) : undefined);
         await this.log("lessons", `${by} learned: ${r.value.fact}`);
         return `Saved: ${r.value.id}  ${r.value.fact}`;
       }
@@ -2082,6 +2106,53 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       }
       default: return usage;
     }
+  }
+
+  /** A lesson was just saved: keep the keywords it came with, or have the quick model write them. */
+  private async lessonSaved(id: string, keywords?: unknown) {
+    const words = Array.isArray(keywords) ? parseKeywords(keywords.map(String).join(",")) : typeof keywords === "string" ? parseKeywords(keywords) : [];
+    const f = await this.store.get<Fact>("memory", id);
+    if (!f) return;
+    if (words.length) await this.store.put("memory", { ...f, keywords: words });
+    else if (!f.keywords?.length) this.fillLessonKeywords(1).catch(() => {});
+  }
+
+  /** Lessons without keywords get them from the quick model, a few at a time (the lessons sweep runs this every minute). */
+  async fillLessonKeywords(max = 3) {
+    if (this.keywording) return 0;
+    this.keywording = true;
+    let n = 0;
+    try {
+      const need = (await this.store.all<Fact>("memory")).filter((f) => f.notebook === LESSONS && isActive(f, this.clock()) && !f.keywords?.length).slice(0, max);
+      for (const f of need) {
+        const text = await this.brain.think({ mode: "keywords", context: {}, input: `${f.fact}${f.evidence ? `\n(Learned when: ${f.evidence})` : ""}` }, (await this.brains()).quick);
+        const keywords = parseKeywords(String(text || ""));
+        const now = await this.store.get<Fact>("memory", f.id);
+        if (keywords.length && now && !now.supersededBy) { await this.store.put("memory", { ...now, keywords }); n++; }
+      }
+    } finally { this.keywording = false; }
+    return n;
+  }
+
+  /** Lessons put in a prompt as ones that may apply: counted, then handed back. */
+  private async countShown(lessons: Fact[]) {
+    for (const f of lessons) {
+      const now = await this.store.get<Fact>("memory", f.id);
+      if (now) await this.store.put("memory", { ...now, shown: (now.shown || 0) + 1 });
+    }
+    return lessons;
+  }
+
+  /** How the lessons library is doing: searches that found something and led to a lesson being followed, and each lesson's record. */
+  async lessonStats() {
+    const searches = await this.store.all<LessonSearch>("lessonSearches");
+    const lessons = (await this.store.all<Fact>("memory")).filter((f) => f.notebook === LESSONS && isActive(f, this.clock()));
+    const empty = [...new Set(searches.filter((s) => !s.hits.length).reverse().map((s) => s.query))];
+    return {
+      searches: { total: searches.length, found: searches.filter((s) => s.hits.length).length, followed: searches.filter((s) => s.used?.length).length, empty: empty.slice(0, 30) },
+      lessons: lessons.map((f) => ({ id: f.id, fact: f.fact, keywords: f.keywords || [], found: f.found || 0, shown: f.shown || 0, used: f.useCount || 0, broken: f.broken || 0, lastUsedAt: f.lastUsedAt || null }))
+        .sort((a, b) => b.used - a.used || b.found - a.found),
+    };
   }
 
   /** What `hearth-skill-store <argv>` does, for /api/agent/skills. Text back for the agent to read. */
@@ -2680,7 +2751,12 @@ ${JSON.stringify(shown, null, 1)}
           case "lesson.add": {
             // A lesson is a memory fact in the lessons notebook: same dedupe, superseding, forgetting and nightly tidy.
             const r = await this.addFact({ fact: a.lesson ?? a.fact, notebook: LESSONS, importance: a.importance, evidence: a.evidence || evidence.slice(0, 300) }, "assistant");
-            if (r.value) done.push({ kind: "memory", label: `Learned: ${r.value.fact}`, id: r.value.id });
+            if (r.value) { done.push({ kind: "memory", label: `Learned: ${r.value.fact}`, id: r.value.id }); await this.lessonSaved(r.value.id, a.keywords); }
+            break;
+          }
+          case "lesson.broken": {
+            const f = await this.store.get<Fact>("memory", String(a.id));
+            if (f && f.notebook === LESSONS) await this.store.put("memory", { ...f, broken: (f.broken || 0) + 1 });
             break;
           }
           case "memory.update": {
@@ -2912,9 +2988,12 @@ ${JSON.stringify(shown, null, 1)}
     if (!old || old.supersededBy) return null;
     const v = validateFact({ ...old, ...input, fact: input.fact ?? old.fact });
     if (!v.value) return null;
-    const f = await this.store.put<Fact>("memory", this.doc({ ...v.value, source: old.source, useCount: old.useCount, supersedes: old.id }));
+    // A sharpened lesson keeps its record; its keywords are written again for the new wording (fillLessonKeywords).
+    const record = old.notebook === LESSONS ? { found: old.found, shown: old.shown, broken: old.broken, lastUsedAt: old.lastUsedAt } : {};
+    const f = await this.store.put<Fact>("memory", this.doc({ ...v.value, source: old.source, useCount: old.useCount, supersedes: old.id, ...record }));
     await this.store.put("memory", { ...old, supersededBy: f.id, updatedAt: f.createdAt });
     this.emit("memory");
+    if (f.notebook === LESSONS) this.fillLessonKeywords(1).catch(() => {});
     return f;
   }
 
@@ -2927,7 +3006,9 @@ ${JSON.stringify(shown, null, 1)}
     if (olds.length < 2) return null;
     const v = validateFact(input);
     if (!v.value) return null;
-    const f = await this.store.put<Fact>("memory", this.doc({ ...v.value, source: "assistant" as const, useCount: Math.max(...olds.map((o) => o.useCount)), supersedes: olds[0].id }));
+    const sum = (k: "found" | "shown" | "broken" | "useCount") => olds.reduce((n, o) => n + (o[k] || 0), 0);
+    const record = v.value.notebook === LESSONS ? { useCount: sum("useCount"), found: sum("found"), shown: sum("shown"), broken: sum("broken") } : { useCount: Math.max(...olds.map((o) => o.useCount)) };
+    const f = await this.store.put<Fact>("memory", this.doc({ ...v.value, source: "assistant" as const, ...record, supersedes: olds[0].id }));
     for (const o of olds) await this.store.put("memory", { ...o, supersededBy: f.id });
     this.emit("memory");
     return f;
@@ -3810,6 +3891,7 @@ ${JSON.stringify(shown, null, 1)}
     if (Date.now() - this.lessonsSweptAt > 60_000) {
       this.lessonsSweptAt = Date.now();
       try { await this.learnFromQuietThreads(); } catch (e: any) { console.error("lessons review failed", e); }
+      try { await this.fillLessonKeywords(3); } catch (e: any) { console.error("lesson keywords failed", e); }
     }
     try { await this.expireApprovals(); } catch (e: any) { console.error("expiring approvals failed", e); }
     if (Date.now() - this.tidiedAt > 86_400_000) {
