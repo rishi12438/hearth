@@ -344,7 +344,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             guard message.frameInfo.isMainFrame, isHubPage(message.frameInfo.request.url ?? web.url),
                   let path = m["path"] as? String, downloaded.contains(path), FileManager.default.fileExists(atPath: path) else { return }
             let url = URL(fileURLWithPath: path)
-            if type == "file-reveal" { NSWorkspace.shared.activateFileViewerSelecting([url]) } else { NSWorkspace.shared.open(url) }
+            // Since macOS 14 an app in front has to hand focus over, or Finder (or the viewer) opens behind this window.
+            let target = type == "file-reveal" ? URL(fileURLWithPath: "/System/Library/CoreServices/Finder.app") : NSWorkspace.shared.urlForApplication(toOpen: url)
+            let bundleId = target.flatMap { Bundle(url: $0)?.bundleIdentifier }
+            if #available(macOS 14.0, *), let bundleId { NSApp.yieldActivation(toApplicationWithBundleIdentifier: bundleId) }
+            if type == "file-reveal" { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+            else { let c = NSWorkspace.OpenConfiguration(); c.activates = true; NSWorkspace.shared.open(url, configuration: c) }
+            // Then bring it forward through Launch Services (the cooperative way; works while Hearth is the app you clicked).
+            if type == "file-reveal", let target { let c = NSWorkspace.OpenConfiguration(); c.activates = true; NSWorkspace.shared.openApplication(at: target, configuration: c) }
         default: break
         }
     }
