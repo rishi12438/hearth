@@ -126,7 +126,10 @@ give the service its URL. Every call becomes an event on the port's source, wher
 - \`hearth-trigger-port list [--all]\` · \`show <name>\` (its URL, triggers, last events) · \`test <name> '<json>'\`
 - \`hearth-trigger-port release <name> --reason "<why>"\`: the URL stops working. Release ports you no longer need.
 
+Push before polling: when a service can call a webhook, use a port, not a watcher that checks every few minutes.
 Check \`list\` first: if a live port already covers this service and purpose, use it instead of claiming another.
+Some ports are fed by the hub itself and have no URL: \`plaid\` gets every verified Plaid webhook while a bank is
+connected (variables type, code, bank, item_id), so for bank events put a trigger on it rather than claiming one.
 
 Many webhooks only say "something changed" (Plaid: item X has updates). Then add a trigger on the port whose action is
 a script (script.propose; .ts, .py or .sh) that gets the whole event as JSON on stdin and in $HEARTH_EVENT, fetches the
