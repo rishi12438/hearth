@@ -3,7 +3,7 @@ import { homedir, hostname, platform, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { sha256 } from "./auth.ts";
 import { Brain, availableHarnesses, type BrainProfile } from "./brain.ts";
-import { ALIVE_EVERY_MS, COPY_ITEMS, isCopyItem, type CopyItem } from "./computers.ts";
+import { ALIVE_EVERY_MS, COPY_ITEMS, MAX_SHOT, isCopyItem, type CopyItem } from "./computers.ts";
 import { readSiteCookiesAnywhere, canReadBrowser, chromeFingerprint } from "./chrome.ts";
 import { requiredFor, labelFor, isValidDomain } from "./cookie-sites.ts";
 import type { Config } from "./config.ts";
@@ -125,9 +125,61 @@ export function hasLogin(item: CopyItem): boolean {
   return existsSync(join(homedir(), COPY_ITEMS[item].path));
 }
 
+/**
+ * One hearth-browser command from the hub (a job there got blocked, and you approved using this Mac's browser; see
+ * other-browser.ts), run with this Mac's own enkidu-browser in a session the hub names. The page opens in a real,
+ * visible Chrome here: your home connection, your logins. Screenshots go back as an image small enough for the line.
+ */
+export async function browseHere(sid: string, action: string, params: Record<string, unknown>, opts: { bin?: string | null; run?: (argv: string[]) => Promise<{ code: number; out: string }> } = {}): Promise<{ ok: boolean; out?: string; png?: string; mime?: string }> {
+  if (!/^hearth-other-[a-f0-9]{6,20}$/.test(sid)) return { ok: false, out: "Not a session the hub can use." };
+  if (!["open", "navigate", "observe", "click", "type", "press", "scroll", "evaluate", "screenshot", "back", "close"].includes(action)) return { ok: false, out: `Unknown command ${action}.` };
+  const bin = opts.bin !== undefined ? opts.bin : (existsSync(join(homedir(), ".enkidu", "bin", "enkidu-browser")) ? join(homedir(), ".enkidu", "bin", "enkidu-browser") : Bun.which("enkidu-browser"));
+  if (!bin) return { ok: false, out: "This Mac has no enkidu-browser, so it can't open pages for the hub." };
+  const run = opts.run ?? (async (argv: string[]) => {
+    // The hub's sessions have their own owner here, so they never mix with yours.
+    const p = Bun.spawn([bin, ...argv], { env: { ...process.env, ENKIDU_OWNER: "hearth-hub" }, stdout: "pipe", stderr: "pipe" });
+    const timer = setTimeout(() => p.kill(), 120_000);
+    const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+    clearTimeout(timer);
+    return { code: await p.exited, out: (out.trim() || err.trim()).slice(0, 60_000) };
+  });
+  const msg = (out: string) => { try { return String(JSON.parse(out).message || out); } catch { return out; } };
+  if (action === "close") { await run(["session", "close", sid]); return { ok: true, out: "Closed." }; }
+  const use = (a: string, p: Record<string, unknown>) => run(["session", "use", sid, a, JSON.stringify(p)]);
+  let r: { code: number; out: string };
+  if (action === "open") {
+    // A visible Chrome: sites that stop headless ones let a real window through.
+    const fresh = async () => { await run(["session", "close", sid]); await run(["session", "new", sid, JSON.stringify({ recordName: "Hearth: a job from the hub" })]); return use("open", { ...params, headless: false }); };
+    r = (await run(["session", "get", sid])).code === 0 ? await use("open", { ...params, headless: false }) : await fresh();
+    if (r.code !== 0 && /lost|expired|canceled|cancelled|not found|no session/i.test(msg(r.out))) r = await fresh();
+  } else if (action === "back") r = await use("evaluate", { expression: "history.back()" });
+  else r = await use(action, params);
+  if (r.code !== 0) return { ok: false, out: msg(r.out) };
+  if (action !== "screenshot") return { ok: true, out: r.out };
+  let file = "";
+  try { file = String(JSON.parse(r.out).file || ""); } catch {}
+  if (!file || !existsSync(file)) return { ok: false, out: "The screenshot didn't come out." };
+  let bytes = readFileSync(file), mime = "image/png";
+  if (bytes.length > MAX_SHOT && platform() === "darwin") {
+    // Too big for the line: a smaller JPEG of it.
+    const dir = mkdtempSync(join(tmpdir(), "hearth-shot-"));
+    try {
+      for (const [w, q] of [[1280, 70], [1000, 55], [800, 45]] as const) {
+        const jpg = join(dir, `s-${w}.jpg`);
+        Bun.spawnSync(["sips", "-s", "format", "jpeg", "-s", "formatOptions", String(q), "--resampleWidth", String(w), file, "--out", jpg], { stdout: "ignore", stderr: "ignore" });
+        if (existsSync(jpg) && readFileSync(jpg).length <= MAX_SHOT) { bytes = readFileSync(jpg); mime = "image/jpeg"; break; }
+      }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+  if (bytes.length > MAX_SHOT) return { ok: false, out: "That screenshot is too big to send. Take a normal one (not full), or use observe." };
+  return { ok: true, png: bytes.toString("base64"), mime };
+}
+
 type Opts = { config: Config; link: Link; brain?: Brain; readCopy?: (item: CopyItem) => string | null; log?: (s: string) => void; copyEveryMs?: number; home?: string;
   /** How this computer's tools are (enkidu-browser, enkidu-cua), told to the hub for Settings. Swapped in tests. */
   tools?: () => Promise<ToolStatus[]>;
+  /** hearth-browser commands from the hub (browseHere); swapped in tests. */
+  browse?: typeof browseHere;
   /** The hub signed this computer out for good. */
   onSignedOut?: () => void };
 
@@ -251,6 +303,12 @@ export function connect(opts: Opts) {
       if (m.t === "ping") send({ t: "pong", ts: m.ts });
       else if (m.t === "run" && typeof m.id === "string") run(m);
       else if (m.t === "stop") runs.get(m.id)?.abort();
+      else if (m.t === "browse" && typeof m.id === "string" && !link.cloud) {
+        const params = m.params && typeof m.params === "object" ? m.params : {};
+        log(`  the hub is using this Mac's browser: ${String(m.action)}${typeof params.url === "string" ? ` ${params.url}` : ""}`);
+        (opts.browse ?? browseHere)(String(m.sid), String(m.action), params)
+          .then((r) => send({ t: "browsed", id: m.id, ...r }), (e) => send({ t: "browsed", id: m.id, ok: false, out: String(e?.message || e) }));
+      }
       else if (m.t === "want") { want = { items: (m.items || []).filter(isCopyItem), have: m.have || {} }; copyUp(); }
       else if (m.t === "skills" && typeof m.key === "string") { agentSkills = { key: m.key, google: m.google === true }; brain.refreshSkills?.(); }
       else if (m.t === "wantCookies") { cookieWant = { sites: (m.sites || []).filter(isValidDomain), have: m.have || {}, fresh: isValidDomain(m.fresh) ? m.fresh : undefined }; copyCookiesUp(); }

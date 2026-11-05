@@ -251,7 +251,8 @@ test("end to end: the hub sets up a cloud computer that downloads Hearth from it
 
   // It linked back to the hub on its own, with the hub-minted key.
   const deviceId = ms.get(id)!.deviceId;
-  await until(() => computers.isOnline(deviceId), 20_000);
+  // Online once its socket opens; its brains are known once its hello arrives just after.
+  await until(() => computers.isOnline(deviceId) && computers.status(deviceId, "").harnesses.length > 0, 20_000);
   expect(computers.status(deviceId, "")).toMatchObject({ state: "online", harnesses: expect.arrayContaining(["claude", "codex", "echo"]) });
   const link = JSON.parse(readFileSync(join(box, "hearth/data/computer.json"), "utf8"));
   expect(link).toMatchObject({ hub: url, deviceId, name: "Sandbox", cloud: true });

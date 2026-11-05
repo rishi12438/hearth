@@ -59,6 +59,8 @@ job that don't need the login, so the rerun only has the signed-in part left.
 If a command fails, read the \`message\` in its JSON and act on it (a new session for a canceled or expired one, other letters for a taken
 id). If you're still stuck, say what the tool said, word for word, in \`why\`. The user doesn't run Enkidu: never tell them to open or
 restart it.
+A site that blocks this browser (a human check, a captcha, Access Denied, a page that never loads): run
+\`hearth-help stuck blocked\` and do what it says, instead of giving the work back to the user.
 ${SAFE}`,
   },
   {
@@ -475,6 +477,10 @@ export function describeSkillStep(command: unknown): string | null {
     if (svc === "drive") return cmd === "search" ? "Searching your Drive" : cmd === "read" ? "Reading a file from Drive" : cmd === "append" ? "Adding rows to a Google Sheet" : cmd === "folder" ? "Making a Drive folder" : "Saving to your Drive";
     return cmd === "list" ? "Checking your calendar" : cmd === "add" ? "Adding to your calendar" : "Changing a calendar event";
   }
+  const stuck = c.match(/(?:^|[\s;&|/])hearth-help\s+stuck(?:\s+["']?([\w'-]+))?/);
+  if (stuck) return stuck[1] ? `Stuck (${stuck[1].replace(/'/g, "")}): finding another way` : "Stuck: working out what to do";
+  const other = c.match(/(?:^|[\s;&|/])hearth-browser\s+(\w+)/)?.[1];
+  if (other) return other === "open" ? "Opening the page in Chrome on your Mac" : other === "screenshot" ? "Looking at the page on your Mac" : "Using Chrome on your Mac";
   const find = c.match(/(?:^|[\s;&|/])hearth-skill\s+(search|show)\s+(.+)/);
   if (find) return find[1] === "search" ? `Looking for a skill: ${find[2].replace(/["']/g, "").trim().slice(0, 50)}` : `Reading the ${find[2].replace(/["']/g, "").trim().slice(0, 40)} skill`;
   const tool = c.match(/(?:^|[\s;&|/])(enkidu-browser|enkidu-cua)\s/)?.[1];
