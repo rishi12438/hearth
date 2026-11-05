@@ -22,7 +22,7 @@ export type Message = Doc & {
   /** Set on messages the assistant sent first. */
   proactive?: { hookId: string; title: string; trigger: string; why: string };
   /** Posted by a trigger handing what happened to Hearth (route who "hearth"): shown as the trigger, not as you. */
-  fromTrigger?: { id: string; title: string };
+  fromTrigger?: { id: string; title: string; eventId?: string };
   /** Not shown in the chat: a trigger's hand-off to an agent (and Hearth's line about it). Only what the agent does shows. */
   hidden?: boolean;
   /**
