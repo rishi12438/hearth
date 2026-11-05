@@ -35,12 +35,14 @@ func loginPath() -> String {
     return (found.split(separator: ":").map(String.init) + extra).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }.joined(separator: ":")
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, UNUserNotificationCenterDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, WKDownloadDelegate, UNUserNotificationCenterDelegate, NSWindowDelegate {
     var window: NSWindow!
     var web: WKWebView!
     var wizard: Process?
     var computer: Process?
     var statusItem: NSStatusItem?
+    var downloading: [ObjectIdentifier: (url: URL, asked: String)] = [:] // downloads in flight: where each is going
+    var downloaded: Set<String> = [] // files this app saved, the only ones the page may show in Finder or open
     let path = loginPath()
 
     func applicationDidFinishLaunching(_ note: Notification) {
@@ -50,6 +52,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         config.websiteDataStore = .default() // keeps this Mac paired with the hub between launches
         config.applicationNameForUserAgent = "HearthMac" // lets Hearth's pages offer "Set up a new hub"
         config.userContentController.add(self, name: "hearth") // the hub page tells the app: "ready", "notify", "chrome-…"
+        // Tells the page this app saves Download clicks into ~/Downloads and reports back (older apps silently dropped them).
+        config.userContentController.addUserScript(WKUserScript(source: "window.hearthSavesFiles = true", injectionTime: .atDocumentStart, forMainFrameOnly: true))
         web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = self
         web.uiDelegate = self
@@ -178,6 +182,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     /// Leaving the wizard for a hub (the "Open Hearth" button): remember it, so the next launch opens it directly.
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        // A Download button (<a download>): save it like a browser would, into Downloads.
+        if action.shouldPerformDownload { return decisionHandler(.download) }
         guard let url = action.request.url else { return decisionHandler(.allow) }
         // "Set up a new hub" (Settings → Hubs): run setup again. The hub you're on stays as it is.
         if url.scheme == "hearth-app" { if url.host == "new-hub" { rerun() }; return decisionHandler(.cancel) }
@@ -195,6 +201,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             }
         }
         decisionHandler(.allow)
+    }
+
+    /// A file the page can't show (sent as an attachment): download it too.
+    func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        decisionHandler(response.canShowMIMEType ? .allow : .download)
+    }
+
+    // ---------- downloads: straight into ~/Downloads, like Slack, then the page says where it went ----------
+
+    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) { download.delegate = self }
+    func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) { download.delegate = self }
+
+    func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
+        let url = freeDownloadURL(suggestedFilename)
+        downloading[ObjectIdentifier(download)] = (url, suggestedFilename)
+        completionHandler(url)
+    }
+
+    func downloadDidFinish(_ download: WKDownload) {
+        guard let d = downloading.removeValue(forKey: ObjectIdentifier(download)) else { return }
+        // Marked as downloaded from the internet, so macOS checks it before anything in it can run.
+        var url = d.url, rv = URLResourceValues()
+        rv.quarantineProperties = [kLSQuarantineAgentNameKey as String: "Hearth", kLSQuarantineTypeKey as String: kLSQuarantineTypeWebDownload as String]
+        try? url.setResourceValues(rv)
+        downloaded.insert(d.url.path)
+        // The Downloads stack in the Dock bounces, as it does for Safari.
+        DistributedNotificationCenter.default().post(name: .init("com.apple.DownloadFileFinished"), object: d.url.path)
+        tellPage(["asked": d.asked, "name": d.url.lastPathComponent, "path": d.url.path,
+                  "where": d.url.deletingLastPathComponent().path.replacingOccurrences(of: NSHomeDirectory(), with: "~")])
+    }
+
+    func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+        let d = downloading.removeValue(forKey: ObjectIdentifier(download))
+        tellPage(["asked": d?.asked ?? "", "error": "Couldn't save \(d?.asked ?? "the file"): \(error.localizedDescription)"])
+    }
+
+    /// ~/Downloads/<name>, or "<name> (2)" and on if that's taken. The name loses anything that could point elsewhere.
+    func freeDownloadURL(_ suggested: String) -> URL {
+        let dir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
+        var name = (suggested as NSString).lastPathComponent.replacingOccurrences(of: ":", with: "-").trimmingCharacters(in: .whitespaces)
+        while name.hasPrefix(".") { name.removeFirst() }
+        if name.isEmpty { name = "download" }
+        let base = (name as NSString).deletingPathExtension, ext = (name as NSString).pathExtension
+        var url = dir.appendingPathComponent(name), n = 2
+        while FileManager.default.fileExists(atPath: url.path) {
+            url = dir.appendingPathComponent(ext.isEmpty ? "\(base) (\(n))" : "\(base) (\(n)).\(ext)"); n += 1
+        }
+        return url
+    }
+
+    /// window.hearthDownloaded({asked, name, path, where} or {asked, error}).
+    func tellPage(_ info: [String: String]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: info), let json = String(data: data, encoding: .utf8) else { return }
+        web.evaluateJavaScript("window.hearthDownloaded && window.hearthDownloaded(\(json))", completionHandler: nil)
     }
 
     /// <input type="file"> (the SSH key in setup): the usual Open panel. Picking a file this way is what lets the app
@@ -279,6 +339,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             guard message.frameInfo.isMainFrame, let id = m["id"] as? String, isHubPage(message.frameInfo.request.url ?? web.url) else { return }
             let ok = (m["link"] as? [String: Any]).map(saveLink) ?? false
             reply(id, ok ? "{\"ok\":true}" : "{\"error\":\"That link isn't for this hub.\"}")
+        case "file-reveal", "file-open":
+            // Show in Finder / Open, for a file this app just downloaded (never any other path).
+            guard message.frameInfo.isMainFrame, isHubPage(message.frameInfo.request.url ?? web.url),
+                  let path = m["path"] as? String, downloaded.contains(path), FileManager.default.fileExists(atPath: path) else { return }
+            let url = URL(fileURLWithPath: path)
+            if type == "file-reveal" { NSWorkspace.shared.activateFileViewerSelecting([url]) } else { NSWorkspace.shared.open(url) }
         default: break
         }
     }
