@@ -2129,7 +2129,11 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     const mac = this.macName();
     const gate = mac ? await this.macBrowserGate(job?.threadId || ORPHAN_THREAD) : null;
     const waiting = job ? (await this.store.all<Approval>("approvals")).filter((a) => a.status === "pending" && a.jobId === job!.id).map((a) => a.summary) : [];
-    await this.log("help.stuck", `${kind}: ${rest.join(" ")}`.slice(0, 200));
+    // Activity log: who got stuck, on what, and how (Settings → Activity log), so you can see where agents get stuck.
+    const k = stuckKind(kind)!;
+    const mate = job?.teammateId ? await this.store.get<any>("teammates", job.teammateId) : null;
+    const words = rest.join(" ").trim();
+    await this.log("help.stuck", `${mate?.name || "A teammate"} got stuck (${k.id})${job?.task ? ` on "${job.task.slice(0, 120)}"` : ""}${words ? `: ${words.slice(0, 160)}` : ""}`);
     return stuckHelp(kind, { mac, gate, servers: this.connect?.mcp.list() ?? [], waiting });
   }
 

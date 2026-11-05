@@ -477,6 +477,10 @@ export function describeSkillStep(command: unknown): string | null {
     if (svc === "drive") return cmd === "search" ? "Searching your Drive" : cmd === "read" ? "Reading a file from Drive" : cmd === "append" ? "Adding rows to a Google Sheet" : cmd === "folder" ? "Making a Drive folder" : "Saving to your Drive";
     return cmd === "list" ? "Checking your calendar" : cmd === "add" ? "Adding to your calendar" : "Changing a calendar event";
   }
+  const stuck = c.match(/(?:^|[\s;&|/])hearth-help\s+stuck(?:\s+["']?([\w'-]+))?/);
+  if (stuck) return stuck[1] ? `Stuck (${stuck[1].replace(/'/g, "")}): finding another way` : "Stuck: working out what to do";
+  const other = c.match(/(?:^|[\s;&|/])hearth-browser\s+(\w+)/)?.[1];
+  if (other) return other === "open" ? "Opening the page in Chrome on your Mac" : other === "screenshot" ? "Looking at the page on your Mac" : "Using Chrome on your Mac";
   const find = c.match(/(?:^|[\s;&|/])hearth-skill\s+(search|show)\s+(.+)/);
   if (find) return find[1] === "search" ? `Looking for a skill: ${find[2].replace(/["']/g, "").trim().slice(0, 50)}` : `Reading the ${find[2].replace(/["']/g, "").trim().slice(0, 40)} skill`;
   const tool = c.match(/(?:^|[\s;&|/])(enkidu-browser|enkidu-cua)\s/)?.[1];

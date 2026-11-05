@@ -10,6 +10,7 @@ import { loadConfig } from "../src/config.ts";
 import { Computers } from "../src/computers.ts";
 import { browseHere } from "../src/computer.ts";
 import { CLOUD_BROWSERS, STUCK, stuckHelp, stuckKind } from "../src/help.ts";
+import { describeSkillStep } from "../src/brains/skills.ts";
 import { OtherBrowser, macSession, otherBrowserSkill, parseArgv, type Act, type MacGate } from "../src/other-browser.ts";
 import type { Approval, Job } from "../src/types.ts";
 
@@ -154,6 +155,12 @@ test("hub: hearth-help stuck reads the Mac, this conversation's answer and the M
     for (const k of STUCK) expect(menu).toContain(`  ${k.id}`);
   }
   expect(await hub.helpAgent([], "j1")).toContain("hearth-help topics");
+  // The Activity log says who got stuck, on what.
+  const mate = await store.put<any>("teammates", { id: "m1", createdAt: new Date().toISOString(), name: "Research" });
+  await store.put<Job>("jobs", { ...(await store.get<Job>("jobs", "j1"))!, teammateId: mate.id });
+  await hub.helpAgent(["stuck", "bot-detection", "priceline", "press-and-hold"], "j1");
+  const logged = (await store.all<any>("activity")).filter((a) => a.kind === "help.stuck").map((a) => a.text);
+  expect(logged).toContain('Research got stuck (blocked) on "cars": priceline press-and-hold');
   // Words after the kind change nothing in the answer (they're only logged).
   expect(await hub.helpAgent(["stuck", "failing", "curl", "keeps", "timing", "out"], "j1")).toBe(await hub.helpAgent(["stuck", "failing"], "j1"));
 });
@@ -269,6 +276,13 @@ test("hub: one card per conversation; Approve opens the Mac there; No and Always
   await hub.decideApproval(c3.id, true, true);
   expect(await hub.alwaysAllowed()).toContain("browser:mac");
   expect(await hub.macBrowserGate("t9")).toBe("ok");
+});
+
+test("the thread's step line says when it's stuck and when it's on the Mac", () => {
+  expect(describeSkillStep('hearth-help stuck blocked "priceline"')).toBe("Stuck (blocked): finding another way");
+  expect(describeSkillStep("hearth-help stuck")).toBe("Stuck: working out what to do");
+  expect(describeSkillStep('hearth-browser open https://priceline.com "human check"')).toBe("Opening the page in Chrome on your Mac");
+  expect(describeSkillStep("hearth-browser click e3")).toBe("Using Chrome on your Mac");
 });
 
 test("the skill brings the command, and enkidu-browser's rules point to it", () => {
