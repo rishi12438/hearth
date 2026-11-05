@@ -218,7 +218,6 @@ export type Prefs = {
   /** The brains the user picked in setup (claude, codex). Two or more share the work by live usage. */
   brainPool?: string[];
   spend?: { date: string; usd: number };
-  costCaps?: { rambleUsd: number; dayUsd: number };
   /** "About you": a short profile the assistant keeps (and you can edit). Always in context. */
   about?: string;
   aboutUpdatedAt?: string;
