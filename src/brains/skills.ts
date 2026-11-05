@@ -204,12 +204,10 @@ before you pick a tool or say anything is true; if one proves wrong now, fix it 
 Save it the moment you know it, not at the end: you can be stopped at any time.
 
 ## Make it general
-A lesson is a rule for every job, not a note about this one. Take out this case's names and dates, keep the pattern,
-and keep exact tool names when it's about tools.
-- "The PDF's totals table lost a page when I parsed it" -> "After extracting data from a document, check the counts
-  against the source before using them."
-- "WebFetch gave the bakery's menu page empty, the browser got it" -> "When a plain fetch returns an empty page, the site
-  needs JavaScript: switch to the browser tool instead of retrying the fetch."
+A lesson is a rule for every job, not a note about this one. Take out this case's names, places and dates and keep
+the pattern. Name a tool only when the lesson is which tool to use for a kind of problem.
+- "The table lost a page when I parsed it" -> "After extracting data, check the counts against the source before using them."
+- "The same tool failed three times the same way" -> "When a tool fails twice the same way, switch to another instead of retrying."
 - "I said done but the file was empty" -> "Check a tool's output before saying something is done."
 (These only show the shape. Your lessons come from what actually happened in your own work.)
 One or two short, imperative sentences. evidence: what happened, in a line.
