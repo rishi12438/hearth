@@ -1108,7 +1108,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       if (stop.signal.aborted && this.cancelled.delete(job.id)) {
         this.additions.delete(job.id); this.additions.delete(`${job.id}:label`);
         await this.addSpend(job.messageId, meter.costUsd);
-        cur = await this.saveJob({ ...cur, status: "failed", result: "Stopped by you.", durationMs: Date.now() - started, finishedAt: this.clock().toISOString() });
+        cur = await this.saveJob({ ...cur, status: "failed", stopped: true, result: "Stopped by you.", durationMs: Date.now() - started, finishedAt: this.clock().toISOString() });
         return;
       }
       if (stop.signal.aborted) {
@@ -1538,7 +1538,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     if (!j || !["queued", "working"].includes(j.status)) return { error: "That isn't running." };
     const stop = this.stops.get(id);
     if (stop) { this.cancelled.add(id); stop.abort(); }
-    else await this.saveJob({ ...j, status: "failed", result: "Stopped by you.", finishedAt: this.clock().toISOString() });
+    else await this.saveJob({ ...j, status: "failed", stopped: true, result: "Stopped by you.", finishedAt: this.clock().toISOString() });
     await this.log("job.stopped", (j.label || j.task).slice(0, 80));
     return { value: { ok: true } };
   }
@@ -1563,7 +1563,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       job = await this.saveJob({ ...job, relogged: [...new Set([...(job.relogged || []), site])] });
     }
     const msg = await this.store.get<Message>("messages", job.messageId);
-    const fresh = await this.saveJob({ ...job, blocked: undefined, status: "queued", result: undefined, did: undefined });
+    const fresh = await this.saveJob({ ...job, blocked: undefined, stopped: undefined, status: "queued", result: undefined, did: undefined });
     await this.log("job.retry", job.task.slice(0, 80));
     if (fresh.parentId) { this.inflight++; this.runJob(fresh, msg?.text || job.task).finally(() => this.inflight--); }
     else await this.pump(fresh.messageId);
@@ -2614,7 +2614,7 @@ ${JSON.stringify(shown, null, 1)}
     for (const j of jobs.filter((x) => x.status === "blocked")) items.push({ kind: "blocked", at: j.updatedAt || j.createdAt, id: j.id, summary: j.blocked?.need || j.task, unblock: j.blocked?.unblock, seen: stuckSeen(j), teammateId: j.teammateId, threadId: j.threadId, jobId: rootOf(j) });
     for (const m of msgs.filter((x) => x.proactive)) items.push({ kind: "proactive", at: m.createdAt, id: m.id, summary: m.text, title: m.proactive!.title, teammateId: m.teammateId || "hearth", threadId: m.threadId });
     for (const j of jobs.filter((x) => (x.status === "done" || x.status === "failed") && x.finishedAt).sort((a, b) => b.finishedAt!.localeCompare(a.finishedAt!)).slice(0, 25)) {
-      items.push({ kind: j.status === "failed" ? "failed" : "done", at: j.finishedAt, id: j.id, summary: j.task, result: (j.result || "").split("\n").find((l) => l.trim()) || "", teammateId: j.teammateId, threadId: j.threadId, jobId: rootOf(j) });
+      items.push({ kind: j.status === "failed" && !j.stopped ? "failed" : "done", at: j.finishedAt, id: j.id, summary: j.task, result: (j.result || "").split("\n").find((l) => l.trim()) || "", teammateId: j.teammateId, threadId: j.threadId, jobId: rootOf(j) });
     }
     // Everyone working right now, and what's waiting its turn.
     for (const j of jobs.filter((x) => x.status === "working" || x.status === "queued")) {

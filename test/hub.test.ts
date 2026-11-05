@@ -808,6 +808,8 @@ test("Activity lists who's working right now, and Stop ends a running job withou
   const done = (await store.get<Job>("jobs", job.id))!;
   expect(done.status).toBe("failed"); // not back in the queue
   expect(done.result).toBe("Stopped by you.");
+  expect(done.stopped).toBe(true); // shown as stopped, not as a failure
+  expect((await hub.inbox()).find((x: any) => x.id === job.id)?.kind).not.toBe("failed");
   expect((await hub.stopJob(job.id)).error).toBeTruthy();
 });
 

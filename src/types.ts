@@ -116,6 +116,8 @@ export type Job = Doc & {
   /** It was stopped mid-run by a new message from the user: what they said, and what it had done so far. The next run
    *  carries on from there (in the same session when it has one) instead of starting the task over. */
   interrupted?: { added: string[]; steps: string[] };
+  /** You stopped it (the stop button, Esc twice): it ended where it was, which isn't a failure. */
+  stopped?: boolean;
   /** Files the teammate made for this job. */
   fileIds?: string[];
   /** Jobs this one needs results from; it starts when they're done. */
