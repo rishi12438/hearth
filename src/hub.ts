@@ -16,7 +16,7 @@ import { SignedOut } from "./sources/pages.ts";
 import type { Vault } from "./vault.ts";
 import { SOURCES, sourceById, formatItems, needOf, type Item } from "./sources/index.ts";
 import { recall, isActive, validateFact } from "./memory.ts";
-import { describeLocal, inQuietHours, quietEndsAt, localDate, distanceMeters } from "./time.ts";
+import { describeLocal, localDate, distanceMeters } from "./time.ts";
 import { CHANNELS, CHANNEL_LABEL, type Channel } from "./types.ts";
 import { badChatLink } from "./connectors/web-senders.ts";
 import { googleAgent, CHANGE_KINDS, type GoogleChange } from "./connectors/google-agent.ts";
@@ -37,8 +37,7 @@ import { describeWatch } from "./events/watchers.ts";
 import { judgePrompt, parseValue, describeOutput, type Judge, type JudgeExample, type JudgeValue } from "./events/judge.ts";
 
 const DEFAULT_PREFS: Prefs = {
-  userName: "", tz: "UTC", quietStart: "23:00", quietEnd: "07:30",
-  maxProactivePerDay: 6, proactiveToday: { date: "", n: 0 }, placeState: {},
+  userName: "", tz: "UTC", placeState: {},
 };
 // Teammates are named after their job ("Reminders", "Research"), so "@Research is on it" explains itself.
 export const DEFAULT_TEAMMATES: Pick<Teammate, "id" | "name" | "color" | "description" | "prompt" | "emoji">[] = [
@@ -146,7 +145,7 @@ export class Hub {
   get pipeline() {
     if (!this._pipeline) {
       const p = new EventPipeline(join(this.config.dataDir, "events.db"), () => this.clock(), async () => (await this.prefs()).tz);
-      p.run = (t, e, v, released) => this.runEventTrigger(t, e, v, released);
+      p.run = (t, e, v) => this.runEventTrigger(t, e, v);
       p.watchFn = (w, seen) => this.watchOnce(w, seen);
       p.note = (kind, text) => { void this.log(kind, text).catch(() => {}); };
       p.judgeFn = (jd, e, ex) => this.judgeEvent(jd, e, ex);
@@ -284,7 +283,6 @@ export class Hub {
     const fix = (await this.store.recent<LocationFix>("locations", 1))[0];
     const history = await this.store.recent<Message>("messages", 14);
     const today = localDate(now, prefs.tz);
-    const used = prefs.proactiveToday.date === today ? prefs.proactiveToday.n : 0;
     let location: Record<string, unknown> | null = null;
     if (fix) {
       const near = places.find((p) => distanceMeters(fix, p) <= p.radiusM);
@@ -301,8 +299,6 @@ export class Hub {
       userName: prefs.userName || undefined,
       aboutYou: prefs.about || "(not written yet)",
       people: (await this.store.all<Person>("people")).slice(0, 80).map((p) => ({ name: p.name, relation: p.relation, notes: p.notes.slice(-4), links: p.links })),
-      quietHours: `${prefs.quietStart}-${prefs.quietEnd}`,
-      proactiveMessagesLeftToday: Math.max(0, prefs.maxProactivePerDay - used),
       location,
       places: places.map((p) => ({ name: p.name, radiusM: p.radiusM })),
       sources: SOURCES.map((s) => ({ id: s.id, label: s.label, connected: typeof s.needs === "function" ? undefined : this.connections.connected(s.needs) })),
@@ -2786,7 +2782,7 @@ ${JSON.stringify(shown, null, 1)}
 
   ideaTitlesForTest() { return this.ideaTitles(); }
 
-  /** Ask the team for ideas now (the system hook does this every few hours, outside quiet hours). */
+  /** Ask the team for ideas now (the system hook does this every few hours). */
   async thinkOfIdeas() {
     const r = await this.turn("ideas", "Suggest ideas.", "ideas", { profile: (await this.brains()).workhorse });
     await this.log("ideas", r.text && r.text !== QUIET ? r.text : "nothing worth suggesting");
@@ -3275,13 +3271,6 @@ ${JSON.stringify(shown, null, 1)}
     }
   }
 
-  /** How many messages you've had today without asking (the daily limit counts these). */
-  private async proactiveLeft() {
-    const prefs = await this.prefs();
-    const today = localDate(this.clock(), prefs.tz);
-    return { prefs, today, n: prefs.proactiveToday.date === today ? prefs.proactiveToday.n : 0 };
-  }
-
   /** One look by a watcher: what's new since `seen`, and what to remember. The first look only remembers. */
   private async watchOnce(w: Watcher, seen: any): Promise<WatchResult> {
     const c = w.config as any;
@@ -3538,7 +3527,7 @@ ${JSON.stringify(shown, null, 1)}
       const sc = await this.scripts.byName(String(typeof act.before === "object" ? act.before.script : act.before).toLowerCase());
       if (sc && sc.lang !== "sh") return `## ${a.type}: not done\nThe action's "before" must be a bash script (script.propose with lang "sh"); "${sc.name}" is ${sc.lang === "py" ? "Python" : "TypeScript"}. A bash script can still call python3 if it needs to.`;
     }
-    // Your own reminders ("remind me…") ring even in quiet hours; that's what requestedByUser says.
+    // requestedByUser: the user asked for this one themselves ("remind me…").
     const by = a.requestedByUser === true && (a.type === "remind" || a.type === "trigger.add") ? "you" : (await this.teammate(where.teammateId))?.name || "Hearth";
     const no = (what: string, r: { error?: string }) => `## ${what}: not done\n${r.error}\nPick one of the options and try again, or ask the user if it's their call.`;
     const name = String(a.name ?? a.source ?? "");
@@ -3669,21 +3658,11 @@ ${JSON.stringify(shown, null, 1)}
 
   /**
    * A trigger matched: notify, think, run a workflow or a script, and say it where the trigger was made.
-   * Your own reminders ring any time. Anything else waits out quiet hours (held, then run when they end) and counts
-   * toward the daily limit of messages you didn't ask for.
+   * Every trigger runs when it matches: no quiet hours, no daily limit.
    */
-  private async runEventTrigger(t: EventTrigger, e: PipelineEvent, judge?: JudgeValue, released = false): Promise<RunResult> {
+  private async runEventTrigger(t: EventTrigger, e: PipelineEvent, judge?: JudgeValue): Promise<RunResult> {
     const a = t.action;
     if (a.type === "system") return this.runSystemJob(a.job);
-    const now = this.clock();
-    const mine = t.createdBy === "you" && a.type === "message" && !a.agent && e.sourceName === TIME_SOURCE;
-    const gated = !mine && !e.test;
-    if (gated) {
-      const { prefs, n } = await this.proactiveLeft();
-      if (!released && inQuietHours(now, prefs.tz, prefs.quietStart, prefs.quietEnd)) return { hold: quietEndsAt(now, prefs.tz, prefs.quietEnd).toISOString() };
-      if (n >= prefs.maxProactivePerDay) return { skipped: `not sent: today's limit of ${prefs.maxProactivePerDay} messages is reached` };
-    }
-    const counted = async () => { if (gated) { const { today, n } = await this.proactiveLeft(); await this.setPrefs({ proactiveToday: { date: today, n: n + 1 } }); } };
     const vars: Record<string, unknown> = { ...e.variables, source: e.sourceName, ...(judge !== undefined ? { judge } : {}) };
     const teammate = await this.teammate(t.teammateId);
     // A timer's event says nothing a routine needs (it knows the time), unless the timer carries data.
@@ -3745,7 +3724,6 @@ ${JSON.stringify(shown, null, 1)}
           await this.store.put<Message>("messages", { ...m, jobIds: [job.id] });
           this.emit("job", job);
           this.pump(m.id);
-          await counted();
           return { text: `went on in its task thread (${root.label || shortLabel(undefined, root.task)})` };
         }
         const where = await this.triggerThread(t, teammate);
@@ -3753,17 +3731,14 @@ ${JSON.stringify(shown, null, 1)}
           // Hearth reads what happened and picks who, like a ramble.
           const r = await this.ramble(task, where.threadId, [], undefined, { fromTrigger: from, title: t.title, hidden: true });
           if (r.error) throw new Error(r.error);
-          await counted();
           return { text: `handed to Hearth in ${where.fresh ? "a new ramble" : "its ramble"}` };
         }
         const job = await this.startTriggerJob(t, where.threadId, teammate?.id || "hearth", task);
-        await counted();
         return { text: `${teammate?.name || "Hearth"} is on it (task ${job.id})` };
       }
       if (!text) text = fillTemplate(a.message, vars);
     }
     if (!text.trim() || text.includes(QUIET)) return { quiet: true };
-    await counted();
     const late = e.sourceName === TIME_SOURCE && Number(e.variables.late_by_min) > 10;
     const where = await this.triggerThread(t, teammate);
     const threadId = where.threadId, home = where.home;
@@ -3858,8 +3833,6 @@ ${JSON.stringify(shown, null, 1)}
   private async runSystemJob(job: string): Promise<RunResult> {
     if (job === "purge") { await this.purgeLibrary(); return { text: "library tidied" }; }
     if (job === "ideas") {
-      const prefs = await this.prefs();
-      if (inQuietHours(this.clock(), prefs.tz, prefs.quietStart, prefs.quietEnd)) return { quiet: true };
       await this.thinkOfIdeas();
       return { text: "looked for ideas" };
     }

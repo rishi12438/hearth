@@ -132,22 +132,15 @@ test("a push source's URL (and the old webhook URL) wakes its trigger; a wrong s
   expect(p.pushBySecret(src.secret, "{}")!.error).toContain("paused");
 });
 
-test("a webhook in quiet hours is held and handled once when they end", async () => {
+test("a webhook at 2am is handled right away", async () => {
   now = zonedToUtc(2026, 10, 31, 2, 0, TZ); // 2am
   const p = hub.pipeline;
   const src = p.createSource({ name: "school-mail", variables: [{ name: "subject" }] }, "Hearth").value!;
   await p.addTrigger({ name: "school-mail", source: "school-mail", formula: "true", action: { type: "notify", text: "Email from school: {{subject}}" } }, "Hearth");
   p.push("school-mail", src.secret, '{"subject":"Uniforms due"}');
   await p.drain();
-  expect((await sent()).length).toBe(0);
-  expect(p.heldCount()).toBe(1);
-  expect(p.events({ limit: 1 })[0].status).toBe("held");
-  now = zonedToUtc(2026, 10, 31, 7, 31, TZ);
-  await hub.tick();
   expect((await sent()).map((m) => m.text)).toEqual(["Email from school: Uniforms due"]);
   expect(p.events({ limit: 1 })[0].status).toBe("matched");
-  await hub.tick();
-  expect((await sent()).length).toBe(1);
 });
 
 test("remind makes a timer and its trigger in one step; moving or deleting one moves or deletes both", async () => {

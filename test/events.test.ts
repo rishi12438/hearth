@@ -258,7 +258,7 @@ async function makeHub() {
   const hub = new Hub(config, store, new Brain(config), new Scripts(store, dir, join(dir, "none")), null);
   let at = zonedToUtc(2026, 11, 4, 12, 0, TZ);
   hub.clock = () => at;
-  await hub.setPrefs({ tz: TZ, quietStart: "23:00", quietEnd: "07:00" });
+  await hub.setPrefs({ tz: TZ });
   return { hub, store, dir, setNow: (d: Date) => { at = d; } };
 }
 

@@ -212,10 +212,6 @@ export type ConnAudit = Doc & {
 export type Prefs = {
   userName: string;
   tz: string;
-  quietStart: string;
-  quietEnd: string;
-  maxProactivePerDay: number;
-  proactiveToday: { date: string; n: number };
   lastUserAt?: string;
   placeState: Record<string, boolean>;
   brains?: import("./brain.ts").Brains;

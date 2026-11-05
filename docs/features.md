@@ -72,7 +72,7 @@ Everything that makes a teammate speak first is in one event pipeline, and you s
 | a **watcher**: page, script, app (Gmail, Calendar, LinkedIn…) or silence | "Tell me when this page changes", "tell me when the school emails", "if I haven't said anything in 48h, check in" |
 | a **push source** with a secret URL | "Give me a webhook for my door camera", GitHub, Stripe, Zapier, iOS Shortcuts |
 
-A trigger does one of four things: **notify** (send text, with `{{variables}}` from the event), **think** (run the brain, which can stay quiet), **workflow**, or **script**. Every proactive message carries a *why* you can tap. Quiet hours (held, then run when they end) and the daily cap are enforced by the hub, not left to the model. Reminders you asked for yourself always come through. The hub's own nightly jobs (memory review, ideas, library cleanup) are built-in triggers you can pause.
+A trigger does one of four things: **notify** (send text, with `{{variables}}` from the event), **think** (run the brain, which can stay quiet), **workflow**, or **script**. Every proactive message carries a *why* you can tap. A trigger runs every time it matches: there are no quiet hours and no daily cap. The hub's own nightly jobs (memory review, ideas, library cleanup) are built-in triggers you can pause.
 
 ## Memory
 

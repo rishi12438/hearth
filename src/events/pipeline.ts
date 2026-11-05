@@ -175,8 +175,7 @@ export type Watcher = {
 };
 /** What a watcher found on one look: events to push, and what to remember for next time. */
 export type WatchResult = { items: Record<string, unknown>[]; seen?: unknown; error?: string };
-/** held: a trigger matched but waits (quiet hours) and runs when they end. */
-export type EventStatus = "new" | "processing" | "matched" | "unmatched" | "failed" | "held";
+export type EventStatus = "new" | "processing" | "matched" | "unmatched" | "failed";
 export type LogLine = { at: string; triggerId: string | null; step: string; detail: string; value?: JudgeValue };
 export type PipelineEvent = {
   id: string; sourceId: string; sourceName: string; status: EventStatus;
@@ -188,12 +187,10 @@ export type Conflict = { kind: "name" | "duplicate" | "overlap" | "variables" | 
 export type Result<T> = { value: T; error?: undefined; conflict?: undefined; duplicate?: boolean } | { value?: undefined; error: string; conflict?: Conflict; duplicate?: undefined };
 
 /**
- * What the hub does when a trigger matches. `quiet` = it ran and chose not to speak; `hold` = not now, run it at
- * that time (quiet hours); `skipped` = it won't run (the daily limit), with why. `judge` = the judge's value, if any.
- * `released` = this is a held run whose time came, so it must not be held again.
+ * What the hub does when a trigger matches. `quiet` = it ran and chose not to speak. `judge` = the judge's value, if any.
  */
-export type RunResult = { text?: string; quiet?: boolean; hold?: string; skipped?: string };
-export type Runner = (trigger: EventTrigger, event: PipelineEvent, judge?: JudgeValue, released?: boolean) => Promise<RunResult>;
+export type RunResult = { text?: string; quiet?: boolean };
+export type Runner = (trigger: EventTrigger, event: PipelineEvent, judge?: JudgeValue) => Promise<RunResult>;
 /** Asks the quick model a trigger's judge question about an event; returns the one value (or throws). */
 export type JudgeFn = (judge: Judge, event: PipelineEvent, examples: JudgeExample[]) => Promise<JudgeValue>;
 /** At most this many judge calls per trigger per hour, so a busy source can't run up a bill. */
@@ -376,13 +373,6 @@ export class EventPipeline {
         status TEXT NOT NULL DEFAULT 'active', created_by TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS watchers_due ON watchers (status, next_at);
-      CREATE TABLE IF NOT EXISTS held (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
-        trigger_id TEXT NOT NULL REFERENCES triggers(id) ON DELETE CASCADE,
-        until TEXT NOT NULL, value TEXT CHECK (value IS NULL OR json_valid(value)), created_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS held_until ON held (until);
     `);
     // Files made before judges and reminders existed get the new columns.
     for (const [table, col, def] of [["triggers", "judge", "TEXT"], ["event_log", "value", "TEXT"], ["triggers", "title", "TEXT"], ["triggers", "timer_id", "TEXT REFERENCES timers(id) ON DELETE CASCADE"], ["triggers", "route", "TEXT"], ["sources", "claim", "TEXT"], ["triggers", "check_script", "TEXT"], ["events", "dedupe_key", "TEXT"]]) {
@@ -1182,7 +1172,7 @@ export class EventPipeline {
   private async process(e: PipelineEvent) {
     this.db.query("UPDATE events SET status = 'processing' WHERE id = ?").run(e.id);
     const vars = this.varsOf(e);
-    let ran = 0, failed = 0, held = 0;
+    let ran = 0, failed = 0;
     for (const t of this.triggers(e.sourceId).filter((x) => x.status === "active")) {
       const tree = this.tree(t.formula);
       if (!tree) { this.log(e.id, "failed", `formula doesn't read: ${t.formula}`, t.id); failed++; continue; }
@@ -1225,64 +1215,35 @@ export class EventPipeline {
         if (!passes) continue;
       }
       this.log(e.id, "matched", `${t.name}: ${t.formula}${t.check ? ` and ${t.check.script}` : ""}${t.judge ? ` and ${t.judge.pass}` : ""}`, t.id);
-      const r = await this.runOne(t, ev, value, false);
-      if (r === "held") held++; else if (r === "failed") failed++; else ran++;
+      if (await this.runOne(t, ev, value)) ran++; else failed++;
     }
     // A one-time reminder that has rung is done (only this event's timer: others may still have events waiting).
     if (e.sourceName === TIME_SOURCE) {
       const n = this.db.query("UPDATE triggers SET status = 'done', updated_at = ? WHERE status = 'active' AND timer_id IN (SELECT id FROM timers WHERE name = ? AND status = 'done')").run(this.now(), String(e.variables.time_to_run ?? "")).changes;
       if (n) this.onChange("triggers");
     }
-    this.finish(e.id, ran, failed, held);
+    this.finish(e.id, ran, failed);
   }
 
-  private finish(eventId: string, ran: number, failed: number, held: number) {
-    const status: EventStatus = ran ? "matched" : held ? "held" : failed ? "failed" : "unmatched";
-    if (!ran && !failed && !held) this.log(eventId, "unmatched", "no trigger matched");
+  private finish(eventId: string, ran: number, failed: number) {
+    const status: EventStatus = ran ? "matched" : failed ? "failed" : "unmatched";
+    if (!ran && !failed) this.log(eventId, "unmatched", "no trigger matched");
     this.db.query("UPDATE events SET status = ?, processed_at = ?, error = ? WHERE id = ?").run(status, this.now(), failed && !ran ? "a trigger failed" : null, eventId);
     this.onChange("events");
   }
 
-  /** Run one matched trigger on one event and log what happened. */
-  private async runOne(t: EventTrigger, e: PipelineEvent, value: JudgeValue | undefined, released: boolean): Promise<"ran" | "held" | "failed"> {
+  /** Run one matched trigger on one event and log what happened. True if it ran. */
+  private async runOne(t: EventTrigger, e: PipelineEvent, value: JudgeValue | undefined): Promise<boolean> {
     try {
-      const r = await this.depth.run(e.depth, () => this.run(t, e, value, released));
-      if (r.hold && !released) {
-        this.db.query("INSERT INTO held (event_id, trigger_id, until, value, created_at) VALUES (?, ?, ?, ?, ?)").run(e.id, t.id, r.hold, value === undefined ? null : j(value), this.now());
-        this.log(e.id, "held", `${t.name}: quiet hours; it runs at ${r.hold}`, t.id);
-        return "held";
-      }
+      const r = await this.depth.run(e.depth, () => this.run(t, e, value));
       this.db.query("UPDATE triggers SET last_fired_at = ?, fire_count = fire_count + 1 WHERE id = ?").run(this.now(), t.id);
-      if (r.skipped) this.log(e.id, "skipped", `${t.name}: ${r.skipped}`, t.id);
-      else this.log(e.id, r.quiet ? "quiet" : "ran", r.quiet ? `${t.name}: ${r.text ? r.text.slice(0, 500) : "nothing worth saying"}` : `${t.name}: ${(r.text || "done").slice(0, 500)}`, t.id);
-      return "ran";
+      this.log(e.id, r.quiet ? "quiet" : "ran", r.quiet ? `${t.name}: ${r.text ? r.text.slice(0, 500) : "nothing worth saying"}` : `${t.name}: ${(r.text || "done").slice(0, 500)}`, t.id);
+      return true;
     } catch (err: any) {
       this.log(e.id, "failed", `${t.name}: ${String(err?.message || err).slice(0, 500)}`, t.id);
-      return "failed";
+      return false;
     }
   }
-
-  /** Held runs whose time has come (quiet hours ended): each runs now, once. */
-  async release() {
-    const due = this.db.query("SELECT * FROM held WHERE until <= ? ORDER BY id").all(this.now()) as any[];
-    for (const h of due) {
-      this.db.query("DELETE FROM held WHERE id = ?").run(h.id);
-      const t = this.findTrigger(h.trigger_id), e = this.getEvent(h.event_id);
-      if (!t || !e || t.status === "paused") continue;
-      this.log(e.id, "released", `${t.name}: quiet hours are over`, t.id);
-      // The check's hand-on fields aren't saved with the hold: ask it again (it's code, so it says the same).
-      let ev = e;
-      if (t.check) { try { const c = await this.checkFn(t.check, e); if (c.data && Object.keys(c.data).length) ev = { ...e, variables: { ...e.variables, check: c.data } }; } catch { /* runs without them */ } }
-      const r = await this.runOne(t, ev, h.value == null ? undefined : JSON.parse(h.value), true);
-      const still = (this.db.query("SELECT count(*) AS n FROM held WHERE event_id = ?").get(e.id) as any).n;
-      if (r === "ran" || !still) this.db.query("UPDATE events SET status = ? WHERE id = ?").run(r === "ran" ? "matched" : still ? "held" : "failed", e.id);
-      this.onChange("events");
-    }
-    return due.length;
-  }
-
-  /** How many runs are waiting for quiet hours to end. */
-  heldCount() { return (this.db.query("SELECT count(*) AS n FROM held").get() as any).n as number; }
 
   // ---------- watchers (the hub's own publishers) ----------
 
@@ -1447,17 +1408,16 @@ export class EventPipeline {
   /** Keep the last 30 days and at most 5000 events. */
   prune() {
     const cutoff = new Date(this.clock().getTime() - KEEP_DAYS * 86_400_000).toISOString();
-    let n = this.db.query("DELETE FROM events WHERE received_at < ? AND status NOT IN ('new', 'processing', 'held')").run(cutoff).changes;
-    n += this.db.query(`DELETE FROM events WHERE id IN (SELECT id FROM events WHERE status NOT IN ('new', 'processing', 'held') ORDER BY received_at DESC LIMIT -1 OFFSET ${KEEP_EVENTS})`).run().changes;
+    let n = this.db.query("DELETE FROM events WHERE received_at < ? AND status NOT IN ('new', 'processing')").run(cutoff).changes;
+    n += this.db.query(`DELETE FROM events WHERE id IN (SELECT id FROM events WHERE status NOT IN ('new', 'processing') ORDER BY received_at DESC LIMIT -1 OFFSET ${KEEP_EVENTS})`).run().changes;
     return n;
   }
 
-  /** One tick of the hub: mint due timers, let watchers look, work the queue, run what was held, tidy up. */
+  /** One tick of the hub: mint due timers, let watchers look, work the queue, tidy up. */
   async tick() {
     await this.mint();
     await this.look();
     await this.drain();
-    await this.release();
     this.prune();
   }
 
