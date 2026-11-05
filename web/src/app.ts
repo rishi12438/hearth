@@ -18,6 +18,8 @@ const S = {
   state: null as any,
   roster: [] as any[],
   threads: [] as any[],
+  /** The sidebar's "Past rambles" list is open. */
+  pastOpen: false,
   chat: null as any,            // open group chat: { thread, messages, jobs, approvals }
   dm: null as any,              // open DM: { teammate, jobs, messages, routines, approvals }
   inbox: [] as any[],           // Activity tab
@@ -627,7 +629,12 @@ function drawSide() {
   });
   const team = [...(S.roster.length ? S.roster : S.teammates)].sort((a, b) => (b.at || "").localeCompare(a.at || ""));
   const live = S.threads.filter((t: any) => !t.archived);
-  const loose = live.filter((t: any) => !t.projectId).slice(0, 12);
+  const allLoose = live.filter((t: any) => !t.projectId);
+  const loose = allLoose.slice(0, 12);
+  // Past rambles: archived ones (an hour after everything in them is done) and any past the first 12, newest first.
+  const past = [...allLoose.slice(12), ...S.threads.filter((t: any) => t.archived && !t.projectId)]
+    .sort((a: any, b: any) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+  const pastShown = S.pastOpen ? past.slice(0, 30) : past.filter((t: any) => r.view === "chat" && r.id === t.id);
   const openProject = r.view === "project" ? r.id : r.view === "chat" ? S.threads.find((t: any) => t.id === r.id)?.projectId : null;
   const host = (activeHub()?.url || location.origin).replace(/^https?:\/\//, "");
   clear(el,
@@ -647,7 +654,11 @@ function drawSide() {
       openProject === p.id ? live.filter((t: any) => t.projectId === p.id).map((t: any) => ramble(t, true)) : null,
     ]) : h("p", { class: "snone" }, "Group rambles, files and memory, like Wedding or Move to SF.")),
     h("div", { class: "slabel" }, "Rambles", h("button", { class: "sadd", "aria-label": "New ramble", on: { click: () => { S.newProject = null; location.hash = "#c/new"; } } }, icon("plus", 14))),
-    h("nav", { class: "sgroup", on: dropTo(null) }, loose.length ? loose.map((t: any) => ramble(t)) : h("p", { class: "snone" }, "Tap + to start one.")),
+    h("nav", { class: "sgroup", on: dropTo(null) }, loose.length || past.length ? loose.map((t: any) => ramble(t)) : h("p", { class: "snone" }, "Tap + to start one."),
+      past.length ? h("button", { class: `snav spast ${S.pastOpen ? "open" : ""}`, "aria-expanded": String(S.pastOpen), on: { click: () => { S.pastOpen = !S.pastOpen; drawSide(); } } },
+        icon("chevron", 14), h("span", { class: "grow" }, "Past rambles"), h("small", { class: "scount" }, String(past.length))) : null,
+      pastShown.map((t: any) => ramble(t, true)),
+      S.pastOpen && past.length > 30 ? h("button", { class: "snav nested spast-more", on: { click: openJump } }, h("span", { class: "grow" }, `Search ${past.length - 30} older…`)) : null),
     team.length ? [h("div", { class: "slabel" }, "Teammates"), h("nav", { class: "sgroup" }, team.map((t: any) =>
       h("button", { class: `snav mate ${r.view === "dm" && r.id === t.id ? "on" : ""}`, on: { click: () => { location.hash = `#t/${t.id}`; } } },
         face(t, 22, t.state || "idle"), h("span", { class: "grow" }, t.name), t.needsYou ? h("em", null, String(t.needsYou)) : unreadDm(t) ? h("i", { class: "udot", title: "New since you last looked" }) : null)))] : null,
