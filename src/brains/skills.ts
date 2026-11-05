@@ -206,11 +206,12 @@ Save it the moment you know it, not at the end: you can be stopped at any time.
 ## Make it general
 A lesson is a rule for every job, not a note about this one. Take out this case's names and dates, keep the pattern,
 and keep exact tool names when it's about tools.
-- "Europcar's $131 deal on Kayak was dead" -> "Before quoting a price or listing, click through to the provider and
-  check it's really available; aggregator results go stale."
-- "Firecrawl worked on enterprise.com" -> "For sites with bot protection, use Firecrawl interact. Browserless and
-  Browserbase, even with a residential proxy, get blocked."
+- "The PDF's totals table lost a page when I parsed it" -> "After extracting data from a document, check the counts
+  against the source before using them."
+- "WebFetch gave the bakery's menu page empty, the browser got it" -> "When a plain fetch returns an empty page, the site
+  needs JavaScript: switch to the browser tool instead of retrying the fetch."
 - "I said done but the file was empty" -> "Check a tool's output before saying something is done."
+(These only show the shape. Your lessons come from what actually happened in your own work.)
 One or two short, imperative sentences. evidence: what happened, in a line.
 
 ## Not a lesson
@@ -222,7 +223,7 @@ One or two short, imperative sentences. evidence: what happened, in a line.
 - Already covered in CONTEXT.lessons? Don't add it again. Sharpen that one with memory.update {id, fact}, or merge
   overlapping ones with memory.merge, so it stays a short list every job can read.
 - Proved wrong or out of date (a tool got fixed, a better one came along)? memory.update or memory.forget it.
-- Say it in a short line in your reply ("Noted for next time: check listings on the provider's site before quoting").`,
+- Say it in a short line in your reply ("Noted for next time: check a tool's output before saying it's done").`,
 }, {
   name: "send-files", common: true, commands: [], reads: [],
   description: "Making something the user should open (a video, picture, PDF, spreadsheet, deck, export), or working files they shouldn't see? How files reach them: shown by themselves, @file for the rest, drafts in _scratchpad/.",
