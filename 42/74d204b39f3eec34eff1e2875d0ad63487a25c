@@ -1,0 +1,42 @@
+test/sessions.test.ts
+  s_ecc5f16f1c9872::t_6afd9b3927931d 379-385,387-413
+  s_ecc5f16f1c9872::t_5ea95237cb4bea 386
+test/fixtures/fake-codex-app.ts
+  s_ecc5f16f1c9872::t_6afd9b3927931d 8,34,40-42
+test/fixtures/fake-agent.ts
+  s_ecc5f16f1c9872::t_6afd9b3927931d 10
+test/fixtures/codex.ts
+  s_ecc5f16f1c9872::t_6afd9b3927931d 4
+src/brain.ts
+  s_ecc5f16f1c9872::t_cfaeb7e30326c0 1227-1232
+  s_ecc5f16f1c9872::t_657df4993fcd54 1143-1148,1175,1187-1188
+src/brains/codex-app.ts
+  s_ecc5f16f1c9872::t_657df4993fcd54 61-62,146-147,151-160
+src/hub.ts
+  s_ecc5f16f1c9872::t_37dade5da0ddbf 1342
+  s_ecc5f16f1c9872::t_cbf2d271447081 1106,1120-1123
+  s_ecc5f16f1c9872::t_e837d0432f0a50 1136,1197-1207
+test/queued.test.ts
+  s_ecc5f16f1c9872::t_6afd9b3927931d 36,68,70-71,91-95
+web/src/app.ts
+  s_ecc5f16f1c9872::t_37dade5da0ddbf 1858,1898
+src/types.ts
+  s_ecc5f16f1c9872::t_cbf2d271447081 114-116
+  s_ecc5f16f1c9872::t_37dade5da0ddbf 59
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "4274d204b39f3eec34eff1e2875d0ad63487a25c",
+  "prompts": {},
+  "sessions": {
+    "s_ecc5f16f1c9872": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9ee9baae-e2e3-4da5-8c69-34c9cadb72da",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
