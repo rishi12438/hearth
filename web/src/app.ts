@@ -53,7 +53,7 @@ const S = {
   /** Which box of an open workflow is selected (trigger or action). */
   wfNode: {} as Record<string, "trigger" | "action">,
   pipeSrcEvents: {} as Record<string, any[] | undefined>,
-  pipeTab: "triggers" as "triggers" | "timers" | "sources" | "events",
+  pipeTab: "triggers" as "triggers" | "sources" | "events",
   /** Just made by a teammate: highlighted as it lands. */
   pipeFresh: new Set<string>(),
   /** Until when a change is one you just made on the Triggers screen (so it doesn't fly in at you). */
@@ -3265,10 +3265,8 @@ function drawTriggers() {
   const live = liveTriggers().sort((a: any, b: any) => (next(a) < next(b) ? -1 : next(a) > next(b) ? 1 : 0));
   const builtIn = triggers.filter((t: any) => t.createdBy === "system");
   const done = triggers.filter((t: any) => t.status === "done" && t.createdBy !== "system").slice(-5).reverse();
-  // A reminder's timer shows on its trigger; this tab is for timers on their own.
-  const timers = S.pipe.timers.filter((t: any) => !triggers.some((x: any) => x.timerId === t.id));
   const owner = !!S.state?.device?.primary;
-  const tabs: [typeof S.pipeTab, string, number][] = [["triggers", "Workflows", live.length], ["timers", "Timers", timers.filter((t) => t.status !== "done").length], ["sources", "Sources", sources.length], ["events", "Events", 0]];
+  const tabs: [typeof S.pipeTab, string, number][] = [["triggers", "Workflows", live.length], ["sources", "Sources", sources.length], ["events", "Events", 0]];
   const fresh = (id: string) => (S.pipeFresh.has(id) ? "fresh" : "");
   // confirmSheet closes itself after the action, so Triggers opens again just after.
   const reopen = (tab?: typeof S.pipeTab) => setTimeout(() => openTriggers(tab), 0);
@@ -3357,16 +3355,6 @@ function drawTriggers() {
     t.status !== "done" ? pauseTrigger(t) : null,
     sys(t) ? null : del(t.title, t.timer ? "It won't ring again." : "It stops acting on new events. Past events stay in the log.", () => call(`/api/pipeline/triggers/${t.id}`, { method: "DELETE" })));
 
-  const timerRow = (t: any) => h("div", { class: `item pipe ${t.status} ${fresh(t.id)}`, "data-pipe": t.id },
-    h("span", { class: "hicon" }, icon("clock", 16)),
-    h("span", { class: "grow" },
-      h("b", null, t.name, t.status === "paused" ? h("span", { class: "tag" }, "Paused") : t.status === "done" ? h("span", { class: "tag" }, "Done") : null),
-      h("small", { class: "sub" }, scheduleText(t.schedule), t.nextAt && t.status === "active" ? ` · next ${dayLabel(t.nextAt)} ${clockTime(t.nextAt)}` : ""),
-      Object.keys(t.data || {}).length ? h("small", { class: "sub" }, h("code", { class: "formula" }, JSON.stringify(t.data))) : null,
-      h("small", { class: "sub" }, [t.runCount ? `ran ${t.runCount}×` : null, by(t.createdBy), (triggers.filter((x) => x.sourceName === "time" && x.formula.includes(`"${t.name}"`)).map((x) => `→ ${x.name}`).join(", ")) || "no trigger listens to it yet"].filter(Boolean).join(" · "))),
-    t.status !== "done" ? pause(t, `/api/pipeline/timers/${t.id}`) : null,
-    del(t.name, "It won't fire again.", () => call(`/api/pipeline/timers/${t.id}`, { method: "DELETE" })));
-
   const sourceRow = (s: any) => {
     const url = s.pushPath ? `${activeHub()?.url?.replace(/\/$/, "") || location.origin}${s.pushPath}` : null;
     const w = s.kind === "watch" ? watchers.find((x: any) => x.sourceId === s.id) : null;
@@ -3430,11 +3418,9 @@ function drawTriggers() {
   };
 
   const tab = S.pipeTab;
-  const active = live.filter((t: any) => t.status === "active").length;
   clear(el,
     h("p", { class: "muted" }, "Reminders, routines and rules. Anything can push events into a source (a clock, a watcher, a webhook, your location). Every event is saved, and each trigger's formula decides, with plain code, whether it acts."),
     S.pipe.held ? h("p", { class: "muted small" }, `${S.pipe.held} waiting for quiet hours to end.`) : null,
-    h("div", { class: "pipeflow" }, h("span", null, `${sources.length} source${sources.length === 1 ? "" : "s"}`), "→", h("span", null, "events"), "→", h("span", { id: "pipe-drop" }, `${active} trigger${active === 1 ? "" : "s"}`), "→", h("span", null, "actions")),
     h("div", { class: "seg" }, tabs.map(([k, label, n]) => h("button", { class: tab === k ? "on" : "", on: { click: () => { S.pipeTab = k; if (k === "events") loadPipelineEvents(); drawTriggers(); } } }, label, n ? h("small", null, ` ${n}`) : null))),
     tab === "triggers" ? [
       live.length ? h("div", { class: "list" }, live.map(triggerRow)) : h("p", { class: "empty" }, "No workflows yet. Each one is a trigger and what it does. Say “remind me Friday at 6 to call mom”, “tell me when this page changes” or “when a GitHub PR is opened on my repo, summarize it”."),
@@ -3442,7 +3428,6 @@ function drawTriggers() {
       done.length ? [h("h4", null, "Done"), h("div", { class: "list" }, done.map(triggerRow))] : null,
       builtIn.length ? [h("h4", null, "The hub's own"), h("div", { class: "list" }, builtIn.map(triggerRow))] : null,
     ] : null,
-    tab === "timers" ? (timers.length ? h("div", { class: "list" }, timers.map(timerRow)) : h("p", { class: "empty" }, "No timers. A timer pushes one event to the time source when it's due, and triggers on “time” pick it up.")) : null,
     // Ports (callback URLs someone claimed, with what each is for) first, then every other source, then the ports given back.
     tab === "sources" ? (() => {
       const ports = sources.filter((s: any) => s.kind === "push" && !s.claim?.releasedAt);
@@ -3483,7 +3468,7 @@ function flyIn(what: string, id: string, next: () => void) {
   if (!item) return next();
   S.pipeFresh.add(id);
   setTimeout(() => { S.pipeFresh.delete(id); if (hubPage() === "triggers") drawTriggers(); }, 4500);
-  const tab = what === "triggers" ? "triggers" : what === "timers" ? "timers" : "sources";
+  const tab = what === "triggers" || what === "timers" ? "triggers" : "sources";
   if (hubPage() === "triggers") { S.pipeTab = tab; drawTriggers(); document.querySelector(`#hubpage [data-pipe="${id}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }); }
   const reminder = what === "triggers" && item.timer;
   const label = reminder ? "New reminder" : what === "triggers" ? "New trigger" : what === "timers" ? "New timer" : what === "watchers" ? "Now watching" : "New source";
@@ -3496,7 +3481,7 @@ function flyIn(what: string, id: string, next: () => void) {
     h("span", { class: "grow" }, h("small", null, `${label} · ${item.teammateId ? mate(item.teammateId).name : item.createdBy === "you" ? "for you" : item.createdBy || "a teammate"}`), h("b", null, item.title || item.name), h("code", null, detail)));
   document.body.appendChild(card);
   // Looked up when it flies (and again when it lands): the sidebar may have been redrawn in between.
-  const findTarget = () => (hubPage() === "triggers" ? document.querySelector<HTMLElement>("#hubpage #pipe-drop") : null) || document.getElementById("snav-triggers");
+  const findTarget = () => document.getElementById("snav-triggers");
   const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
   // Show it for a moment, then fly it into its place; the next card can come up as this one leaves.
   setTimeout(() => {
