@@ -181,6 +181,7 @@ ${sourceDocs()}
 - PLACES: the built-in source "place" gets an event when the user arrives at or leaves a saved place (place.add saves
     one). Variables: place (lowercase name), event ("arrive"|"leave"). e.g. trigger.add {source:"place",
     formula:"place == \"office\" and event == \"arrive\"", action:{"type":"notify","text":"Grab the charger"}}.
+- HOW TO MAKE A TRIGGER: the make-triggers skill (get the event in → name the fields → decide with code → act → test).
 - PUSH BEFORE POLLING. To act when something happens, first look for a way to be TOLD: a port that already gets it
     (CONTEXT.eventPipeline sources: "plaid" is fed by the Plaid connection), the service's own webhooks (claim a port),
     or a built-in source (place). Poll with watch.add only when nothing can push it (a plain web page, an app with no
@@ -192,9 +193,8 @@ ${sourceDocs()}
     \`hearth-trigger-port claim --reason … --source …\`. When the webhook only says "something changed" (Plaid: item X
     has updates), the trigger's action is a script that fetches the details and prints one JSON object per line:
     {"type":"script","script":"<name>","then":"publish","into":"<another source>"}; formulas on that source test the
-    real fields. Make the port's variables the sender's real fields (source.update mapping, e.g. {"from":
-    "data.message.from"}) and put the rule in the formula (from contains "14084203023" && from_me == false), not in a
-    prompt over formula "true": a model should never be the filter for facts code can check.
+    real fields. Make the port's variables the sender's real fields (source.update mapping) and decide with code (a
+    formula, or a check script), never a prompt over formula "true". The make-triggers skill has the method.
 EVENT PIPELINE (CONTEXT.eventPipeline: sources, watchers, triggers, timers). Everything that makes you speak first
     lives here. Anything pushes events into a SOURCE (a named inbox with its own variables); every event is saved; each
     TRIGGER on that source is a FORMULA checked with plain code (no model) against the event's variables, and when it's

@@ -108,6 +108,59 @@ export const GUIDES: Skill[] = [{
 - Keep it: the script in scripts/, a skills/<name>.md in your workspace (how to run it, inputs, what breaks it), and
   skill.save if it will come back outside this subject. Next time, rerun it and only check what changed.`,
 }, {
+  name: "make-triggers", common: true, commands: [], reads: [],
+  description: "Making something happen when an event comes in (a webhook, a new email, a bank change, a time): how to get the event in, decide with code, act, and test it.",
+  body: `# Making triggers
+
+A trigger is: an event arrives on a SOURCE → code decides whether it matters → an ACTION runs. Work through these in
+order. The aim is predictable and cheap: code decides, a model is used only for what needs judgment.
+
+## 1. Get the event in: push before polling
+Prefer, in this order:
+1. A source that already gets it: the event pipeline's sources (CONTEXT.eventPipeline, or \`hearth-trigger-port list\`).
+   Some come with a connection and are fed by the hub itself (no URL), e.g. the bank one while a bank is connected.
+2. The service's own webhooks: claim a port (\`hearth-trigger-port claim --reason "…" --source <service>\`, or
+   port.claim) and give the service its URL. Say plainly what it's for: it's recorded with who claimed it.
+3. Built-in sources: time (timers), place (arriving/leaving).
+4. Only when nothing can push it: a watcher (watch.add) that looks every few minutes, at the slowest useful interval.
+Don't claim a second port for something a live one already covers; release ports you stop needing.
+
+## 2. Know the shape, name the fields
+Find out what the sender really sends (its docs, or \`hearth-trigger-port show <name>\` after a first event).
+Make the fields that matter variables with a mapping ({"status":"data.object.status"}) so formulas and messages can
+use them. Every event also has payload (all of it), so payload.x works too.
+
+## 3. Decide with code (most deterministic first)
+1. FORMULA, for facts on the event: \`status == "failed" && amount > 100\`, \`action == "opened"\`,
+   \`sender endsWith "@school.org"\`. Cheap, checked on every event.
+2. CHECK SCRIPT, for facts that are awkward as a formula: nested or variable JSON, normalizing numbers or names,
+   several conditions, a lookup. script.propose a small read-only script (Python is fine) that reads the event as JSON
+   on stdin ({id, source, variables, payload}) and prints \`true\` to fire, or one JSON line
+   {"fire": true, "summary": "…"} whose fields fill {{check.summary}}. Anything else means no. Give the trigger
+   {"check":{"script":"<name>"}}; the formula can stay "true" or narrow first.
+3. JUDGE, only for meaning code can't see (urgent? a good lead? angry?): the quick model answers ONE value and the
+   judge's pass formula compares it. See the write-trigger-judges skill. Filter with a formula first.
+Never use formula "true" plus a prompt that tells a model which events to ignore: that's a model as the filter, on
+every event. If a fact decides it, code decides it.
+
+## 4. Act
+- notify with the fields: "Payment failed for {{email}}: {{amount}}". Most triggers should be this.
+- think only when the message needs writing or looking things up; it may answer [[quiet]] and nothing is shown.
+- When the event only says "something changed" (an id, no details), a script action fetches the details and, with
+  "then":"publish","into":"<source>", prints one JSON object per line that become events there, where formulas test
+  the real fields.
+- to/post say who handles it and where (see trigger.add).
+
+## 5. Test it before you say it's done
+- \`hearth-trigger-port test <name> '<json shaped like the real thing>'\` or source.test: one that should fire and
+  one that shouldn't. trigger.dryrun on recent events for a formula.
+- Read the event's log (Triggers → Sources → Latest events): which triggers matched, what the check said.
+
+## 6. When it breaks
+A check or script that crashes starts a repair: a teammate gets the error, the code and the event, and proposes a
+fix that waits for the user's Approve. When you're that teammate, fix the cause (often the event's shape), keep the
+same script name, and say in a line what broke.`,
+}, {
   name: "write-trigger-judges", common: false, commands: [], reads: [],
   description: "A trigger that needs judgment (urgent? a good lead? angry? worth my time?): how to write its judge so the model answers with one value code can compare.",
   body: `# Writing a trigger judge
