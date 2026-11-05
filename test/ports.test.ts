@@ -275,3 +275,20 @@ test("a hand-off carries what was sent, not just the variables; map turns the re
   await p.drain();
   expect(p.events({ source: name, log: false })[0].variables).toEqual({ text: "hello", from: "14084203023@s.whatsapp.net", from_me: false });
 });
+
+test("a model as the filter is refused with how to decide with code; routines, checks, judges and plain thinks are fine", async () => {
+  const p = hub.pipeline;
+  const [, name] = urlOf(portsAgent(p, ["claim", "--reason", "messages from one sender", "--source", "parley"], who, BASE));
+  const filtering = { type: "think", prompt: "Notify the owner only for a real message from +1 408. Otherwise reply exactly [[quiet]]." };
+  const r = await p.addTrigger({ name: "llm-filter", source: name, formula: "true", action: filtering }, "Bills");
+  expect(r.conflict?.kind).toBe("filter");
+  expect(r.error).toContain("check");
+  // The same with code deciding: fine.
+  expect((await p.addTrigger({ name: "coded", source: name, check: { script: "from-one-number" }, action: filtering }, "Bills")).value).toBeTruthy();
+  expect((await p.addTrigger({ name: "summarize", source: name, formula: "true", action: { type: "think", prompt: "Summarize this message in one line." } }, "Bills")).value).toBeTruthy();
+  expect((await p.addTrigger({ name: "forced", source: name, formula: "true", action: filtering, force: true }, "Bills")).value).toBeTruthy();
+  // A routine on the clock may say "stay quiet if nothing's new".
+  expect((await p.addTrigger({ name: "morning", source: "time", formula: 'time_to_run == "morning"', action: { type: "think", prompt: "Check the news; reply [[quiet]] if nothing matters." } }, "Bills")).value).toBeTruthy();
+  // Updating a coded one back into a filter prompt is refused too.
+  expect((await p.updateTrigger("coded", { check: null })).conflict?.kind).toBe("filter");
+});
