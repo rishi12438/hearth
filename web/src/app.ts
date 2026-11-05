@@ -1918,6 +1918,8 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
     const cmd = SLASH.find((c) => c.cmd === box.value.trim().toLowerCase());
     if (cmd && !pending.length) return runSlash(cmd);
     const v = box.value; box.value = ""; sessionStorage.removeItem(draftKey); box.dispatchEvent(new Event("input")); send(v, inThread);
+    // send() has taken the waiting files by now; empty the tray however the message went (Enter or the send button).
+    drawChips(); swap();
   };
   const action = h("button", { class: "act", "aria-label": "Hold to talk" });
   const canAttach = r.view !== "dm";
@@ -1954,7 +1956,7 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
   // Mic: tap to dictate (✓/✕ to finish), or hold and let go.
   action.addEventListener("pointerdown", (e) => { if (box.value.trim() || pending.length || dict) return; e.preventDefault(); micTarget = inThread; onMicDown(box, swap, wrap); });
   action.addEventListener("pointerup", () => { if (recording && Date.now() - pressAt > 600) finishDictation(true); });
-  action.addEventListener("click", () => { if (box.value.trim() || pending.length) { submit(); drawChips(); } });
+  action.addEventListener("click", () => { if (box.value.trim() || pending.length) submit(); });
   // Files dragged onto the message box attach too.
   const dropping = (on: boolean) => (e: DragEvent) => { if (!canAttach || !e.dataTransfer?.types.includes("Files")) return; e.preventDefault(); bar.classList.toggle("drop", on); };
   const bar = h("div", { class: "composer", id: targetId === "composerwrap" ? "composerbox" : undefined, on: {
