@@ -147,20 +147,31 @@ fields that matter variables with a mapping ({"status":"data.object.status"}). E
 Never formula "true" plus an action prompt that tells a model which events to ignore: the hub refuses it.
 
 ## Piece 2: the Action
-What happens when the trigger fires. Pick the smallest one that does the job:
-- notify: a message to the user with the fields filled in ("Payment failed for {{email}}: {{amount}}"). No agent.
-- script: code runs on the event. With "then":"publish","into":"<source>", what it prints becomes new events there
-  (for webhooks that only say "something changed": fetch the details, publish them, and put a second workflow on them).
-- think: an AGENT runs. Its prompt is exactly what it's told, with the event attached: write it as instructions for a
-  teammate ("Write a short reply to this message and send it with <tool> to the same chat"). It can say [[quiet]] and
-  nothing is shown. Use it when the action needs writing, looking things up, or a tool.
-Then who handles it and where it posts (to / post on trigger.add), and a cooldownMin if it can fire in bursts.
-An action that SENDS something (a reply, a forward, a post) must not set itself off: the trigger's check ignores what
-the user or Hearth sent (the outgoing / "from me" flag), and it has a cooldown. Send with the normal tools: the tools and
-the hub decide whether a send is held for the user, so the action's prompt just says to send it.
+Every action is one message, delivered when the trigger fires. The only questions are who gets it and where it shows:
+
+  {"message": "…{{fields}}…", "agent": true|false, "before"?: "<bash script>", "who"?: "…", "where"?: "…"}
+
+- agent false: the message goes to the user as written, fields filled in ("Payment failed for {{email}}: {{amount}}").
+  No model. Use it when the event already says everything.
+- agent true: the message goes to an agent as its task, out of sight, with the event attached. Write it the way you'd
+  brief a teammate, and say the whole job: "Write a short, quirky reply to this message and send it to the same
+  chat." The agent works as a normal task (its tools, the workspace this workflow was made in, why it exists, who made
+  it). The user sees only what it does, marked with the workflow's name, and nothing at all if it says [[quiet]].
+  Don't write limits the user didn't ask for into it ("draft only", "don't send"): the tools decide what needs the
+  user's OK.
+- before (rare): a bash script that runs first on the event (JSON on stdin and in $HEARTH_EVENT) and prints what the
+  message needs that the event doesn't have: a lookup, a reshaped payload. What it prints is {{before}}. It is not a
+  filter (that's the trigger) and it keeps no "seen" list (the hub drops repeated deliveries itself).
+- who (agent only): "self" (you; the default), a teammate's name, or "hearth" to let Hearth read it and pick.
+- where: "this" (default: this thread; made inside a task, that task's conversation carries on), "ramble" (a new
+  ramble each time), or "ramble:<name>" (that ramble, made the first time).
+- Two other kinds, for plumbing only: {"type":"script","script","then":"publish","into":"<source>"} turns a raw ping
+  into clean events on another source (put the real workflow on that source), and {"type":"workflow","name"}.
+Add a cooldownMin if it can fire in bursts. An action that SENDS (a reply, a forward, a post) must not set itself
+off: the trigger ignores what the user or Hearth sent (the outgoing / "from me" flag).
 
 ## Build it, then test it
-One trigger.add makes both pieces: {name, title, source, formula, check?, judge?, action, to?, post?, cooldownMin?}.
+One trigger.add makes both pieces: {name, title, source, formula, check?, judge?, action, cooldownMin?}.
 Give it a short title: that's the workflow's name in the list. Then test before you say it's done:
 \`hearth-trigger-port test <name> '<json shaped like the real thing>'\` (or source.test), one that should fire and one
 that shouldn't, and read what happened (Workflows → open it → Trigger → Lately).
@@ -205,7 +216,7 @@ trigger's \`pass\` formula compares it with plain code. The model never decides 
 
 ## Use the value
 - {{judge}} fills in the action: "Urgent ({{judge}}/10) from {{from}}: {{text}}".
-- A think action is told what the judge answered.
+- An agent's message is told what the judge answered.
 
 ## After
 - trigger.dryrun the formula to see how many recent events the judge would be asked about. Too many: narrow the formula.

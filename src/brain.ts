@@ -136,35 +136,40 @@ You can change things only by ending your reply with ONE fenced block tagged hea
 Mention what you did in your visible reply ("Done, I'll ping you at 6."). Never show the JSON otherwise.
 
 ACTIONS
-WHO HANDLES IT (remind, trigger.add, watch.add, trigger.update all take these):
-    to: who acts when it fires. "self" (default: you, or the teammate named in teammate) · a teammate's name
-        ("Bills") · "hearth" = Hearth reads what happened, picks the right teammate(s) (or makes a new one) and hands
-        it out, exactly like a ramble. Use "hearth" when what to do depends on what happened (a new email could be a
-        bill, a school form or nothing), or when it may need several teammates. A fixed job for one lane: name it.
-        "this" = THIS conversation goes on when it fires: same teammate, same session, everything said so far (use it
-        inside a task for "check back on this in 2 hours", "when the tracking page changes, carry on here").
-        "session:<job id>" = that task thread goes on.
-    post: where it says so. "here" (default: this ramble; the teammate's DM once it's archived) · "dm" (the
-        teammate's DM, for routines that aren't about this ramble) · "new" (a fresh ramble on Home each time it fires,
-        for things worth their own conversation: a weekly review, a new lead).
-- remind {title, schedule, text | prompt | action, why, requestedByUser, to?, post?, cooldownMin?}
+THE ACTION (remind, trigger.add, watch.add, trigger.update): what happens when it fires is ONE message:
+    {"message":"… {{variable}} …", "agent": true|false, "before"?: "<bash script>", "who"?: "…", "where"?: "…"}
+    agent false: the message is shown to the user as written (fields filled in). No model.
+    agent true: the message goes to an agent as its task, with the event; the user sees only what the agent does.
+        Write it as plain instructions for a teammate ("Write a quirky reply to this and send it to the same chat").
+        The agent runs as a normal task with its tools, in the workspace the workflow was made in, and is told why the
+        workflow exists and who made it. It can reply ${QUIET} and nothing shows.
+    before: a bash script (script.propose lang "sh") run first on the event (JSON on stdin and in $HEARTH_EVENT).
+        What it prints fills {{before}} and goes to the agent; printing nothing or ${QUIET} stops the run. Only when
+        the message needs data the event doesn't have. Filtering is the trigger's job, never the action's.
+    who (agent only): "self" (default: you, or the teammate named in teammate) · a teammate's name ("Bills") ·
+        "hearth" = Hearth reads what happened and picks who, like a ramble (when what to do depends on what happened).
+    where: "this" (default) = the thread it's made in; made inside a task, that task's conversation goes on when it
+        fires (same teammate, same session) · "ramble" = a new ramble each time (things worth their own
+        conversation: a weekly review, a new lead) · "ramble:<name>" = that ramble, made the first time.
+    The hub drops repeated deliveries of the same event, so nothing needs its own "seen" list.
+- remind {title, schedule, text | prompt | action, why, requestedByUser, cooldownMin?}
     A reminder or routine in one step: a timer and the trigger that runs at its time (it shows in Triggers).
       schedule: {"at":"<ISO 8601 with offset>","repeat"?:"none|daily|weekdays|weekly|monthly"}
               | {"time":"HH:MM","days":[0-6, 0=Sunday]}  (days [] = every day)  | {"everyMin":n>=5}
-      text: the exact message to send (plain reminders) · prompt: what to do then (you're called; you may stay quiet)
-      action: instead, {"type":"workflow","name","inputs"} or {"type":"script","script","args","then":"notify|think"}
+      text: the exact message to send (plain reminders) · prompt: what an agent does then (it may stay quiet)
+      action: instead, the message action above (for who / where), or {"type":"workflow","name","inputs"}
     "why" is shown to the user when it fires: say who asked and when, in a few words.
     requestedByUser = true only if the user explicitly asked for this reminder (theirs ring even in quiet hours).
     Move or snooze one with time.update {name, schedule? | snoozeMin?}; cancel with trigger.remove {name}.
     BEFORE adding, look for one that already covers it: CONTEXT.eventPipeline.triggers and CONTEXT.library entries of
     kind "trigger" (a live one, its name in "id"). Already covered: say so, or change it with trigger.update / time.update.
-- watch.add {name, kind, ..., action?, formula?, judge?, why?, to?, post?}
+- watch.add {name, kind, ..., action?, formula?, judge?, why?}
     A WATCHER (polling: only when nothing can push it, see PUSH BEFORE POLLING): the hub looks at something every few minutes and pushes what's NEW into its own source (named like the
     watcher), where triggers act on it. Give action (and formula, default "true") to make its trigger in the same step.
     The first look only remembers what's there, so it tells the user about what's new from then on. Kinds:
       {"kind":"page","url":"https://…","everyMin":>=15}   when the page's text changes. Variables: url, changes (the
-            lines that came + and went -), added, removed, text. Use a formula (added contains "in stock") or a think
-            action that stays quiet when the change doesn't matter.
+            lines that came + and went -), added, removed, text. Use a formula (added contains "in stock"), or a
+            judge when it takes judgment.
       {"kind":"script","script":"<name>","args":[],"everyMin":>=5,"when":"changed|output"}   your own code as a watcher:
             the hub runs the script with NO model and pushes an event when it prints something ("output") or prints
             something different from last time ("changed"). Variables: output, previous. The script gets its previous
@@ -180,7 +185,7 @@ ${sourceDocs()}
     (look now; you're called again with what happened)
 - PLACES: the built-in source "place" gets an event when the user arrives at or leaves a saved place (place.add saves
     one). Variables: place (lowercase name), event ("arrive"|"leave"). e.g. trigger.add {source:"place",
-    formula:"place == \"office\" and event == \"arrive\"", action:{"type":"notify","text":"Grab the charger"}}.
+    formula:"place == \"office\" and event == \"arrive\"", action:{"message":"Grab the charger","agent":false}}.
 - HOW TO BUILD AN AUTOMATION: the build-workflows skill (a workflow is two pieces: a Trigger that code decides → an Action).
 - PUSH BEFORE POLLING. To act when something happens, first look for a way to be TOLD: a port that already gets it
     (CONTEXT.eventPipeline sources: "plaid" is fed by the Plaid connection), the service's own webhooks (claim a port),
@@ -222,7 +227,7 @@ EVENT PIPELINE (CONTEXT.eventPipeline: sources, watchers, triggers, timers). Eve
     without one, a variable is read from the top level. The URL shows in Triggers; tell the user to copy it from there.
 - source.update {name, description?, variables?, mapping?, status?} | source.remove {name, purgeEvents?}
 - source.test {name, payload}   push a test event through every trigger; you'll be called again with what happened
-- trigger.add {name, source, formula, check?, judge?, action, why, to?, post?, cooldownMin?, force?}
+- trigger.add {name, title, source, formula, check?, judge?, action, why, cooldownMin?, force?}
     check: {"script":"<name>","args":[]}  YOUR CODE DECIDES. Prefer it to a prompt whenever the rule is checkable
     but awkward as a formula (nested JSON, normalizing a phone number, several conditions). Write it with
     script.propose (Python is fine, read-only): it gets the whole event as JSON on stdin ({id, source, variables,
@@ -232,13 +237,13 @@ EVENT PIPELINE (CONTEXT.eventPipeline: sources, watchers, triggers, timers). Eve
     judge: {"prompt":"How urgent is this message for the user?","output":{"type":"rating","min":1,"max":10,
             "low":"can wait a week","high":"needs them now"},"pass":"judge >= 8"}
     The formula can't read judge (it runs first); pass must. {{judge}} fills in the action's text.
-    action: {"type":"notify","text":"… {{variable}} …"} | {"type":"think","prompt":"…"} | {"type":"workflow","name","inputs":{"x":"{{variable}}"}}
-          | {"type":"script","script":"<name>","args":["{{variable}}"],"then":"notify|think|publish","into"?:"<source>"}
-    A script gets the event on stdin / $HEARTH_EVENT. then "publish": each JSON object line it prints becomes an
-    event on "into" (quiet itself; that source's triggers speak).
+    action: the message action (THE ACTION above) | {"type":"workflow","name","inputs":{"x":"{{variable}}"}}
+          | {"type":"script","script":"<name>","then":"publish","into":"<source>"}: the script gets the event on stdin /
+            $HEARTH_EVENT and each JSON object line it prints becomes an event on "into" (quiet itself; that
+            source's triggers speak).
     {{variable}} fills from the event (e.g. {{payload.customer.email}}, {{data.who}}).
 - trigger.dryrun {source, formula}   what it would have caught in recent events, and which triggers already catch them
-- trigger.update {name, title?, formula?, check?, judge?, action?, why?, status?, cooldownMin?, to?, post?} | trigger.remove {name}
+- trigger.update {name, title?, formula?, check?, judge?, action?, why?, status?, cooldownMin?} | trigger.remove {name}
     judge: null removes it. Changing the question or the answer kind clears its corrections.
 - trigger.correct {trigger, value, event?}   when the user says a judgment was wrong ("that wasn't urgent", "that one
     was a 9"): the right value is kept as an example the judge sees next time. event defaults to the last one it judged.
@@ -1276,6 +1281,7 @@ function echoOrchestrator(b: BrainInput): string {
 function echoBrain(b: BrainInput): string {
   const ctx = b.context as { tz: string; nowIso: string };
   if (b.mode === "review") return QUIET;
+  if (b.input.trimStart().startsWith(QUIET)) return QUIET; // a task that is only "stay quiet" (a routine with nothing to say)
   if (b.mode === "describe") return `Shows ${(b.input.match(/^Title: (.*)$/m)?.[1] || "a view").trim()}.`;
   if (b.mode === "clean") return b.input.replace(/\b(um+|uh+|you know),?\s*/gi, "").replace(/\s+/g, " ").trim();
   if (b.mode === "narrate") return "";
