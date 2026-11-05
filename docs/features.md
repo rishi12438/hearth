@@ -20,7 +20,7 @@ A tour of everything Hearth does. For setup, see the [README](../README.md).
 
 ## Parallel jobs
 
-The orchestrator gives jobs a `dependsOn` only when one needs another's result; everything else runs at once (`HEARTH_MAX_PARALLEL`, default 4, plus `HEARTH_MAX_PARALLEL_CLAUDE` / `_CODEX` per harness). Each job is its own agent process. A new ramble is read immediately even while jobs run. Heavy jobs may split into 2-4 sub-agents (one level deep) whose results are merged. Spend caps per ramble and per day (`HEARTH_COST_CAP_RAMBLE_USD`, `HEARTH_COST_CAP_DAY_USD`) park jobs instead of running them. In the app, teammates post their results in the conversation, and only Approve or "stuck" rows ask for you.
+The orchestrator gives jobs a `dependsOn` only when one needs another's result; everything else runs at once (`HEARTH_MAX_PARALLEL`, default 4, plus `HEARTH_MAX_PARALLEL_CLAUDE` / `_CODEX` per harness). Each job is its own agent process. A new ramble is read immediately even while jobs run. Heavy jobs may split into 2-4 sub-agents (one level deep) whose results are merged. In the app, teammates post their results in the conversation, and only Approve or "stuck" rows ask for you.
 
 ## Tiles
 

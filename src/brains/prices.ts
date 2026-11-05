@@ -1,5 +1,5 @@
 // What a call on a plan (Codex on ChatGPT) would cost at the model's API prices. The plan reports no dollars, so this is
-// an estimate: it's shown with "≈" and never counts toward the spending cap.
+// an estimate: it's shown with "≈" and never counts toward the day's spend.
 //
 // Per 1M tokens. OpenAI's standard tier as listed in Nov 2026 (third-party pricing sites, checked against each other):
 // requests over `longAbove` input tokens are billed at the long-context rates.

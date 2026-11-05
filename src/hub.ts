@@ -1210,12 +1210,6 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
           body: first.slice(0, 180), tag: job.id, url: job.threadId.startsWith("tm-") ? threadLink(job.threadId) : `/#c/${job.threadId}/${job.followsUp || job.id}` }).catch(() => {});
       }
     };
-    const overCap = async () => {
-      const r = await this.spendCheck(job.messageId);
-      if (!r) return false;
-      cur = await this.saveJob({ ...cur, blocked: { need: r, why: "Spending caps keep a ramble from running up a bill.", unblock: "Raise the cap in Brains, or tap Try again later" } });
-      return true;
-    };
 
     let failedSkill: { name: string; error: string } | null = null;
     if (job.skillId || job.workflowId) {
@@ -1286,7 +1280,6 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     };
     // The strongest model said it can't: the job fails with why it stopped ("Couldn't do it: …"), never the marker.
     const gaveUp = (text: string) => new Error(escalateWhy(text));
-    if (await overCap()) return finish({ how: "fresh" });
     // The lead briefs a cheaper model before it starts: the approach, the traps, what to check (brains/lead.ts).
     // Only with hybrid on (Settings → Brains): off means one model does the job by itself.
     if (hybrid && ladder[0] !== "heavy" && job.effort !== "quick" && label(brains[ladder[0]]) !== label(brains.heavy) && !stop.signal.aborted) {
@@ -1550,16 +1543,6 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       const cur = p.spend?.date === today ? p.spend.usd : 0;
       await this.setPrefsNow({ spend: { date: today, usd: +(cur + usd).toFixed(4) } });
     });
-  }
-
-  /** Null when there's budget left; otherwise what's over. */
-  async spendCheck(messageId: string) {
-    const p = await this.prefs();
-    const caps = { ramble: p.costCaps?.rambleUsd ?? this.config.costCapRambleUsd, day: p.costCaps?.dayUsd ?? this.config.costCapDayUsd };
-    const today = p.spend?.date === localDate(this.clock(), p.tz) ? p.spend.usd : 0;
-    if (today >= caps.day) return `Today's spending cap ($${caps.day}) is reached`;
-    if ((this.rambleSpend.get(messageId) || 0) >= caps.ramble) return `This ramble's spending cap ($${caps.ramble}) is reached`;
-    return null;
   }
 
   /** Set by the server: wake a cloud computer when a job is waiting for one. */

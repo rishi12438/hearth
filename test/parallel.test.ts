@@ -104,15 +104,6 @@ test("a second ramble mid-run is handled immediately", async () => {
   expect(Date.now() - t0).toBeLessThan(700); // the orchestrator didn't queue behind running jobs
 });
 
-test("spending cap parks model jobs instead of running them", async () => {
-  await setup({ HEARTH_COST_CAP_DAY_USD: "0" });
-  plan([{ task: "anything", teammate: "Hearth" }]);
-  await hub.ramble("x");
-  await until(async () => (await jobs()).some((j) => j.status === "blocked"));
-  expect((await jobs())[0].blocked!.need).toContain("spending cap");
-  expect(existsSync(log) ? readFileSync(log, "utf8") : "").toBe(""); // no model ran
-});
-
 test("tiles come out of script output; junk is dropped", () => {
   const r = extractTiles('@tile {"type":"weather","data":{"place":"Paris","temp":11,"hours":[{"t":"12:00","temp":12}]}}\nParis: 11°\n@tile {"type":"evil","data":{}}\n@tile not json');
   expect(r.text).toBe("Paris: 11°");
