@@ -15,7 +15,7 @@ import { readPage } from "./browser.ts";
 import { SignedOut } from "./sources/pages.ts";
 import type { Vault } from "./vault.ts";
 import { SOURCES, sourceById, formatItems, needOf, type Item } from "./sources/index.ts";
-import { recall, recallLessons, isActive, validateFact, LESSONS } from "./memory.ts";
+import { recall, allLessons, isActive, validateFact, LESSONS } from "./memory.ts";
 import { describeLocal, localDate, distanceMeters } from "./time.ts";
 import { CHANNELS, CHANNEL_LABEL, type Channel } from "./types.ts";
 import { badChatLink } from "./connectors/web-senders.ts";
@@ -282,8 +282,7 @@ export class Hub {
     const all = await this.store.all<Fact>("memory");
     // Lessons (how to get things done) go in their own list below; memory is about the user and their world.
     const facts = mode === "review" ? all : all.filter((f) => f.notebook !== LESSONS);
-    const lessons = mode === "review" ? [] : mode === "learn" ? all.filter((f) => f.notebook === LESSONS && isActive(f, now)).slice(-80)
-      : recallLessons(all, query, now);
+    const lessons = mode === "review" ? [] : mode === "learn" ? all.filter((f) => f.notebook === LESSONS && isActive(f, now)) : allLessons(all, now);
     // In a project's ramble: everything in its notebook comes first, then what's relevant from the rest.
     const project = await this.projectOf(threadId);
     const own = project ? facts.filter((f) => f.notebook === project.notebook && isActive(f, now)).slice(-30) : [];

@@ -775,22 +775,20 @@ test("a ramble's look happens on its own once its tasks are done", async () => {
   } finally { delete process.env.HEARTH_PROACTIVE_DELAY_MS; }
 });
 
-test("lessons: saved apart from memory, every-job ones always in context, the rest only when relevant", async () => {
+test("lessons: general rules kept apart from memory, and every job gets all of them", async () => {
   await hub.applyActions([
-    { type: "lesson.add", lesson: "Live prices on bot-protected booking sites (enterprise.com): Firecrawl interact gets through; Browserless and Browserbase were blocked.", evidence: "it worked" },
-    { type: "lesson.add", lesson: "Check a tool's output before relying on it.", importance: 3 },
+    { type: "lesson.add", lesson: "For sites with bot protection, use Firecrawl interact; Browserless and Browserbase get blocked.", evidence: "it worked" },
+    { type: "lesson.add", lesson: "Before quoting a price or listing, click through to the provider and check it's really available." },
     { type: "memory.add", fact: "Has a Chase Sapphire Preferred card.", notebook: "money", importance: 2 },
   ], "");
-  const facts = await store.all<Fact>("memory");
-  expect(facts.filter((f) => f.notebook === "lessons").length).toBe(2);
-  const car = (await hub.context("check enterprise car rental prices for PHX", "job")) as any;
-  expect(car.lessons.map((l: any) => l.lesson).join(" ")).toContain("Firecrawl interact");
-  expect(car.lessons.length).toBe(2);
-  expect(car.memory.some((m: any) => m.notebook === "lessons")).toBe(false); // lessons don't crowd out what's known about the user
-  const other = (await hub.context("draft an email to the landlord", "job")) as any;
-  expect(other.lessons.map((l: any) => l.lesson)).toEqual(["Check a tool's output before relying on it."]);
+  expect((await store.all<Fact>("memory")).filter((f) => f.notebook === "lessons").length).toBe(2);
+  for (const task of ["check enterprise car rental prices", "draft an email to the landlord"]) {
+    const ctx = (await hub.context(task, "job")) as any;
+    expect(ctx.lessons.length).toBe(2); // not matched by words: rules for every job
+    expect(ctx.memory.some((m: any) => m.notebook === "lessons")).toBe(false); // they don't crowd out what's known about the user
+  }
   // The same lesson twice is one lesson.
-  await hub.applyActions([{ type: "lesson.add", lesson: "Check a tool's output before relying on it.", importance: 3 }], "");
+  await hub.applyActions([{ type: "lesson.add", lesson: "Before quoting a price or listing, click through to the provider and check it's really available." }], "");
   expect((await store.all<Fact>("memory")).filter((f) => f.notebook === "lessons").length).toBe(2);
   // Job prompts point at them and at the skill that says how to save one.
   const prompt = buildPrompt({ mode: "job", input: "x", context: {} } as any, "claude", true);
