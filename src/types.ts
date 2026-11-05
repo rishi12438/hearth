@@ -311,10 +311,15 @@ export type Approval = Doc & {
     /** A call to an MCP tool that asks first (mcp.ts); "Always allow" lets that tool run without asking. */
     | { type: "mcp"; server: string; tool: string; args: unknown }
     /** A public skill an agent wants installed (brains/skill-store.ts), pinned to the commit and files the card showed. */
-    | { type: "skill"; name: string; repo: string; path: string; sha: string; hash: string; url: string; update?: boolean };
+    | { type: "skill"; name: string; repo: string; path: string; sha: string; hash: string; url: string; update?: boolean }
+    /** An MCP server an agent asked for (mcp.ts). Approve turns it on; if it needs a login, the agent signs in with its
+     * own browser (or saves an API key from the site). */
+    | { type: "mcp-server"; server: string; url: string };
   /** expired: nobody answered within a day (APPROVAL_TTL_MS), so it didn't run and no longer asks. */
   status: "pending" | "approved" | "rejected" | "done" | "failed" | "expired";
   result?: string;
+  /** The hub's own words for the agent once it's decided (what to do next), kept apart from result (what came back). */
+  note?: string;
   decidedAt?: string;
   /** Done without asking, because you'd said "Always allow" for that chat (or that kind of Google change). */
   auto?: boolean;

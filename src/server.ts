@@ -382,6 +382,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         // A script run you approved (its one-time token): your Approve covers its MCP calls too.
         const out = await mcpAgent(connect.mcp, argv, from === "hub" ? "an agent" : `an agent on ${from}`, { approved: hub.scripts.isApprovedRun(req.headers.get("x-hearth-run")), jobId: req.headers.get("x-hearth-job")?.slice(0, 100) || undefined });
         if (argv[0] === "add" || argv[0] === "call") await hub.log("mcp.agent", `hearth-mcp ${argv.slice(0, 3).join(" ").slice(0, 160)}`);
+        if (argv[0] === "key") await hub.log("mcp.agent", `hearth-mcp key ${String(argv[1] || "").slice(0, 40)} (key not logged)`);
         return new Response(out + "\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
       } catch (e: any) { return new Response(`Error: ${String(e?.message || e).slice(0, 500)}\n`, { status: 502, headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } }); }
     }
@@ -879,7 +880,9 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         }
         {
           // MCP servers an agent asked for wait here too ("Needs you"), next to approvals.
-          const asked = connect.mcp.waiting().map((s) => ({ kind: "mcp", at: s.addedAt, id: `mcp:${s.name}`, summary: `${s.name} · ${s.url}`, server: { name: s.name, url: s.url, addedBy: s.addedBy }, teammateId: "hearth" }));
+          // Only ones with no Approve card in a conversation (that card is the ask; Needs you lists it already).
+          const carded = new Set((await store.all<Approval>("approvals")).filter((a) => a.action.type === "mcp-server" && (a.status === "pending" || a.status === "approved")).map((a) => (a.action as any).server));
+          const asked = connect.mcp.waiting().filter((s) => !carded.has(s.name)).map((s) => ({ kind: "mcp", at: s.addedAt, id: `mcp:${s.name}`, summary: `${s.name} · ${s.url}`, server: { name: s.name, url: s.url, addedBy: s.addedBy }, teammateId: "hearth" }));
           return json([...asked, ...(await hub.inbox())]);
         }
       case "teammates": {
@@ -1003,6 +1006,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (method === "DELETE" && !verb) {
           const asked = !!connect.mcp.get(name)?.pending;
           res(connect.mcp.remove(name));
+          await hub.mcpServerGone(name);
           await hub.log("mcp.removed", `MCP: ${name} ${asked ? "denied" : "removed"} by ${device.name}`);
           if (asked) hub.emit("inbox");
           return json({ ok: true });

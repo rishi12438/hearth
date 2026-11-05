@@ -498,6 +498,74 @@ test("an approved read goes back to the agent, which carries on instead of sayin
   (hub as any).connect = null;
 });
 
+test("an agent's MCP server is an Approve card in its thread; Approve hands the agent the sign-in to do in its own browser", async () => {
+  const approved: string[] = [];
+  let state = "signin";
+  (hub as any).connect = { mcp: { get: (n: string) => (n === "browserless" ? { pending: !approved.length } : null),
+    approve: async (n: string) => { approved.push(n); return { value: { state, tools: [], auth: "oauth" } }; },
+    signIn: async () => ({ value: { url: "https://login.example/authorize?x=1" } }), remove: () => {} } };
+  await hub.ensureTeammates();
+  const seen: string[] = [];
+  let told = "";
+  (hub.brain as any).think = async (b: any) => {
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "Find rental cars", teammate: "Hearth", effort: "light" }] });
+    seen.push(String(b.input));
+    if (seen.length > 1) return "Signed in and searched.";
+    const [job] = await store.all<Job>("jobs");
+    told = await hub.requestMcpServer({ name: "browserless", url: "https://mcp.browserless.io/mcp", addedBy: "an agent" }, job.id);
+    await hub.requestMcpServer({ name: "browserless", url: "https://mcp.browserless.io/mcp", addedBy: "an agent" }, job.id); // again: one card
+    return "Asked to add Browserless.";
+  };
+  await hub.ramble("find rental cars");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "waiting"));
+  expect(told).toContain("waits for the user's Approve in this conversation");
+  const aps = await store.all<any>("approvals");
+  expect(aps).toHaveLength(1);
+  const [job] = await store.all<Job>("jobs");
+  expect(aps[0]).toMatchObject({ jobId: job.id, threadId: job.threadId, status: "pending", action: { type: "mcp-server", server: "browserless" } });
+  expect(approved).toEqual([]); // nothing contacts it until the tap
+
+  const r = await hub.decideApproval(aps[0].id, true);
+  expect(approved).toEqual(["browserless"]);
+  expect(r.value!.status).toBe("done");
+  await until(async () => seen.length === 2);
+  expect(seen[1]).toContain("https://login.example/authorize?x=1");
+  expect(seen[1]).toContain("open the sign-in link above in your browser");
+  expect(seen[1]).toContain("hearth-mcp key browserless");
+  (hub as any).connect = null;
+});
+
+test("an MCP server whose sign-in can't start: the agent is pointed at an API key from the site", async () => {
+  (hub as any).connect = { mcp: { get: () => ({ pending: true }), approve: async () => ({ value: { state: "signin", tools: [], auth: "oauth" } }),
+    signIn: async () => ({ error: "Couldn't start signing in to browserless: its login service didn't answer (it may be down)." }), remove: () => {} } };
+  const ap: any = await store.put("approvals", { id: "a1", createdAt: now.toISOString(), updatedAt: now.toISOString(), summary: "Add browserless", status: "pending", action: { type: "mcp-server", server: "browserless", url: "https://mcp.browserless.io/mcp" } } as any);
+  const r = await hub.decideApproval(ap.id, true);
+  expect(r.value!.result).toContain("didn't answer");
+  expect(r.value!.note).toContain("hearth-mcp key browserless <key>");
+  (hub as any).connect = null;
+});
+
+test("an MCP server card is settled when it connects some other way (approved in /mcp), and the agent carries on", async () => {
+  await hub.ensureTeammates();
+  const seen: string[] = [];
+  (hub.brain as any).think = async (b: any) => {
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "Use linear", teammate: "Hearth", effort: "light" }] });
+    seen.push(String(b.input));
+    if (seen.length > 1) return "Used it.";
+    const [job] = await store.all<Job>("jobs");
+    await hub.requestMcpServer({ name: "linear", url: "https://mcp.linear.app/mcp", addedBy: "an agent" }, job.id);
+    return "Asked to add Linear.";
+  };
+  await hub.ramble("use linear");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "waiting"));
+  await hub.mcpServerReady("linear", ["list_issues"]);
+  const [ap] = await store.all<any>("approvals");
+  expect(ap.status).toBe("done");
+  expect(ap.result).toContain("list_issues");
+  await until(async () => seen.length === 2);
+  expect(seen[1]).toContain("Done: Add linear");
+});
+
 test("saying no to everything a job asked for doesn't start another turn", async () => {
   await hub.ensureTeammates();
   let turns = 0;
