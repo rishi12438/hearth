@@ -17,6 +17,7 @@ import { google } from "./google.ts";
 import { googleSkills } from "./google-agent.ts";
 import { leadSkill } from "../brains/lead.ts";
 import { Mcp, mcpSkill } from "../mcp.ts";
+import { storeSkill } from "../brains/skill-store.ts";
 import { claude, codex, takeLogin } from "./brains.ts";
 import { whatsappSource } from "./whatsapp-source.ts";
 import { registerSource } from "../sources/index.ts";
@@ -98,6 +99,8 @@ export class Connect {
     registerSkills(() => [mcpSkill(base, this.agentKey)]);
     // Trigger ports: claim a callback URL for a webhook, with a reason the hub records (events/ports.ts).
     registerSkills(() => [portsSkill(base, this.agentKey)]);
+    // Public skills: find, read and install them (brains/skill-store.ts); an install waits for your Approve.
+    registerSkills(() => [storeSkill(base, this.agentKey)]);
     hub.brain.mcpServers = (jobId) => this.mcp.forRun(base, this.agentKey, jobId);
   }
 

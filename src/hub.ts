@@ -30,6 +30,8 @@ import { Apps, appSize } from "./apps.ts";
 import { sha256 } from "./auth.ts";
 import { Narrator } from "./brains/narrate.ts";
 import { syncBrowserLogins } from "./brains/browser-logins.ts";
+import { GUIDES, hubSkills } from "./brains/skills.ts";
+import { bundleDetails, fetchBundle, installBundle, installedSkills, parseRef, readSource, removeSkill, scriptFiles, searchRemote, skillMd, type Bundle, type SkillRef } from "./brains/skill-store.ts";
 import type { FreshLogin } from "./computers.ts";
 import { labelFor } from "./cookie-sites.ts";
 import { EventPipeline, fillTemplate, parseWhere, readCheck, TIME_SOURCE, type EventTrigger, type PipelineEvent, type RunResult, type TimerSchedule, type Watcher, type WatchResult } from "./events/pipeline.ts";
@@ -1901,6 +1903,161 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     return { value: ap };
   }
 
+  // ---------- public skills (brains/skill-store.ts): search, read, install ----------
+
+  /** How the skill store reaches skills.sh and GitHub (tests swap it). */
+  skillFetch: (url: string, init?: RequestInit) => Promise<Response> = (u, i) => fetch(u, i);
+
+  /** Names an installed skill can't take: the hub's tools and connector skills. (A built-in guide it may replace, like yours can.) */
+  private builtInSkillNames(): Set<string> {
+    const guides = new Set(GUIDES.map((g) => g.name));
+    return new Set(hubSkills(this.config.dataDir).filter((s) => !s.dir && !guides.has(s.name)).map((s) => s.name));
+  }
+
+  /** The public catalog, each hit saying whether it's installed here (and under which name). */
+  async searchSkills(query: string) {
+    const here = installedSkills(this.config.dataDir).filter((s) => s.source);
+    const hits = await searchRemote(query, this.skillFetch);
+    return hits.map((h) => ({ ...h, installed: here.find((s) => s.source!.repo === h.repo
+      && (s.source!.path.split("/").pop() || h.repo.split("/")[1]).toLowerCase() === h.skill.toLowerCase())?.name ?? null }));
+  }
+
+  /** A skill as it is now on GitHub: what it says and the files it brings, before anyone installs it. */
+  async previewSkill(ref: string) {
+    const r = parseRef(ref);
+    if (!r.value) return { error: r.error };
+    const b = await fetchBundle(r.value, { fetch: this.skillFetch });
+    if (!b.value) return { error: b.error };
+    const now = readSource(join(this.config.dataDir, "skills", b.value.name));
+    return { value: { name: b.value.name, description: b.value.description, repo: b.value.repo, path: b.value.path, sha: b.value.sha, url: b.value.url,
+      skillMd: skillMd(b.value), files: b.value.files.map((x) => ({ path: x.path, size: x.bytes.length })), scripts: scriptFiles(b.value),
+      installed: now ? { sha: now.sha, same: now.sha === b.value.sha, from: now.repo === b.value.repo && now.path === b.value.path } : null } };
+  }
+
+  private checkName(b: Bundle): string | null {
+    if (this.builtInSkillNames().has(b.name)) return `${b.name} is the name of one of Hearth's own skills, so it can't be installed over it.`;
+    const now = readSource(join(this.config.dataDir, "skills", b.name));
+    const yours = installedSkills(this.config.dataDir).find((s) => s.name === b.name);
+    if (yours && !now) return `You already have your own skill called ${b.name}. Remove it on the Skills page first to install this one.`;
+    if (now && (now.repo !== b.repo || now.path !== b.path)) return `A different skill called ${b.name} is installed (from ${now.repo}${now.path ? `/${now.path}` : ""}). Remove it on the Skills page first.`;
+    return null;
+  }
+
+  private writeSkill(b: Bundle, by: string) {
+    const prev = readSource(join(this.config.dataDir, "skills", b.name));
+    installBundle(this.config.dataDir, b, by, this.clock());
+    this.brain.refreshSkills?.();
+    this.emit("skills");
+    return prev;
+  }
+
+  /** You install one from the Skills page: no card, you're the one asking. Again on an installed one updates it. */
+  async installSkill(ref: string, by = "you") {
+    const r = parseRef(ref);
+    if (!r.value) return { error: r.error };
+    const b = await fetchBundle(r.value, { fetch: this.skillFetch });
+    if (!b.value) return { error: b.error };
+    const bad = this.checkName(b.value);
+    if (bad) return { error: bad };
+    const prev = this.writeSkill(b.value, by);
+    await this.log(prev ? "skill.updated" : "skill.installed", `${b.value.name} from ${b.value.repo}${b.value.path ? `/${b.value.path}` : ""} @${b.value.sha.slice(0, 7)}`);
+    return { value: { name: b.value.name, updated: !!prev, sha: b.value.sha } };
+  }
+
+  /** Update an installed skill to the latest from where it came from. */
+  async updateSkill(name: string) {
+    const src = readSource(join(this.config.dataDir, "skills", name));
+    if (!src) return { error: `${name} wasn't installed from anywhere, so there's nothing to update it from.` };
+    return this.installSkill(`https://github.com/${src.repo}/tree/HEAD${src.path ? `/${src.path}` : ""}`);
+  }
+
+  async removeInstalledSkill(name: string) {
+    if (!removeSkill(this.config.dataDir, name)) return false;
+    await this.log("skill.removed", name);
+    this.brain.refreshSkills?.();
+    this.emit("skills");
+    return true;
+  }
+
+  /**
+   * An agent wants a skill installed: an Approve card in its job's thread, pinned to the commit and to a hash of the
+   * files it showed. One Approve installs it, scripts and all; nothing runs until then.
+   */
+  async requestSkillInstall(ref: SkillRef, by: string, jobId?: string): Promise<string> {
+    const b = await fetchBundle(ref, { fetch: this.skillFetch });
+    if (!b.value) return `Couldn't get that skill: ${b.error}`;
+    const sk = b.value;
+    const bad = this.checkName(sk);
+    if (bad) return bad;
+    const now = readSource(join(this.config.dataDir, "skills", sk.name));
+    if (now?.sha === sk.sha) return `${sk.name} is installed already, at the latest. Read it: hearth-skill show ${sk.name}`;
+    let job = jobId ? await this.store.get<Job>("jobs", jobId) : null;
+    if (!job) {
+      const working = (await this.store.all<Job>("jobs")).filter((j) => j.status === "working");
+      if (working.length === 1) job = working[0];
+    }
+    const told = `Not installed yet: ${now ? "updating" : "installing"} ${sk.name} (from ${sk.repo}) waits for the user's Approve in Hearth. Don't ask again or install it another way. Say in your reply which skill it is and what it's for; when they tap Approve it's installed and you carry on with it.`;
+    const same = (await this.store.all<Approval>("approvals")).find((a) => a.status === "pending" && a.action.type === "skill"
+      && a.action.repo === sk.repo && a.action.path === sk.path && a.action.sha === sk.sha);
+    if (same) return told;
+    const ap = await this.store.put<Approval>("approvals", {
+      ...this.doc({}), threadId: job?.threadId || ORPHAN_THREAD, jobId: job?.id,
+      summary: `${now ? "Update" : "Install"} the ${sk.name} skill`, details: bundleDetails(sk),
+      action: { type: "skill", name: sk.name, repo: sk.repo, path: sk.path, sha: sk.sha, hash: sk.hash, url: sk.url, ...(now ? { update: true } : {}) },
+      status: "pending",
+    } as Approval);
+    if (job) await this.saveJob({ ...job, approvalIds: [...(job.approvalIds || []), ap.id] });
+    await this.log("approval.requested", `${ap.summary} (asked by ${by})`);
+    this.emit("approval", ap);
+    await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: await this.approvalLink(ap) });
+    return told;
+  }
+
+  /** Approved: fetch that exact commit again and install it only if its files are the ones the card showed. */
+  private async runSkillInstall(act: Extract<Approval["action"], { type: "skill" }>): Promise<{ ok: boolean; output: string }> {
+    const b = await fetchBundle({ repo: act.repo, path: act.path }, { fetch: this.skillFetch, sha: act.sha });
+    if (!b.value) return { ok: false, output: `Couldn't get it: ${b.error}` };
+    if (b.value.hash !== act.hash || b.value.name !== act.name) return { ok: false, output: "The skill's files aren't the ones this card showed, so it wasn't installed. Ask again." };
+    const bad = this.checkName(b.value);
+    if (bad) return { ok: false, output: bad };
+    const prev = this.writeSkill(b.value, "an agent (you approved)");
+    await this.log(prev ? "skill.updated" : "skill.installed", `${act.name} from ${act.repo}${act.path ? `/${act.path}` : ""} @${act.sha.slice(0, 7)}`);
+    return { ok: true, output: `Installed ${act.name}. Read it with: hearth-skill show ${act.name}` };
+  }
+
+  /** What `hearth-skill-store <argv>` does, for /api/agent/skills. Text back for the agent to read. */
+  async skillStoreAgent(argv: string[], by: string, jobId?: string): Promise<string> {
+    const [cmd = "help", ...rest] = argv;
+    const usage = "usage: hearth-skill-store find <words...> | show <id> | install <id>";
+    try {
+      switch (cmd) {
+        case "find": case "search": {
+          const q = rest.join(" ").trim();
+          if (!q) return "usage: hearth-skill-store find <a few words>";
+          const hits = await this.searchSkills(q);
+          if (!hits.length) return `No public skill matches "${q}". Try other words.`;
+          return hits.slice(0, 12).map((h) => `${h.id}  (${h.installs.toLocaleString("en-US")} installs)${h.installed ? `  installed here as ${h.installed}` : ""}`).join("\n")
+            + "\n\nRead one: hearth-skill-store show <id>. Install: hearth-skill-store install <id>";
+        }
+        case "show": {
+          if (!rest[0]) return "usage: hearth-skill-store show <id>";
+          const p = await this.previewSkill(rest[0]);
+          if (!p.value) return p.error;
+          const v = p.value;
+          return `${v.name}: ${v.description}\nFrom ${v.url}${v.installed ? `\nInstalled here${v.installed.same ? " (this version)" : " (an older version: install updates it)"}` : ""}\n`
+            + `Files: ${v.files.map((f) => f.path).join(", ").slice(0, 2000)}\n\n----- SKILL.md (the skill author's text) -----\n${v.skillMd.slice(0, 30_000)}`;
+        }
+        case "install": case "add": case "update": {
+          if (!rest[0]) return "usage: hearth-skill-store install <id>";
+          const r = parseRef(rest[0]);
+          if (!r.value) return r.error;
+          return await this.requestSkillInstall(r.value, by, jobId);
+        }
+        default: return usage;
+      }
+    } catch (e: any) { return `Error: ${String(e?.message || e).slice(0, 300)}`; }
+  }
+
   /**
    * An agent called an MCP tool that asks first (mcp.ts): an Approve card, in the job's thread. The call hasn't been made;
    * Approve makes exactly this call. The same call again while one waits gets the same card, not a second one.
@@ -2144,6 +2301,7 @@ ${JSON.stringify(shown, null, 1)}
       const act = ap.action;
       const out = act.type === "google" ? await this.runGoogle(act)
         : act.type === "mcp" ? await this.runMcp(act)
+        : act.type === "skill" ? await this.runSkillInstall(act)
         : act.type === "message"
         ? await (this.senders[act.channel]?.send(act.to, act.text, { subject: act.subject, threadId: act.threadId, from: act.from }).then(() => ({ ok: true, output: "Sent." }), (e: any) => ({ ok: false, output: String(e?.message || e) }))
           ?? { ok: false, output: `${act.channel} isn't connected.` })

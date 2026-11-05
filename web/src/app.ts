@@ -35,6 +35,8 @@ const S = {
   running: new Map<string, string>(), // jobId -> the model on it right now and where ("Claude opus on the cloud")
   frames: new Map<string, { n: number; src: string }>(), // jobId -> the latest live-view picture of its browser or app
   skills: [] as any[],
+  /** Public skills (skills.sh): the search box, its hits, and the skills in <data>/skills. */
+  storeQuery: "", storeHits: null as any[] | null, storeBusy: false, storeError: "", installed: [] as any[],
   workflows: [] as any[],
   memory: null as any,
   memoryQuery: "",
@@ -378,6 +380,7 @@ async function refreshState() {
 
 async function loadSkills() {
   try { const r = await call("/api/skills"); S.skills = r.skills; S.workflows = r.workflows; S.components = r.components || []; if (hubPage() === "skills") drawSkills(); } catch {}
+  try { S.installed = await call("/api/skillstore/installed"); if (hubPage() === "skills") drawInstalled(); } catch {}
 }
 
 async function loadTeammates() {
@@ -1674,7 +1677,8 @@ async function decide(id: string, yes: boolean, always = false): Promise<any> { 
 /** One ask, as a card in its conversation. data-ap is what a link from Activity or a notification scrolls to. */
 function approvalCard(a: any) {
   return h("div", { class: "block", "data-ap": a.id },
-    h("div", { class: "blockhead" }, icon("lock", 15), h("b", null, a.summary)), a.details ? h("p", null, a.details) : null, codeToApprove(a),
+    h("div", { class: "blockhead" }, icon("lock", 15), h("b", null, a.summary)), a.details ? h("p", { class: "predetails" }, a.details) : null, codeToApprove(a),
+    a.action?.type === "skill" ? h("a", { class: "small", href: a.action.url, target: "_blank", rel: "noopener" }, "Read the skill on GitHub") : null,
     a.status === "pending" ? h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => decide(a.id, true) } }, "Approve"), alwaysBtn(a), h("button", { class: "sbtn", on: { click: () => decide(a.id, false) } }, "No"))
       : [h("small", { class: "muted" }, approvalState(a)), a.result ? h("pre", { class: "code" }, a.result) : null]);
 }
@@ -3268,7 +3272,7 @@ function renderHubPage(id: HubPage) {
 function fillHubPage(id: HubPage) {
   const el = document.getElementById("hubpage");
   if (!el) return;
-  if (id === "skills") { clear(el, h("div", { id: "skills" })); drawSkills(); loadSkills(); }
+  if (id === "skills") { clear(el, h("div", { id: "skillstore" }), h("div", { id: "skills" })); drawStore(); drawSkills(); loadSkills(); }
   else if (id === "triggers") { clear(el, h("div", { id: "triggers" })); drawTriggers(); loadPipeline(); }
   else if (id === "memory") {
     clear(el,
@@ -3280,11 +3284,109 @@ function fillHubPage(id: HubPage) {
   } else void drawPeople();
 }
 
+/** Find skills: search the public catalog (skills.sh), read one, install it. Drawn once; the hits redraw on their own. */
+function drawStore() {
+  const el = document.getElementById("skillstore");
+  if (!el) return;
+  const run = debounce(async (q: string) => {
+    S.storeQuery = q;
+    if (!q.trim()) { S.storeHits = null; S.storeError = ""; drawStoreHits(); return; }
+    S.storeBusy = true; drawStoreHits();
+    try { const hits = await call(`/api/skillstore/search?q=${encodeURIComponent(q)}`); if (S.storeQuery === q) { S.storeHits = hits; S.storeError = ""; } }
+    catch (e: any) { if (S.storeQuery === q) { S.storeHits = []; S.storeError = e?.message || "Couldn't search."; } }
+    finally { if (S.storeQuery === q) { S.storeBusy = false; drawStoreHits(); } }
+  }, 300);
+  clear(el,
+    h("h4", null, "Find skills"),
+    h("p", { class: "muted small" }, "Public skills from skills.sh and GitHub. Install one and every teammate can use it. You can also ask a teammate to find and install one for you."),
+    h("div", { class: "search" }, icon("search", 18), h("input", { placeholder: "Search skills, or paste a GitHub link", type: "search", value: S.storeQuery, "aria-label": "Search public skills",
+      on: { input: (e: Event) => { const v = (e.target as HTMLInputElement).value; /^https?:\/\/|^[\w.-]+\/[\w.-]+@/.test(v.trim()) ? (S.storeQuery = v, drawStoreHits()) : run(v); } } })),
+    h("div", { id: "storehits" }),
+    h("div", { id: "installed" }));
+  drawStoreHits(); drawInstalled();
+}
+
+function drawStoreHits() {
+  const el = document.getElementById("storehits");
+  if (!el) return;
+  const q = S.storeQuery.trim();
+  // A link or owner/repo@skill pasted in: one row to open it.
+  if (/^https?:\/\/|^[\w.-]+\/[\w.-]+@/.test(q)) {
+    clear(el, h("div", { class: "list" }, h("button", { class: "item", on: { click: () => openStoreSkill(q) } },
+      h("span", { class: "hicon" }, icon("download", 16)), h("span", { class: "grow" }, h("b", null, "Open this skill"), h("small", { class: "sub" }, q)))));
+    return;
+  }
+  if (!q) { clear(el); return; }
+  if (S.storeBusy && !S.storeHits) { clear(el, h("p", { class: "muted small" }, "Searching…")); return; }
+  if (S.storeError) { clear(el, h("p", { class: "err small" }, S.storeError)); return; }
+  const hits = S.storeHits || [];
+  clear(el, hits.length ? h("div", { class: "list" }, hits.map((x: any) => h("button", { class: "item", on: { click: () => openStoreSkill(x.id) } },
+    h("span", { class: "hicon" }, icon("sparkle", 16)),
+    h("span", { class: "grow" }, h("b", null, x.name, x.installed ? h("span", { class: "tag" }, "installed") : null),
+      h("small", { class: "sub" }, `${x.repo} · ${Number(x.installs).toLocaleString()} install${x.installs === 1 ? "" : "s"}`)))))
+    : h("p", { class: "empty" }, "No public skill matches. Try other words."));
+}
+
+/** The skills in <data>/skills: installed ones (with where from, Update, Remove) and ones you wrote. */
+function drawInstalled() {
+  const el = document.getElementById("installed");
+  if (!el) return;
+  const list = S.installed || [];
+  clear(el, list.length ? [h("h4", null, "Installed"), h("div", { class: "list" }, list.map((sk: any) => h("button", { class: "item", on: { click: () => openInstalled(sk) } },
+    h("span", { class: "hicon" }, icon(sk.source ? "download" : "sparkle", 16)),
+    h("span", { class: "grow" }, h("b", null, sk.name),
+      h("small", { class: "sub clamp2" }, sk.description),
+      h("small", { class: "sub" }, sk.source ? `${sk.source.repo}${sk.source.path ? `/${sk.source.path}` : ""} · ${shortAgo(sk.source.installedAt)}` : "Written on this hub")))))] : null);
+}
+
+function openInstalled(sk: any) {
+  openSheet(sk.name, [
+    h("p", null, sk.description),
+    h("dl", { class: "facts" },
+      h("dt", null, "From"), h("dd", null, sk.source ? h("a", { href: sk.source.url, target: "_blank", rel: "noopener" }, `${sk.source.repo}${sk.source.path ? `/${sk.source.path}` : ""} @${sk.source.sha.slice(0, 7)}`) : "Written on this hub"),
+      sk.source ? [h("dt", null, "Installed"), h("dd", null, `${shortAgo(sk.source.installedAt)} by ${sk.source.by}`)] : null,
+      h("dt", null, "Files"), h("dd", null, String(sk.files))),
+    h("div", { class: "stack" },
+      sk.source ? h("button", { class: "btn primary", on: { click: async (e: Event) => {
+        const b = e.currentTarget as HTMLButtonElement; b.disabled = true; b.textContent = "Updating…";
+        try { const r = await call(`/api/skillstore/update/${encodeURIComponent(sk.name)}`, { body: {} }); toast(r.sha === sk.source.sha ? "Already up to date" : `Updated ${sk.name}`); closeSheet(); loadSkills(); }
+        catch (err) { handleError(err); b.disabled = false; b.textContent = "Update"; }
+      } } }, icon("download", 16), "Update") : null,
+      h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet(`Remove ${sk.name}?`, "Teammates stop using it. You can install it again any time.", "Remove", async () => { await call(`/api/skillstore/${encodeURIComponent(sk.name)}`, { method: "DELETE" }); toast("Removed"); loadSkills(); }) } }, icon("trash", 16), "Remove")),
+  ]);
+}
+
+/** One public skill: what it says and what it brings, then Install. */
+async function openStoreSkill(ref: string) {
+  const body = h("div", null, h("p", { class: "muted" }, "Loading…")) as HTMLElement;
+  openSheet(ref.split(/[/@]/).pop() || "Skill", body);
+  let p: any;
+  try { p = await call(`/api/skillstore/preview?ref=${encodeURIComponent(ref)}`); }
+  catch (e: any) { clear(body, h("p", { class: "err" }, e?.message || "Couldn't load that skill.")); return; }
+  const others = p.files.filter((f: any) => f.path !== "SKILL.md");
+  const kb = (n: number) => n < 1024 ? `${n} B` : `${Math.round(n / 1024)} KB`;
+  const label = !p.installed ? "Install" : p.installed.same ? "Installed" : "Update";
+  clear(body,
+    h("p", null, p.description),
+    h("dl", { class: "facts" },
+      h("dt", null, "From"), h("dd", null, h("a", { href: p.url, target: "_blank", rel: "noopener" }, `${p.repo}${p.path ? `/${p.path}` : ""} @${p.sha.slice(0, 7)}`)),
+      h("dt", null, "Brings"), h("dd", null, p.scripts.length ? `Code: ${p.scripts.length} script${p.scripts.length === 1 ? "" : "s"} (they run in the sandbox)` : "Instructions only, no code")),
+    others.length ? h("details", { class: "trigdata" }, h("summary", null, `${others.length} other file${others.length === 1 ? "" : "s"}`),
+      h("pre", { class: "code" }, others.map((f: any) => `${f.path}  ${kb(f.size)}`).join("\n"))) : null,
+    h("details", { class: "trigdata" }, h("summary", null, "Read its SKILL.md"), h("pre", { class: "code" }, p.skillMd)),
+    h("div", { class: "stack" }, h("button", { class: "btn primary", disabled: !!p.installed?.same, on: { click: async (e: Event) => {
+      const b = e.currentTarget as HTMLButtonElement; b.disabled = true; b.textContent = label === "Update" ? "Updating…" : "Installing…";
+      try { const r = await call("/api/skillstore/install", { body: { ref } }); toast(`${r.updated ? "Updated" : "Installed"} ${r.name}`, "ok", { sub: "Your teammates can use it now." }); closeSheet(); S.storeHits = (S.storeHits || []).map((x: any) => x.id === ref ? { ...x, installed: r.name } : x); drawStoreHits(); loadSkills(); }
+      catch (err) { handleError(err); b.disabled = false; b.textContent = label; }
+    } } }, icon("download", 16), label)));
+}
+
 function drawSkills() {
   const el = document.getElementById("skills");
   if (!el) return;
   const wfs = S.workflows;
   clear(el,
+    h("h4", null, "Saved by your team"),
     h("p", { class: "muted" }, "When a teammate works something out, it saves how, so next time it's instant. Skills with code need your approval first."),
     h("button", { class: "link", on: { click: async () => { const r = await call("/api/library/purge", { body: {} }); toast(r.removed.length ? `Cleaned up ${r.removed.length}: ${r.removed.join(", ")}` : "Nothing to clean up"); } } },
       "Clean up now (pinned ones stay)"),
