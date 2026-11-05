@@ -119,6 +119,39 @@ test("connecting: your client, Google's consent (read, and send after Approve), 
   expect(hub.vault!.get("google")).not.toContain("rt1");
 });
 
+test("a big Gmail search fetches a few emails at a time, retries Google's 'too many at once', and the agent's list skips bodies", async () => {
+  await connect();
+  inbox = Array.from({ length: 25 }, (_, i) => ({ id: `m${i}`, from: `Shop ${i} <s${i}@shop.com>`, subject: `Receipt ${i}`, body: `Body ${i}` }));
+  hub.google.retryMs = 0;
+  let inFlight = 0, most = 0, turnedAway = 0;
+  const formats = new Set<string>();
+  hub.google.fetch = async (url, init) => {
+    const u = new URL(String(url));
+    if (!/\/messages\/\w+$/.test(u.pathname)) return fakeGoogle(String(url), init);
+    formats.add(u.searchParams.get("format") || "");
+    inFlight++; most = Math.max(most, inFlight);
+    try {
+      await Bun.sleep(2);
+      // Like Gmail: more than 5 open for one user, or the first time m7 is asked for, is turned away.
+      if (inFlight > 5 || (u.pathname.endsWith("/m7") && !turnedAway && ++turnedAway)) return new Response(JSON.stringify({ error: { code: 429, message: "Too many concurrent requests for user." } }), { status: 429 });
+      return fakeGoogle(String(url), init);
+    } finally { inFlight--; }
+  };
+  const mails = await hub.google.searchMail("receipt", 25);
+  expect(mails.length).toBe(25);
+  expect(mails.every((m) => m.text.startsWith("Body"))).toBe(true);
+  expect(most).toBeLessThanOrEqual(5);
+  expect(turnedAway).toBe(1);
+  expect([...formats]).toEqual(["full"]);
+
+  formats.clear();
+  const { googleAgent } = await import("../src/connectors/google-agent.ts");
+  const out: any = await googleAgent(hub.google, "gmail", ["search", "receipt", "--max", "25"]);
+  expect(out.count).toBe(25);
+  expect(out.mails[0]).toMatchObject({ subject: expect.stringContaining("Receipt") });
+  expect([...formats]).toEqual(["metadata"]);
+});
+
 test("email text: the plain part, else the HTML without tags", () => {
   expect(mailText({ mimeType: "text/html", body: { data: b64("<style>x{}</style><p>Due <b>Friday</b></p>") } })).toBe("Due Friday");
 });

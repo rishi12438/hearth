@@ -60,6 +60,16 @@ export function mailText(payload: any, max = 4000): string {
     .replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/[ \t]+/g, " ").replace(/\n\s*\n+/g, "\n\n").trim().slice(0, max);
 }
 
+/** fn over items, at most `n` running at once, results in order. */
+async function inBatches<T, R>(items: T[], n: number, fn: (x: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (next < items.length) { const i = next++; out[i] = await fn(items[i]); }
+  }));
+  return out;
+}
+
 export class Google {
   /** Access tokens by account email (each lasts an hour). */
   private access = new Map<string, { token: string; until: number }>();
@@ -68,6 +78,8 @@ export class Google {
   private states = new Map<string, { redirectUri: string; until: number }>();
   /** Swapped in tests. */
   fetch: (url: string, init?: RequestInit) => Promise<Response> = (url, init) => fetch(url, init);
+  /** How long to wait before retrying a read Google turned away for going too fast (ms, doubled each try). Tests set 0. */
+  retryMs = 1000;
 
   /** No vault (a hub without one, as in some tests): nothing saved, and saving says why. */
   constructor(private vault: Vault | null, private env: Record<string, string | undefined> = process.env) {}
@@ -206,11 +218,22 @@ export class Google {
     return j.access_token as string;
   }
 
+  /** A read. Google turns away too many at once for one user (429, or 403 rateLimitExceeded) even far under the daily
+   * quota; those wait a moment and try again rather than failing the whole search. */
   private async get(a: Account, url: string): Promise<any> {
-    const res = await this.fetch(url, { headers: { Authorization: `Bearer ${await this.token(a)}` }, signal: AbortSignal.timeout(20_000) });
-    if (res.status === 401) this.access.delete(a.email);
-    if (!res.ok) throw new Error(`Google answered ${res.status} for ${a.email}: ${(await res.text()).slice(0, 200)}`);
-    return res.json();
+    for (let attempt = 0; ; attempt++) {
+      const res = await this.fetch(url, { headers: { Authorization: `Bearer ${await this.token(a)}` }, signal: AbortSignal.timeout(20_000) });
+      if (res.status === 401) this.access.delete(a.email);
+      if (res.ok) return res.json();
+      const text = await res.text();
+      const tooFast = res.status === 429 || (res.status === 403 && /rateLimitExceeded|userRateLimitExceeded|RATE_LIMIT_EXCEEDED/.test(text));
+      if (tooFast && attempt < 3) {
+        const after = Number(res.headers.get("retry-after"));
+        await Bun.sleep(Math.min(after > 0 ? after * 1000 : this.retryMs * 2 ** attempt, 10_000));
+        continue;
+      }
+      throw new Error(`Google answered ${res.status} for ${a.email}${tooFast ? " (too many requests at once; try again in a minute)" : ""}: ${text.slice(0, 200)}`);
+    }
   }
 
   /** Run a read on each account. One account failing doesn't hide the others; it only throws when every one failed. */
@@ -244,12 +267,14 @@ export class Google {
     return String((await res.json()).id || "");
   }
 
-  /** Newest first, across every account (or just `account`). query is Gmail search syntax (from:school.org newer_than:2d…). */
-  async searchMail(query: string, max = 10, account?: string): Promise<Mail[]> {
+  /** Newest first, across every account (or just `account`). query is Gmail search syntax (from:school.org newer_than:2d…).
+   * `bodies: false` fetches only headers and snippet (text comes back empty): lighter, for a list someone picks from.
+   * Fetches a few emails at a time: all at once trips Gmail's per-user limit on requests in flight. */
+  async searchMail(query: string, max = 10, account?: string, opts: { bodies?: boolean } = {}): Promise<Mail[]> {
     const q = new URLSearchParams({ q: query || "in:inbox", maxResults: String(Math.min(25, Math.max(1, max))) });
     const all = await this.each<Mail>(this.pick(account), async (a) => {
       const list = await this.get(a, `https://gmail.googleapis.com/gmail/v1/users/me/messages?${q}`);
-      return Promise.all((list.messages || []).map((m: any) => this.mailIn(a, m.id)));
+      return inBatches((list.messages || []) as any[], 5, (m) => this.mailIn(a, m.id, opts.bodies !== false));
     });
     const when = (m: Mail) => Date.parse(m.date) || 0;
     return all.sort((x, y) => when(y) - when(x)).slice(0, Math.max(1, max));
@@ -258,8 +283,9 @@ export class Google {
   /** One email by id, from `account` (default: the first account). */
   async mail(id: string, account?: string): Promise<Mail> { return this.mailIn(this.pick(account)[0], id); }
 
-  private async mailIn(a: Account, id: string): Promise<Mail> {
-    const m = await this.get(a, `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}?format=full`);
+  private async mailIn(a: Account, id: string, body = true): Promise<Mail> {
+    const how = body ? "format=full" : "format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date";
+    const m = await this.get(a, `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}?${how}`);
     return { id: m.id, threadId: m.threadId, account: a.email, from: header(m, "from"), to: header(m, "to"), subject: header(m, "subject"), date: header(m, "date"),
       snippet: String(m.snippet || ""), text: mailText(m.payload), labels: m.labelIds || [] };
   }
