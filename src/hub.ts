@@ -275,7 +275,8 @@ export class Hub {
       return {
         you: teammate ? { name: teammate.name, role: teammate.prompt } : { name: "Hearth", role: "The user's main assistant." },
         now: describeLocal(now, prefs.tz), tz: prefs.tz, userName: prefs.userName || undefined, aboutYou: prefs.about || undefined,
-        memory: recall(await this.store.all<Fact>("memory"), query, 8, now).map((f) => f.fact),
+        memory: recall((await this.store.all<Fact>("memory")).filter((f) => f.notebook !== LESSONS), query, 8, now).map((f) => f.fact),
+        lessons: allLessons(await this.store.all<Fact>("memory"), now).map((f) => ({ id: f.id, lesson: f.fact })),
         components: (await this.searchLibrary(query)).filter((x) => x.kind === "component"), // ready-made visuals it can fill with data
       };
     }

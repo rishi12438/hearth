@@ -796,6 +796,30 @@ test("lessons: general rules kept apart from memory, and every job gets all of t
   expect(prompt).toContain("learn-from-mistakes");
 });
 
+test("lessons are a checklist every run ends on, the reply pass too, and using one is on record", async () => {
+  await hub.applyActions([{ type: "lesson.add", lesson: "Check a tool's output before saying something is done." }], "");
+  const id = (await store.all<Fact>("memory")).find((f) => f.notebook === "lessons")!.id;
+  const job = await hub.context("rename the files", "job");
+  const prompt = buildPrompt({ mode: "job", input: "rename the files", context: job } as any, "claude", true);
+  const rules = prompt.slice(prompt.indexOf("RULES FROM EXPERIENCE"));
+  expect(prompt.indexOf("RULES FROM EXPERIENCE")).toBeGreaterThan(prompt.indexOf("JOB:")); // the last thing it reads
+  expect(rules).toContain(`1. Check a tool's output before saying something is done.  [${id}]`);
+  expect(rules).toContain("BEFORE YOU REPLY");
+  expect(prompt.slice(0, prompt.indexOf("RULES FROM EXPERIENCE"))).not.toContain('"lessons"'); // not also buried in the JSON
+  // The pass that writes the user's reply gets them too, without the bookkeeping.
+  const voice = buildPrompt({ mode: "voice", input: "x", context: await hub.context("x", "voice") } as any);
+  expect(voice).toContain("1. Check a tool's output before saying something is done.");
+  expect(voice).not.toContain(`[${id}]`);
+  // The lessons review sees them with ids, and is told to fix a rule the team broke.
+  const learn = buildPrompt({ mode: "learn", input: "x", context: await hub.context("x", "learn") } as any);
+  expect(learn).toContain(id);
+  expect(learn).toContain("BROKEN RULES");
+  expect(learn).not.toContain("RULES FROM EXPERIENCE");
+  // A run that applied it says so, and it's counted.
+  await hub.applyActions([{ type: "memory.used", ids: [id] }], "");
+  expect((await store.get<Fact>("memory", id))!.useCount).toBe(1);
+});
+
 test("lessons: a thread quiet for 15 minutes is reviewed once for what it taught, then only what's new", async () => {
   await hub.ensureTeammates();
   const t = (await hub.ramble("using firecrawl interact worked for enterprise")).value!.thread;

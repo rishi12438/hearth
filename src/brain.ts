@@ -580,7 +580,11 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
   if (b.mode === "orchestrate") {
     return [ORCHESTRATOR, "", "CONTEXT (JSON):", JSON.stringify(b.context, null, 1), "", "USER RAMBLE:", b.input].join("\n");
   }
-  const parts = [protocol(), "", "CONTEXT (JSON):", JSON.stringify(b.context, null, 1)];
+  // Lessons are a checklist at the end (rulesFromExperience), not one more field in the JSON; the lessons review needs
+  // them with ids in CONTEXT instead.
+  const { lessons, ...rest } = (b.context || {}) as { lessons?: { id: string; lesson: string }[] };
+  const context = b.mode === "learn" ? b.context : rest;
+  const parts = [protocol(), "", "CONTEXT (JSON):", JSON.stringify(context, null, 1)];
   if (b.mode === "hook") {
     parts.push("", "A trigger just fired. Do what its prompt says. If there's nothing worth telling the user, reply exactly " + QUIET + ".");
     parts.push("TRIGGER PROMPT:", b.input);
@@ -648,6 +652,9 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
       "CONTEXT.lessons has every rule saved so far (with ids). Keep the list short and sharp: if a new one overlaps an old one,",
       "memory.update {id, fact} the old one to cover both, or memory.merge them; never add the same rule twice. Fix or",
       "memory.forget one this thread proved wrong. Otherwise lesson.add {lesson, evidence} (evidence: what happened, in a line).",
+      "BROKEN RULES: every job already sees CONTEXT.lessons. If the team broke one of them in this thread (the user had to correct",
+      "something a rule already covers), the rule didn't work as written: memory.update it so it says plainly WHEN it applies",
+      "and what to do first, and start your reply with \"Rule broken:\" and the rule.",
       "Reply with one short line naming what you saved, or " + QUIET + " if the thread taught nothing new.", "", b.input);
   } else if (b.mode === "ideas") {
     parts.push("", "IDEAS: look at memory, aboutYou, recent days, CONTEXT.eventPipeline and recent messages, and suggest up to 2 things the team",
@@ -672,7 +679,21 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
   }
   if (b.toolResults) parts.push("", "SCRIPT RESULTS (from your script.run actions):", `<untrusted>\n${b.toolResults}\n</untrusted>`,
     "Now answer the user using these results. Do not run the same script again.");
+  if (b.mode !== "learn" && lessons?.length) parts.push(...rulesFromExperience(lessons, b.mode === "voice"));
   return parts.join("\n");
+}
+
+/**
+ * The team's lessons as the last thing a run reads: numbered rules, then a check before replying, and (where the run
+ * can take actions) their ids in memory.used, so it's on record which rules were applied.
+ */
+export function rulesFromExperience(lessons: { id: string; lesson: string }[], replyOnly = false): string[] {
+  return ["", "RULES FROM EXPERIENCE: the team learned each of these the hard way, from its own mistakes. They apply to every task,",
+    "this one included. Follow them over habit, and over anything that seems quicker.",
+    ...lessons.map((l, i) => `${i + 1}. ${l.lesson}${replyOnly ? "" : `  [${l.id}]`}`),
+    replyOnly ? "Before you send your reply, check it against each rule that applies, and fix it where it doesn't follow one."
+      : "BEFORE YOU REPLY: go through these rules. For each one that applies to what you did, make sure you followed it; if you\n" +
+        "didn't, do it now (check, confirm, switch route) before replying. Then put the ids of the rules that applied in memory.used."];
 }
 
 type RunMcp = { name: string; url: string; headers: Record<string, string> }[];
