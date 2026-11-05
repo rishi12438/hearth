@@ -1307,7 +1307,7 @@ function drawActivity() {
         h("span", { class: "grow" },
           h("span", { class: "l1" }, h("b", null, line), h("small", null, chan(it.threadId)), h("time", null, shortAgo(it.at))),
           h("span", { class: "l2" }, it.kind === "done" || it.kind === "failed" ? `${it.summary}${it.result ? ` — ${it.result}` : ""}` : it.kind === "blocked" ? `${it.summary}. ${it.unblock || ""}` : it.summary))),
-      it.kind === "approval" ? h("div", { class: "actbtns" }, h("button", { class: "sbtn", on: { click: async () => { await decide(it.approval.id, false); renderActivity(); } } }, "No"), h("button", { class: "sbtn primary", on: { click: async () => { await decide(it.approval.id, true); renderActivity(); } } }, "Approve"), alwaysBtn(it.approval, renderActivity)) : null,
+      it.kind === "approval" ? h("div", { class: "actbtns" }, ...(it.approval?.action?.type === "browser" ? macBrowserBtns(it.approval, renderActivity) : [h("button", { class: "sbtn", on: { click: async () => { await decide(it.approval.id, false); renderActivity(); } } }, "No"), h("button", { class: "sbtn primary", on: { click: async () => { await decide(it.approval.id, true); renderActivity(); } } }, "Approve"), alwaysBtn(it.approval, renderActivity)])) : null,
       it.kind === "blocked" ? h("div", { class: "actbtns" }, h("button", { class: "sbtn primary", on: { click: async () => { await retry(it.id); renderActivity(); } } }, "Try again"), dismissBtn(it.id, renderActivity)) : null);
   };
   // A workflow that matched: what it's doing or how it ended. Tapping it opens the agent's thread, or Workflows.
@@ -1605,7 +1605,7 @@ function taskMessage(m: any) {
   } else if (st === "waiting") {
     body.push(h("div", { class: "block" }, h("div", { class: "blockhead" }, icon("lock", 15), h("b", null, aps[0]?.summary || "Needs your OK")),
       aps.length ? codeToApprove(aps[0]) : null,
-      aps.length ? h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => decide(aps[0].id, true) } }, "Approve"), alwaysBtn(aps[0]), h("button", { class: "sbtn", on: { click: () => decide(aps[0].id, false) } }, "No")) : null));
+      aps.length ? h("div", { class: "blockbtns" }, ...apButtons(aps[0])) : null));
   } else if (st === "blocked") {
     body.push(h("div", { class: "block" }, h("div", { class: "blockhead" }, h("b", null, `Stuck: ${latest.blocked?.need || ""}`)), latest.blocked?.unblock ? h("p", null, latest.blocked.unblock) : null,
       h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => retry(latest.id) } }, "Try again"), dismissBtn(latest.id))));
@@ -1673,13 +1673,32 @@ setInterval(() => {
   }
 }, 1000);
 
-async function decide(id: string, yes: boolean, always = false): Promise<any> { try { return await call(`/api/approvals/${id}/${yes ? "approve" : "reject"}`, { body: { always } }); } catch (e) { handleError(e); return null; } }
+async function decide(id: string, yes: boolean, always = false, mode?: "background" | "mine"): Promise<any> { try { return await call(`/api/approvals/${id}/${yes ? "approve" : "reject"}`, { body: { always, ...(mode ? { mode } : {}) } }); } catch (e) { handleError(e); return null; } }
+/**
+ * Lending your Mac's browser has two ways to say yes (src/other-browser.ts): in the background (its own headless Chrome,
+ * watched here in live view) or in your own Chrome (a tab you watch). "Don't ask again" remembers the one you tap.
+ */
+function macBrowserBtns(ap: any, then?: () => void) {
+  const again = h("input", { type: "checkbox" }) as HTMLInputElement;
+  const go = (mode: "background" | "mine") => async () => { await decide(ap.id, true, again.checked, mode); then?.(); };
+  return [
+    h("button", { class: "sbtn primary", title: "Its own Chrome on your Mac, with your logins copied in. Nothing pops up; watch it here.", on: { click: go("background") } }, "Run in background"),
+    h("button", { class: "sbtn", title: "A new tab in the Chrome you're using, with everything you're signed in to. You can watch it.", on: { click: go("mine") } }, "Use my Chrome"),
+    h("button", { class: "sbtn", on: { click: async () => { await decide(ap.id, false); then?.(); } } }, "No"),
+    h("label", { class: "apagain small muted" }, again, " Don't ask again"),
+  ];
+}
+/** Approve / Always allow / No for a card (or the Mac-browser choice). */
+function apButtons(ap: any, then?: () => void) {
+  if (ap?.action?.type === "browser") return macBrowserBtns(ap, then);
+  return [h("button", { class: "sbtn primary", on: { click: async () => { await decide(ap.id, true); then?.(); } } }, "Approve"), alwaysBtn(ap, then), h("button", { class: "sbtn", on: { click: async () => { await decide(ap.id, false); then?.(); } } }, "No")];
+}
 /** One ask, as a card in its conversation. data-ap is what a link from Activity or a notification scrolls to. */
 function approvalCard(a: any) {
   return h("div", { class: "block", "data-ap": a.id },
     h("div", { class: "blockhead" }, icon("lock", 15), h("b", null, a.summary)), a.details ? h("p", { class: "predetails" }, a.details) : null, codeToApprove(a),
     a.action?.type === "skill" ? h("a", { class: "small", href: a.action.url, target: "_blank", rel: "noopener" }, "Read the skill on GitHub") : null,
-    a.status === "pending" ? h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => decide(a.id, true) } }, "Approve"), alwaysBtn(a), h("button", { class: "sbtn", on: { click: () => decide(a.id, false) } }, "No"))
+    a.status === "pending" ? h("div", { class: "blockbtns" }, ...apButtons(a))
       : [h("small", { class: "muted" }, approvalState(a)), a.result ? h("pre", { class: "code" }, a.result) : null]);
 }
 /** The card a link points at (#…?ap=<id>), if any. */
@@ -1710,8 +1729,8 @@ const approvalState = (a: any) => a.status === "done" ? "Approved and done" : a.
 
 const CHANNEL_NAME: Record<string, string> = { whatsapp: "WhatsApp", slack: "Slack", gmail: "Gmail", instagram: "Instagram", linkedin: "LinkedIn", x: "X" };
 /** "Always allow": for a message to one chat, one kind of Google change, or one MCP tool (scripts and payments always ask). */
-const alwaysBtn = (ap: any, then?: () => void) => ap?.action?.type === "message" || ap?.action?.type === "mcp" || ap?.action?.type === "browser" || (ap?.action?.type === "google" && GOOGLE_KINDS[ap.action.kind])
-  ? h("button", { class: "sbtn", title: ap.action.type === "browser" ? "Let teammates use Chrome on your Mac for blocked sites without asking from now on" : ap.action.type === "mcp" ? `Let ${ap.action.server}'s ${ap.action.tool} run without asking from now on (change it in /mcp)` : ap.action.type === "google" ? `${GOOGLE_KINDS[ap.action.kind]}: do it without asking from now on` : `Send future ${CHANNEL_NAME[ap.action.channel] || ""} messages to ${ap.action.to} without asking`, on: { click: async () => { await decide(ap.id, true, true); then?.(); } } }, "Always allow")
+const alwaysBtn = (ap: any, then?: () => void) => ap?.action?.type === "message" || ap?.action?.type === "mcp" || (ap?.action?.type === "google" && GOOGLE_KINDS[ap.action.kind])
+  ? h("button", { class: "sbtn", title: ap.action.type === "mcp" ? `Let ${ap.action.server}'s ${ap.action.tool} run without asking from now on (change it in /mcp)` : ap.action.type === "google" ? `${GOOGLE_KINDS[ap.action.kind]}: do it without asking from now on` : `Send future ${CHANNEL_NAME[ap.action.channel] || ""} messages to ${ap.action.to} without asking`, on: { click: async () => { await decide(ap.id, true, true); then?.(); } } }, "Always allow")
   : null;
 /** The Google changes that wait for Approve (connectors/google-agent.ts CHANGE_KINDS), as Settings → Always allowed names them. */
 const GOOGLE_KINDS: Record<string, string> = {
@@ -4538,7 +4557,7 @@ async function openAlwaysAllowed() {
     const { keys } = await call("/api/always-allow");
     const nice = (k: string) => {
       const [ch, ...rest] = k.split(":"); const to = rest.join(":");
-      if (ch === "browser") return { app: "Your Mac", to: "Using Chrome on your Mac when a site blocks the hub's browser" };
+      if (ch === "browser") return { app: "Your Mac", to: to === "mac:mine" ? "Using your own Chrome on your Mac when a site blocks the hub's browser" : "Using a background Chrome on your Mac when a site blocks the hub's browser" };
       if (ch === "google") return { app: to.startsWith("calendar") ? "Google Calendar" : "Google Drive", to: GOOGLE_KINDS[to] || to };
       return { app: CHANNEL_NAME[ch] || ch, to: ch === "whatsapp" ? to.replace(/@.*/, "") : to };
     };

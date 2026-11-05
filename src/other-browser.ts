@@ -9,7 +9,8 @@ import { createHash } from "node:crypto";
 // A conversation keeps its one browser across its jobs (an Approve's follow-up is a new job in the same thread).
 
 export type Act = { action: string; params: Record<string, unknown> };
-export type Out = { text: string } | { png: Uint8Array; mime?: "image/png" | "image/jpeg" };
+/** frame: a small picture of the page after the step, for the job's live view (background mode). */
+export type Out = { text: string; frame?: Uint8Array } | { png: Uint8Array; mime?: "image/png" | "image/jpeg" };
 
 /** The words of `hearth-browser <argv>`, as one action. A string is the usage error to print. */
 export function parseArgv(argv: string[]): Act | string {
@@ -60,17 +61,22 @@ export const USAGE = `usage: hearth-browser <command>
 export const macSession = (threadId: string) => `hearth-other-${createHash("sha256").update(threadId).digest("hex").slice(0, 10)}`;
 
 export type MacGate = "ok" | "ask" | "pending" | "no";
+/** How the user chose to lend their Mac, on the Approve card: a headless Chrome in the background, or their own Chrome. */
+export type MacMode = "background" | "mine";
+export const MODE_NAME: Record<MacMode, string> = { background: "a background Chrome on", mine: "your own Chrome on" };
 export type OtherBrowserOpts = {
   /** The online Mac that can take browser work (never a cloud box), or null. */
-  mac: { name(): string | null; act(sid: string, a: Act): Promise<Out> };
-  /** May this conversation use the Mac's browser? */
-  gate: (threadId: string) => Promise<MacGate>;
+  mac: { name(): string | null; act(sid: string, a: Act, mode: MacMode): Promise<Out> };
+  /** May this conversation use the Mac's browser, and how (the mode they picked)? */
+  gate: (threadId: string) => Promise<{ state: MacGate; mode?: MacMode }>;
+  /** A live-view picture for the job that asked. */
+  onFrame?: (jobId: string, f: Uint8Array) => void;
   /** Put the Approve card in the thread. */
   ask: (c: { threadId: string; jobId?: string; url: string; why?: string; mac: string }) => Promise<void>;
   now?: () => number;
 };
 
-type Open = { mac: string; at: number };
+type Open = { mac: string; mode: MacMode; at: number };
 const IDLE_MS = 20 * 60_000;
 
 /** The Mac can't take it: what the agent is told. What to do instead is hearth-help's to say (help.ts). */
@@ -91,7 +97,7 @@ export class OtherBrowser {
     this.sweep();
     const cur = this.open.get(ctx.threadId);
     const mac = this.o.mac.name();
-    if (a.action === "where") return { text: cur ? `This conversation's browser is Chrome on ${cur.mac}.` : mac ? `None open yet. The next open uses Chrome on ${mac} (once the user approves).` : noMac("offline") };
+    if (a.action === "where") return { text: cur ? `This conversation's browser is ${cur.mode === "mine" ? "the user's own Chrome" : "a background Chrome"} on ${cur.mac}.` : mac ? `None open yet. The next open uses Chrome on ${mac} (once the user approves).` : noMac("offline") };
     if (a.action === "close") {
       if (cur) await this.closeOn(ctx.threadId);
       return { text: "Closed." };
@@ -99,33 +105,38 @@ export class OtherBrowser {
     if (cur) {
       if (!mac) { this.open.delete(ctx.threadId); return { text: noMac("gone", cur.mac) }; }
       cur.at = this.now();
-      return this.on(ctx.threadId, a);
+      return this.on(ctx.threadId, cur, a, ctx.jobId);
     }
     if (a.action !== "open") return { text: "No browser is open for this yet. Start with: hearth-browser open <url> [what blocked you]" };
     if (!mac) return { text: noMac("offline") };
     const url = String(a.params.url), why = a.params.why ? String(a.params.why) : undefined;
-    const g = await this.o.gate(ctx.threadId);
+    const { state: g, mode = "background" } = await this.o.gate(ctx.threadId);
     if (g === "no") return { text: noMac("no") };
     if (g === "ask" || g === "pending") {
       if (g === "ask") await this.o.ask({ threadId: ctx.threadId, jobId: ctx.jobId, url, why, mac });
-      return { text: `Not open yet: using Chrome on ${mac} (the user's Mac) waits for their Approve in Hearth. Don't try to get past the block another way meanwhile; finish the parts of the task that don't need this site. In your reply, ask them plainly ("Can I use Chrome on your Mac for this? Tap Approve below") and say what blocked you. When they tap Approve you get a turn; then run hearth-browser open ${url} again.` };
+      return { text: `Not open yet: using Chrome on ${mac} (the user's Mac) waits for their Approve in Hearth. Don't try to get past the block another way meanwhile; finish the parts of the task that don't need this site. In your reply, ask them plainly ("Can I use Chrome on your Mac for this? Pick one below": in the background, or in their own Chrome) and say what blocked you. When they answer you get a turn; then run hearth-browser open ${url} again.` };
     }
-    this.open.set(ctx.threadId, { mac, at: this.now() });
-    const out = await this.on(ctx.threadId, a);
-    if ("text" in out && !/^Error/.test(out.text)) return { text: `Opened in Chrome on ${mac}. Carry on with the same commands.\n${out.text}` };
+    const s: Open = { mac, mode, at: this.now() };
+    this.open.set(ctx.threadId, s);
+    const out = await this.on(ctx.threadId, s, a, ctx.jobId);
+    if ("text" in out && !/^Error/.test(out.text)) return { text: `Opened in ${mode === "mine" ? "the user's own Chrome (they can watch; don't touch their other tabs)" : "a background Chrome (the user watches in live view)"} on ${mac}. Carry on with the same commands.\n${out.text}` };
     return out;
   }
 
-  private async on(threadId: string, a: Act): Promise<Out> {
+  private async on(threadId: string, s: Open, a: Act, jobId?: string): Promise<Out> {
     const params = { ...a.params };
     delete params.why;
-    try { return await this.o.mac.act(macSession(threadId), { action: a.action, params }); }
-    catch (e: any) { return { text: `Error: ${String(e?.message || e).slice(0, 400)}` }; }
+    try {
+      const out = await this.o.mac.act(macSession(threadId), { action: a.action, params }, s.mode);
+      if ("text" in out && out.frame) { if (jobId) this.o.onFrame?.(jobId, out.frame); return { text: out.text }; }
+      return out;
+    } catch (e: any) { return { text: `Error: ${String(e?.message || e).slice(0, 400)}` }; }
   }
 
   private async closeOn(threadId: string) {
+    const s = this.open.get(threadId);
     this.open.delete(threadId);
-    try { await this.o.mac.act(macSession(threadId), { action: "close", params: {} }); } catch {}
+    try { await this.o.mac.act(macSession(threadId), { action: "close", params: {} }, s?.mode ?? "background"); } catch {}
   }
 
   /** Close what nobody has used for a while, so a window doesn't stay open on the Mac. */
@@ -177,8 +188,9 @@ quietly drops your search. You'll see it on the page or the screenshot; you deci
 
 ## hearth-browser: Chrome on the user's Mac
 Once the user lets you (hearth-help says how), it's the same as enkidu-browser, one command each:
-- \`hearth-browser open <url> "<what blocked you>"\`: the first time in a conversation, this asks the user (an Approve
-  card under your reply) and tells you so; after their Approve, the same open goes ahead.
+- \`hearth-browser open <url> "<what blocked you>"\`: the first time in a conversation, this asks the user (a card under
+  your reply: run it in the background, or in their own Chrome) and tells you so; after they pick, the same open goes
+  ahead. In their own Chrome, work only in the tab you opened.
 - \`hearth-browser observe\`: the page's text and its clickable parts, each with a ref (e1, e2…). Refs change after
   each observe and each page load: observe again before reusing one.
 - \`hearth-browser click e12\`, \`type e3 Phoenix\`, \`press Enter\`, \`scroll 800\`, \`navigate <url>\`, \`back\`

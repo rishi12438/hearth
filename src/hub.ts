@@ -1135,11 +1135,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     const meter: Meter = { costUsd: 0, unknown: false, signal: stop.signal, thread: job.parentId ? job.id : job.followsUp || job.id, jobId: job.id, workspace: await this.placeFor(job),
       onProgress: (what) => { narrator?.step(what); show(what); }, onAction: (raw) => narrator?.action(raw),
       // A picture of the page or window it's on: kept in memory; the app fetches it when told there's a new one.
-      onFrame: (f) => {
-        const n = (this.frames.get(job.id)?.n ?? 0) + 1, at = this.clock().toISOString();
-        this.frames.set(job.id, { n, at, mime: f.mime, data: f.data });
-        this.emit("frame", { jobId: job.id, threadId: job.threadId, n, at });
-      },
+      onFrame: (f) => this.pushFrame(job.id, f, job.threadId),
       // Which model is on it right now, and where: the working card shows it, the step log keeps each change.
       onBrain: (w) => {
         const name = brainName(w);
@@ -2070,18 +2066,32 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
 
   /** Set by the server once the Mac link and the Browserbase key are there. */
   otherBrowser: import("./other-browser.ts").OtherBrowser | null = null;
-  /** Conversations you said yes (or no) to using your Mac's browser in, until when. */
-  private macBrowserYes = new Map<string, number>();
+  /** Conversations you said yes (or no) to using your Mac's browser in, until when, and how (background or your Chrome). */
+  private macBrowserYes = new Map<string, { until: number; mode: import("./other-browser.ts").MacMode }>();
   private macBrowserNo = new Map<string, number>();
 
   /** May this conversation use Chrome on your Mac? Always allow, an Approve in it, a No, a card still waiting, or ask. */
   async macBrowserGate(threadId: string): Promise<import("./other-browser.ts").MacGate> {
+    return (await this.macBrowserChoice(threadId)).state;
+  }
+  /** The same, with the way you chose: "mine" (your Chrome) or "background". Always allow remembers which. */
+  async macBrowserChoice(threadId: string): Promise<{ state: import("./other-browser.ts").MacGate; mode?: import("./other-browser.ts").MacMode }> {
     const t = this.clock().getTime();
-    if ((await this.alwaysAllowed()).includes("browser:mac")) return "ok";
-    if ((this.macBrowserYes.get(threadId) ?? 0) > t) return "ok";
-    if ((this.macBrowserNo.get(threadId) ?? 0) > t) return "no";
+    const yes = this.macBrowserYes.get(threadId);
+    if (yes && yes.until > t) return { state: "ok", mode: yes.mode };
+    const always = await this.alwaysAllowed();
+    if (always.includes("browser:mac:mine")) return { state: "ok", mode: "mine" };
+    if (always.includes("browser:mac")) return { state: "ok", mode: "background" };
+    if ((this.macBrowserNo.get(threadId) ?? 0) > t) return { state: "no" };
     const waiting = (await this.store.all<Approval>("approvals")).some((a) => a.status === "pending" && a.action.type === "browser" && a.action.threadId === threadId);
-    return waiting ? "pending" : "ask";
+    return { state: waiting ? "pending" : "ask" };
+  }
+
+  /** A live-view picture for a job (its own browser's, or one from your Mac's background Chrome). */
+  pushFrame(jobId: string, f: { mime: string; data: Uint8Array }, threadId?: string) {
+    const n = (this.frames.get(jobId)?.n ?? 0) + 1, at = this.clock().toISOString();
+    this.frames.set(jobId, { n, at, mime: f.mime, data: f.data });
+    this.emit("frame", { jobId, threadId, n, at });
   }
 
   /** A job is stuck on a site and wants Chrome on your Mac: one Approve card in its thread. */
@@ -2093,7 +2103,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     const ap = await this.store.put<Approval>("approvals", {
       ...this.doc({}), threadId: c.threadId, jobId: job?.id,
       summary: `Use Chrome on ${c.mac} for ${site}`.slice(0, 200),
-      details: `${mate?.name || "A teammate"} is blocked on ${site} in the hub's browser${c.why ? ` (${c.why})` : ""}. Approve and it carries on in Chrome on ${c.mac}: a window opens there, on your home connection and with your logins on that Mac. This covers this conversation for 12 hours.`,
+      details: `${mate?.name || "A teammate"} is blocked on ${site} in the hub's browser${c.why ? ` (${c.why})` : ""}. It can carry on from ${c.mac}, on your home connection: in the background (its own Chrome with your logins, nothing pops up; watch it here in live view), or in your own Chrome (a new tab you can watch, with everything you're signed in to). Your pick covers this conversation for 12 hours.`,
       action: { type: "browser", computer: c.mac, url: c.url, threadId: c.threadId },
       status: "pending",
     } as Approval);
@@ -2103,10 +2113,10 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: await this.approvalLink(ap) });
   }
 
-  private async runMacBrowserOk(act: Extract<Approval["action"], { type: "browser" }>): Promise<{ ok: boolean; output: string }> {
-    this.macBrowserYes.set(act.threadId, this.clock().getTime() + 12 * 3600_000);
+  private async runMacBrowserOk(act: Extract<Approval["action"], { type: "browser" }>, mode: import("./other-browser.ts").MacMode): Promise<{ ok: boolean; output: string }> {
+    this.macBrowserYes.set(act.threadId, { until: this.clock().getTime() + 12 * 3600_000, mode });
     this.macBrowserNo.delete(act.threadId);
-    return { ok: true, output: `Chrome on ${act.computer} is open to you in this conversation. Carry on: hearth-browser open ${act.url}` };
+    return { ok: true, output: `${mode === "mine" ? "The user's own Chrome" : "A background Chrome"} on ${act.computer} is open to you in this conversation. Carry on: hearth-browser open ${act.url}` };
   }
 
   /** The online Mac's name (set by the server), for hearth-help. */
@@ -2445,7 +2455,9 @@ ${JSON.stringify(shown, null, 1)}
     return old.length;
   }
 
-  async decideApproval(id: string, yes: boolean, always = false) {
+  /** mode: for a Mac-browser card, the button tapped ("background" or "mine"). */
+  async decideApproval(id: string, yes: boolean, always = false, mode?: string) {
+    const macMode: import("./other-browser.ts").MacMode = mode === "mine" ? "mine" : "background";
     const ap = await this.store.get<Approval>("approvals", id);
     if (!ap || ap.status !== "pending") return { error: ap?.status === "expired" ? "This expired: nobody answered it within a day, so it didn't run." : "Already decided." };
     if (yes && always && ap.action.type === "message") {
@@ -2457,8 +2469,8 @@ ${JSON.stringify(shown, null, 1)}
       await this.log("approval.always", `Always allow: ${CHANGE_KINDS[ap.action.kind]}`);
     }
     if (yes && always && ap.action.type === "browser") {
-      await this.setAlwaysAllowed([...(await this.alwaysAllowed()), "browser:mac"]);
-      await this.log("approval.always", "Always allow teammates to use Chrome on your Mac for blocked sites");
+      await this.setAlwaysAllowed([...(await this.alwaysAllowed()).filter((k) => !k.startsWith("browser:mac")), macMode === "mine" ? "browser:mac:mine" : "browser:mac"]);
+      await this.log("approval.always", `Always let teammates use ${macMode === "mine" ? "your own Chrome" : "a background Chrome"} on your Mac for blocked sites`);
     }
     if (!yes && ap.action.type === "browser") this.macBrowserNo.set(ap.action.threadId, this.clock().getTime() + 12 * 3600_000);
     if (yes && always && ap.action.type === "mcp") {
@@ -2484,7 +2496,7 @@ ${JSON.stringify(shown, null, 1)}
       const out = act.type === "google" ? await this.runGoogle(act)
         : act.type === "mcp" ? await this.runMcp(act)
         : act.type === "skill" ? await this.runSkillInstall(act)
-        : act.type === "browser" ? await this.runMacBrowserOk(act)
+        : act.type === "browser" ? await this.runMacBrowserOk(act, macMode)
         : act.type === "message"
         ? await (this.senders[act.channel]?.send(act.to, act.text, { subject: act.subject, threadId: act.threadId, from: act.from }).then(() => ({ ok: true, output: "Sent." }), (e: any) => ({ ok: false, output: String(e?.message || e) }))
           ?? { ok: false, output: `${act.channel} isn't connected.` })

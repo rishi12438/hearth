@@ -166,8 +166,10 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   // Another browser for jobs a site blocks (other-browser.ts): Chrome on your Mac once you approve. What else there is
   // when that can't be, hearth-help stuck says (help.ts).
   hub.otherBrowser = new OtherBrowser({
-    mac: { name: () => computers.macName(), act: (sid, a) => computers.browse(sid, a.action, a.params) },
-    gate: (threadId) => hub.macBrowserGate(threadId),
+    mac: { name: () => computers.macName(), act: (sid, a, mode) => computers.browse(sid, a.action, a.params, mode) },
+    // Background mode sends a small picture after each step: it goes to the job's live view in the thread.
+    onFrame: (jobId, data) => hub.pushFrame(jobId, { mime: "image/jpeg", data }),
+    gate: (threadId) => hub.macBrowserChoice(threadId),
     ask: (c) => hub.requestMacBrowser(c),
   });
   hub.macName = () => computers.macName();
@@ -735,7 +737,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       case "approvals": {
         if (method === "GET") return json((await store.all<Approval>("approvals")).filter((a) => !url.searchParams.get("thread") || a.threadId === url.searchParams.get("thread")));
         if (method === "POST" && (seg[3] === "approve" || seg[3] === "reject")) {
-          const r = await hub.decideApproval(id, seg[3] === "approve", (await body(req).catch(() => ({}))).always === true);
+          const b = await body(req).catch(() => ({}));
+          const r = await hub.decideApproval(id, seg[3] === "approve", b.always === true, typeof b.mode === "string" ? b.mode : undefined);
           if (r.error) throw new HttpError(409, r.error);
           return json(r.value);
         }
