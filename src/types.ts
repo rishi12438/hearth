@@ -329,6 +329,8 @@ export type StoredFile = Doc & {
   threadId?: string;
   jobId?: string;
   teammateId?: string;
+  /** The workspace file an agent's file was copied from: a later edit of it shows as an update of this one. */
+  origin?: string;
 };
 
 /** A mini app a teammate built: one html file plus its data. Runs sandboxed with no network. */

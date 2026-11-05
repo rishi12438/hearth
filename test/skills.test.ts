@@ -46,7 +46,7 @@ test("the catalog names the common skills and how to search; flags allow only th
   expect(cat).not.toContain("weekly-report");
   expect(cat).toContain("- automate-repetitive-work: Doing the same thing many times");
   expect(cat).toContain("7 skill(s)");
-  expect(cat).toContain("- send-files: Made something the user should open");
+  expect(cat).toContain("- send-files: Making something the user should open");
   expect(cat).toContain("- build-workflows: Building an automation");
   expect(cat).not.toContain("write-trigger-judges"); // not common: found by search
   const f = skillFlags(skills);

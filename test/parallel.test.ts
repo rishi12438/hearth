@@ -201,6 +201,39 @@ test("an agent hands over files from its workspace with @file lines; nothing out
   expect(mac.text).toContain("on Rishi's Mac");
 });
 
+test("media and documents an agent makes or edits are shown by themselves; _scratchpad and workspace folders aren't", async () => {
+  await setup();
+  const { mkdirSync, writeFileSync, utimesSync } = await import("node:fs");
+  const thread = "job-thread-2";
+  const folder = hub.brain.sessions.folder(thread, { workspace: "launch-video" })!;
+  for (const d of ["out", "_scratchpad", "data", "scripts"]) mkdirSync(join(folder, d), { recursive: true });
+  writeFileSync(join(folder, "out/old.mp4"), "from yesterday");
+  const yesterday = new Date(Date.now() - 86_400_000);
+  utimesSync(join(folder, "out/old.mp4"), yesterday, yesterday);
+  const meter: any = { costUsd: 0, unknown: false, thread, ranOn: "cloud" };
+  const since = Date.now() - 5;
+  writeFileSync(join(folder, "out/cut.mp4"), "v1");
+  writeFileSync(join(folder, "out/deck.pdf"), "pdf");
+  writeFileSync(join(folder, "out/notes.md"), "not media: needs @file");
+  writeFileSync(join(folder, "_scratchpad/frame.png"), "test frame");
+  writeFileSync(join(folder, "data/raw.csv"), "raw");
+  writeFileSync(join(folder, "scripts/render.py"), "code");
+  const r = await hub.handOver("Here's the first cut.", { threadId: "t2", jobId: "j1", meter }, undefined, since);
+  expect(r.text).toBe("Here's the first cut.");
+  expect(r.done.map((d) => d.label).sort()).toEqual(["Made cut.mp4", "Made deck.pdf"]);
+
+  // The next run edits the cut and leaves the deck alone: only the cut comes back, as an update.
+  const since2 = Date.now() + 10;
+  await Bun.sleep(20);
+  writeFileSync(join(folder, "out/cut.mp4"), "v2");
+  utimesSync(join(folder, "out/deck.pdf"), new Date(), new Date()); // touched, same bytes
+  const r2 = await hub.handOver("Tightened the ending.\n@file out/notes.md", { threadId: "t2", jobId: "j2", meter }, undefined, since2);
+  expect(r2.done.map((d) => d.label)).toEqual(["Made notes.md", "Updated cut.mp4"]);
+  const cut = (await store.get<any>("files", r2.done[1].id!))!;
+  expect(new TextDecoder().decode(hub.files.bytes(cut.id)!)).toBe("v2");
+  expect(r2.text).toBe("Tightened the ending.");
+});
+
 test("teammates make files, scripts hand files over, and downloads are sandboxed", async () => {
   await setup();
   // A teammate's file.create action

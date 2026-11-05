@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, statSync, realpathSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, statSync, realpathSync, readdirSync, lstatSync } from "node:fs";
 import { join, basename, extname, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { sha256 } from "./auth.ts";
@@ -23,6 +23,10 @@ const TYPES: Record<string, string> = {
   ".zip": "application/zip", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 };
+/** What an agent's workspace file must look like to be shown to the user without asking: a finished thing to open. */
+const SHOWN = /\.(mp4|mov|m4v|webm|mp3|m4a|wav|aac|flac|ogg|png|jpe?g|gif|webp|avif|heic|svg|pdf|docx|xlsx|pptx|csv|tsv|zip|ics)$/i;
+/** A workspace's own folders (see workspaceNote in brain.ts): never shown by themselves. */
+const SKIP_DIRS = new Set(["data", "scripts", "history", "archive", "skills", "attachments", "node_modules"]);
 /** Types a teammate can read as text in its prompt. */
 const TEXTY = /^(text\/|application\/(json|xml))/;
 
@@ -42,7 +46,7 @@ export class Files {
     mkdirSync(this.dir, { recursive: true, mode: 0o700 });
   }
 
-  async save(bytes: Uint8Array, meta: { name: string; source: StoredFile["source"]; threadId?: string; jobId?: string; teammateId?: string }, max = MAX_FILE_BYTES) {
+  async save(bytes: Uint8Array, meta: { name: string; source: StoredFile["source"]; threadId?: string; jobId?: string; teammateId?: string; origin?: string }, max = MAX_FILE_BYTES) {
     if (bytes.length > max) return { error: `That file is over ${Math.round(max / 1024 / 1024)} MB.` };
     const name = cleanName(meta.name);
     const id = randomUUID();
@@ -50,6 +54,7 @@ export class Files {
     const f = await this.store.put<StoredFile>("files", {
       id, createdAt: new Date().toISOString(), name, mime: mimeFor(name), size: bytes.length, sha256: sha256(bytes),
       source: meta.source, threadId: meta.threadId, jobId: meta.jobId, teammateId: meta.teammateId,
+      ...(meta.origin ? { origin: meta.origin } : {}),
     });
     return { value: f };
   }
@@ -68,7 +73,7 @@ export class Files {
    * Copies a file an agent made in its workspace (e.g. "out/preview.mp4") into the thread, for the user to open. The
    * workspace keeps its copy. Only paths inside the workspace, links resolved, so nothing else on the hub can be sent.
    */
-  async share(root: string, relPath: string, meta: Omit<Parameters<Files["save"]>[1], "name">) {
+  async share(root: string, relPath: string, meta: Omit<Parameters<Files["save"]>[1], "name" | "origin">): Promise<{ error: string } | { value: StoredFile; path: string; status: "new" | "updated" | "same" }> {
     const want = String(relPath || "").trim().replace(/^["'`]|["'`]$/g, "");
     if (!want) return { error: "No file named." };
     let base: string, path: string;
@@ -80,7 +85,37 @@ export class Files {
     const st = statSync(path);
     if (!st.isFile()) return { error: `${want} isn't a file.` };
     if (st.size > MAX_AGENT_FILE_BYTES) return { error: `${want} is over ${MAX_AGENT_FILE_BYTES / 1024 / 1024} MB.` };
-    return this.save(readFileSync(path), { ...meta, name: basename(path) }, MAX_AGENT_FILE_BYTES);
+    const bytes = readFileSync(path);
+    // The same workspace file sent to this thread before: unchanged is that file again; changed is an update.
+    const before = (await this.store.all<StoredFile>("files")).filter((f) => f.origin === path && f.threadId === meta.threadId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+    if (before && before.sha256 === sha256(bytes)) return { value: before, path, status: "same" };
+    const r = await this.save(bytes, { ...meta, name: basename(path), origin: path }, MAX_AGENT_FILE_BYTES);
+    return "error" in r ? { error: r.error! } : { value: r.value, path, status: before ? "updated" : "new" };
+  }
+
+  /**
+   * Files an agent made or changed in its workspace since `since` (ms) that look like something to hand over: media,
+   * documents, spreadsheets. Not in _scratchpad/ (or any _ or . folder) or the workspace's own bookkeeping folders.
+   */
+  recent(root: string, since: number, max = 8): string[] {
+    const found: { rel: string; at: number }[] = [];
+    let seen = 0;
+    const walk = (dir: string, rel: string, depth: number) => {
+      let names: string[];
+      try { names = readdirSync(dir); } catch { return; }
+      for (const n of names) {
+        if (++seen > 3000) return;
+        if (n.startsWith(".") || n.startsWith("_")) continue;
+        const p = join(dir, n), r = rel ? `${rel}/${n}` : n;
+        let st;
+        try { st = lstatSync(p); } catch { continue; }
+        if (st.isDirectory()) { if (depth < 4 && !(depth === 0 && SKIP_DIRS.has(n))) walk(p, r, depth + 1); continue; }
+        if (st.isFile() && st.mtimeMs >= since && SHOWN.test(n) && st.size > 0 && st.size <= MAX_AGENT_FILE_BYTES) found.push({ rel: r, at: st.mtimeMs });
+      }
+    };
+    walk(root, "", 0);
+    return found.sort((a, b) => a.at - b.at).slice(-max).map((f) => f.rel);
   }
 
   bytes(id: string) {
