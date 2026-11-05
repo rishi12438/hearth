@@ -1,0 +1,21 @@
+src/brains/skills.ts
+  s_9d5bba51266822::t_9e036d01405898 215-222,224
+src/brain.ts
+  s_9d5bba51266822::t_9e036d01405898 637-647
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "68523783b05d94a3c915065f1f85ad980926048c",
+  "prompts": {},
+  "sessions": {
+    "s_9d5bba51266822": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ed1a7638-c528-4c42-b04d-868bc4b3ee89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
