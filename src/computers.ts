@@ -121,6 +121,13 @@ export class Computers implements Remote {
       case "pong":
         if (typeof m.ts === "number") { link.rttMs = Math.max(0, this.now() - m.ts); this.changed(); }
         return;
+      // Its run's notes to teammates, and how far it has read what it was sent (see brains/team.ts).
+      case "team": {
+        const line = link.running.get(m.id)?.meter?.team;
+        if (line && typeof m.text === "string" && m.text.trim()) line.send(String(m.to || "all").slice(0, 80), m.text.slice(0, 2000));
+        return;
+      }
+      case "teamRead": if (typeof m.n === "number") link.running.get(m.id)?.meter?.team?.markRead(m.n); return;
       case "step": link.running.get(m.id)?.meter?.onProgress?.(String(m.text || "").slice(0, 120)); return;
       case "act": link.running.get(m.id)?.meter?.onAction?.(String(m.text || "").slice(0, 300)); return;
       case "frame": {
@@ -189,9 +196,11 @@ export class Computers implements Remote {
     return new Promise<string>((resolve, reject) => {
       const stop = () => this.send(deviceId, { t: "stop", id });
       meter?.signal?.addEventListener("abort", stop, { once: true });
-      const done = (f: () => void) => { meter?.signal?.removeEventListener("abort", stop); f(); };
+      // Notes for the run from its teammates, and who's around, as they come. An older app ignores them.
+      const unsub = meter?.team?.subscribe((n) => this.send(deviceId, { t: "note", id, ...n }), (text) => this.send(deviceId, { t: "roster", id, text }));
+      const done = (f: () => void) => { meter?.signal?.removeEventListener("abort", stop); unsub?.(); f(); };
       link.running.set(id, { resolve: (s) => done(() => resolve(s)), reject: (e) => done(() => reject(e)), meter });
-      this.send(deviceId, { t: "run", id, input, profile: { harness: profile.harness, model: MODEL_RE.test(profile.model) ? profile.model : "" } });
+      this.send(deviceId, { t: "run", id, input, profile: { harness: profile.harness, model: MODEL_RE.test(profile.model) ? profile.model : "" }, ...(meter?.team ? { team: true } : {}) });
       this.changed();
     });
   }

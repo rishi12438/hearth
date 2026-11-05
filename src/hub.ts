@@ -29,6 +29,7 @@ import { Files, extractFiles } from "./files.ts";
 import { Apps, appSize } from "./apps.ts";
 import { sha256 } from "./auth.ts";
 import { Narrator } from "./brains/narrate.ts";
+import { TeamLine } from "./brains/team.ts";
 import { syncBrowserLogins } from "./brains/browser-logins.ts";
 import type { FreshLogin } from "./computers.ts";
 import { labelFor } from "./cookie-sites.ts";
@@ -709,6 +710,10 @@ export class Hub {
   /** What each running job is doing right now, so a reload or another device sees it too. */
   /** Each working job's steps so far (newest last, capped), so the app can show the whole stream, not just the latest. */
   private steps = new Map<string, { at: string; text: string }[]>();
+  /** Each working run's line to its teammates (brains/team.ts): runs of one ramble can tell each other things mid-run. */
+  private teams = new Map<string, { job: Job; name: string; tag: string; line: TeamLine; show: (s: string) => void }>();
+  /** What teammates said to each other in each ramble lately, for Activity. Memory only. */
+  private teamLog = new Map<string, { at: string; from: string; fromId: string; to: string[]; toIds: string[]; text: string }[]>();
   /** Each working job's latest live-view picture (memory only, gone when the job ends). */
   private frames = new Map<string, { n: number; at: string; mime: string; data: Uint8Array }>();
   private handedBack = new Map<string, string>(); // message id -> the task thread that handed it back
@@ -794,7 +799,42 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     await this.log("trigger.quiet", label);
     return true;
   }
+  // ---- teammates talking while they work ----
+
+  private leaveTeam(job: Job) {
+    if (this.teams.delete(job.id)) this.refreshRosters(job.threadId);
+  }
+  /** Who's working alongside this run, for `hearth-team who`. */
+  private rosterFor(id: string) {
+    const me = this.teams.get(id);
+    if (!me) return "";
+    const others = [...this.teams.entries()].filter(([k, t]) => k !== id && t.job.threadId === me.job.threadId);
+    const lines = others.map(([, t]) => `- ${t.tag}: ${t.name}, on "${t.job.label || shortLabel(undefined, t.job.task)}"`);
+    return `You are ${me.tag}.\n${lines.length ? `Working alongside you (send --to <id>, or all):\n${lines.join("\n")}` : "Nobody else is working on this ramble right now."}\n`;
+  }
+  private refreshRosters(threadId: string) {
+    for (const [k, t] of this.teams) if (t.job.threadId === threadId) t.line.setRoster(this.rosterFor(k));
+  }
+  /** A note from one run to the others working on the same ramble (to one by id or name, or all). */
+  private teamSend(fromId: string, to: string, text: string) {
+    const me = this.teams.get(fromId);
+    if (!me) return;
+    const others = [...this.teams.entries()].filter(([k, t]) => k !== fromId && t.job.threadId === me.job.threadId);
+    const want = to.trim().toLowerCase();
+    const hits = want === "all" ? others : others.filter(([k, t]) => t.tag === want || t.name.toLowerCase() === want || k === to);
+    if (!hits.length) { me.line.deliver("Hearth", `Nobody called "${to}" is working with you now.\n${this.rosterFor(fromId)}`); return; }
+    for (const [, t] of hits) { t.line.deliver(`${me.name} (${me.tag})`, text); t.show(`Heard from ${me.name}: ${text}`.slice(0, 120)); }
+    me.show(`Told ${hits.map(([, t]) => t.name).join(", ")}: ${text}`.slice(0, 120));
+    const log = this.teamLog.get(me.job.threadId) ?? [];
+    log.push({ at: this.clock().toISOString(), from: me.name, fromId, to: hits.map(([, t]) => t.name), toIds: hits.map(([k]) => k), text: text.slice(0, 300) });
+    if (log.length > 40) log.splice(0, log.length - 40);
+    this.teamLog.set(me.job.threadId, log);
+    this.emit("team", { threadId: me.job.threadId });
+    this.log("team.note", `${me.name} → ${hits.map(([, t]) => t.name).join(", ")}: ${text.slice(0, 100)}`).catch(() => {});
+  }
+
   private async handBack(job: Job, meter: Meter) {
+    this.leaveTeam(job);
     this.stops.delete(job.id); this.steps.delete(job.id); this.frames.delete(job.id);
     await this.addSpend(job.messageId, meter.costUsd);
     await this.store.remove("jobs", job.id);
@@ -1157,9 +1197,15 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     };
     const models: string[] = [];
     const mate = await this.teammate(job.teammateId);
+    // Its line to whoever else is working on this ramble: `hearth-team` in the run (see brains/team.ts).
+    const team = new TeamLine((to, text) => this.teamSend(job.id, to, text));
+    meter.team = team;
+    this.teams.set(job.id, { job, name: mate?.name || "Hearth", tag: `${slugOf(mate?.name || "hearth")}-${job.id.replace(/[^a-z0-9]/gi, "").slice(0, 4).toLowerCase()}`, line: team, show });
+    this.refreshRosters(job.threadId);
     let cur: Job = await this.saveJob({ ...job, status: "working", startedAt: this.clock().toISOString() });
     const finish = async (patch: Partial<Job>) => {
       narrator?.stop();
+      this.leaveTeam(job);
       const stepsSoFar = (this.steps.get(job.id) || []).map((x) => x.text);
       this.stops.delete(job.id); this.steps.delete(job.id); this.frames.delete(job.id); this.running.delete(job.id);
       if (stop.signal.aborted && this.cancelled.delete(job.id)) {
@@ -2683,7 +2729,12 @@ ${JSON.stringify(shown, null, 1)}
     }
     // Everyone working right now, and what's waiting its turn (a workflow's own run shows under Workflows).
     for (const j of jobs.filter((x) => (x.status === "working" || x.status === "queued") && !byRun.has(x.id))) {
-      items.push({ kind: j.status === "working" ? "running" : "queued", at: j.startedAt || j.createdAt, startedAt: j.startedAt, id: j.id, summary: j.label || shortLabel(undefined, j.task), teammateId: j.teammateId, threadId: j.threadId, jobId: rootOf(j) });
+      const t = this.teams.get(j.id);
+      // Its team id and the latest notes to or from it, so you can see who's talking to whom.
+      const notes = (this.teamLog.get(j.threadId) || []).filter((n) => n.fromId === j.id || n.toIds.includes(j.id)).slice(-3)
+        .map((n) => ({ at: n.at, from: n.fromId === j.id ? null : n.from, to: n.fromId === j.id ? n.to : null, text: n.text }));
+      items.push({ kind: j.status === "working" ? "running" : "queued", at: j.startedAt || j.createdAt, startedAt: j.startedAt, id: j.id, summary: j.label || shortLabel(undefined, j.task), teammateId: j.teammateId, threadId: j.threadId, jobId: rootOf(j),
+        ...(t ? { tag: t.tag, team: [...this.teams.values()].filter((x) => x.job.threadId === j.threadId && x.job.id !== j.id).map((x) => x.name), notes } : {}) });
     }
     const urgent = (k: string) => (k === "running" || k === "queued" ? 0 : k === "approval" || k === "blocked" ? 1 : 2);
     return items.sort((a, b) => urgent(a.kind) - urgent(b.kind) || String(b.at).localeCompare(String(a.at))).slice(0, 80);

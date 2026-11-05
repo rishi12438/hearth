@@ -1,3 +1,4 @@
+import { TeamLine } from "./brains/team.ts";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, hostname, platform, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -159,6 +160,7 @@ export function connect(opts: Opts) {
   const brain = opts.brain || new Brain(config);
   const readCopy = opts.readCopy || readLogin;
   const runs = new Map<string, AbortController>();
+  const lines = new Map<string, TeamLine>(); // each run's line to its teammates, fed by the hub
   let ws: WebSocket | null = null;
   let stopped = false, backoff = 1000, alive: ReturnType<typeof setInterval> | null = null, copyTimer: ReturnType<typeof setInterval> | null = null, toolsTimer: ReturnType<typeof setInterval> | null = null;
   let want: { items: CopyItem[]; have: Record<string, string> } = { items: [], have: {} };
@@ -208,17 +210,19 @@ export function connect(opts: Opts) {
   const run = async (m: any) => {
     const ctl = new AbortController();
     runs.set(m.id, ctl);
+    if (m.team) lines.set(m.id, new TeamLine((to, text) => send({ t: "team", id: m.id, to, text }), (n) => send({ t: "teamRead", id: m.id, n })));
     try {
       const profile: BrainProfile = { harness: String(m.profile?.harness || ""), model: String(m.profile?.model || "") };
       if (!availableHarnesses(config).includes(profile.harness)) throw new Error(`${profile.harness} isn't installed on ${link.name}.`);
       const meter = { costUsd: 0, unknown: false, signal: ctl.signal, onProgress: (text: string) => send({ t: "step", id: m.id, text }),
         onAction: (text: string) => send({ t: "act", id: m.id, text }),
-        onFrame: (f: { data: Uint8Array; mime: string }) => send({ t: "frame", id: m.id, mime: f.mime, data: Buffer.from(f.data).toString("base64") }) };
+        onFrame: (f: { data: Uint8Array; mime: string }) => send({ t: "frame", id: m.id, mime: f.mime, data: Buffer.from(f.data).toString("base64") }),
+        ...(m.team ? { team: lines.get(m.id) } : {}) };
       const reply = await brain.think(m.input, profile, meter);
       send({ t: "done", id: m.id, reply, costUsd: meter.unknown ? undefined : meter.costUsd });
     } catch (e: any) {
       send({ t: "error", id: m.id, message: e?.message || String(e) });
-    } finally { runs.delete(m.id); }
+    } finally { runs.delete(m.id); lines.delete(m.id); }
   };
 
   let opened = false;
@@ -251,6 +255,8 @@ export function connect(opts: Opts) {
       if (m.t === "ping") send({ t: "pong", ts: m.ts });
       else if (m.t === "run" && typeof m.id === "string") run(m);
       else if (m.t === "stop") runs.get(m.id)?.abort();
+      else if (m.t === "note" && typeof m.text === "string") lines.get(m.id)?.deliver(String(m.from || "a teammate"), m.text);
+      else if (m.t === "roster" && typeof m.text === "string") lines.get(m.id)?.setRoster(m.text);
       else if (m.t === "want") { want = { items: (m.items || []).filter(isCopyItem), have: m.have || {} }; copyUp(); }
       else if (m.t === "skills" && typeof m.key === "string") { agentSkills = { key: m.key, google: m.google === true }; brain.refreshSkills?.(); }
       else if (m.t === "wantCookies") { cookieWant = { sites: (m.sites || []).filter(isValidDomain), have: m.have || {}, fresh: isValidDomain(m.fresh) ? m.fresh : undefined }; copyCookiesUp(); }

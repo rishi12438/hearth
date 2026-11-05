@@ -13,6 +13,8 @@ import { jailArgs, jailWorks } from "./brains/jail.ts";
 import { loginsFile } from "./brains/browser-logins.ts";
 import { masterKeyPath } from "./vault.ts";
 import { liveOwner, watchLive, type Frame } from "./brains/live-view.ts";
+import { installTeam, openMailbox, TEAM_NOTE, type TeamLine } from "./brains/team.ts";
+import { pruneTranscripts, startTranscript } from "./brains/transcript.ts";
 import { Sessions, type Place, type SessionHarness } from "./brains/sessions.ts";
 import { CodexAppTurn } from "./brains/codex-app.ts";
 import { estimateUsd } from "./brains/prices.ts";
@@ -699,7 +701,9 @@ export type Meter = { costUsd: number; unknown: boolean; signal?: AbortSignal; o
   /** What those tokens would cost at the model's API prices (brains/prices.ts): an estimate, never billed. */
   estUsd?: number;
   /** The cost or tokens just went up. */
-  onUsage?: () => void };
+  onUsage?: () => void;
+  /** Its line to the teammates working alongside it on the same ramble (see brains/team.ts). */
+  team?: TeamLine };
 
 /** Somewhere else that can run a brain call: a computer linked to this hub (see computers.ts). */
 export type RemoteRunner = { name: string; run(b: BrainInput, p: BrainProfile, meter?: Meter): Promise<string> };
@@ -833,6 +837,7 @@ export class Brain {
     this.usage = new BrainUsage(undefined, undefined, join(config.dataDir, "brain-usage.json"));
     mkdirSync(this.workDir, { recursive: true, mode: 0o700 });
     this.sessions = new Sessions(join(config.dataDir, "brain-sessions.json"), this.workDir);
+    pruneTranscripts(join(config.dataDir, "transcripts"));
   }
 
   /** Each job thread's session ids and its own folder (see brains/sessions.ts). */
@@ -842,6 +847,7 @@ export class Brain {
   tidyWorkspaces(now = Date.now()): TidyReport { return tidyWorkspaces(this.workDir, now); }
 
   private jailState: string[] | null | undefined;
+  private teamBin: string | undefined;
   /** The bubblewrap prefix for brain runs on this hub, or null when there's no jail here (see brains/jail.ts). */
   jail(): string[] | null {
     if (this.jailState !== undefined) return this.jailState;
@@ -1076,7 +1082,9 @@ export class Brain {
     // Attachments only go to a brain that can open files (a working call on Claude or Codex).
     const saved = web && (harness === "claude" || harness === "codex") ? saveFiles(cwd, b.files) : [];
     const images = pictures(saved);
-    const prompt = (codexSkills.length ? skillCatalog(codexSkills, "codex").trim() + "\n\n" : "") + buildPrompt(b, coder, thread ? this.sessions.placeOf(thread) || true : false, lead) + filesNote(saved, cwd, harness);
+    // A working run with a team line gets a mailbox and the hearth-team command (and, on Claude, a hook that delivers).
+    const team = web && harness !== "echo" && meter?.team ? meter.team : null;
+    const prompt = (codexSkills.length ? skillCatalog(codexSkills, "codex").trim() + "\n\n" : "") + buildPrompt(b, coder, thread ? this.sessions.placeOf(thread) || true : false, lead) + filesNote(saved, cwd, harness) + (team ? TEAM_NOTE : "");
     const planning = b.mode === "orchestrate";
     const name = `${harness}${model ? ` (${model})` : ""}`;
     // Working runs get your MCP servers (Settings → /mcp), each through this hub's proxy, which holds the logins.
@@ -1093,8 +1101,8 @@ export class Brain {
         const sf = skillFlags(skills);
         const coding = coder ? CODE_TOOLS : [];
         const look = saved.length ? ["Read"] : []; // to open the attachments
-        const tools = web ? [...new Set(["WebSearch", "WebFetch", ...sf.tools, ...coding, ...look])] : [];
-        const allowed = web ? [...new Set(["WebSearch", "WebFetch", ...(coder ? [] : sf.allowed), ...coding, ...look])] : [];
+        const tools = web ? [...new Set(["WebSearch", "WebFetch", ...sf.tools, ...coding, ...look, ...(team ? ["Bash"] : [])])] : [];
+        const allowed = web ? [...new Set(["WebSearch", "WebFetch", ...(coder ? [] : sf.allowed), ...coding, ...look, ...(team && !coder ? ["Bash(hearth-team:*)"] : [])])] : [];
         cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose",
           ...(thread ? (resume ? ["--resume", resume] : []) : ["--no-session-persistence"]), ...(model ? ["--model", model] : []),
           // Only the hub's MCP servers (none of this machine's): --strict-mcp-config, plus --mcp-config when there are any.
@@ -1127,7 +1135,18 @@ export class Brain {
     if (owner) env.ENKIDU_OWNER = owner;
     // Which job this run is: hearth-mcp sends it, so a call that waits for your Approve lands in this job's thread.
     if (meter?.jobId) env.HEARTH_JOB = meter.jobId;
+    let box: ReturnType<typeof openMailbox> | null = null;
+    if (team) {
+      const bin = (this.teamBin ??= installTeam(this.workDir));
+      box = openMailbox(this.workDir, randomUUID(), team);
+      env.HEARTH_TEAM_DIR = box.dir;
+      if (!(env.PATH || "").split(":").includes(bin)) env.PATH = [bin, env.PATH || "/usr/bin:/bin"].join(":");
+    }
     const proc = Bun.spawn(cmd, { cwd, env, stdin: harness === "codex" ? "pipe" : new Blob([prompt]), stdout: "pipe", stderr: "pipe" });
+    // The whole run, kept for debugging (see brains/transcript.ts). Not the live narrator: it's tiny and runs constantly.
+    const tx = b.mode === "narrate" ? null : startTranscript(join(this.config.dataDir, "transcripts"), { harness, model, mode: b.mode, owner, prompt, cmd });
+    const closeBox = () => box?.close();
+    proc.exited.then(closeBox, closeBox);
     const stopLive = owner && meter?.onFrame ? watchLive(owner, meter.onFrame) : () => {};
     proc.exited.then(stopLive, stopLive);
     // Codex: one turn over its app-server's stdio; the server stays up until we close it once the turn is over.
@@ -1173,6 +1192,11 @@ export class Brain {
       if (!it) return;
       if (it.type === "agent_message" && e.type === "item.completed") codexLast = String(it.text || "");
       if (e.type === "item.started" && it.type === "command_execution") history?.command(it.command);
+      // A command that failed (a browser call that timed out, a skill's error): into the log, like Claude's tool errors.
+      if (e.type === "item.completed" && it.type === "command_execution" && ((typeof it.exit_code === "number" && it.exit_code !== 0) || it.status === "failed")) {
+        const why = String(it.aggregated_output || "").replace(/\s+/g, " ").trim().slice(-500);
+        console.warn(`brain tool error (${name}): exit ${it.exit_code ?? "?"} from ${String(it.command || "").slice(0, 200)}: ${why}`);
+      }
       if (e.type === "item.started" && it.type === "command_execution") meter?.onAction?.(`shell: ${String(it.command || "").slice(0, 240)}`);
       if (e.type === "item.completed" && it.type === "web_search" && (it.query || it.action?.query)) meter?.onAction?.(`web search: ${it.query || it.action?.query}`);
       if (e.type === "item.started" && it.type === "mcp_tool_call") meter?.onAction?.(`${it.server || "tool"}.${it.tool || ""}: ${String(it.arguments?.title || "")} ${JSON.stringify(it.arguments ?? {}).slice(0, 200)}`);
@@ -1190,7 +1214,7 @@ export class Brain {
     };
     let started: string | undefined;
     const readOut = async () => {
-      if (harness !== "claude" && harness !== "codex") return new Response(proc.stdout).text();
+      if (harness !== "claude" && harness !== "codex") { const t = await new Response(proc.stdout).text(); for (const l of t.split("\n")) tx?.line(l); return t; }
       let all = "", buf = "";
       const dec = new TextDecoder();
       for await (const chunk of proc.stdout as unknown as AsyncIterable<Uint8Array>) {
@@ -1199,6 +1223,7 @@ export class Brain {
         let i: number;
         while ((i = buf.indexOf("\n")) >= 0) {
           const line = buf.slice(0, i); buf = buf.slice(i + 1);
+          tx?.line(line);
           if (app) { for (const l of app.line(line)) codexLine(l); continue; }
           // The session it's in, as soon as it starts: a run stopped for a new message must still be resumable.
           if (thread && !started && line.includes('"subtype":"init"')) { try { const id = JSON.parse(line)?.session_id; if (typeof id === "string") started = id; } catch {} }
@@ -1234,10 +1259,13 @@ export class Brain {
           } catch {}
         }
       }
+      tx?.line(buf); // a last line with no newline
       return all;
     };
     const [out, err] = await Promise.all([readOut(), new Response(proc.stderr).text()]);
     const code = await proc.exited;
+    tx?.end({ code, stderr: err, timedOut, aborted: !!meter?.signal?.aborted });
+    if (tx?.file && (web || code !== 0)) console.log(`brain transcript (${name}, ${b.mode}): ${tx.file}`);
     clearTimeout(timer);
     meter?.signal?.removeEventListener("abort", stop);
     if (meter?.signal?.aborted) {

@@ -9,8 +9,14 @@ if (prompt.includes("came straight to you") && task.includes("NEW")) { console.l
 const log = process.env.FAKE_LOG;
 if (process.env.FAKE_PROMPTS) appendFileSync(process.env.FAKE_PROMPTS, `${prompt}\n=====\n`);
 if (log) appendFileSync(log, `start ${Date.now()} ${task}\n`);
+// Teammates: a task with "TELL<word>" sends <word> to everyone at the start; one with "READ" (or FAKE_READ=1) reads its inbox
+// before it answers, through the real hearth-team command (so the read mark is real too).
+const team = process.env.HEARTH_TEAM_DIR;
+const say = task.match(/TELL(\w+)/)?.[1];
+if (team && say) Bun.spawnSync(["hearth-team", "send", "--to", "all", say]);
 await Bun.sleep(Number(process.env.FAKE_MS || 300));
+const heard = team && (task.includes("READ") || process.env.FAKE_READ === "1") ? new TextDecoder().decode(Bun.spawnSync(["hearth-team", "inbox"]).stdout).trim() : "";
 if (log) appendFileSync(log, `end ${Date.now()} ${task}\n`);
 if (task.includes("FAIL")) process.exit(1);
 const sawDep = prompt.includes("Results from earlier jobs") && prompt.includes("done: find a restaurant");
-console.log(`done: ${task}${sawDep ? " (used earlier result)" : ""}`);
+console.log(`done: ${task}${sawDep ? " (used earlier result)" : ""}${heard && !heard.startsWith("No new") ? ` [heard: ${heard.replace(/\s+/g, " ")}]` : ""}`);
