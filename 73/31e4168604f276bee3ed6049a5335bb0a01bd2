@@ -1,0 +1,19 @@
+src/brain.ts
+  s_41a2a79d785228::t_3d8281beb4bab1 118-119,413-417
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "7331e4168604f276bee3ed6049a5335bb0a01bd2",
+  "prompts": {},
+  "sessions": {
+    "s_41a2a79d785228": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c29baf29-f329-4d0b-9981-1db5705e0eb6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
