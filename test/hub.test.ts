@@ -795,6 +795,34 @@ test("lessons: a library apart from memory; each run gets the ones that match it
   expect(prompt).toContain("learn-from-mistakes");
 });
 
+test("lessons get keywords, and every search, showing, follow and break is counted", async () => {
+  // Saved with keywords: found by words that aren't in the rule.
+  const add = await hub.lessonsAgent(["add", "Confirm it on the provider's own page before presenting it.", "--why", "a deal was gone", "--keywords", "price, cheapest, booking, rental"], "Research", "job-1");
+  const id = add.split(/\s+/)[1];
+  expect(await hub.lessonsAgent(["search", "cheapest", "rental"], "Research", "job-1")).toContain(id);
+  // Saved without: the quick model writes them.
+  await hub.applyActions([{ type: "lesson.add", lesson: "Check a tool's output before saying something is done." }], "");
+  const tool = async () => (await store.all<Fact>("memory")).find((f) => f.fact.startsWith("Check a tool"))!;
+  await until(async () => !!(await tool()).keywords?.length);
+  const other = await tool();
+  expect(other.keywords!.length).toBeGreaterThan(0);
+  // A search that finds nothing is on record, with its words.
+  await hub.lessonsAgent(["search", "zebra", "unicorn"], "Research", "job-1");
+  // Shown in a prompt, followed by the job that found it, broken once.
+  await hub.context("find the cheapest rental price", "job");
+  await hub.lessonsAgent(["used", id], "Research", "job-1");
+  await hub.applyActions([{ type: "lesson.broken", id }], "");
+  const s = await hub.lessonStats();
+  expect(s.searches).toMatchObject({ total: 2, found: 1, followed: 1 });
+  expect(s.searches.empty).toEqual(["zebra unicorn"]);
+  expect(s.lessons.find((l) => l.id === id)).toMatchObject({ found: 1, shown: 1, used: 1, broken: 1, keywords: ["price", "cheapest", "booking", "rental"] });
+  expect(await hub.lessonsAgent(["stats"], "Research")).toContain("found something 1 (50%)");
+  // Sharpening a lesson keeps its record; its keywords are written again for the new words.
+  await hub.lessonsAgent(["update", id, "Confirm a price on the provider's own page before presenting it."], "Research");
+  await until(async () => !!(await hub.lessonStats()).lessons.find((l) => l.fact.startsWith("Confirm a price"))?.keywords.length);
+  expect((await hub.lessonStats()).lessons.find((l) => l.fact.startsWith("Confirm a price"))).toMatchObject({ found: 1, shown: 1, used: 1, broken: 1 });
+});
+
 test("hearth-lesson: search, show, add, update and count lessons like skills", async () => {
   const add = await hub.lessonsAgent(["add", "Check a tool's output before saying something is done.", "--why", "a file came back empty"], "Research");
   expect(add).toStartWith("Saved: ");

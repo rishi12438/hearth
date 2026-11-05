@@ -178,7 +178,16 @@ export type Fact = Doc & {
   supersedes?: string;
   useCount: number;
   lastUsedAt?: string;
+  /** Lessons only (notebook "lessons"): words an agent would search with when it applies (written by the quick model),
+   *  and how it's doing: found by a search, shown in a prompt as one that may apply, broken (useCount = followed). */
+  keywords?: string[];
+  found?: number;
+  shown?: number;
+  broken?: number;
 };
+
+/** One `hearth-lesson search`: what was asked, what came back, and which of those the same job then followed. */
+export type LessonSearch = Doc & { query: string; hits: string[]; by: string; jobId?: string; used?: string[] };
 
 export type Notebook = Doc & { name: string; summary: string };
 

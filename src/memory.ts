@@ -51,6 +51,12 @@ export const LESSONS = "lessons";
  * Lessons that match a query, best first: words shared with the rule and what happened (evidence), then how often
  * they've been used. No query: every lesson, most used first.
  */
+/** The quick model's keyword list, cleaned: lowercase words or short phrases, no repeats, at most 20. */
+export function parseKeywords(text: string): string[] {
+  const out = text.toLowerCase().replace(/^[^:\n]*keywords?:/i, "").split(/[,\n;]+/).map((k) => k.replace(/[^a-z0-9 '-]/g, "").trim()).filter((k) => k.length >= 2 && k.length <= 30);
+  return [...new Set(out)].slice(0, 20);
+}
+
 export function searchLessons(facts: Fact[], query: string, limit = 8, now = new Date()) {
   const active = facts.filter((f) => f.notebook === LESSONS && isActive(f, now));
   const used = (f: Fact) => Math.min(f.useCount || 0, 10) * 0.2;
@@ -59,7 +65,7 @@ export function searchLessons(facts: Fact[], query: string, limit = 8, now = new
   return active
     .map((f) => {
       let hit = 0;
-      for (const t of tokens(f.fact)) if (q.has(t)) hit += 2;
+      for (const t of tokens(`${f.fact} ${(f.keywords || []).join(" ")}`)) if (q.has(t)) hit += 2;
       for (const t of tokens(f.evidence || "")) if (q.has(t)) hit += 1;
       return { f, score: hit ? hit + used(f) : 0 };
     })

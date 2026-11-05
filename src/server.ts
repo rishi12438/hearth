@@ -444,7 +444,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       const jobId = req.headers.get("x-hearth-job")?.slice(0, 100) || undefined;
       const job = jobId ? await store.get<any>("jobs", jobId) : null;
       const mate = job?.teammateId ? await store.get<any>("teammates", job.teammateId) : null;
-      const out = await hub.lessonsAgent(argv, `${mate?.name || "an agent"}${from === "hub" ? "" : ` on ${from}`}`);
+      const out = await hub.lessonsAgent(argv, `${mate?.name || "an agent"}${from === "hub" ? "" : ` on ${from}`}`, jobId);
       return new Response(out + "\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
     }
     // The agent's hearth-trigger-port (events/ports.ts): claim a callback URL for a webhook, list, release. The claim
@@ -1216,6 +1216,11 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         const p = await hub.prefs();
         if (method === "GET") return json({ text: p.about || "", updatedAt: p.aboutUpdatedAt || null });
         if (method === "PUT") { await hub.setAbout(String((await body(req)).text || ""), true); return json({ ok: true }); }
+        break;
+      }
+      case "lessons": {
+        // How the lessons library is doing (searches, found, followed, broken), for the Memory screen.
+        if (method === "GET" && id === "stats") return json(await hub.lessonStats());
         break;
       }
       case "memory": {
