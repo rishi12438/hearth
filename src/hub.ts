@@ -1336,6 +1336,14 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     return held;
   }
 
+  /** This message stopped a run partway (it carries on with it): the thread shows "Interrupted" at that point. */
+  private async markInterrupt(m: Message, run: Job) {
+    const cur = (await this.store.get<Message>("messages", m.id)) || m;
+    const marked = await this.store.put<Message>("messages", { ...cur, interrupted: run.teammateId });
+    this.emit("message", marked);
+    return marked;
+  }
+
   /** A run is going (not just waiting its turn), so folding a message in would stop it and start over. */
   private midRun(j: Job) { return j.status === "working" && this.stops.has(j.id); }
 
@@ -1429,7 +1437,8 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
   private async followUp(root: Job, m: Message, task: string, mayHandBack = false, queue = false): Promise<{ job: Job; folded: boolean; held?: Message }> {
     const busy = (await this.store.all<Job>("jobs")).filter((j) => (j.id === root.id || j.followsUp === root.id) && (j.status === "queued" || j.status === "working")).at(-1);
     if (busy && queue && this.midRun(busy)) return { job: busy, folded: true, held: await this.holdMessage(m) };
-    if (busy && (await this.addToJob(busy.id, root.threadId, task))) return { job: busy, folded: true };
+    const cut = !!busy && this.midRun(busy);
+    if (busy && (await this.addToJob(busy.id, root.threadId, task))) { if (cut) await this.markInterrupt(m, busy); return { job: busy, folded: true }; }
     // Replying in a stuck thread picks it up: the stuck turn is settled (it stops saying "Stuck") and the new turn goes on from it.
     for (const j of (await this.store.all<Job>("jobs")).filter((x) => (x.id === root.id || x.followsUp === root.id) && x.status === "blocked"))
       await this.saveJob({ ...j, blocked: undefined, status: "done", finishedAt: j.finishedAt || this.clock().toISOString(),
@@ -2532,7 +2541,8 @@ ${JSON.stringify(shown, null, 1)}
     // Still working on your last message? This one goes into that task, so you get one answer (or, queued, waits for it).
     const busy = (await this.store.all<Job>("jobs")).filter((j) => j.threadId === tid && !j.parentId && (j.status === "queued" || j.status === "working")).at(-1);
     if (busy && queue && this.midRun(busy)) return { message: await this.holdMessage(m), job: busy };
-    if (busy && (await this.addToJob(busy.id, tid, text))) return { message: m, job: busy };
+    const cut = !!busy && this.midRun(busy);
+    if (busy && (await this.addToJob(busy.id, tid, text))) return { message: cut ? await this.markInterrupt(m, busy) : m, job: busy };
     const job = await this.store.put<Job>("jobs", { ...this.doc({}), threadId: tid, messageId: m.id, task: text, teammateId: mateId, status: "queued", effort: "light" } as Job);
     await this.store.put<Message>("messages", { ...m, jobIds: [job.id] });
     this.emit("job", job);

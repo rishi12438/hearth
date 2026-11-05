@@ -58,6 +58,8 @@ export type Message = Doc & {
   replyTo?: string;
   /** Sent while the teammate was mid-run: it waits (shown greyed) and goes out as the next turn when the run ends, or now if you tap Send now (the run is interrupted and carries on with it). */
   queued?: boolean;
+  /** It stopped this teammate's run (id) partway: the thread shows "Interrupted" there, and the run carries on with it. */
+  interrupted?: string;
   error?: boolean;
 };
 
