@@ -59,6 +59,7 @@ const REVIEW_MARKER = "[[memory-review]]";
 const PURGE_MARKER = "[[library-purge]]";
 const IDEAS_MARKER = "[[ideas]]";
 const MAX_OPEN_IDEAS = 4;
+const INBOX_WATCH = "inbox-watch";
 const LOCATION_KEEP_DAYS = 7;
 /** An Approve nobody answers stops asking after a day (expireApprovals). */
 export const APPROVAL_TTL_MS = 86_400_000;
@@ -3398,6 +3399,44 @@ ${JSON.stringify(shown, null, 1)}
       const r = await p.remind({ name: j.name, title: j.title, why: j.why, schedule: j.schedule, action: { type: "system", job: j.job } }, "system", { system: true });
       if (!r.value) console.warn(`couldn't set up ${j.name}: ${r.error}`);
     }
+    await this.ensureInboxWatch();
+  }
+
+  /**
+   * Inbox watch, the hub's own once Google is connected: every new email in the inbox (not promotions, social, forums
+   * or what you sent) gets one quick yes/no ("does this need anything?"), and only a yes goes to Hearth as one task: it works out
+   * what it means and do the useful part: a booking becomes reminders, an invite gets a clash check and prep, a
+   * question gets a reply written. It talks in #inbox. It can be paused in Workflows, not changed.
+   */
+  async ensureInboxWatch() {
+    if (!this.connections.connected("google")) return;
+    const p = this.pipeline;
+    if (p.findTrigger(INBOX_WATCH)) return;
+    if (!p.findWatcher(INBOX_WATCH)) {
+      const w = await p.addWatcher({ name: INBOX_WATCH, kind: "app", app: "gmail", everyMin: 10,
+        config: { query: "in:inbox -from:me -category:promotions -category:social -category:forums" },
+        description: "New email in your inbox (not promotions, social, forums or what you sent)." }, "system");
+      if (!w.value) { console.warn(`couldn't set up ${INBOX_WATCH}: ${w.error}`); return; }
+    }
+    const t = await p.addTrigger({
+      name: INBOX_WATCH, title: "Inbox watch", source: INBOX_WATCH, formula: "true",
+      why: "Every new email gets a quick look; the ones that need something go to the team, who handle them.",
+      judge: {
+        prompt: "Does this email need anything from the user, or give the assistant something to prepare or remember? Yes for: a booking or " +
+          "itinerary (flight, hotel, tickets, reservation), a meeting or invite, a deadline, a bill or payment due, a delivery, a person " +
+          "asking them something or waiting on them. No for: newsletters, marketing, receipts with nothing to do, automatic notifications, FYIs.",
+        output: { type: "yesno" }, pass: 'judge == "yes"',
+      },
+      // One task for one agent (not planned, so it isn't split into parts): what the email means, and the useful part done.
+      action: { message: "A new email came in (it's attached). Work out what it means for me and do the useful part now, as one task. " +
+        "A booking (flight, hotel, tickets, a reservation): remember the trip and set reminders for check-in, when to leave, and the day " +
+        "before with the weather there and what to pack; if there's more to keep an eye on, suggest a workflow for it with idea.add. " +
+        "A meeting or an invite: check my calendar for clashes and get me what I'd want before it. Someone asking me something or " +
+        "waiting on me: write the reply. A bill, payment or deadline: a reminder before it's due. Anything else: what I need to know or do. " +
+        "Then tell me what you did in one or two lines, without repeating the email back.", agent: true },
+      route: { who: "self", where: "ramble", ramble: "inbox" },
+    }, "system", { system: true });
+    if (!t.value) console.warn(`couldn't set up ${INBOX_WATCH}: ${t.error}`);
   }
 
   /**
@@ -4094,7 +4133,7 @@ ${JSON.stringify(shown, null, 1)}
     const p = this.pipeline;
     for (const t of p.triggers()) if (t.createdBy !== "system") p.removeTrigger(t.id);
     for (const t of p.timers()) if (t.createdBy !== "system") p.removeTimer(t.id);
-    for (const s of p.sources()) if (s.kind === "push" || s.kind === "watch") p.removeSource(s.id);
+    for (const s of p.sources()) if ((s.kind === "push" || s.kind === "watch") && s.createdBy !== "system") p.removeSource(s.id);
     await this.ensureBuiltIns();
     await this.ensureTeammates();
     await this.log("data.wiped", "All personal data deleted from this hub.");
