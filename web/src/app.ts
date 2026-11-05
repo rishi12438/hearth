@@ -515,6 +515,37 @@ function icsView(text: string) {
     h("p", { class: "muted small" }, "Download to add it to your calendar."));
 }
 
+/** Pictures shown in messages, fetched once (they need the hub's auth) and kept. The message box hands over its own preview when you send. */
+const thumbUrls = new Map<string, string>();
+const thumbLoads = new Map<string, Promise<string>>();
+const thumbable = (m: string) => /^image\/(png|jpeg|gif|webp|avif)$/.test(m);
+function thumbUrl(f: any): Promise<string> {
+  const have = thumbUrls.get(f.id);
+  if (have) return Promise.resolve(have);
+  let p = thumbLoads.get(f.id);
+  if (!p) {
+    p = fileBlob(f, true).then((b) => { const u = URL.createObjectURL(b); thumbUrls.set(f.id, u); return u; });
+    p.catch(() => thumbLoads.delete(f.id));
+    thumbLoads.set(f.id, p);
+  }
+  return p;
+}
+
+/** What you attached to a message: pictures as pictures (tap to open), anything else as a file card. */
+function sentFiles(ids: string[] = []) {
+  const files = ids.map((id) => S.files.get(id)).filter(Boolean);
+  const pics = files.filter((f: any) => thumbable(f.mime));
+  return [
+    pics.length ? h("div", { class: "sentpics" }, pics.map((f: any) => {
+      const img = h("img", { alt: f.name }) as HTMLImageElement;
+      const have = thumbUrls.get(f.id);
+      if (have) img.src = have; else thumbUrl(f).then((u) => { img.src = u; }).catch(() => {});
+      return h("button", { class: "sentpic", title: f.name, "aria-label": `View ${f.name}`, on: { click: () => viewFile(f) } }, img);
+    })) : null,
+    files.filter((f: any) => !thumbable(f.mime)).map((f: any) => fileCard(f.id)),
+  ];
+}
+
 function fileCard(id: string) {
   const f = S.files.get(id);
   if (!f) return null;
@@ -1396,7 +1427,9 @@ function userRow(m: any, extra: any[] = [], grouped = false) {
       [h("div", { class: "mtext" }, ok ? `You approved "${m.fromApproval.summary}". It ran, and was handed back to carry on.` : `You approved "${m.fromApproval.summary}", but it failed. Handed back to be fixed.`),
         back ? h("details", { class: "trigdata", open: !ok }, h("summary", null, "What came back"), h("pre", { class: "output" }, back)) : null, ...extra], grouped);
   }
-  return row(youWho(), m.createdAt, [h("div", { class: "mtext" }, m.text), ...extra], grouped);
+  // A picture sent on its own gets "Have a look at this." as its text on the hub; the picture says it, so that line isn't shown.
+  const text = m.fileIds?.length && m.text === "Have a look at this." ? "" : m.text;
+  return row(youWho(), m.createdAt, [sentFiles(m.fileIds), text ? h("div", { class: "mtext" }, text) : null, ...extra], grouped);
 }
 
 /** A run card for a script whose code you haven't approved yet: Approve covers that exact code too, so it's here to read. */
@@ -1426,7 +1459,7 @@ function plainMessage(m: any, grouped = false) {
     return row({ face: h("span", { class: "trigav" }, icon("zap", 18)), name: m.fromTrigger.title, badge: h("span", { class: "apptag" }, "TRIGGER") }, m.createdAt,
       [h("div", { class: "mtext" }, ask), data, ...goes], grouped);
   }
-  if (m.role === "user") return userRow(m, [(m.fileIds || []).map(fileCard), ...goes], grouped);
+  if (m.role === "user") return userRow(m, goes, grouped);
   const from = m.fromThreadId ? S.threads.find((t) => t.id === m.fromThreadId) : null;
   const body: (Node | null)[] = [m.proactive ? h("div", { class: "proline" }, icon("bell", 13), m.proactive.title) : null, richText(m.text),
     from ? h("button", { class: "fromchip", on: { click: () => { location.hash = `#c/${from.id}`; } } }, `From #${channelName(from)}`, icon("chevron", 13)) : null, ...goes,
@@ -1946,7 +1979,8 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
   };
   const picker = h("input", { type: "file", multiple: true, hidden: true, on: { change: async () => { await upload(Array.from(picker.files || [])); picker.value = ""; } } }) as HTMLInputElement;
   const clip = h("button", { class: "plus", "aria-label": "Attach a file", title: "Attach a file", disabled: !canAttach, on: { click: () => picker.click() } }, icon("clip", 20));
-  attachments = () => pending.splice(0).map((f) => { if (f.preview) URL.revokeObjectURL(f.preview); return f.id; });
+  // The preview carries on as the picture in the sent message, so it shows straight away.
+  attachments = () => pending.splice(0).map((f) => { if (f.preview) thumbUrls.set(f.id, f.preview); return f.id; });
   const swap = () => {
     const hasText = !!box.value.trim() || pending.length > 0;
     action.classList.toggle("send", hasText);
