@@ -40,6 +40,31 @@ export function recall(facts: Fact[], query: string, budget = 40, now = new Date
   return [...core, ...scored.slice(0, Math.max(0, budget - core.length)).map((s) => s.f)];
 }
 
+/**
+ * Lessons: what the team learned the hard way about getting things done (this tool gets past that site's bot wall, that
+ * one doesn't; click through an aggregator's deal before quoting it). They live in their own notebook so they're never
+ * crowded out by facts about the user: importance 3 ones go to every run, the rest only when they bear on the task.
+ */
+export const LESSONS = "lessons";
+
+export function recallLessons(facts: Fact[], query: string, now = new Date()) {
+  const active = facts.filter((f) => f.notebook === LESSONS && isActive(f, now));
+  const always = active.filter((f) => f.importance === 3).slice(-8);
+  const q = tokens(query);
+  const relevant = active
+    .filter((f) => f.importance !== 3)
+    .map((f) => {
+      let overlap = 0;
+      for (const t of tokens(f.fact)) if (q.has(t)) overlap++;
+      return { f, overlap };
+    })
+    .filter((s) => s.overlap > 0)
+    .sort((a, b) => b.overlap - a.overlap || b.f.createdAt.localeCompare(a.f.createdAt))
+    .slice(0, 8)
+    .map((s) => s.f);
+  return [...always, ...relevant];
+}
+
 export function search(facts: Fact[], query: string) {
   const q = query.trim().toLowerCase();
   if (!q) return facts;

@@ -185,6 +185,44 @@ A check or script that crashes starts a repair: a teammate gets the error, the c
 fix that waits for the user's Approve. When you're that teammate, fix the cause (often the event's shape), keep the
 same script name, and say in a line what broke.`,
 }, {
+  name: "learn-from-mistakes", common: true, commands: [], reads: [],
+  description: "A way failed and another worked, or the user corrected you or told you a better way? Save it as a lesson (lesson.add) so no later job makes that mistake again.",
+  body: `# Learning from mistakes
+
+CONTEXT.lessons is what earlier jobs learned the hard way. Read it before you pick a tool or a way in. Follow it unless
+it's clearly about something else, and if one proves wrong now, fix it (memory.update {id, fact}). Don't re-learn it.
+
+## When to save one (lesson.add)
+- A way failed and another worked: a tool was blocked, rate-limited or gave empty pages, and a different tool, setting or
+  route got through. Save the one that worked AND the ones that didn't.
+- The user corrected you ("europcar doesn't show any", "that's wrong", "you didn't check"): save what you should have
+  done, so it holds for every job, not just this one.
+- The user told you a better way ("use firecrawl interact", "check their own site"), and it worked.
+- You wasted real time or money on something a sentence would have avoided next time (a login trap, a page that only
+  loads after a click, a limit you hit).
+Save it the moment you know it. Don't wait for the end: you can be stopped at any time.
+
+## Not a lesson
+- Facts about the user or their world (their card, their car, a price you found): that's memory.add or the workspace's NOTES.md.
+- How to do this one subject's job step by step: that's the Playbook in NOTES.md, or a skill.
+- One-off bad luck (a site down for a minute) or a guess you haven't tested.
+
+## How to word it
+One standalone sentence or two that make sense to a job that knows nothing of this one:
+WHEN (the kind of task or site), DO (what works, with the exact tool and setting), AVOID (what failed and how).
+- Good: "Live prices on bot-protected booking sites (enterprise.com, priceline.com): Firecrawl interact gets through;
+  Browserless and Browserbase, even with a residential proxy, were blocked at the search step."
+- Good: "Aggregator deals (Kayak, Expedia) can be dead: click through to the provider's own page before quoting one."
+- Bad: "Firecrawl worked." (for what? instead of what?)
+Name the sites and tools in it: lessons reach later jobs by matching their words.
+importance: 3 for a lesson every job should see (how a tool behaves, a rule about checking work), 2 (the default) for
+one that matters only when the task is about the same kind of site or thing. evidence: what happened, in a line.
+
+## Keep them true
+- Already in CONTEXT.lessons? Don't add it again. Sharpen it with memory.update {id, fact} if you learned more.
+- Proved wrong or out of date (the site changed, the tool got fixed)? memory.update it, or memory.forget it.
+- Say it in a short line in your reply ("Noted for next time: Firecrawl interact gets through Enterprise's bot wall").`,
+}, {
   name: "send-files", common: true, commands: [], reads: [],
   description: "Making something the user should open (a video, picture, PDF, spreadsheet, deck, export), or working files they shouldn't see? How files reach them: shown by themselves, @file for the rest, drafts in _scratchpad/.",
   body: `# Sending the user a file

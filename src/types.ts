@@ -73,7 +73,9 @@ export type Thread = Doc & { title: string; updatedAt: string; preview?: string;
   /** Who named it: you (then it's never renamed for you) or Hearth. */
   channelBy?: "you" | "hearth";
   /** The project this ramble is filed under, if any. */
-  projectId?: string };
+  projectId?: string;
+  /** Lessons review: messages up to this time were already looked at for lessons (see Hub.learnFromThread). */
+  lessonsAt?: string };
 
 /** A folder of rambles ("Wedding", "Move to SF") with its own memory: teammates working in its rambles read and save
  *  facts in its notebook, so what's learned in one ramble is there in the next. */
