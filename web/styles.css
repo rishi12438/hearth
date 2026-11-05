@@ -1131,8 +1131,6 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 .devtool b { font-weight: var(--fw-semibold); }
 
 /* ---------- Triggers (the event pipeline) ---------- */
-.pipeflow { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 4px 0 12px; color: var(--muted); font-size: 13px; }
-.pipeflow span { background: var(--surface); color: var(--ink-2); padding: 3px 9px; border-radius: 999px; font-weight: var(--fw-medium); }
 #triggers .seg { display: flex; gap: 4px; padding: 3px; background: var(--surface); border-radius: 10px; margin-bottom: 10px; }
 #triggers .seg button { flex: 1; padding: 7px 6px; border-radius: 8px; font-size: 13.5px; font-weight: var(--fw-medium); color: var(--ink-2); }
 #triggers .seg button.on { background: var(--card); color: var(--ink); box-shadow: 0 1px 2px rgba(40, 30, 20, .08); }
