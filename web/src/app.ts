@@ -20,6 +20,8 @@ const S = {
   threads: [] as any[],
   /** The sidebar's "Past rambles" list is open. */
   pastOpen: false,
+  /** What's typed in the Past rambles search box. */
+  pastQuery: "",
   chat: null as any,            // open group chat: { thread, messages, jobs, approvals }
   dm: null as any,              // open DM: { teammate, jobs, messages, routines, approvals }
   inbox: [] as any[],           // Activity tab
@@ -634,7 +636,22 @@ function drawSide() {
   // Past rambles: archived ones (an hour after everything in them is done) and any past the first 12, newest first.
   const past = [...allLoose.slice(12), ...S.threads.filter((t: any) => t.archived && !t.projectId)]
     .sort((a: any, b: any) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
-  const pastShown = S.pastOpen ? past.slice(0, 30) : past.filter((t: any) => r.view === "chat" && r.id === t.id);
+  // Past rambles matching the search box (every one of them, not just the first 30), drawn into their own box so typing
+  // doesn't redraw the whole sidebar.
+  const pastList = h("div", { class: "spastlist" });
+  const drawPast = () => {
+    const q = S.pastQuery.trim().toLowerCase();
+    const hits = q ? past.filter((t: any) => `${channelName(t)} ${t.title || ""} ${t.preview || ""}`.toLowerCase().includes(q)) : past;
+    clear(pastList,
+      hits.slice(0, 30).map((t: any) => ramble(t, true)),
+      q && !hits.length ? h("p", { class: "snone nested" }, "No past rambles match.") : null,
+      hits.length > 30 ? h("button", { class: "snav nested spast-more", on: { click: openJump } }, h("span", { class: "grow" }, `${hits.length - 30} more… search everything`)) : null);
+  };
+  if (S.pastOpen) drawPast(); else clear(pastList, past.filter((t: any) => r.view === "chat" && r.id === t.id).map((t: any) => ramble(t, true)));
+  const pastSearch = S.pastOpen && past.length > 5 ? h("input", { class: "spastq", type: "search", placeholder: "Search past rambles", value: S.pastQuery,
+    on: { input: (e: Event) => { S.pastQuery = (e.target as HTMLInputElement).value; drawPast(); },
+      keydown: (e: KeyboardEvent) => { if (e.key === "Escape") { S.pastQuery = ""; (e.target as HTMLInputElement).value = ""; drawPast(); } } } }) as HTMLInputElement : null;
+  const typing = document.activeElement?.classList.contains("spastq");
   const openProject = r.view === "project" ? r.id : r.view === "chat" ? S.threads.find((t: any) => t.id === r.id)?.projectId : null;
   const host = (activeHub()?.url || location.origin).replace(/^https?:\/\//, "");
   clear(el,
@@ -655,10 +672,9 @@ function drawSide() {
     ]) : h("p", { class: "snone" }, "Group rambles, files and memory, like Wedding or Move to SF.")),
     h("div", { class: "slabel" }, "Rambles", h("button", { class: "sadd", "aria-label": "New ramble", on: { click: () => { S.newProject = null; location.hash = "#c/new"; } } }, icon("plus", 14))),
     h("nav", { class: "sgroup", on: dropTo(null) }, loose.length || past.length ? loose.map((t: any) => ramble(t)) : h("p", { class: "snone" }, "Tap + to start one."),
-      past.length ? h("button", { class: `snav spast ${S.pastOpen ? "open" : ""}`, "aria-expanded": String(S.pastOpen), on: { click: () => { S.pastOpen = !S.pastOpen; drawSide(); } } },
+      past.length ? h("button", { class: `snav spast ${S.pastOpen ? "open" : ""}`, "aria-expanded": String(S.pastOpen), on: { click: () => { S.pastOpen = !S.pastOpen; if (!S.pastOpen) S.pastQuery = ""; drawSide(); if (S.pastOpen) document.querySelector<HTMLInputElement>(".spastq")?.focus(); } } },
         icon("chevron", 14), h("span", { class: "grow" }, "Past rambles"), h("small", { class: "scount" }, String(past.length))) : null,
-      pastShown.map((t: any) => ramble(t, true)),
-      S.pastOpen && past.length > 30 ? h("button", { class: "snav nested spast-more", on: { click: openJump } }, h("span", { class: "grow" }, `Search ${past.length - 30} older…`)) : null),
+      pastSearch, pastList),
     team.length ? [h("div", { class: "slabel" }, "Teammates"), h("nav", { class: "sgroup" }, team.map((t: any) =>
       h("button", { class: `snav mate ${r.view === "dm" && r.id === t.id ? "on" : ""}`, on: { click: () => { location.hash = `#t/${t.id}`; } } },
         face(t, 22, t.state || "idle"), h("span", { class: "grow" }, t.name), t.needsYou ? h("em", null, String(t.needsYou)) : unreadDm(t) ? h("i", { class: "udot", title: "New since you last looked" }) : null)))] : null,
@@ -672,6 +688,8 @@ function drawSide() {
     h("div", { class: "sfoot" },
       nav("settings", "Settings", false, openSettings)),
   );
+  // Live updates redraw the sidebar; don't pull you out of the search box mid-word.
+  if (typing && pastSearch) { pastSearch.focus(); pastSearch.setSelectionRange(pastSearch.value.length, pastSearch.value.length); }
 }
 
 // ---------------- projects ----------------
