@@ -170,6 +170,37 @@ test("replying in a job's thread goes to the same teammate with the thread as co
   expect(r2.value!.thread.id).not.toBe(r.value!.thread.id);
 });
 
+test("an agent hands over files from its workspace with @file lines; nothing outside it leaves", async () => {
+  await setup();
+  const { mkdirSync, writeFileSync, symlinkSync } = await import("node:fs");
+  const thread = "job-thread-1";
+  const folder = hub.brain.sessions.folder(thread, { workspace: "parley-launch" })!;
+  mkdirSync(join(folder, "out"), { recursive: true });
+  writeFileSync(join(folder, "out/preview.mp4"), "fake video bytes");
+  writeFileSync(join(dir, "secret.txt"), "hub secret");
+  symlinkSync(join(dir, "secret.txt"), join(folder, "out/link.txt"));
+  const meter: any = { costUsd: 0, unknown: false, thread, ranOn: "cloud" };
+  const text = "Made a first preview.\n@file out/preview.mp4\n@file ../../secret.txt\n@file out/link.txt\n@file out/missing.png";
+  const r = await hub.handOver(text, { threadId: "t1", jobId: "j1", meter });
+  expect(r.fileIds.length).toBe(1);
+  const f = (await store.get<any>("files", r.fileIds[0]))!;
+  expect(f).toMatchObject({ name: "preview.mp4", mime: "video/mp4", threadId: "t1", jobId: "j1", source: "teammate" });
+  expect(new TextDecoder().decode(hub.files.bytes(f.id)!)).toBe("fake video bytes");
+  expect(existsSync(join(folder, "out/preview.mp4"))).toBe(true); // the workspace keeps its copy
+  expect(r.done).toEqual([{ kind: "file", label: "Made preview.mp4", id: f.id }]);
+  expect(r.text).toStartWith("Made a first preview.");
+  expect(r.text).not.toContain("@file");
+  expect(r.text).toContain("../../secret.txt (couldn't attach");
+  expect(r.text).toContain("out/link.txt (couldn't attach");
+  expect(r.text).toContain("out/missing.png (couldn't attach");
+  // No @file lines: the text is left exactly as it was.
+  expect((await hub.handOver("just text", { meter })).text).toBe("just text");
+  // A run on a linked Mac made its files there: say so instead of attaching.
+  const mac = await hub.handOver("Done.\n@file out/preview.mp4", { threadId: "t1", meter: { ...meter, ranOn: "Rishi's Mac" } });
+  expect(mac.fileIds).toEqual([]);
+  expect(mac.text).toContain("on Rishi's Mac");
+});
+
 test("teammates make files, scripts hand files over, and downloads are sandboxed", async () => {
   await setup();
   // A teammate's file.create action

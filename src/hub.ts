@@ -336,6 +336,10 @@ export class Hub {
     if (first.text.includes(ESCALATE)) return { text: `${ESCALATE} ${escalateWhy(first.text)}`, did: [] as Done[], used: [] as string[] };
     if (first.text.includes(HAND_BACK)) return { text: HAND_BACK, did: [] as Done[], used: [] as string[] }; // nothing it proposed is applied
     const applied = await this.applyActions(first.actions, evidence, where);
+    const handed = await this.handOver(first.text, opts, teammate?.id);
+    first.text = handed.text;
+    applied.done.push(...handed.done);
+    applied.fileIds.push(...handed.fileIds);
     if (!applied.runs.length) return { text: first.text, did: applied.done, used: applied.used, split: applied.split, tiles: applied.tiles, fileIds: applied.fileIds };
     const scriptTiles: Tile[] = [];
     const scriptFiles: string[] = [];
@@ -372,9 +376,38 @@ export class Hub {
     const ctx2 = await this.context(input, mode, teammate, opts.threadId);
     const second = parseReply(await this.brain.think({ mode, context: ctx2, input, toolResults: [extra, already, ...results].filter(Boolean).join("\n\n"), top: opts.top }, profile, opts.meter));
     const applied2 = await this.applyActions(second.actions.filter((a: any) => a?.type !== "script.run"), evidence, where);
+    const handed2 = await this.handOver(second.text, opts, teammate?.id);
+    second.text = handed2.text;
+    applied2.done.push(...handed2.done);
+    applied2.fileIds.push(...handed2.fileIds);
     const tiles = [...applied.tiles, ...applied2.tiles, ...scriptTiles].slice(0, 4);
     const fileIds = [...applied.fileIds, ...applied2.fileIds, ...scriptFiles];
     return { text: second.text || first.text, did: [...applied.done, ...applied2.done], used: [...applied.used, ...applied2.used], split: applied.split ?? applied2.split, tiles, fileIds };
+  }
+
+  /**
+   * An agent hands over files it made in its workspace by putting "@file <path>" lines in its reply (e.g.
+   * "@file out/preview.mp4"): each becomes a file in the thread, and the line leaves the text. A run on a linked computer
+   * made its files there, where the hub can't reach yet: the reply says where they are instead.
+   */
+  async handOver(text: string, opts: TurnOpts, teammateId?: string) {
+    const fx = extractFiles(text);
+    const done: Done[] = [];
+    const fileIds: string[] = [];
+    if (!fx.names.length) return { text, done, fileIds };
+    const m = opts.meter;
+    const remote = m?.ranOn && m.ranOn !== "cloud" ? m.ranOn : null;
+    const folder = !remote && m?.thread ? this.brain.sessions.folder(m.thread, m.workspace) : null;
+    const notes: string[] = [];
+    for (const n of fx.names) {
+      if (remote) { notes.push(`${n} (on ${remote}; Hearth can't bring files over from there yet)`); continue; }
+      const r = folder ? await this.files.share(folder, n, { source: "teammate", threadId: opts.threadId, jobId: opts.jobId, teammateId }) : { error: "no workspace" } as const;
+      if ("value" in r && r.value) { fileIds.push(r.value.id); done.push({ kind: "file", label: `Made ${r.value.name}`, id: r.value.id }); }
+      else { notes.push(`${n} (couldn't attach: ${r.error})`); await this.log("file.handover_failed", `${n}: ${r.error}`); }
+    }
+    if (fileIds.length) this.emit("files");
+    const out = fx.text.trim() + (notes.length ? `\n\nNot attached: ${notes.join("; ")}` : "");
+    return { text: out, done, fileIds };
   }
 
   // ---------- brains: who plans, who works ----------
@@ -1248,7 +1281,9 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
         meter.onProgress?.("Writing it up");
         // The work is done by now: a write-up that fails (an error, a full plan) posts the legwork's notes instead of
         // failing the whole job.
-        const v = await this.turn("voice", `${job.task}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")\n\nNOTES FROM THE LEGWORK:\n<untrusted>\n${r0.text.slice(0, 8000)}\n</untrusted>`,
+        const handedNames = r0.did.filter((d) => d.kind === "file").map((d) => d.label.replace(/^Made /, ""));
+        const handedNote = handedNames.length ? `\n\nAlready attached to your reply for the user to open: ${handedNames.join(", ")}. Don't attach them again or give paths to them; just say what they are.` : "";
+        const v = await this.turn("voice", `${job.task}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")\n\nNOTES FROM THE LEGWORK:\n<untrusted>\n${r0.text.slice(0, 8000)}\n</untrusted>${handedNote}`,
           job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains.heavy, meter }).catch(async (err) => {
           if (stop.signal.aborted) throw err;
           await this.log("job.voice_failed", `${job.task.slice(0, 80)}: ${String(err?.message || err).slice(0, 160)}`);
