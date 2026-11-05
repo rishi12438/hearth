@@ -155,13 +155,7 @@ test("hub: hearth-help stuck reads the Mac, this conversation's answer and the M
     for (const k of STUCK) expect(menu).toContain(`  ${k.id}`);
   }
   expect(await hub.helpAgent([], "j1")).toContain("hearth-help topics");
-  // The Activity log says who got stuck, on what.
-  const mate = await store.put<any>("teammates", { id: "m1", createdAt: new Date().toISOString(), name: "Research" });
-  await store.put<Job>("jobs", { ...(await store.get<Job>("jobs", "j1"))!, teammateId: mate.id });
-  await hub.helpAgent(["stuck", "bot-detection", "priceline", "press-and-hold"], "j1");
-  const logged = (await store.all<any>("activity")).filter((a) => a.kind === "help.stuck").map((a) => a.text);
-  expect(logged).toContain('Research got stuck (blocked) on "cars": priceline press-and-hold');
-  // Words after the kind change nothing in the answer (they're only logged).
+  // Words after the kind change nothing in the answer (the hub ignores them).
   expect(await hub.helpAgent(["stuck", "failing", "curl", "keeps", "timing", "out"], "j1")).toBe(await hub.helpAgent(["stuck", "failing"], "j1"));
 });
 

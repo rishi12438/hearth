@@ -7,7 +7,7 @@ import type { MacGate } from "./other-browser.ts";
 //
 //   hearth-help stuck                          the kinds of stuck, to pick one
 //   hearth-help stuck <kind>   what to do about it, best first (STUCK below: one entry per kind). Words after the
-//                              kind are only logged (help.stuck), so you can see what agents got stuck on.
+//                              kind are ignored. The thread's step line shows "Stuck (<kind>)" while it happens.
 
 /**
  * A cloud browser or scraper with a hosted MCP server the hub can add, best first. Checked 2026-11-05 by probing each
