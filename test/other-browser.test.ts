@@ -9,7 +9,7 @@ import { Scripts } from "../src/scripts.ts";
 import { loadConfig } from "../src/config.ts";
 import { Computers } from "../src/computers.ts";
 import { browseHere } from "../src/computer.ts";
-import { CLOUD_BROWSERS, stuckHelp } from "../src/help.ts";
+import { CLOUD_BROWSERS, STUCK, stuckHelp, stuckKind } from "../src/help.ts";
 import { OtherBrowser, macSession, otherBrowserSkill, parseArgv, type Act, type MacGate } from "../src/other-browser.ts";
 import type { Approval, Job } from "../src/types.ts";
 
@@ -59,7 +59,7 @@ test("no Mac, or you said no: nothing opens, and the agent is sent to hearth-hel
   const r = router({ mac: null });
   const out = await r.b.run(["open", "expedia.com"], { threadId: "t2" });
   expect("text" in out && out.text).toContain("Mac isn't online");
-  expect("text" in out && out.text).toContain('hearth-help stuck "<what blocked you>"');
+  expect("text" in out && out.text).toContain('hearth-help stuck blocked "<what blocked you>"');
   const no = router({ gate: "no" });
   const t = await no.b.run(["open", "expedia.com"], { threadId: "t1" });
   expect("text" in t && t.text).toContain("said no");
@@ -80,36 +80,54 @@ test("commands before an open, and a Mac that went offline mid-way", async () =>
 
 // ---- hearth-help stuck
 
+test("stuck kinds: each has a name, other words for it, and steps that end in telling the user plainly", () => {
+  expect(stuckKind("bot-detection")!.id).toBe("blocked");
+  expect(stuckKind("Can't scrape")?.id).toBe("blocked");
+  expect(stuckKind("login")!.id).toBe("signed-out");
+  expect(stuckKind("no tool")!.id).toBe("no-access");
+  expect(stuckKind("error")!.id).toBe("failing");
+  expect(stuckKind("nope")).toBeNull();
+  const words = STUCK.flatMap((k) => [k.id, ...k.aka]);
+  expect(new Set(words).size).toBe(words.length); // no word means two kinds
+  for (const k of STUCK) {
+    const out = stuckHelp(k.id, { what: "x", mac: null, gate: null, servers: [] });
+    expect(out).toStartWith(`You're stuck (${k.id}): x.`);
+    expect(out).toContain("tell the user plainly");
+  }
+  expect(stuckHelp("failing", { what: "x", mac: null, gate: null, servers: [] })).toContain("hearth-lead");
+  expect(stuckHelp("no-access", { what: "x", mac: null, gate: null, servers: [] })).toContain("hearth-mcp add <https url> <name>");
+});
+
 const server = (name: string, url: string, state: string): any => ({ name, url, state, enabled: true, tools: [], ask: [], why: {}, auth: "key", checking: false, addedBy: "x", addedAt: "" });
 
 test("stuck, Mac online: ask the user to use it; already allowed: just open it", () => {
-  const ask = stuckHelp({ what: "priceline human check", mac: "Studio", gate: "ask", servers: [] });
+  const ask = stuckHelp("blocked", { what: "priceline human check", mac: "Studio", gate: "ask", servers: [] });
   expect(ask).toContain("Ask the user if you can use Chrome on their Mac (Studio)");
   expect(ask).toContain('hearth-browser open <url> "priceline human check"');
   expect(ask.indexOf("Studio")).toBeLessThan(ask.indexOf(CLOUD_BROWSERS[0].label));
-  const ok = stuckHelp({ what: "x", mac: "Studio", gate: "ok", servers: [] });
+  const ok = stuckHelp("blocked", { what: "x", mac: "Studio", gate: "ok", servers: [] });
   expect(ok).toContain("is yours in this conversation already");
-  const no = stuckHelp({ what: "x", mac: "Studio", gate: "no", servers: [] });
+  const no = stuckHelp("blocked", { what: "x", mac: "Studio", gate: "no", servers: [] });
   expect(no).not.toContain("Chrome on Studio");
 });
 
 test("stuck, no Mac: a connected cloud browser first; else add one yourself, with its free plan and how it signs in", () => {
   const [first, second] = CLOUD_BROWSERS;
-  const on = stuckHelp({ what: "x", mac: null, gate: null, servers: [server(first.name, first.url, "connected")] });
+  const on = stuckHelp("blocked", { what: "x", mac: null, gate: null, servers: [server(first.name, first.url, "connected")] });
   expect(on).toContain(`${first.label} is connected as the MCP server ${first.name}`);
   expect(on).toContain(`If that one can't get through either, add another yourself: ${second.label}`);
-  const none = stuckHelp({ what: "x", mac: null, gate: null, servers: [] });
+  const none = stuckHelp("blocked", { what: "x", mac: null, gate: null, servers: [] });
   expect(none).toContain(`hearth-mcp add ${first.url} ${first.name}`);
   expect(none).toContain(first.free);
   expect(none).toContain("no need to ask the user to do it");
   for (const b of CLOUD_BROWSERS.slice(1)) expect(none).toContain(`hearth-mcp add ${b.url} ${b.name}`);
   // Asked already and waiting: says so, doesn't add it again.
-  const waiting = stuckHelp({ what: "x", mac: null, gate: null, servers: [server(first.name, first.url, "pending")] });
+  const waiting = stuckHelp("blocked", { what: "x", mac: null, gate: null, servers: [server(first.name, first.url, "pending")] });
   expect(waiting).toContain("waits for the user's Approve");
   expect(waiting).not.toContain(`hearth-mcp add ${first.url}`);
   // A key provider, approved but not signed in: get the key yourself, in the right place.
   const bb = CLOUD_BROWSERS.find((b) => b.key?.query)!;
-  const keyless = stuckHelp({ what: "x", mac: null, gate: null, servers: [server(bb.name, bb.url, "signin")] });
+  const keyless = stuckHelp("blocked", { what: "x", mac: null, gate: null, servers: [server(bb.name, bb.url, "signin")] });
   expect(keyless).toContain(`hearth-mcp key ${bb.name} <key> ?${bb.key!.query}`);
   expect(keyless).toContain("never a paid one");
 });
@@ -117,11 +135,24 @@ test("stuck, no Mac: a connected cloud browser first; else add one yourself, wit
 test("hub: hearth-help stuck reads the Mac, this conversation's answer and the MCP servers", async () => {
   hub.macName = () => "Studio";
   await store.put<Job>("jobs", { id: "j1", createdAt: new Date().toISOString(), task: "cars", status: "working", threadId: "t1" } as Job);
-  expect(await hub.helpAgent(["stuck", "priceline", "blocked"], "j1")).toContain("Ask the user if you can use Chrome on their Mac (Studio)");
+  expect(await hub.helpAgent(["stuck", "bot-detection", "priceline", "press-and-hold"], "j1")).toContain("Ask the user if you can use Chrome on their Mac (Studio)");
   await hub.setAlwaysAllowed(["browser:mac"]);
-  expect(await hub.helpAgent(["stuck", "x"], "j1")).toContain("is yours in this conversation already");
+  expect(await hub.helpAgent(["stuck", "blocked", "x"], "j1")).toContain("is yours in this conversation already");
+  // Signed out: the Mac's Chrome has their logins, and connection.refresh.
+  const login = await hub.helpAgent(["stuck", "login", "amazon"], "j1");
+  expect(login).toContain("You're stuck (signed-out): amazon");
+  expect(login).toContain("Chrome on Studio");
+  expect(login).toContain("connection.refresh {site}");
   hub.macName = () => null;
-  expect(await hub.helpAgent(["stuck", "x"], "j1")).toContain("hearth-mcp add");
+  expect(await hub.helpAgent(["stuck", "blocked", "x"], "j1")).toContain("hearth-mcp add");
+  // Waiting: names what's waiting for this job.
+  await store.put<Approval>("approvals", { id: "ap9", createdAt: new Date().toISOString(), jobId: "j1", threadId: "t1", summary: "Send the email to Sam", action: { type: "message", channel: "gmail", to: "s@x.com", text: "hi" }, status: "pending" } as Approval);
+  expect(await hub.helpAgent(["stuck", "waiting"], "j1")).toContain("Waiting now: Send the email to Sam");
+  // No kind, or one it doesn't know: the menu, so it picks.
+  for (const argv of [["stuck"], ["stuck", "priceline", "blocked"]]) {
+    const menu = await hub.helpAgent(argv, "j1");
+    for (const k of STUCK) expect(menu).toContain(`  ${k.id}`);
+  }
   expect(await hub.helpAgent([], "j1")).toContain("hearth-help topics");
 });
 
@@ -243,7 +274,7 @@ test("the skill brings the command, and enkidu-browser's rules point to it", () 
   expect(sk.commands).toEqual(["hearth-browser"]);
   expect(sk.description).toMatch(/prove you are human/);
   expect(sk.body).toContain("hearth-browser open <url>");
-  expect(readFileSync(join(import.meta.dir, "../src/brains/skills.ts"), "utf8")).toContain("hearth-help stuck \"<what blocked you>\"\\` and do what it says");
+  expect(readFileSync(join(import.meta.dir, "../src/brains/skills.ts"), "utf8")).toContain("hearth-help stuck blocked \"<what blocked you>\"\\` and do what it says");
 });
 
 test("the command saves a screenshot where the agent works and prints its path", async () => {

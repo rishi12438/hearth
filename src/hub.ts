@@ -2115,9 +2115,12 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
 
   /** What `hearth-help <argv>` says, for /api/agent/help: built from what's there right now (help.ts). */
   async helpAgent(argv: string[], jobId?: string): Promise<string> {
-    const { stuckHelp, HELP_TOPICS } = await import("./help.ts");
-    const [topic = "topics", ...rest] = argv;
+    const { stuckHelp, stuckKind, STUCK_MENU, HELP_TOPICS } = await import("./help.ts");
+    const [topic = "topics", kind = "", ...rest] = argv;
     if (topic !== "stuck") return HELP_TOPICS;
+    if (!kind) return STUCK_MENU;
+    // An old-style call with no kind ("hearth-help stuck priceline blocked"): the menu, so it picks one.
+    if (!stuckKind(kind)) return stuckHelp(kind, { what: "", mac: null, gate: null, servers: [] });
     let job = jobId ? await this.store.get<Job>("jobs", jobId) : null;
     if (!job) {
       const working = (await this.store.all<Job>("jobs")).filter((j) => j.status === "working");
@@ -2125,8 +2128,9 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     }
     const mac = this.macName();
     const gate = mac ? await this.macBrowserGate(job?.threadId || ORPHAN_THREAD) : null;
-    await this.log("help.stuck", rest.join(" ").slice(0, 200));
-    return stuckHelp({ what: rest.join(" ").slice(0, 300), mac, gate, servers: this.connect?.mcp.list() ?? [] });
+    const waiting = job ? (await this.store.all<Approval>("approvals")).filter((a) => a.status === "pending" && a.jobId === job!.id).map((a) => a.summary) : [];
+    await this.log("help.stuck", `${kind}: ${rest.join(" ")}`.slice(0, 200));
+    return stuckHelp(kind, { what: rest.join(" ").slice(0, 300), mac, gate, servers: this.connect?.mcp.list() ?? [], waiting });
   }
 
   /** What `hearth-browser <argv>` does, for /api/agent/browser. */
