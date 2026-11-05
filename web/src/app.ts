@@ -1698,9 +1698,6 @@ function chatMenu() {
     h("button", { class: "btn ghost", on: { click: () => openFiles() } }, icon("clip", 16), "Files"),
     h("button", { class: "btn ghost", on: { click: () => moveToProject(t) } }, icon("folder", 16), t.projectId ? `In ${S.projects.find((p: any) => p.id === t.projectId)?.name || "a project"} · Move` : "Move to project"),
     h("div", { class: "stack" },
-      doneAll && lastRamble ? h("button", { class: "btn ghost", on: { click: async () => {
-        try { const wf = await call("/api/workflows/from-ramble", { body: { messageId: lastRamble.id } }); toast(`Saved workflow ${wf.name}. Say “run ${wf.name}” any time.`); closeSheet(); loadSkills(); } catch (e) { handleError(e); }
-      } } }, icon("repeat", 16), "Save as workflow") : null,
       h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet("Delete this ramble?", "Its messages and results are deleted. Reminders it set keep working.", "Delete", async () => { await call(`/api/threads/${t.id}`, { method: "DELETE" }); location.hash = ""; }) } }, icon("trash", 16), "Delete")),
   ]);
 }
@@ -3089,13 +3086,6 @@ function drawSkills() {
         h("small", { class: "sub" }, sk.description),
         h("small", { class: "sub" }, [`${sk.runs} use${sk.runs === 1 ? "" : "s"}`, sk.lastUsedAt ? `last ${shortAgo(sk.lastUsedAt)}` : null, sk.lastFixedAt ? `fixed ${shortAgo(sk.lastFixedAt)}` : null, sk.avgMs ? `~${secs(sk.avgMs)}` : null].filter(Boolean).join(" · "))))))
       : h("p", { class: "empty" }, "No skills yet. They appear as your team finishes jobs."),
-    wfs.length ? [h("h4", null, "Workflows"), h("div", { class: "list" }, wfs.map((w) => h("div", { class: "item" },
-      h("span", { class: "grow" }, h("b", null, w.name, w.status === "proposed" ? h("span", { class: "tag" }, "proposed") : null, w.pinned ? h("span", { class: "tag" }, "pinned") : null),
-        h("small", { class: "sub" }, w.description), h("small", { class: "sub" }, w.steps.map((x: any) => x.skill || x.teammate || "task").join(" → "))),
-      w.status === "proposed" ? h("button", { class: "btn small primary", on: { click: async () => { await call(`/api/workflows/${w.id}/activate`, { body: {} }); toast("Switched on"); } } }, "Switch on")
-        : h("button", { class: "btn small primary", on: { click: async () => { closeSheet(); const r = await call("/api/threads", { body: { text: `Run my "${w.name}" workflow` } }); location.hash = `#c/${r.thread.id}`; } } }, "Run"),
-      h("button", { class: `star ${w.pinned ? "on" : ""}`, "aria-label": w.pinned ? "Unpin" : "Pin (never clean up)", on: { click: async () => { await call(`/api/workflows/${w.id}`, { method: "PATCH", body: { pinned: !w.pinned } }); } } }, icon("pin", 16)),
-      h("button", { class: "iconbtn", "aria-label": "Delete workflow", on: { click: () => confirmSheet(`Delete ${w.name}?`, "The skills it uses stay.", "Delete", async () => { await call(`/api/workflows/${w.id}`, { method: "DELETE" }); }) } }, icon("trash", 16)))))] : null,
     // Components: reusable artifacts (visual skills). The team reuses them with new data instead of writing new code.
     S.components.length ? [h("h4", null, "Components"), h("p", { class: "muted small" }, "Visuals your team built once and reuses with new data, like an itinerary with a map or a comparison."),
       h("div", { class: "list" }, S.components.map((c: any) => h("div", { class: "item" },
@@ -3268,7 +3258,7 @@ function drawTriggers() {
   // A reminder's timer shows on its trigger; this tab is for timers on their own.
   const timers = S.pipe.timers.filter((t: any) => !triggers.some((x: any) => x.timerId === t.id));
   const owner = !!S.state?.device?.primary;
-  const tabs: [typeof S.pipeTab, string, number][] = [["triggers", "Workflows", live.length], ["timers", "Timers", timers.filter((t) => t.status !== "done").length], ["sources", "Sources", sources.length], ["events", "Events", 0]];
+  const tabs: [typeof S.pipeTab, string, number][] = [["triggers", "Workflows", live.length], ["sources", "Sources", sources.length], ["events", "Events", 0]];
   const fresh = (id: string) => (S.pipeFresh.has(id) ? "fresh" : "");
   // confirmSheet closes itself after the action, so Triggers opens again just after.
   const reopen = (tab?: typeof S.pipeTab) => setTimeout(() => openTriggers(tab), 0);
@@ -3429,10 +3419,11 @@ function drawTriggers() {
       body);
   };
 
+  if (S.pipeTab === "timers") S.pipeTab = "triggers"; // timers show as their workflows' trigger now
   const tab = S.pipeTab;
   const active = live.filter((t: any) => t.status === "active").length;
   clear(el,
-    h("p", { class: "muted" }, "Reminders, routines and rules. Anything can push events into a source (a clock, a watcher, a webhook, your location). Every event is saved, and each trigger's formula decides, with plain code, whether it acts."),
+    h("p", { class: "muted" }, "Each workflow is a trigger and an action. A trigger starts on an event (a time, a webhook, a watcher, your location) and code decides whether it counts; the action is what happens."),
     S.pipe.held ? h("p", { class: "muted small" }, `${S.pipe.held} waiting for quiet hours to end.`) : null,
     h("div", { class: "pipeflow" }, h("span", null, `${sources.length} source${sources.length === 1 ? "" : "s"}`), "→", h("span", null, "events"), "→", h("span", { id: "pipe-drop" }, `${active} trigger${active === 1 ? "" : "s"}`), "→", h("span", null, "actions")),
     h("div", { class: "seg" }, tabs.map(([k, label, n]) => h("button", { class: tab === k ? "on" : "", on: { click: () => { S.pipeTab = k; if (k === "events") loadPipelineEvents(); drawTriggers(); } } }, label, n ? h("small", null, ` ${n}`) : null))),
@@ -3442,7 +3433,6 @@ function drawTriggers() {
       done.length ? [h("h4", null, "Done"), h("div", { class: "list" }, done.map(triggerRow))] : null,
       builtIn.length ? [h("h4", null, "The hub's own"), h("div", { class: "list" }, builtIn.map(triggerRow))] : null,
     ] : null,
-    tab === "timers" ? (timers.length ? h("div", { class: "list" }, timers.map(timerRow)) : h("p", { class: "empty" }, "No timers. A timer pushes one event to the time source when it's due, and triggers on “time” pick it up.")) : null,
     // Ports (callback URLs someone claimed, with what each is for) first, then every other source, then the ports given back.
     tab === "sources" ? (() => {
       const ports = sources.filter((s: any) => s.kind === "push" && !s.claim?.releasedAt);
@@ -3483,7 +3473,7 @@ function flyIn(what: string, id: string, next: () => void) {
   if (!item) return next();
   S.pipeFresh.add(id);
   setTimeout(() => { S.pipeFresh.delete(id); if (hubPage() === "triggers") drawTriggers(); }, 4500);
-  const tab = what === "triggers" ? "triggers" : what === "timers" ? "timers" : "sources";
+  const tab = what === "sources" || what === "watchers" ? "sources" : "triggers"; // a new timer shows as its workflow
   if (hubPage() === "triggers") { S.pipeTab = tab; drawTriggers(); document.querySelector(`#hubpage [data-pipe="${id}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }); }
   const reminder = what === "triggers" && item.timer;
   const label = reminder ? "New reminder" : what === "triggers" ? "New trigger" : what === "timers" ? "New timer" : what === "watchers" ? "Now watching" : "New source";

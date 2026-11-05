@@ -83,7 +83,7 @@ export function portsAgent(p: EventPipeline, argv: string[], who: PortWho, base:
       if (!v.variables?.length) return 'Say which fields: hearth-trigger-port map <name> --var status=data.object.status --var email=data.object.email';
       const names = new Set(v.variables.map((x) => x.name));
       const r = p.updateSource(s.id, { variables: [...s.variables.filter((x) => !names.has(x.name)), ...v.variables], mapping: { ...(s.mapping || {}), ...(v.mapping || {}) } });
-      return r.value ? `${s.name} now has: ${r.value.variables.map((x) => `${x.name}${r.value!.mapping?.[x.name] ? ` (${r.value!.mapping[x.name]})` : ""}`).join(", ")}. Decide with code: a formula on these, or a check script (see the make-triggers skill).`
+      return r.value ? `${s.name} now has: ${r.value.variables.map((x) => `${x.name}${r.value!.mapping?.[x.name] ? ` (${r.value!.mapping[x.name]})` : ""}`).join(", ")}. Decide with code: a formula on these, or a check script (see the build-workflows skill).`
         : `Not changed: ${r.error}${r.conflict ? `\nOptions: ${r.conflict.options.join(" · ")}` : ""}`;
     }
     case "release": {
@@ -141,7 +141,7 @@ give the service its URL. Every call becomes an event on the port's source, wher
 
 The trigger on a port decides with CODE: a formula for facts on the event, a check script (Python is fine) for
 facts that are awkward as a formula, a judge only for meaning. Never formula "true" plus a prompt that filters. The
-make-triggers skill has the whole method: read it before you add the trigger.
+build-workflows skill has the whole method: read it before you add the trigger.
 - \`hearth-trigger-port release <name> --reason "<why>"\`: the URL stops working. Release ports you no longer need.
 
 Push before polling: when a service can call a webhook, use a port, not a watcher that checks every few minutes.
