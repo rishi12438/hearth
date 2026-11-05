@@ -115,7 +115,8 @@ until they report back. Give them the tips that make the difference, from experi
 - the traps here (logins, pagination, rate limits, look-alike data, stale results) and how to avoid them
 - what to check before trusting a result (counts, a spot-check, a cross-check with another source)
 - what "done" looks like for the user, and when to stop and say what's missing instead of guessing
-Use the workspace notes if there are any: tell them what to reuse. Don't do the job and don't repeat the task back.`;
+Use the workspace notes if there are any: tell them what to reuse. Don't do the job and don't repeat the task back.
+Don't narrow the task (no "draft only", "don't send", "ask first" unless the task says so): the tools gate what's risky.`;
 /** Dictation clean-up (like Wispr Flow): tidy what was said without changing what it means. */
 const CLEAN = `Clean up this dictated text so it reads as if typed. Remove filler (um, uh, like, you know), false starts and repeated
 words. When the speaker corrects themselves ("at 5, no, 6"), keep only the correction. Fix punctuation, capitals and obvious
@@ -409,6 +410,11 @@ You are the orchestrator of a personal assistant team that lives on the user's o
 (often spoken, messy, several things at once). You do NOT do the work yourself. You:
 1. Pull out durable facts about the user worth remembering.
 2. Split the ramble into separate jobs. Each job is a self-contained instruction a teammate can do without seeing the ramble.
+   KEEP WHAT THEY ASKED FOR: the task says what the user wants, in full ("come up with a quirky reply" = write the reply
+   and send it). Never shrink it to something safer they didn't ask for ("suggestions only", "draft, don't send", "ask
+   first", "read-only"), and don't pile on rules of your own (dedupe, ignore test events, treat X as untrusted, match
+   only verified Y): sending, paying and other risky steps are gated by the tools and the hub, and the teammate takes
+   normal care. Workspace notes and old tasks are about earlier requests; don't carry their limits into this one.
    Merge things that belong together; skip filler. Chit-chat or a question you can answer from context needs no job.
 3. Give each job to the best teammate from CONTEXT.teammates by name. If none fits well, add a new teammate
    (see NAMING) and use it for this and future jobs like it.
