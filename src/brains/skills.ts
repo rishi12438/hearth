@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -26,6 +26,10 @@ export type Skill = {
   scripts?: Record<string, string>;
   /** Listed by name in the prompt's catalog (not only found by search). */
   common?: boolean;
+  /** Its folder in <data>/skills (yours or installed): its other files (scripts/, reference .md…) go along with it. */
+  dir?: string;
+  /** Where an installed skill came from: owner/repo/path@commit. */
+  origin?: string;
 };
 
 /** Skills a connector adds while it's connected (Plaid's hearth-plaid). Registered once by the hub. */
@@ -279,20 +283,49 @@ function toolSkill(bin: string): string {
   return text;
 }
 
-const stripFrontMatter = (s: string) => s.replace(/^\s*---\n[\s\S]*?\n---\n/, "").trim();
-const NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const stripFrontMatter = (s: string) => s.replace(/^\s*---\r?\n[\s\S]*?\r?\n---\r?\n/, "").trim();
+export const NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
-/** Your own skill files: <data>/skills/<name>/SKILL.md, with a `description:` line in its front matter. */
+/**
+ * A SKILL.md's name and description, from its front matter. Enough YAML for what skills use: plain or quoted values,
+ * and a folded (>) or literal (|) block on the lines below.
+ */
+export function frontMatter(text: string): { name?: string; description?: string } {
+  const m = text.match(/^\s*---\r?\n([\s\S]*?)\r?\n---\r?(\n|$)/);
+  if (!m) return {};
+  const lines = m[1].split(/\r?\n/);
+  const out: Record<string, string> = {};
+  for (let i = 0; i < lines.length; i++) {
+    const kv = lines[i].match(/^(name|description):\s*(.*)$/);
+    if (!kv) continue;
+    let v = kv[2].trim();
+    if (/^[>|][-+]?$/.test(v) || v === "") {
+      const block: string[] = [];
+      while (i + 1 < lines.length && (/^\s+\S/.test(lines[i + 1]) || lines[i + 1].trim() === "")) block.push(lines[++i].trim());
+      v = block.join(v.startsWith("|") ? "\n" : " ").trim();
+    } else if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+      try { v = v.startsWith('"') ? JSON.parse(v) : v.slice(1, -1).replace(/''/g, "'"); } catch { v = v.slice(1, -1); }
+    }
+    out[kv[1]] = v.replace(/\s+/g, " ").trim();
+  }
+  return { name: out.name || undefined, description: out.description || undefined };
+}
+
+/** Your own skill files and installed ones: <data>/skills/<name>/SKILL.md, with a description in its front matter. */
 function ownSkills(dataDir: string): Skill[] {
   const root = join(dataDir, "skills");
   if (!existsSync(root)) return [];
   const out: Skill[] = [];
-  for (const name of readdirSync(root)) {
-    const f = join(root, name, "SKILL.md");
+  for (const name of readdirSync(root).sort()) {
+    const dir = join(root, name);
+    const f = join(dir, "SKILL.md");
     if (!NAME_RE.test(name) || !existsSync(f)) continue;
     const text = readFileSync(f, "utf8");
-    const description = text.match(/^description:\s*(.+)$/m)?.[1]?.trim().replace(/^["']|["']$/g, "");
-    if (description) out.push({ name, description, body: stripFrontMatter(text), commands: [], reads: [] });
+    const { description } = frontMatter(text);
+    if (!description) continue;
+    let origin: string | undefined;
+    try { const s = JSON.parse(readFileSync(join(dir, ".hearth-source.json"), "utf8")); origin = `${s.repo}${s.path ? `/${s.path}` : ""}@${String(s.sha).slice(0, 12)}`; } catch {}
+    out.push({ name, description, body: stripFrontMatter(text), commands: [], reads: [], dir, ...(origin ? { origin } : {}) });
   }
   return out;
 }
@@ -336,11 +369,16 @@ export function installSkills(workDir: string, skills: Skill[]): string {
   rmSync(root, { recursive: true, force: true });
   for (const s of skills) {
     mkdirSync(join(root, s.name), { recursive: true });
+    // A skill with a folder brings all its files (scripts/, reference .md), so what its SKILL.md points to is there.
+    if (s.dir && existsSync(s.dir)) cpSync(s.dir, join(root, s.name), { recursive: true, filter: (src) => !src.endsWith("/.hearth-source.json") });
     writeFileSync(join(root, s.name, "SKILL.md"), `---\nname: ${s.name}\ndescription: ${JSON.stringify(s.description)}\n---\n\n${s.body}\n`);
   }
   const bin = join(workDir, "bin");
   mkdirSync(bin, { recursive: true });
-  for (const [name, text] of [["hearth-open", HEARTH_OPEN], ["hearth-skill", HEARTH_SKILL.replace("__ROOT__", root)]]) {
+  // No skill here for it: search says to look in the public catalog (the hub's hearth-skill-store), when there is one.
+  const more = skills.some((s) => s.name === "install-skills")
+    ? "No skill here matches. Public skills you can install: hearth-skill-store find <words>" : "No skill matches. All skills: hearth-skill list";
+  for (const [name, text] of [["hearth-open", HEARTH_OPEN], ["hearth-skill", HEARTH_SKILL.replace("__ROOT__", root).replace("__NOMATCH__", more)]]) {
     writeFileSync(join(bin, name), text);
     chmodSync(join(bin, name), 0o755);
   }
@@ -444,7 +482,9 @@ case "\${1:-}" in
     for f in "$root"/*/SKILL.md; do [ -e "$f" ] || continue; n=$(basename "$(dirname "$f")"); echo "$n: $(desc "$f")"; done ;;
   show)
     n="\${2:-}"; [[ "$n" =~ ^[a-z0-9][a-z0-9-]*$ ]] && [ -f "$root/$n/SKILL.md" ] || { echo "No skill named '$n'. Try: hearth-skill search <words>" >&2; exit 1; }
-    cat "$root/$n/SKILL.md" ;;
+    cat "$root/$n/SKILL.md"
+    more=$(cd "$root/$n" && find . -type f ! -name SKILL.md | sed 's|^\\./||' | sort | head -60)
+    if [ -n "$more" ]; then printf '\\nThis skill'"'"'s folder is %s. Its other files (run its scripts from there):\\n%s\\n' "$root/$n" "$more"; fi ;;
   search)
     shift; [ $# -gt 0 ] || { echo "usage: hearth-skill search <words...>" >&2; exit 1; }
     words=$(printf '%s\\n' "$@" | tr 'A-Z' 'a-z' | tr -cs 'a-z0-9' '\\n' | awk 'length($0) > 1')
@@ -458,7 +498,7 @@ case "\${1:-}" in
         score=$((score + h * 10 + (b > 20 ? 20 : b)))
       done
       [ "$score" -gt 0 ] && printf '%s\\t%s: %s\\n' "$score" "$n" "$d"
-    done | sort -rn | head -5 | cut -f2- | grep . || echo "No skill matches. All skills: hearth-skill list" ;;
+    done | sort -rn | head -5 | cut -f2- | grep . || echo "__NOMATCH__" ;;
   *) echo "usage: hearth-skill search <words...> | show <name> | list" >&2; exit 1 ;;
 esac
 `;

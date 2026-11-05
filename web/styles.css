@@ -1296,3 +1296,7 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 }
 .flowline { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
 .codechip { color: #3f6b35; font-family: var(--mono); font-size: 12px; }
+
+/* An Approve card's details keep their lines (a skill install lists source, code, files). */
+.predetails { white-space: pre-line; overflow-wrap: anywhere; }
+.sub.clamp2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }

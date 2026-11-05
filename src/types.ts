@@ -307,7 +307,9 @@ export type Approval = Doc & {
     /** A Gmail/Drive/Calendar command that changes or removes something (connectors/google-agent.ts); kind is what "Always allow" remembers. */
     | { type: "google"; service: "gmail" | "drive" | "calendar"; args: string[]; body?: string; kind: string }
     /** A call to an MCP tool that asks first (mcp.ts); "Always allow" lets that tool run without asking. */
-    | { type: "mcp"; server: string; tool: string; args: unknown };
+    | { type: "mcp"; server: string; tool: string; args: unknown }
+    /** A public skill an agent wants installed (brains/skill-store.ts), pinned to the commit and files the card showed. */
+    | { type: "skill"; name: string; repo: string; path: string; sha: string; hash: string; url: string; update?: boolean };
   /** expired: nobody answered within a day (APPROVAL_TTL_MS), so it didn't run and no longer asks. */
   status: "pending" | "approved" | "rejected" | "done" | "failed" | "expired";
   result?: string;

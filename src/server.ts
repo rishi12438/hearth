@@ -67,6 +67,7 @@ import type { Shares } from "./shares.ts";
 import { sharePage } from "./share-page.ts";
 import { mcpAgent } from "./mcp.ts";
 import { portsAgent } from "./events/ports.ts";
+import { installedSkills } from "./brains/skill-store.ts";
 import type { Component, Person, StoredFile, Approval, Device, Fact, LocationFix, MiniApp, Message, Notebook, Place, Prefs, Skill, Teammate, Workflow } from "./types.ts";
 import pkg from "../package.json" with { type: "json" };
 
@@ -384,6 +385,21 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         return new Response(out + "\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
       } catch (e: any) { return new Response(`Error: ${String(e?.message || e).slice(0, 500)}\n`, { status: 502, headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } }); }
     }
+    // The agent's hearth-skill-store (brains/skill-store.ts): find, read and install public skills. An install is an Approve
+    // card in the job's thread (X-Hearth-Job); nothing is installed until you tap it. Same keys as hearth-mcp.
+    if (path === "/api/agent/skills" && method === "POST") {
+      const key = req.headers.get("x-hearth-agent");
+      const from = fromThisMachine(req, server) && connect.isAgentKey(key) ? "hub" : computers.agentKeyOwner(key);
+      if (!from) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not the agent's key."); }
+      let argv: string[] = [];
+      try { argv = (await req.formData()).getAll("a").slice(0, 20).map((a) => String(a).slice(0, 2000)); } catch { throw new HttpError(400, "Send the command's words as a fields."); }
+      server.timeout(req, 120);
+      const jobId = req.headers.get("x-hearth-job")?.slice(0, 100) || undefined;
+      const job = jobId ? await store.get<any>("jobs", jobId) : null;
+      const mate = job?.teammateId ? await store.get<any>("teammates", job.teammateId) : null;
+      const out = await hub.skillStoreAgent(argv, `${mate?.name || "an agent"}${from === "hub" ? "" : ` on ${from}`}`, jobId);
+      return new Response(out + "\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
+    }
     // The agent's hearth-trigger-port (events/ports.ts): claim a callback URL for a webhook, list, release. The claim
     // records which teammate and job took it (X-Hearth-Job), so every live URL can be traced to the task that wanted it.
     if (path === "/api/agent/ports" && method === "POST") {
@@ -638,6 +654,32 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           return json(r.value);
         }
         if (method === "DELETE" && id) { const ok = await store.remove("skills", id); hub.emit("skills"); return json({ ok }); }
+        break;
+      }
+      // Public skills (brains/skill-store.ts): search the catalog, read one, install, update, remove. You're asking, so no card.
+      case "skillstore": {
+        if (method === "GET" && id === "search") {
+          try { return json(await hub.searchSkills(url.searchParams.get("q") || "")); }
+          catch (e: any) { throw new HttpError(502, `Couldn't search skills.sh: ${String(e?.message || e).slice(0, 200)}`); }
+        }
+        if (method === "GET" && id === "preview") {
+          const r = await hub.previewSkill(url.searchParams.get("ref") || "");
+          if (r.error) throw new HttpError(400, r.error);
+          return json(r.value);
+        }
+        if (method === "GET" && id === "installed") return json(installedSkills(hub.config.dataDir));
+        if (method === "POST" && id === "install") {
+          const b = await body(req);
+          const r = await hub.installSkill(String(b.ref || ""));
+          if (r.error) throw new HttpError(400, r.error);
+          return json(r.value);
+        }
+        if (method === "POST" && id === "update" && seg[3]) {
+          const r = await hub.updateSkill(decodeURIComponent(seg[3]));
+          if (r.error) throw new HttpError(400, r.error);
+          return json(r.value);
+        }
+        if (method === "DELETE" && id) return json({ ok: await hub.removeInstalledSkill(decodeURIComponent(id)) });
         break;
       }
       case "library": {
