@@ -115,6 +115,10 @@ export const GUIDES: Skill[] = [{
 A trigger is: an event arrives on a SOURCE → code decides whether it matters → an ACTION runs. Work through these in
 order. The aim is predictable and cheap: code decides, a model is used only for what needs judgment.
 
+The user will just say what they want ("tell me when the school emails", "alert me on big charges"). They won't
+say how, and they shouldn't have to: choose the method yourself, following this, and don't ask them which. Tell
+them in plain words what will notify them and what won't, and that a script you wrote waits for their Approve.
+
 ## 1. Get the event in: push before polling
 Prefer, in this order:
 1. A source that already gets it: the event pipeline's sources (CONTEXT.eventPipeline, or \`hearth-trigger-port list\`).

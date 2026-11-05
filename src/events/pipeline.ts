@@ -149,7 +149,7 @@ export type PipelineEvent = {
   receivedAt: string; processedAt: string | null; error: string | null;
   log?: LogLine[];
 };
-export type Conflict = { kind: "name" | "duplicate" | "overlap" | "variables" | "protected" | "loop"; message: string; existing?: { id: string; name: string }; options: string[] };
+export type Conflict = { kind: "name" | "duplicate" | "overlap" | "variables" | "protected" | "loop" | "filter"; message: string; existing?: { id: string; name: string }; options: string[] };
 export type Result<T> = { value: T; error?: undefined; conflict?: undefined } | { value?: undefined; error: string; conflict?: Conflict };
 
 /**
@@ -708,6 +708,10 @@ export class EventPipeline {
     if (extra) return { error: extra };
     const clash = this.findTrigger(name);
     if (clash) return this.conflict({ kind: "name", message: `There's already a trigger called "${name}".`, existing: clash, options: [`trigger.update "${name}"`, "pick a different name"] });
+    if (!input?.force && !o.timerId) {
+      const filt = this.modelAsFilter(s, formula, action, check, judge);
+      if (filt) return this.conflict(filt);
+    }
     if (!input?.force && !o.timerId && !check) {
       const over = this.overlapping(s, formula, action, judge);
       if (over) return this.conflict(over);
@@ -747,6 +751,10 @@ export class EventPipeline {
       if (typeof jd === "string") return { error: jd };
       judge = jd;
     }
+    if (!input?.force && (formula !== t.formula || input?.action !== undefined || input?.check !== undefined || input?.judge !== undefined)) {
+      const filt = this.modelAsFilter(s, formula, action, check, judge);
+      if (filt) return this.conflict(filt);
+    }
     if (!input?.force && !check && (formula !== t.formula || input?.action !== undefined || input?.judge !== undefined)) {
       const over = this.overlapping(s, formula, action, judge, t.id);
       if (over) return this.conflict(over);
@@ -779,6 +787,20 @@ export class EventPipeline {
    * Another trigger on the same source that does the same thing and would catch the same events: the same rule
    * written differently, or (from the recent events) everything this one catches is caught by it already.
    */
+  /**
+   * A model as the filter: formula "true", no check or judge, and a think prompt that says which events to ignore
+   * ("only if…", "ignore…", "reply [[quiet]]"). Every event then costs a model call and the decision isn't code.
+   * Refused (unless force) with how to do it instead. Time and place events are left alone: a routine's prompt may
+   * well say "stay quiet if there's nothing new".
+   */
+  private modelAsFilter(s: EventSource, formula: string, action: TriggerAction, check: TriggerCheck | null, judge: Judge | null): Conflict | null {
+    if (check || judge || action.type !== "think" || s.kind === "time" || s.kind === "place") return null;
+    if (!/^\s*(true|1)?\s*$/i.test(formula)) return null;
+    if (!/\[\[quiet\]\]|\b(only (if|when|for)|ignore|unless|otherwise (reply|stay|say nothing)|doesn'?t (qualify|count|match)|if (it|this|the \w+) (is|isn'?t|matches|comes from))\b/i.test(action.prompt)) return null;
+    return { kind: "filter", message: "This trigger asks a model to decide which events matter (formula \"true\" and a prompt that filters). Decide with code instead, so it's predictable and doesn't cost a model call per event.",
+      options: ["put the facts in the formula (map the fields with source.update first)", "or add check: {\"script\":\"<name>\"}: a read-only script (Python is fine) that reads the event on stdin and prints true or {\"fire\": true, …}", "keep a think action only to write the message, or a judge for real judgment", "force: true only if the user insists"] };
+  }
+
   private overlapping(s: EventSource, formula: string, action: TriggerAction, judge: Judge | null, except?: string): Conflict | null {
     const tree = this.tree(formula)!;
     const key = this.actionKey(action, judge);
