@@ -3258,7 +3258,8 @@ ${JSON.stringify(shown, null, 1)}
     const said = msgs.slice(-40).map((m) => `${m.role === "user" ? "USER" : "TEAM"}: ${m.text.replace(/\s+/g, " ").slice(0, 700)}`);
     const did = jobs.slice(-10).map((j) => `- [${j.status}] ${j.task.slice(0, 200)}${j.result ? ` → ${j.result.replace(/\s+/g, " ").slice(0, 500)}` : ""}`);
     const input = [`THREAD: #${channelOf(thread)} "${thread.title}"`, "", "WHAT WAS SAID:", ...said, ...(did.length ? ["", "WHAT THE TEAM DID:", ...did] : [])].join("\n");
-    const r = await this.turn("learn", input, "lessons review", { profile: (await this.brains()).workhorse });
+    // The heavy brain (Opus by default): these rules steer every later job, and generalizing well is judgment.
+    const r = await this.turn("learn", input, "lessons review", { profile: (await this.brains()).heavy });
     await this.log("lessons", `after #${channelOf(thread)}: ${r.text && r.text !== QUIET ? r.text : "nothing new"}`);
     return true;
   }
