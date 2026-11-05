@@ -182,17 +182,27 @@ fix that waits for the user's Approve. When you're that teammate, fix the cause 
 same script name, and say in a line what broke.`,
 }, {
   name: "send-files", common: true, commands: [], reads: [],
-  description: "Made something the user should open or keep (a video, picture, PDF, spreadsheet, deck, export)? How to send it to them as a file in the thread.",
+  description: "Making something the user should open (a video, picture, PDF, spreadsheet, deck, export), or working files they shouldn't see? How files reach them: shown by themselves, @file for the rest, drafts in _scratchpad/.",
   body: `# Sending the user a file
 
 The user never sees your folder or the hub's disk. A path in your reply (/opt/..., out/x.mp4, file://...) is a dead
 link to them. To give them a file, attach it.
 
-## How
-- Save it in your workspace, normally under out/ (out/launch-preview.mp4), with a name that says what it is.
-- In your reply, put one line per file, on its own: \`@file out/launch-preview.mp4\` (the path from your current folder).
-  Hearth takes the line out, attaches the file to the thread, and tells you in the reply if one couldn't be attached.
-- Up to 5 files a reply, 50 MB each. Only files inside your workspace can go; anything else is refused.
+## Shown by themselves
+- Media and documents you make or change in your workspace during a run are attached to the thread when you reply:
+  video, audio, pictures, PDF, docx/xlsx/pptx, CSV/TSV, zip, .ics. Save them under out/ with a name that says what it
+  is (out/launch-preview.mp4).
+- Edit a file the user already has (same path) and it shows again as "Updated <name>"; unchanged files aren't resent.
+  To change something you sent, edit that file in place rather than making launch-preview-2.mp4.
+- Not shown: anything in _scratchpad/ (or any folder starting with _ or .), and the workspace's own data/, scripts/,
+  history/, archive/, skills/ and attachments/. Test frames, intermediate renders, downloaded raw media and other
+  working files go in _scratchpad/, so the user only sees what you mean them to.
+
+## Sending anything else
+- Other kinds (.md, .html, .txt, .json, code), or a file you didn't change this run: put one line per file, on its own,
+  in your reply: \`@file out/plan.md\` (the path from your current folder). Hearth takes the line out, attaches the file
+  and says in the reply if one couldn't be attached.
+- Up to 8 files a reply, 50 MB each. Only files inside your workspace can go; anything else is refused.
 - Say in a line what each file is ("27-second preview, silent"). Don't repeat its contents in the text.
 
 ## What to send

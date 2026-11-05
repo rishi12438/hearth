@@ -327,6 +327,8 @@ export class Hub {
   // ---------- one brain turn, with an optional script round-trip ----------
 
   async turn(mode: BrainInput["mode"], input: string, evidence: string, opts: TurnOpts = {}) {
+    // Files the run makes or changes in its workspace from now on are handed over (see handOver).
+    const since = Date.now();
     const { teammate, extra } = opts;
     const profile = opts.profile || (await this.brains()).workhorse;
     const where = { teammateId: teammate?.id, threadId: opts.threadId, jobId: opts.jobId, recipe: opts.allowedScripts };
@@ -336,7 +338,7 @@ export class Hub {
     if (first.text.includes(ESCALATE)) return { text: `${ESCALATE} ${escalateWhy(first.text)}`, did: [] as Done[], used: [] as string[] };
     if (first.text.includes(HAND_BACK)) return { text: HAND_BACK, did: [] as Done[], used: [] as string[] }; // nothing it proposed is applied
     const applied = await this.applyActions(first.actions, evidence, where);
-    const handed = await this.handOver(first.text, opts, teammate?.id);
+    const handed = await this.handOver(first.text, opts, teammate?.id, since);
     first.text = handed.text;
     applied.done.push(...handed.done);
     applied.fileIds.push(...handed.fileIds);
@@ -376,7 +378,7 @@ export class Hub {
     const ctx2 = await this.context(input, mode, teammate, opts.threadId);
     const second = parseReply(await this.brain.think({ mode, context: ctx2, input, toolResults: [extra, already, ...results].filter(Boolean).join("\n\n"), top: opts.top }, profile, opts.meter));
     const applied2 = await this.applyActions(second.actions.filter((a: any) => a?.type !== "script.run"), evidence, where);
-    const handed2 = await this.handOver(second.text, opts, teammate?.id);
+    const handed2 = await this.handOver(second.text, opts, teammate?.id, since);
     second.text = handed2.text;
     applied2.done.push(...handed2.done);
     applied2.fileIds.push(...handed2.fileIds);
@@ -390,24 +392,39 @@ export class Hub {
    * "@file out/preview.mp4"): each becomes a file in the thread, and the line leaves the text. A run on a linked computer
    * made its files there, where the hub can't reach yet: the reply says where they are instead.
    */
-  async handOver(text: string, opts: TurnOpts, teammateId?: string) {
+  async handOver(text: string, opts: TurnOpts, teammateId?: string, since?: number) {
     const fx = extractFiles(text);
     const done: Done[] = [];
     const fileIds: string[] = [];
-    if (!fx.names.length) return { text, done, fileIds };
     const m = opts.meter;
     const remote = m?.ranOn && m.ranOn !== "cloud" ? m.ranOn : null;
+    // Media and documents the run made or changed in its workspace are shown too, without an @file line
+    // (Files.recent: never what's in _scratchpad/ or the workspace's own folders).
     const folder = !remote && m?.thread ? this.brain.sessions.folder(m.thread, m.workspace) : null;
+    const auto = folder && since != null ? this.files.recent(folder, since) : [];
+    if (!fx.names.length && !auto.length) return { text, done, fileIds };
     const notes: string[] = [];
-    for (const n of fx.names) {
+    const sent = new Set<string>();
+    const want = [...fx.names.map((n) => ({ n, asked: true })), ...auto.map((n) => ({ n, asked: false }))];
+    for (const { n, asked } of want) {
       if (remote) { notes.push(`${n} (on ${remote}; Hearth can't bring files over from there yet)`); continue; }
-      const r = folder ? await this.files.share(folder, n, { source: "teammate", threadId: opts.threadId, jobId: opts.jobId, teammateId }) : { error: "no workspace" } as const;
-      if ("value" in r && r.value) { fileIds.push(r.value.id); done.push({ kind: "file", label: `Made ${r.value.name}`, id: r.value.id }); }
-      else { notes.push(`${n} (couldn't attach: ${r.error})`); await this.log("file.handover_failed", `${n}: ${r.error}`); }
+      if (fileIds.length >= 8) break;
+      const r = folder ? await this.files.share(folder, n, { source: "teammate", threadId: opts.threadId, jobId: opts.jobId, teammateId }) : { error: "no workspace" };
+      if ("error" in r) {
+        await this.log("file.handover_failed", `${n}: ${r.error}`);
+        if (asked) notes.push(`${n} (couldn't attach: ${r.error})`);
+        continue;
+      }
+      if (sent.has(r.path)) continue;
+      sent.add(r.path);
+      // Unchanged since it was last sent here: shown again only when the agent pointed at it.
+      if (r.status === "same" && !asked) continue;
+      fileIds.push(r.value.id);
+      done.push({ kind: "file", label: `${r.status === "new" ? "Made" : r.status === "updated" ? "Updated" : "Sent"} ${r.value.name}`, id: r.value.id });
     }
     if (fileIds.length) this.emit("files");
     const out = fx.text.trim() + (notes.length ? `\n\nNot attached: ${notes.join("; ")}` : "");
-    return { text: out, done, fileIds };
+    return { text: fx.names.length || notes.length ? out : text, done, fileIds };
   }
 
   // ---------- brains: who plans, who works ----------
@@ -1295,7 +1312,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
         meter.onProgress?.("Writing it up");
         // The work is done by now: a write-up that fails (an error, a full plan) posts the legwork's notes instead of
         // failing the whole job.
-        const handedNames = r0.did.filter((d) => d.kind === "file").map((d) => d.label.replace(/^Made /, ""));
+        const handedNames = r0.did.filter((d) => d.kind === "file").map((d) => d.label.replace(/^(Made|Updated|Sent) /, ""));
         const handedNote = handedNames.length ? `\n\nAlready attached to your reply for the user to open: ${handedNames.join(", ")}. Don't attach them again or give paths to them; just say what they are.` : "";
         const v = await this.turn("voice", `${job.task}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")\n\nNOTES FROM THE LEGWORK:\n<untrusted>\n${r0.text.slice(0, 8000)}\n</untrusted>${handedNote}`,
           job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains.heavy, meter }).catch(async (err) => {
