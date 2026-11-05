@@ -39,7 +39,8 @@ const S = {
   planning: null as null | string, // chat id the orchestrator is reading
   updateReady: false,
   sheetOpen: false,
-  panel: null as null | "memory" | "skills" | "people" | "shares" | "triggers" | "mcp" | `share:${string}`,
+  /** A sheet that refreshes live while it's open (the "Your hub" screens are pages: see hubPage()). */
+  panel: null as null | "shares" | "mcp" | `share:${string}`,
   /** The event pipeline: sources, triggers (formula rules), timers, and recent events. */
   pipe: { sources: [], triggers: [], timers: [], watchers: [], held: 0 } as { sources: any[]; triggers: any[]; timers: any[]; watchers: any[]; held: number },
   pipeEvents: [] as any[],
@@ -61,12 +62,17 @@ const S = {
 
 let live: ReturnType<typeof stream> | null = null;
 const app = document.getElementById("app")!;
-type Route = { view: "home" } | { view: "dms" } | { view: "activity" } | { view: "connectors" } | { view: "board"; id?: string } | { view: "chat"; id: string; job?: string } | { view: "dm"; id: string } | { view: "app"; id: string } | { view: "project"; id: string };
+/** The "Your hub" screens: each is a page of its own (#hub/<id>), not a sheet over the current one. */
+const HUB_PAGES = { memory: "Memory", people: "People", skills: "Skills", triggers: "Workflows" } as const;
+type HubPage = keyof typeof HUB_PAGES;
+type Route = { view: "home" } | { view: "dms" } | { view: "activity" } | { view: "connectors" } | { view: "hub"; id: HubPage } | { view: "board"; id?: string } | { view: "chat"; id: string; job?: string } | { view: "dm"; id: string } | { view: "app"; id: string } | { view: "project"; id: string };
 const route = (): Route => {
   if (location.hash === "#dms") return { view: "dms" };
   if (location.hash === "#activity") return { view: "activity" };
   if (location.hash === "#connectors") return { view: "connectors" };
-  let m = location.hash.match(/^#c\/([\w-]+)(?:\/([\w-]+))?/);
+  let m = location.hash.match(/^#hub\/(\w+)$/);
+  if (m && m[1] in HUB_PAGES) return { view: "hub", id: m[1] as HubPage };
+  m = location.hash.match(/^#c\/([\w-]+)(?:\/([\w-]+))?/);
   // "New ramble" opens Home: the question, the box, a few suggestions. Typing there starts the ramble.
   if (m && m[1] === "new") return { view: "home" };
   if (m) return { view: "chat", id: m[1], job: m[2] };
@@ -80,6 +86,8 @@ const route = (): Route => {
   return m ? { view: "dm", id: m[1] } : { view: "home" };
 };
 const wide = () => matchMedia("(min-width: 980px)").matches;
+/** Which "Your hub" page is on screen, if any. */
+const hubPage = (): HubPage | null => { const r = route(); return r.view === "hub" ? r.id : null; };
 
 // ---------------- boot ----------------
 
@@ -172,13 +180,14 @@ function show() {
   closeSheet();
   const r = route();
   // Re-render the skeleton only when the layout changes (a ramble and one of its threads are different screens).
-  const layout = r.view === "chat" ? `chat:${r.id}:${r.job ? "thread" : "chat"}` : r.view === "dm" ? `dm:${r.id}` : r.view === "board" ? `board:${r.id || ""}` : r.view === "project" ? `project:${r.id}` : r.view;
+  const layout = r.view === "chat" ? `chat:${r.id}:${r.job ? "thread" : "chat"}` : r.view === "dm" ? `dm:${r.id}` : r.view === "board" ? `board:${r.id || ""}` : r.view === "project" ? `project:${r.id}` : r.view === "hub" ? `hub:${r.id}` : r.view;
   if (layout !== lastLayout) {
     lastLayout = layout;
     if (r.view === "home") renderHome();
     else if (r.view === "dms") renderDms();
     else if (r.view === "activity") renderActivity();
     else if (r.view === "connectors") renderConnectors();
+    else if (r.view === "hub") renderHubPage(r.id);
     else if (r.view === "dm") renderDm();
     else if (r.view === "app") renderApp(r.id);
     else if (r.view === "board") renderBoard(r.id);
@@ -323,7 +332,7 @@ function onEvent(e: { type: string; data?: any }) {
       }
       return;
     }
-    case "people": if (S.panel === "people") openPeople(); return;
+    case "people": if (hubPage() === "people") void drawPeople(); return;
     case "pipeline": {
       // A teammate made a trigger, timer or source: it flies into Triggers.
       const d = e.data || {};
@@ -334,10 +343,10 @@ function onEvent(e: { type: string; data?: any }) {
     }
     case "ideas": loadIdeas().then(() => { if (route().view === "home") drawHome(); }); return;
     case "brains": refreshState().then(() => { if (route().view === "home") drawHome(); drawSide(); }); return;
-    case "about": if (S.panel === "memory") loadAbout(); return;
+    case "about": if (hubPage() === "memory") loadAbout(); return;
     case "apps": loadApps().then(() => { const r2 = route(); if (r2.view === "app") { toast("Updated"); renderApp(r2.id); } else if (r2.view === "home") { drawPins(); drawHome(); } else if (r2.view === "chat") drawChat(false); else if (r2.view === "dm") drawDm(false); }); return;
     case "files": loadFiles().then(() => { const r2 = route(); if (r2.view === "chat") drawChat(false); else if (r2.view === "dm") drawDm(false); }); return;
-    case "memory": if (S.panel === "memory") loadMemory(); return;
+    case "memory": if (hubPage() === "memory") loadMemory(); return;
     case "shares":
       if (document.activeElement?.tagName === "INPUT" || document.activeElement?.tagName === "TEXTAREA") return; // don't wipe what you're typing
       if (S.panel === "shares") openShares(); else if (S.panel?.startsWith("share:")) openShare(S.panel.slice(6));
@@ -363,7 +372,7 @@ async function refreshState() {
 }
 
 async function loadSkills() {
-  try { const r = await call("/api/skills"); S.skills = r.skills; S.workflows = r.workflows; S.components = r.components || []; if (S.panel === "skills") drawSkills(); } catch {}
+  try { const r = await call("/api/skills"); S.skills = r.skills; S.workflows = r.workflows; S.components = r.components || []; if (hubPage() === "skills") drawSkills(); } catch {}
 }
 
 async function loadTeammates() {
@@ -613,10 +622,10 @@ function drawSide() {
         face(t, 22, t.state || "idle"), h("span", { class: "grow" }, t.name), t.needsYou ? h("em", null, String(t.needsYou)) : unreadDm(t) ? h("i", { class: "udot", title: "New since you last looked" }) : null)))] : null,
     h("div", { class: "slabel" }, "Your hub"),
     h("nav", { class: "sgroup" },
-      nav("brain", "Memory", false, openMemory),
-      nav("users", "People", false, openPeople),
-      nav("sparkle", "Skills", false, openSkills),
-      h("button", { class: `snav ${S.panel === "triggers" ? "on" : ""}`, id: "snav-triggers", on: { click: () => openTriggers() } }, icon("zap", 18), h("span", { class: "grow" }, "Workflows"),
+      nav("brain", "Memory", r.view === "hub" && r.id === "memory", openMemory),
+      nav("users", "People", r.view === "hub" && r.id === "people", openPeople),
+      nav("sparkle", "Skills", r.view === "hub" && r.id === "skills", openSkills),
+      h("button", { class: `snav ${r.view === "hub" && r.id === "triggers" ? "on" : ""}`, id: "snav-triggers", on: { click: () => openTriggers() } }, icon("zap", 18), h("span", { class: "grow" }, "Workflows"),
         liveTriggers().length ? h("small", { class: "scount" }, String(liveTriggers().filter((t) => t.status === "active").length)) : null)),
     h("div", { class: "sfoot" },
       nav("settings", "Settings", false, openSettings)),
@@ -878,7 +887,7 @@ function drawHeader() {
   if (!top) return;
   // A project's page has its own title; just a way back on phones.
   if (r.view === "project") { clear(top, wide() ? h("div") : h("div", { class: "toprow" }, h("button", { class: "circle glass", "aria-label": "Back", on: { click: () => { location.hash = ""; } } }, icon("back", 22)))); return; }
-  if (r.view === "home" || r.view === "dms" || r.view === "activity" || r.view === "connectors") {
+  if (r.view === "home" || r.view === "dms" || r.view === "activity" || r.view === "connectors" || r.view === "hub") {
     const left = h("button", { class: "circle glass", "aria-label": "Menu", on: { click: openMenu } }, icon("filter", 22));
     const right = h("div", { class: "pillgroup glass" },
       S.updateReady ? h("button", { class: "pillbtn", on: { click: () => location.reload() } }, "Update") : null,
@@ -889,7 +898,7 @@ function drawHeader() {
         stage("home", hearth, S.planning ? "thinking" : hearth.state || "idle", S.state?.hub?.name || "Hearth", null, openHubs, true), right));
       return;
     }
-    clear(top, h("div", { class: "toprow big" }, left, h("h1", null, r.view === "dms" ? "DMs" : r.view === "connectors" ? "Connectors" : "Activity"), right));
+    clear(top, h("div", { class: "toprow big" }, left, h("h1", null, r.view === "dms" ? "DMs" : r.view === "connectors" ? "Connectors" : r.view === "hub" ? HUB_PAGES[r.id] : "Activity"), right));
     return;
   }
   const back = h("button", { class: "circle glass", "aria-label": "Back", on: { click: () => { history.length > 1 ? history.back() : (location.hash = ""); } } }, icon("back", 24));
@@ -3028,11 +3037,41 @@ async function openBrains() {
 
 // ---------------- skills ----------------
 
-function openSkills() {
-  S.panel = "skills";
-  openSheet("Skills", h("div", { id: "skills" }), { onClose: () => { S.panel = null; } });
-  drawSkills();
-  loadSkills();
+// ---------------- "Your hub" pages ----------------
+
+/** Go to a "Your hub" page; already on it, close whatever sheet is over it and fill it again. */
+function openHub(id: HubPage) {
+  if (hubPage() !== id) { location.hash = `#hub/${id}`; return; }
+  closeSheet();
+  fillHubPage(id);
+}
+const openSkills = () => openHub("skills");
+const openMemory = () => openHub("memory");
+const openPeople = () => openHub("people");
+function openTriggers(tab?: typeof S.pipeTab) {
+  if (tab) S.pipeTab = tab;
+  openHub("triggers");
+}
+
+function renderHubPage(id: HubPage) {
+  frame({ header: h("div"), body: h("div", { id: "hubpage", class: "cpage hubpage" }) });
+  drawHeader();
+  fillHubPage(id);
+}
+
+function fillHubPage(id: HubPage) {
+  const el = document.getElementById("hubpage");
+  if (!el) return;
+  if (id === "skills") { clear(el, h("div", { id: "skills" })); drawSkills(); loadSkills(); }
+  else if (id === "triggers") { clear(el, h("div", { id: "triggers" })); drawTriggers(); loadPipeline(); }
+  else if (id === "memory") {
+    clear(el,
+      h("div", { class: "search" }, icon("search", 18), h("input", { placeholder: "Search", type: "search", value: S.memoryQuery,
+        on: { input: debounce((e: Event) => { S.memoryQuery = (e.target as HTMLInputElement).value; loadMemory(); }, 250) } })),
+      h("div", { id: "about" }),
+      h("div", { id: "memory" }));
+    drawMemory(); loadMemory(); loadAbout();
+  } else void drawPeople();
 }
 
 function drawSkills() {
@@ -3094,10 +3133,10 @@ function openSkill(sk: any) {
 
 async function loadPipeline() {
   try {
-    const [pipe, events] = await Promise.all([call("/api/pipeline"), S.panel === "triggers" ? call("/api/pipeline/events?limit=60") : Promise.resolve(S.pipeEvents)]);
+    const [pipe, events] = await Promise.all([call("/api/pipeline"), hubPage() === "triggers" ? call("/api/pipeline/events?limit=60") : Promise.resolve(S.pipeEvents)]);
     S.pipe = pipe; S.pipeEvents = events;
     drawSide();
-    if (S.panel === "triggers") drawTriggers();
+    if (hubPage() === "triggers") drawTriggers();
   } catch {}
 }
 
@@ -3106,15 +3145,7 @@ async function toggleSourceEvents(id: string) {
   if (S.pipeSrcOpen.delete(id)) { drawTriggers(); return; }
   S.pipeSrcOpen.add(id); S.pipeSrcEvents[id] = undefined; drawTriggers();
   try { S.pipeSrcEvents[id] = await call(`/api/pipeline/events?source=${encodeURIComponent(id)}&limit=10`); } catch (e) { S.pipeSrcOpen.delete(id); handleError(e); }
-  if (S.panel === "triggers") drawTriggers();
-}
-
-function openTriggers(tab?: typeof S.pipeTab) {
-  S.panel = "triggers";
-  if (tab) S.pipeTab = tab;
-  openSheet("Workflows", h("div", { id: "triggers" }), { onClose: () => { S.panel = null; drawSide(); } });
-  drawTriggers();
-  loadPipeline();
+  if (hubPage() === "triggers") drawTriggers();
 }
 
 const pipeDo = async (fn: () => Promise<unknown>, ok?: string) => { try { await fn(); if (ok) toast(ok); await loadPipeline(); } catch (e) { handleError(e); } };
@@ -3219,15 +3250,14 @@ async function toggleTriggerHow(t: any) {
     // Only the events this trigger looked at, and only its own steps in each.
     S.trigRuns[t.id] = (evs as any[]).map((e) => ({ e, steps: (e.log || []).filter((l: any) => l.triggerId === t.id) })).filter((x) => x.steps.length).slice(0, 8);
   } catch (e) { S.trigOpen.delete(t.id); handleError(e); }
-  if (S.panel === "triggers") drawTriggers();
+  if (hubPage() === "triggers") drawTriggers();
 }
 
 /** Your triggers and reminders (not the hub's own jobs, not ones that are done). */
 const liveTriggers = () => S.pipe.triggers.filter((t: any) => t.status !== "done" && t.createdBy !== "system");
 
 function drawTriggers() {
-  // The open sheet's list: a sheet being replaced is still in the page for a moment, with the same id inside.
-  const el = document.querySelector<HTMLElement>("#scrim #triggers");
+  const el = document.querySelector<HTMLElement>("#hubpage #triggers");
   if (!el) return;
   const { sources, triggers, watchers } = S.pipe;
   // Reminders first, soonest first; then rules, oldest first.
@@ -3434,7 +3464,7 @@ function drawTriggers() {
 }
 
 async function loadPipelineEvents() {
-  try { S.pipeEvents = await call("/api/pipeline/events?limit=60"); if (S.panel === "triggers") drawTriggers(); } catch (e) { handleError(e); }
+  try { S.pipeEvents = await call("/api/pipeline/events?limit=60"); if (hubPage() === "triggers") drawTriggers(); } catch (e) { handleError(e); }
 }
 
 /**
@@ -3452,9 +3482,9 @@ function flyIn(what: string, id: string, next: () => void) {
     : what === "watchers" ? S.pipe.watchers.find((w) => w.id === id) : S.pipe.sources.find((s) => s.id === id);
   if (!item) return next();
   S.pipeFresh.add(id);
-  setTimeout(() => { S.pipeFresh.delete(id); if (S.panel === "triggers") drawTriggers(); }, 4500);
+  setTimeout(() => { S.pipeFresh.delete(id); if (hubPage() === "triggers") drawTriggers(); }, 4500);
   const tab = what === "triggers" ? "triggers" : what === "timers" ? "timers" : "sources";
-  if (S.panel === "triggers") { S.pipeTab = tab; drawTriggers(); document.querySelector(`#scrim [data-pipe="${id}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }); }
+  if (hubPage() === "triggers") { S.pipeTab = tab; drawTriggers(); document.querySelector(`#hubpage [data-pipe="${id}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }); }
   const reminder = what === "triggers" && item.timer;
   const label = reminder ? "New reminder" : what === "triggers" ? "New trigger" : what === "timers" ? "New timer" : what === "watchers" ? "Now watching" : "New source";
   const once = reminder && item.timer.schedule.at && (item.timer.schedule.repeat || "none") === "none";
@@ -3466,7 +3496,7 @@ function flyIn(what: string, id: string, next: () => void) {
     h("span", { class: "grow" }, h("small", null, `${label} · ${item.teammateId ? mate(item.teammateId).name : item.createdBy === "you" ? "for you" : item.createdBy || "a teammate"}`), h("b", null, item.title || item.name), h("code", null, detail)));
   document.body.appendChild(card);
   // Looked up when it flies (and again when it lands): the sidebar may have been redrawn in between.
-  const findTarget = () => (S.panel === "triggers" ? document.querySelector<HTMLElement>("#scrim #pipe-drop") : null) || document.getElementById("snav-triggers");
+  const findTarget = () => (hubPage() === "triggers" ? document.querySelector<HTMLElement>("#hubpage #pipe-drop") : null) || document.getElementById("snav-triggers");
   const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
   // Show it for a moment, then fly it into its place; the next card can come up as this one leaves.
   setTimeout(() => {
@@ -3490,20 +3520,7 @@ function flyIn(what: string, id: string, next: () => void) {
 // ---------------- plans & memory panels ----------------
 
 async function loadMemory() {
-  try { S.memory = await call(`/api/memory?q=${encodeURIComponent(S.memoryQuery)}`); if (S.panel === "memory") drawMemory(); } catch (e) { handleError(e); }
-}
-
-function openMemory() {
-  S.panel = "memory";
-  openSheet("Memory", [
-    h("div", { class: "search" }, icon("search", 18), h("input", { placeholder: "Search", type: "search", value: S.memoryQuery,
-      on: { input: debounce((e: Event) => { S.memoryQuery = (e.target as HTMLInputElement).value; loadMemory(); }, 250) } })),
-    h("div", { id: "about" }),
-    h("div", { id: "memory" }),
-  ], { onClose: () => { S.panel = null; } });
-  drawMemory();
-  loadMemory();
-  loadAbout();
+  try { S.memory = await call(`/api/memory?q=${encodeURIComponent(S.memoryQuery)}`); if (hubPage() === "memory") drawMemory(); } catch (e) { handleError(e); }
 }
 
 // ---------------- people: the relationship map ----------------
@@ -3523,10 +3540,11 @@ function personDot(p: any, size: number) {
 }
 
 /** You in the middle; partner and family close, everyone else on the outer ring; lines for how people know each other. */
-async function openPeople() {
+async function drawPeople() {
   let people: any[] = [];
   try { people = await call("/api/people"); } catch (e) { return handleError(e); }
-  S.panel = "people";
+  const page = document.getElementById("hubpage");
+  if (!page || hubPage() !== "people") return;
   const order = ["Partner", "Family", "Friends", "Work", "Others"];
   people.sort((a, b) => order.indexOf(circleOf(a)[1]) - order.indexOf(circleOf(b)[1]) || a.name.localeCompare(b.name));
   const inner = people.length > 8 ? people.filter((p) => ["Partner", "Family"].includes(circleOf(p)[1])) : people;
@@ -3560,13 +3578,12 @@ async function openPeople() {
     people.map((p) => { const at = pos.get(p.name.toLowerCase())!; return h("button", { class: "pnode", style: `left:${at.x}%;top:${at.y}%`, on: { click: () => openPerson(p, people) } },
       personDot(p, 40), h("b", null, p.name), h("small", null, p.relation || "")); }));
   const used = order.filter((g) => people.some((p) => circleOf(p)[1] === g));
-  openSheet("People", [
+  clear(page,
     people.length ? map : h("div", { class: "pempty" }, emoji3d("🫂", "ideaicon"), h("p", null, "As you mention people (your sister, your manager, your landlord), the team adds them here and keeps notes on each.")),
     used.length ? h("div", { class: "plegend" }, used.map((g) => h("span", null, h("i", { style: `--c:${CIRCLES.find((c) => c[1] === g)?.[2] || "#a99d90"}` }), g))) : null,
     people.length ? h("div", { class: "list" }, people.map((p) => h("button", { class: "item", on: { click: () => openPerson(p, people) } },
       personDot(p, 34), h("span", { class: "grow left" }, h("b", null, p.name), h("small", { class: "sub" }, [p.relation, p.notes?.at(-1)].filter(Boolean).join(" · "))), icon("chevron", 16)))) : null,
-    h("button", { class: "btn ghost", on: { click: addPerson } }, icon("plus", 16), "Add someone"),
-  ], { onClose: () => { S.panel = null; } });
+    h("button", { class: "btn ghost", on: { click: addPerson } }, icon("plus", 16), "Add someone"));
 }
 
 function openPerson(p: any, all: any[]) {
