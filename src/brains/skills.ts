@@ -60,7 +60,7 @@ If a command fails, read the \`message\` in its JSON and act on it (a new sessio
 id). If you're still stuck, say what the tool said, word for word, in \`why\`. The user doesn't run Enkidu: never tell them to open or
 restart it.
 A site that blocks this browser (a human check, a captcha, Access Denied, a page that never loads): run
-\`hearth-help stuck blocked "<what blocked you>"\` and do what it says, instead of giving the work back to the user.
+\`hearth-help stuck blocked\` and do what it says, instead of giving the work back to the user.
 ${SAFE}`,
   },
   {

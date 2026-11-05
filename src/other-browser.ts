@@ -76,7 +76,7 @@ const IDLE_MS = 20 * 60_000;
 /** The Mac can't take it: what the agent is told. What to do instead is hearth-help's to say (help.ts). */
 export function noMac(why: "offline" | "no" | "gone", mac?: string) {
   const lead = why === "no" ? "The user said no to using their Mac's browser in this conversation." : why === "gone" ? `${mac || "The user's Mac"} went offline, so its browser is gone.` : "The user's Mac isn't online, so there's no Chrome there to use.";
-  return `${lead} Run hearth-help stuck blocked "<what blocked you>" for what you can use instead.`;
+  return `${lead} Run hearth-help stuck blocked for what you can use instead.`;
 }
 
 export class OtherBrowser {
@@ -172,7 +172,7 @@ quietly drops your search. You'll see it on the page or the screenshot; you deci
 1. Look at the page for real (observe or a screenshot): is it a block, or just a cookie banner or a slow page? A plain
    retry or the site's other address (the mobile site, a search URL with the details in it) sometimes works. One or two
    tries, then move on. Don't solve captchas by hand or hunt for tricks to fool the check.
-2. Run \`hearth-help stuck blocked "<what blocked you>"\`. The hub answers with what you can use right now, best first (the
+2. Run \`hearth-help stuck blocked\`. The hub answers with what you can use right now, best first (the
    user's Mac, a cloud browser it has or can add). Do what it says.
 
 ## hearth-browser: Chrome on the user's Mac

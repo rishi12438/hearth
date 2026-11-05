@@ -6,7 +6,8 @@ import type { MacGate } from "./other-browser.ts";
 // stuck means changing this file, not skill text spread around.
 //
 //   hearth-help stuck                          the kinds of stuck, to pick one
-//   hearth-help stuck <kind> "<what happened>"   what to do about it, best first (STUCK below: one entry per kind)
+//   hearth-help stuck <kind>   what to do about it, best first (STUCK below: one entry per kind). Words after the
+//                              kind are only logged (help.stuck), so you can see what agents got stuck on.
 
 /**
  * A cloud browser or scraper with a hosted MCP server the hub can add, best first. Checked 2026-11-05 by probing each
@@ -69,23 +70,23 @@ export function connectedBrowsers(servers: McpView[]): { b: CloudBrowser; server
 }
 
 /** What's true right now, for the answer. waiting: this job's cards still waiting for the user. */
-export type StuckState = { what: string; mac: string | null; gate: MacGate | null; servers: McpView[]; waiting?: string[] };
-type Steps = (s: StuckState, what: string) => string[];
+export type StuckState = { mac: string | null; gate: MacGate | null; servers: McpView[]; waiting?: string[] };
+type Steps = (s: StuckState) => string[];
 
 /** One kind of stuck: its name (and other words an agent might use), when it applies, and its steps, best first. */
 export type StuckKind = { id: string; aka: string[]; when: string; steps: Steps };
 
-const macStep = (s: StuckState, what: string, why: string): string | null => {
+const macStep = (s: StuckState, why: string): string | null => {
   if (!s.mac || s.gate === "no") return null;
-  if (s.gate === "ok") return `Chrome on ${s.mac} (the user's Mac) is yours in this conversation already: run hearth-browser open <url> "${what}" and carry on there (see the get-past-blocks skill for its commands). ${why}`;
+  if (s.gate === "ok") return `Chrome on ${s.mac} (the user's Mac) is yours in this conversation already: run hearth-browser open <url> "<what blocked you>" and carry on there (see the get-past-blocks skill for its commands). ${why}`;
   if (s.gate === "pending") return `You already asked to use Chrome on ${s.mac}; it's waiting for the user's Approve. Finish what you can meanwhile; you'll get a turn when they answer.`;
-  return `Ask the user if you can use Chrome on their Mac (${s.mac}). ${why} Run hearth-browser open <url> "${what}": that puts an Approve card under your reply. In your reply, ask them plainly ("Can I use Chrome on your Mac for this? Tap Approve") and say what's in the way; finish what you can meanwhile. When they approve you get a turn and carry on with hearth-browser.`;
+  return `Ask the user if you can use Chrome on their Mac (${s.mac}). ${why} Run hearth-browser open <url> "<what blocked you, in a few words>": that puts an Approve card under your reply, and those words are on it. In your reply, ask them plainly ("Can I use Chrome on your Mac for this? Tap Approve") and say what's in the way; finish what you can meanwhile. When they approve you get a turn and carry on with hearth-browser.`;
 };
 
 /** A site blocks the browser: the Mac, a connected cloud browser, one to add. */
-const blockedSteps: Steps = (s, what) => {
+const blockedSteps: Steps = (s) => {
   const out: string[] = [];
-  const m = macStep(s, what, "It's a real browser on their home connection, with their logins, so sites that block servers let it through.");
+  const m = macStep(s, "It's a real browser on their home connection, with their logins, so sites that block servers let it through.");
   if (m) out.push(m);
   const on = connectedBrowsers(s.servers);
   for (const { b, server } of on) out.push(`${b.label} is connected as the MCP server ${server.name}: ${b.good}. Its tools are yours (mcp__${server.name}__<tool> on Claude; on any brain, hearth-mcp call ${server.name} <tool> '<json>'). ${b.how}`);
@@ -114,8 +115,8 @@ export const STUCK: StuckKind[] = [
   {
     id: "signed-out", aka: ["login", "logged-out", "sign-in", "signin", "auth", "password", "2fa"],
     when: "a site wants you signed in (or signed you out) and you don't have that login",
-    steps: (s, what) => [
-      ...[macStep(s, what, "Its Chrome has the user's own logins, so the site is likely signed in already.")].filter((x): x is string => !!x),
+    steps: (s) => [
+      ...[macStep(s, "Its Chrome has the user's own logins, so the site is likely signed in already.")].filter((x): x is string => !!x),
       `Put a connection.refresh {site} action in your \`\`\`hearth block: Hearth asks the user's Mac for a fresh login to that site and runs the job again with it (or tells the user exactly what to sign in to). Meanwhile finish what doesn't need the login.`,
       `Never ask for a password, a code or a card number in chat. If a person really has to sign in, say which site and that they can do it on their Mac (or in your browser while they watch, when you have a page open).`,
     ],
@@ -162,16 +163,15 @@ export function stuckKind(word: string): StuckKind | null {
   return STUCK.find((k) => k.id === w || k.aka.includes(w)) ?? null;
 }
 
-export const STUCK_MENU = `hearth-help stuck <kind> "<what happened, in a few words>". Pick the kind that fits:\n`
+export const STUCK_MENU = `hearth-help stuck <kind>. Pick the kind that fits:\n`
   + STUCK.map((k) => `  ${k.id.padEnd(11)} ${k.when}`).join("\n");
 
 /** The answer for one kind of stuck: its steps, best first, built from what's there right now. */
 export function stuckHelp(kind: string, s: StuckState): string {
   const k = stuckKind(kind);
   if (!k) return `${kind ? `"${kind}" isn't one of the kinds. ` : ""}${STUCK_MENU}`;
-  const what = s.what.trim() || k.when.split(":")[0];
-  const steps = [...k.steps(s, what), `If none of that works, tell the user plainly what's in the way and what you got without it, and finish the rest of the task.`];
-  return `You're stuck (${k.id}): ${what}. What to do, best first. Don't give the work back to the user or tell them to do it by hand.`
+  const steps = [...k.steps(s), `If none of that works, tell the user plainly what's in the way and what you got without it, and finish the rest of the task.`];
+  return `You're stuck (${k.id}: ${k.when}). What to do, best first. Don't give the work back to the user or tell them to do it by hand.`
     + steps.map((t, i) => `\n${i + 1}. ${t}`).join("");
 }
 
@@ -186,7 +186,7 @@ function keyStep(b: CloudBrowser) {
 /** The agent's hearth-help command: curl to the hub with its agent key (like hearth-lead). */
 export function helpSkill(hubUrl: string, key: string) {
   const script = `#!/usr/bin/env bash
-# hearth-help: ask the hub what to do. hearth-help stuck [<kind> "<what happened>"]
+# hearth-help: ask the hub what to do. hearth-help stuck [<kind>]
 set -uo pipefail
 if [ $# -eq 0 ]; then set -- topics; fi
 args=()
@@ -202,11 +202,11 @@ exec curl -sS -m 60 -H "X-Hearth-Agent: ${key}" \${run[@]+"\${run[@]}"} "\${args
 
 When you're stuck, don't give the work back to the user: ask the hub.
 - \`hearth-help stuck\` lists the kinds of stuck (blocked, signed-out, no-access, failing, need-info, waiting).
-- \`hearth-help stuck <kind> "<what happened, in a few words>"\` answers with steps, best first, built from what's there
-  right now (the user's Mac, the MCP servers it has, what's waiting). Do them in order.
+- \`hearth-help stuck <kind>\` answers with steps, best first, built from what's there right now (the user's Mac, the
+  MCP servers it has, what's waiting). Do them in order.
 Run it again after something changes (they approved, a server connected).`,
   };
 }
 
 export const HELP_TOPICS = `hearth-help topics:
-  stuck [<kind> "<what happened>"]   you're stuck on something: hearth-help stuck lists the kinds`;
+  stuck [<kind>]   you're stuck on something: hearth-help stuck lists the kinds`;
