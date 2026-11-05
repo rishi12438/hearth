@@ -197,6 +197,22 @@ test("an API key goes in its header, kept in the vault, not in mcp.json", async 
   expect(bad.value?.error).toContain("refused the key");
 });
 
+test("hearth-mcp key: an agent saves a key for an approved server that isn't connected; a refused one isn't kept", async () => {
+  await mcp.add({ url: KEYED, name: "keyed" }, "an agent", { agent: true });
+  expect(await mcpAgent(mcp, ["key", "keyed", "sekret", "X-Api-Key"], "an agent")).toContain("waiting for the user");
+  await mcp.approve("keyed");
+  expect(mcp.view("keyed")!.state).toBe("signin");
+  expect(await mcpAgent(mcp, ["key", "keyed", "wrong", "X-Api-Key"], "an agent")).toContain("didn't take that key");
+  expect(vault.get("mcp:keyed")).toBeNull();
+  const ready: string[] = [];
+  (mcp as any).o.onConnected = (n: string) => ready.push(n);
+  expect(await mcpAgent(mcp, ["key", "keyed", "sekret", "X-Api-Key"], "an agent")).toContain("connected");
+  expect(ready).toEqual(["keyed"]);
+  // Working now: an agent can't swap its login.
+  expect(await mcpAgent(mcp, ["key", "keyed", "other", "X-Api-Key"], "an agent")).toContain("connected already");
+  expect(JSON.parse(vault.get("mcp:keyed")!).value).toBe("sekret");
+});
+
 test("bad input is refused", async () => {
   expect((await mcp.add({ url: "ftp://x" }, "me")).error).toContain("https");
   expect((await mcp.add({ url: "http://example.com/mcp" }, "me")).error).toContain("https");
@@ -225,7 +241,7 @@ test("the list survives a restart; off servers aren't given to runs; remove forg
 
 test("an agent's server waits for you: never contacted, never in a run, no sign-in, until you approve", async () => {
   let asked: string[] = [];
-  mcp = new Mcp({ dataDir: dir, vault, redirectUri: () => "https://hub.example.com/api/mcp/callback", fetch: fakeFetch as typeof fetch, now: () => now, onPending: (s) => asked.push(s.name) });
+  mcp = new Mcp({ dataDir: dir, vault, redirectUri: () => "https://hub.example.com/api/mcp/callback", fetch: fakeFetch as typeof fetch, now: () => now, onPending: (s) => { asked.push(s.name); } });
   const out = await mcpAgent(mcp, ["add", MCP, "linear"], "an agent");
   expect(out).toContain("Asked the user to approve linear");
   expect(out).not.toContain("authorize");

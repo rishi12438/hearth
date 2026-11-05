@@ -85,12 +85,10 @@ export class Connect {
       dataDir: hub.config.dataDir, vault,
       redirectUri: () => `${(process.env.HEARTH_PUBLIC_URL || base).replace(/\/$/, "")}/api/mcp/callback`,
       onChange: () => hub.emit("mcp"),
-      // An agent asked for a server: it waits in Activity ("Needs you") and /mcp, and you get a notification.
-      onPending: (s) => {
-        hub.emit("inbox");
-        void hub.log("mcp.requested", `MCP: ${s.addedBy} asked to add ${s.name} (${s.url})`).catch(() => {});
-        void hub.push?.send({ title: "An agent wants to add an MCP server", body: `${s.name} · ${s.url}. Approve it or deny it in Hearth.`, tag: `mcp-${s.name}`, url: "/#activity" }).catch(() => {});
-      },
+      // An agent asked for a server: an Approve card in the thread that asked (and a notification that opens it).
+      onPending: (s, jobId) => hub.requestMcpServer(s, jobId),
+      // Connected (a sign-in, a key, or it needs none): the card waiting on it is done and the agent carries on.
+      onConnected: (name, tools) => { void hub.mcpServerReady(name, tools).catch((e) => console.error("mcp ready failed", e)); },
       // A call to a tool that asks first: an Approve card in the job's thread; the hub makes the call after the tap.
       onAsk: (c) => hub.requestMcp(c),
       // Hearth decides which tools change things (the quick model reads each one), not the server.
