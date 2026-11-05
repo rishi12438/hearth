@@ -232,6 +232,8 @@ export type Idea = Doc & {
   emoji?: string;
   /** What runs as a ramble if you say yes. */
   prompt: string;
+  /** workflow: saying yes sets up something that keeps running (a trigger and its action), not a one-off task. */
+  kind?: "workflow";
   teammateId?: string;
   status: "open" | "accepted" | "dismissed";
   decidedAt?: string;

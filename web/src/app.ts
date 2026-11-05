@@ -1224,7 +1224,7 @@ async function fillHome(el: HTMLElement) {
     ...(b.needsYou || []).slice(0, 1).map((c: any) => row(icon("lock", 16), c.title, "Needs you", () => { location.hash = c.threadId?.startsWith("tm-") ? `#t/${c.teammateId}` : `#c/${c.threadId}/${c.root}`; })),
     ...fired.map((m: any) => h("button", { class: "sugg fired", title: m.text, on: { click: () => { location.hash = m.threadId.startsWith("tm-") ? `#t/${m.threadId.slice(3)}` : `#c/${m.threadId}`; } } },
       h("span", { class: "suggic" }, icon("bell", 16)), h("span", { class: "grow" }, m.proactive.title), h("i", { class: "udot" }), h("small", null, `went off ${shortAgo(m.createdAt)}`))),
-    idea ? row(icon("sparkle", 16), String(idea.title || "").replace(/^i can\s+/i, "").replace(/^./, (c) => c.toUpperCase()), null, () => fill(idea.prompt), idea.body || "") : null,
+    idea ? row(icon("sparkle", 16), String(idea.title || "").replace(/^i can\s+/i, "").replace(/^./, (c) => c.toUpperCase()), idea.kind === "workflow" ? "keeps going" : null, () => fill(idea.prompt), idea.body || "") : null,
     ...recent.map((t: any) => row(icon("history", 16), t.title || channelName(t), shortAgo(when(t)), () => { location.hash = `#c/${t.id}`; }, "Continue this ramble")),
   ].filter(Boolean) as Node[];
   clear(el, rows.length ? rows : [
@@ -1430,7 +1430,7 @@ async function fillNow(el: HTMLElement) {
     sec("In progress", b.working.slice(0, 4).map((c: any) => row(face(mate(c.teammateId), 32, "working"), c.title, `${mate(c.teammateId).name} · ${S.progress.get(c.id) || "on it"}`, go(c)))),
     sec("Coming up", b.next.filter((c: any) => c.kind === "plan").slice(0, 3).map((c: any) => row(emoji3d("🔔", "ideaicon small"), c.title, `${dayLabel(c.at)} ${clockTime(c.at)}`, go(c)))),
     // One quiet line per idea: no emoji, no "I can" lead-in; the detail is on hover.
-    sec("Ideas", S.ideas.slice(0, 2).map((i: any) => row(null, String(i.title || "").replace(/^i can\s+/i, "").replace(/^./, (c) => c.toUpperCase()), null, () => {
+    sec("Ideas", S.ideas.slice(0, 2).map((i: any) => row(null, String(i.title || "").replace(/^i can\s+/i, "").replace(/^./, (c) => c.toUpperCase()), i.kind === "workflow" ? "Keeps going on its own" : null, () => {
       const box = document.getElementById("composer") as HTMLTextAreaElement | null;
       if (box) { box.value = i.prompt; box.dispatchEvent(new Event("input")); box.focus(); }
     }, i.body || ""))),

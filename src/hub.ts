@@ -185,6 +185,7 @@ export class Hub {
   private additions = new Map<string, string[]>();    // what the user added to a running job, applied when it restarts
   private inflight = 0;                   // orchestrations, splits and retries still running
   private rambleSpend = new Map<string, number>(); // message id -> USD
+  private rambleLooks = new Map<string, ReturnType<typeof setTimeout>>(); // thread id -> its pending "anything to set up?" look
 
   constructor(
     readonly config: Config, readonly store: Store, readonly brain: Brain,
@@ -2376,6 +2377,7 @@ ${JSON.stringify(shown, null, 1)}
       this.pump(saved.messageId).catch((e) => console.error("pump failed", e));
       this.touchThread(saved.threadId, {}).catch(() => {});
       this.sendQueued(saved).catch((e) => console.error("queued messages failed", e));
+      if (saved.status === "done") this.queueRambleLook(saved.threadId);
     }
     return saved;
   }
@@ -2963,12 +2965,50 @@ ${JSON.stringify(shown, null, 1)}
     const mate = team.find((t) => t.name.toLowerCase() === String(a.teammate || "").toLowerCase());
     const idea = await this.store.put<Idea>("ideas", this.doc({
       title, prompt, body: typeof a.body === "string" ? a.body.trim().slice(0, 400) : "", emoji: cleanEmoji(a.emoji), teammateId: mate?.id, status: "open" as const,
+      ...(a.kind === "workflow" ? { kind: "workflow" as const } : {}),
     }));
     this.emit("ideas");
     return { value: idea };
   }
 
   ideaTitlesForTest() { return this.ideaTitles(); }
+
+  /**
+   * A ramble just finished: a few minutes later (so a quick follow-up lands first), the team looks at it once and
+   * suggests what it could keep doing on its own (a workflow) or do next. Each new finished task restarts the wait.
+   * HEARTH_PROACTIVE_DELAY_MS sets the wait (default 3 min); below 0 turns it off.
+   */
+  private queueRambleLook(threadId?: string) {
+    if (!threadId) return;
+    const delay = Number(process.env.HEARTH_PROACTIVE_DELAY_MS ?? 180_000);
+    if (!(delay >= 0)) return;
+    const prev = this.rambleLooks.get(threadId);
+    if (prev) clearTimeout(prev);
+    const t = setTimeout(() => {
+      this.rambleLooks.delete(threadId);
+      this.lookAtRamble(threadId).catch((e) => console.error("ramble look failed", e));
+    }, delay);
+    (t as any).unref?.();
+    this.rambleLooks.set(threadId, t);
+  }
+
+  /** The look itself: only for what you asked for (not a trigger's hand-off, not an idea you said yes to), once it's all done. */
+  async lookAtRamble(threadId: string): Promise<boolean> {
+    const thread = await this.store.get<Thread>("threads", threadId);
+    if (!thread) return false;
+    const jobs = (await this.store.all<Job>("jobs")).filter((j) => j.threadId === threadId && !j.parentId);
+    if (!jobs.length || jobs.some((j) => !["done", "failed"].includes(j.status))) return false;
+    const msgs = (await this.store.all<Message>("messages")).filter((m) => m.threadId === threadId).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const asked = msgs.filter((m) => m.role === "user" && !m.fromTrigger);
+    if (!asked.length) return false;
+    if ((await this.store.all<Idea>("ideas")).some((i) => i.threadId === threadId)) return false; // it is the set-up of an idea
+    const said = msgs.slice(-12).filter((m) => !m.hidden || m.role === "user").map((m) => `${m.role === "user" ? "USER" : "TEAM"}: ${m.text.slice(0, 500)}`);
+    const did = jobs.slice(-6).map((j) => `- ${j.task.slice(0, 200)}${j.result ? ` → ${j.result.slice(0, 500)}` : ""}`);
+    const input = [`A RAMBLE JUST FINISHED: #${channelOf(thread)} "${thread.title}"`, "", "WHAT WAS SAID:", ...said, "", "WHAT THE TEAM DID:", ...did].join("\n");
+    const r = await this.turn("ideas", input, "ideas", { profile: (await this.brains()).workhorse });
+    await this.log("ideas", `after #${channelOf(thread)}: ${r.text && r.text !== QUIET ? r.text : "nothing worth suggesting"}`);
+    return true;
+  }
 
   /** Ask the team for ideas now (the system hook does this every few hours). */
   async thinkOfIdeas() {
@@ -3291,7 +3331,7 @@ ${JSON.stringify(shown, null, 1)}
     }
   }
 
-  stop() { if (this.timer) clearInterval(this.timer); if (this.brainsTimer) clearTimeout(this.brainsTimer); if (this.healthTimer) clearTimeout(this.healthTimer); }
+  stop() { for (const t of this.rambleLooks.values()) clearTimeout(t); this.rambleLooks.clear(); if (this.timer) clearInterval(this.timer); if (this.brainsTimer) clearTimeout(this.brainsTimer); if (this.healthTimer) clearTimeout(this.healthTimer); }
 
   // ---------- are the brains signed in? ----------
 
