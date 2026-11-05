@@ -3,8 +3,8 @@ import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store, Collection } from "./store/index.ts";
-import type { Brain, BrainImage, BrainInput, BrainProfile, Brains, Meter } from "./brain.ts";
-import { QUIET, ESCALATE, escalateWhy, HAND_BACK, REDO, HARNESSES, MODEL_RE, availableHarnesses, NeedsComputer, BrainsFull, POOL_HARNESSES } from "./brain.ts";
+import type { Brain, BrainFile, BrainInput, BrainProfile, Brains, Meter } from "./brain.ts";
+import { QUIET, ESCALATE, escalateWhy, HAND_BACK, MAX_RUN_FILES, REDO, HARNESSES, MODEL_RE, availableHarnesses, NeedsComputer, BrainsFull, POOL_HARNESSES } from "./brain.ts";
 import type { Scripts } from "./scripts.ts";
 import type { Push } from "./push.ts";
 import { parseReply } from "./reply.ts";
@@ -63,7 +63,7 @@ export const APPROVAL_TTL_MS = 86_400_000;
 /** An ask that came with no job or chat lives in Hearth's DM. */
 const ORPHAN_THREAD = "tm-hearth";
 
-type TurnOpts = { teammate?: Teammate | null; threadId?: string; jobId?: string; extra?: string; profile?: BrainProfile; meter?: Meter; allowedScripts?: string[]; top?: boolean; images?: BrainImage[] };
+type TurnOpts = { teammate?: Teammate | null; threadId?: string; jobId?: string; extra?: string; profile?: BrainProfile; meter?: Meter; allowedScripts?: string[]; top?: boolean; files?: BrainFile[] };
 const label = (p: BrainProfile) => `${p.harness}${p.model ? `/${p.model}` : ""}`;
 /** A model in words for the app: "Claude opus", "Codex gpt-5.5", "Claude" (its default model). */
 export const brainName = (w: { harness: string; model?: string }) =>
@@ -329,7 +329,7 @@ export class Hub {
     const profile = opts.profile || (await this.brains()).workhorse;
     const where = { teammateId: teammate?.id, threadId: opts.threadId, jobId: opts.jobId, recipe: opts.allowedScripts };
     const ctx = await this.context(input, mode, teammate, opts.threadId);
-    const first = parseReply(await this.brain.think({ mode, context: ctx, input, toolResults: extra, top: opts.top, ...(opts.images?.length ? { images: opts.images } : {}) }, profile, opts.meter));
+    const first = parseReply(await this.brain.think({ mode, context: ctx, input, toolResults: extra, top: opts.top, ...(opts.files?.length ? { files: opts.files } : {}) }, profile, opts.meter));
     // Keeps the model's reason with the marker: nothing it proposed is applied.
     if (first.text.includes(ESCALATE)) return { text: `${ESCALATE} ${escalateWhy(first.text)}`, did: [] as Done[], used: [] as string[] };
     if (first.text.includes(HAND_BACK)) return { text: HAND_BACK, did: [] as Done[], used: [] as string[] }; // nothing it proposed is applied
@@ -860,19 +860,18 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       if (!f) continue;
       const text = this.files.textOf(f);
       parts.push(text ? `### ${f.name}\n${text}`
-        : f.mime.startsWith("image/") ? `### ${f.name} (a picture, ${Math.round(f.size / 1024)} KB; if it isn't in your working folder's attachments/, you can't see it: say so if you need to)`
-        : `### ${f.name} (${f.mime}, ${Math.round(f.size / 1024)} KB; you can't open this type yet, say so if you need its contents)`);
+        : `### ${f.name} (${f.mime.startsWith("image/") ? "a picture" : f.mime}, ${Math.round(f.size / 1024)} KB; saved in your working folder's attachments/, open it there. If you have no such folder you can't open it: say so if you need its contents)`);
     }
     return parts.length ? `\n\nAttached files:\n<untrusted>\n${parts.join("\n\n")}\n</untrusted>` : "";
   }
 
-  /** The pictures among a job's attachments, for its teammate to look at (brain.ts saves them in its folder). */
-  private async jobImages(ids: string[]): Promise<BrainImage[]> {
-    const out: BrainImage[] = [];
-    let budget = 12 * 1024 * 1024; // what one run carries (it goes over the wire to a linked computer)
-    for (const id of [...new Set(ids)].slice(0, 5)) {
+  /** A job's attachments, every type, for its teammate to open (brain.ts saves them in its folder). */
+  private async jobFiles(ids: string[]): Promise<BrainFile[]> {
+    const out: BrainFile[] = [];
+    let budget = 40 * 1024 * 1024; // what one run carries (it can go over the wire to a linked computer)
+    for (const id of [...new Set(ids)].slice(0, MAX_RUN_FILES)) {
       const f = await this.store.get<StoredFile>("files", id);
-      if (!f?.mime.startsWith("image/") || f.size > budget) continue;
+      if (!f || f.size > budget) continue;
       const bytes = this.files.bytes(f.id);
       if (!bytes) continue;
       budget -= bytes.length;
@@ -1243,7 +1242,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     // What came with it: the files on the message that started it, and on replies sent into it while it ran.
     const fileIds = [...(ask?.fileIds || []), ...later.flatMap((m) => m.fileIds || [])];
     const attached = await this.attachmentNote(fileIds);
-    const images = await this.jobImages(fileIds);
+    const files = await this.jobFiles(fileIds);
     const handNote = job.mayHandBack ? `\n\nFIRST, before any work or tools: the user sent this in the ramble's channel and it came straight to you because you had the latest thread. If it isn't a follow-up on that thread's subject (a new request, or partly about something else), don't do it: reply with only ${HAND_BACK} and Hearth will route it.` : "";
     let input = `${job.task}${depNote}${handNote}${repairNote}${splitNote}${attached}\n\n(From the user's ramble: "${ramble.slice(0, 600)}")`;
     type Tier = "quick" | "workhorse" | "heavy";
@@ -1269,7 +1268,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     const attempt = async (tier: Tier) => {
       cur = await this.saveJob({ ...cur, status: "working", tier });
       meter.lead = hybrid && tier !== "heavy" && label(brains[tier]) !== label(brains.heavy);
-      return this.turn(hybrid && tier !== "heavy" ? "legwork" : "job", input, job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains[tier], meter, top: tier === "heavy", images });
+      return this.turn(hybrid && tier !== "heavy" ? "legwork" : "job", input, job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains[tier], meter, top: tier === "heavy", files });
     };
     // Start on the cheapest model the plan allows; move up a step when a model can't do it.
     const ladder: Tier[] = job.effort === "heavy" ? ["heavy"] : job.effort === "quick" ? ["quick", "workhorse", "heavy"] : ["workhorse", "heavy"];
