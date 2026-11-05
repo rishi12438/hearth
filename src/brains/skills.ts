@@ -154,6 +154,10 @@ every event. If a fact decides it, code decides it.
   "then":"publish","into":"<source>", prints one JSON object per line that become events there, where formulas test
   the real fields.
 - to/post say who handles it and where (see trigger.add).
+- A trigger that SENDS something (an auto-reply, a forward, a post) must not set itself off: its check ignores what
+  the user (or Hearth) sent (the outgoing/"from me" flag, or the sender being the user's own account), and it gets a
+  cooldownMin so a burst can't become a flood. Sending goes through the normal tools, so it waits for the user's
+  Approve unless they chose "Always allow" for that tool or chat; say which it will be.
 
 ## 5. Test it before you say it's done
 - \`hearth-trigger-port test <name> '<json shaped like the real thing>'\` or source.test: one that should fire and
