@@ -1698,9 +1698,6 @@ function chatMenu() {
     h("button", { class: "btn ghost", on: { click: () => openFiles() } }, icon("clip", 16), "Files"),
     h("button", { class: "btn ghost", on: { click: () => moveToProject(t) } }, icon("folder", 16), t.projectId ? `In ${S.projects.find((p: any) => p.id === t.projectId)?.name || "a project"} · Move` : "Move to project"),
     h("div", { class: "stack" },
-      doneAll && lastRamble ? h("button", { class: "btn ghost", on: { click: async () => {
-        try { const wf = await call("/api/workflows/from-ramble", { body: { messageId: lastRamble.id } }); toast(`Saved workflow ${wf.name}. Say “run ${wf.name}” any time.`); closeSheet(); loadSkills(); } catch (e) { handleError(e); }
-      } } }, icon("repeat", 16), "Save as workflow") : null,
       h("button", { class: "btn danger-ghost", on: { click: () => confirmSheet("Delete this ramble?", "Its messages and results are deleted. Reminders it set keep working.", "Delete", async () => { await call(`/api/threads/${t.id}`, { method: "DELETE" }); location.hash = ""; }) } }, icon("trash", 16), "Delete")),
   ]);
 }
@@ -3089,13 +3086,6 @@ function drawSkills() {
         h("small", { class: "sub" }, sk.description),
         h("small", { class: "sub" }, [`${sk.runs} use${sk.runs === 1 ? "" : "s"}`, sk.lastUsedAt ? `last ${shortAgo(sk.lastUsedAt)}` : null, sk.lastFixedAt ? `fixed ${shortAgo(sk.lastFixedAt)}` : null, sk.avgMs ? `~${secs(sk.avgMs)}` : null].filter(Boolean).join(" · "))))))
       : h("p", { class: "empty" }, "No skills yet. They appear as your team finishes jobs."),
-    wfs.length ? [h("h4", null, "Workflows"), h("div", { class: "list" }, wfs.map((w) => h("div", { class: "item" },
-      h("span", { class: "grow" }, h("b", null, w.name, w.status === "proposed" ? h("span", { class: "tag" }, "proposed") : null, w.pinned ? h("span", { class: "tag" }, "pinned") : null),
-        h("small", { class: "sub" }, w.description), h("small", { class: "sub" }, w.steps.map((x: any) => x.skill || x.teammate || "task").join(" → "))),
-      w.status === "proposed" ? h("button", { class: "btn small primary", on: { click: async () => { await call(`/api/workflows/${w.id}/activate`, { body: {} }); toast("Switched on"); } } }, "Switch on")
-        : h("button", { class: "btn small primary", on: { click: async () => { closeSheet(); const r = await call("/api/threads", { body: { text: `Run my "${w.name}" workflow` } }); location.hash = `#c/${r.thread.id}`; } } }, "Run"),
-      h("button", { class: `star ${w.pinned ? "on" : ""}`, "aria-label": w.pinned ? "Unpin" : "Pin (never clean up)", on: { click: async () => { await call(`/api/workflows/${w.id}`, { method: "PATCH", body: { pinned: !w.pinned } }); } } }, icon("pin", 16)),
-      h("button", { class: "iconbtn", "aria-label": "Delete workflow", on: { click: () => confirmSheet(`Delete ${w.name}?`, "The skills it uses stay.", "Delete", async () => { await call(`/api/workflows/${w.id}`, { method: "DELETE" }); }) } }, icon("trash", 16)))))] : null,
     // Components: reusable artifacts (visual skills). The team reuses them with new data instead of writing new code.
     S.components.length ? [h("h4", null, "Components"), h("p", { class: "muted small" }, "Visuals your team built once and reuses with new data, like an itinerary with a map or a comparison."),
       h("div", { class: "list" }, S.components.map((c: any) => h("div", { class: "item" },

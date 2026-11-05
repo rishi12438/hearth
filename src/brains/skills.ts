@@ -108,63 +108,64 @@ export const GUIDES: Skill[] = [{
 - Keep it: the script in scripts/, a skills/<name>.md in your workspace (how to run it, inputs, what breaks it), and
   skill.save if it will come back outside this subject. Next time, rerun it and only check what changed.`,
 }, {
-  name: "make-triggers", common: true, commands: [], reads: [],
-  description: "Making something happen when an event comes in (a webhook, a new email, a bank change, a time): how to get the event in, decide with code, act, and test it.",
-  body: `# Making triggers
+  name: "build-workflows", common: true, commands: [], reads: [],
+  description: "Building an automation (when something happens, do something: a webhook, a new email, a bank change, a time): a workflow of two pieces, a Trigger and an Action.",
+  body: `# Building a workflow
 
-A trigger is: an event arrives on a SOURCE → code decides whether it matters → an ACTION runs. Work through these in
-order. The aim is predictable and cheap: code decides, a model is used only for what needs judgment.
+A workflow has exactly two pieces, and the user sees them as two boxes in Workflows:
 
-The user will just say what they want ("tell me when the school emails", "alert me on big charges"). They won't
-say how, and they shouldn't have to: choose the method yourself, following this, and don't ask them which. Tell
-them in plain words what will notify them and what won't, and that a script you wrote waits for their Approve.
+  TRIGGER  (when, and whether: decided by code)   →   ACTION  (what happens)
 
-## 1. Get the event in: push before polling
-Prefer, in this order:
+The user will just say what they want ("tell me when the school emails", "alert me on big charges", "reply to her
+for me"). They won't say how and shouldn't have to: build both pieces yourself, following this, and don't ask them
+which method. When it's done, tell them in plain words what will happen and what won't, and that any script you
+wrote waits for their Approve.
+
+## Piece 1: the Trigger
+A trigger is a SOURCE (where events come from) plus a CONDITION (which ones count). Both are decided by code.
+
+### Where events come from: push before polling
 1. A source that already gets it: the event pipeline's sources (CONTEXT.eventPipeline, or \`hearth-trigger-port list\`).
    Some come with a connection and are fed by the hub itself (no URL), e.g. the bank one while a bank is connected.
 2. The service's own webhooks: claim a port (\`hearth-trigger-port claim --reason "…" --source <service>\`, or
    port.claim) and give the service its URL. Say plainly what it's for: it's recorded with who claimed it.
-3. Built-in sources: time (timers), place (arriving/leaving).
+3. Built-in sources: time (a schedule: remind / time.schedule), place (arriving or leaving).
 4. Only when nothing can push it: a watcher (watch.add) that looks every few minutes, at the slowest useful interval.
-Don't claim a second port for something a live one already covers; release ports you stop needing.
+Reuse a live port that already covers it; release ports you stop needing.
 
-## 2. Know the shape, name the fields
-Find out what the sender really sends (its docs, or \`hearth-trigger-port show <name>\` after a first event).
-Make the fields that matter variables with a mapping ({"status":"data.object.status"}) so formulas and messages can
-use them. Every event also has payload (all of it), so payload.x works too.
+### Know the shape
+Find out what the sender really sends (its docs, or \`hearth-trigger-port show <name>\` after a first event). Make the
+fields that matter variables with a mapping ({"status":"data.object.status"}). Every event also has payload (all of it).
 
-## 3. Decide with code (most deterministic first)
-1. FORMULA, for facts on the event: \`status == "failed" && amount > 100\`, \`action == "opened"\`,
-   \`sender endsWith "@school.org"\`. Cheap, checked on every event.
-2. CHECK SCRIPT, for facts that are awkward as a formula: nested or variable JSON, normalizing numbers or names,
-   several conditions, a lookup. script.propose a small read-only script (Python is fine) that reads the event as JSON
-   on stdin ({id, source, variables, payload}) and prints \`true\` to fire, or one JSON line
-   {"fire": true, "summary": "…"} whose fields fill {{check.summary}}. Anything else means no. Give the trigger
-   {"check":{"script":"<name>"}}; the formula can stay "true" or narrow first.
-3. JUDGE, only for meaning code can't see (urgent? a good lead? angry?): the quick model answers ONE value and the
-   judge's pass formula compares it. See the write-trigger-judges skill. Filter with a formula first.
-Never use formula "true" plus a prompt that tells a model which events to ignore: that's a model as the filter, on
-every event. If a fact decides it, code decides it.
+### Which events count: code decides, most deterministic first
+1. FORMULA, for facts on the event: \`status == "failed" && amount > 100\`, \`action == "opened"\`. Cheap, every event.
+2. CHECK SCRIPT, for facts awkward as a formula (nested or changing JSON, normalizing numbers or names, several
+   conditions, a lookup): script.propose a small read-only script (Python is fine). It reads the event as JSON on stdin
+   ({id, source, variables, payload}) and prints \`true\` to fire, or one JSON line {"fire": true, "summary": "…"} whose
+   fields the action can use as {{check.summary}}. Anything else means no. Give the trigger {"check":{"script":"<name>"}}.
+3. JUDGE, only for meaning code can't see (urgent? a good lead?): see the write-trigger-judges skill. Filter first.
+Never formula "true" plus an action prompt that tells a model which events to ignore: the hub refuses it.
 
-## 4. Act
-- notify with the fields: "Payment failed for {{email}}: {{amount}}". Most triggers should be this.
-- think only when the message needs writing or looking things up; it may answer [[quiet]] and nothing is shown.
-- When the event only says "something changed" (an id, no details), a script action fetches the details and, with
-  "then":"publish","into":"<source>", prints one JSON object per line that become events there, where formulas test
-  the real fields.
-- to/post say who handles it and where (see trigger.add).
-- A trigger that SENDS something (an auto-reply, a forward, a post) must not set itself off: its check ignores what
-  the user (or Hearth) sent (the outgoing/"from me" flag, or the sender being the user's own account), and it gets a
-  cooldownMin so a burst can't become a flood. Sending goes through the normal tools, so it waits for the user's
-  Approve unless they chose "Always allow" for that tool or chat; say which it will be.
+## Piece 2: the Action
+What happens when the trigger fires. Pick the smallest one that does the job:
+- notify: a message to the user with the fields filled in ("Payment failed for {{email}}: {{amount}}"). No agent.
+- script: code runs on the event. With "then":"publish","into":"<source>", what it prints becomes new events there
+  (for webhooks that only say "something changed": fetch the details, publish them, and put a second workflow on them).
+- think: an AGENT runs. Its prompt is exactly what it's told, with the event attached: write it as instructions for a
+  teammate ("Write a short reply to this message and send it with <tool> to the same chat"). It can say [[quiet]] and
+  nothing is shown. Use it when the action needs writing, looking things up, or a tool.
+Then who handles it and where it posts (to / post on trigger.add), and a cooldownMin if it can fire in bursts.
+An action that SENDS something (a reply, a forward, a post) must not set itself off: the trigger's check ignores what
+the user or Hearth sent (the outgoing / "from me" flag), and it has a cooldown. Sending uses the normal tools, so it
+waits for the user's Approve unless they chose "Always allow" for that tool or chat; say which it will be.
 
-## 5. Test it before you say it's done
-- \`hearth-trigger-port test <name> '<json shaped like the real thing>'\` or source.test: one that should fire and
-  one that shouldn't. trigger.dryrun on recent events for a formula.
-- Read the event's log (Triggers → Sources → Latest events): which triggers matched, what the check said.
+## Build it, then test it
+One trigger.add makes both pieces: {name, title, source, formula, check?, judge?, action, to?, post?, cooldownMin?}.
+Give it a short title: that's the workflow's name in the list. Then test before you say it's done:
+\`hearth-trigger-port test <name> '<json shaped like the real thing>'\` (or source.test), one that should fire and one
+that shouldn't, and read what happened (Workflows → open it → Trigger → Lately).
 
-## 6. When it breaks
+## When it breaks
 A check or script that crashes starts a repair: a teammate gets the error, the code and the event, and proposes a
 fix that waits for the user's Approve. When you're that teammate, fix the cause (often the event's shape), keep the
 same script name, and say in a line what broke.`,
