@@ -1903,6 +1903,9 @@ function queuedRows(held: any[], runs: any[]) {
 
 // ---------------- composer ----------------
 
+/** Files attached in a message box but not sent yet, by that box's draft key (they outlive the box being redrawn). */
+const waitingFiles = new Map<string, any[]>();
+
 function renderComposer(targetId = "composerwrap", threadJob?: string) {
   const wrap = document.getElementById(targetId);
   if (!wrap) return;
@@ -1913,7 +1916,9 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
     : r.view === "dm" ? `Message ${mate(r.id).name}`
     : r.view === "chat" && r.id !== "new" && S.chat?.thread ? `Message #${channelName(S.chat.thread)}`
     : "Ramble. Hearth will hand it out…";
-  const draftKey = `hearth.draft.${targetId}${threadJob ? `.${threadJob}` : ""}`;
+  // Each ramble, DM and task thread keeps its own draft and its own waiting files, so moving away and back loses nothing.
+  const place = r.view === "chat" ? `c.${r.id}` : r.view === "dm" ? `dm.${r.id}` : "home";
+  const draftKey = `hearth.draft.${targetId}.${place}${inThread ? `.${inThread}` : ""}`;
   wrap.dataset.job = threadJob || "";
   // Type / for commands (/mcp…): a menu above the box, arrows to pick, Enter or Tab to run, Esc to close.
   const menu = h("div", { class: "slash", role: "listbox", hidden: true });
@@ -1956,7 +1961,8 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
   };
   const action = h("button", { class: "act", "aria-label": "Hold to talk" });
   const canAttach = r.view !== "dm";
-  const pending: any[] = [];
+  const pending: any[] = waitingFiles.get(draftKey) || [];
+  waitingFiles.set(draftKey, pending);
   const chips = h("div", { class: "attach-chips" });
   const remove = (f: any) => h("button", { "aria-label": `Remove ${f.name}`, title: "Remove", on: { click: () => { pending.splice(pending.indexOf(f), 1); if (f.preview) URL.revokeObjectURL(f.preview); drawChips(); swap(); } } }, icon("x", 12));
   // Pictures show as a small preview of themselves; other files as their name.
@@ -1998,6 +2004,7 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
     drop: (e: DragEvent) => { if (!canAttach || !e.dataTransfer?.files.length) return; e.preventDefault(); bar.classList.remove("drop"); upload(Array.from(e.dataTransfer.files)); },
   } }, clip, box, action, picker);
   clear(wrap, h("div", { class: "rec", id: targetId === "composerwrap" ? "rec" : undefined, hidden: true }), chips, menu, bar);
+  drawChips();
   swap();
   autosize(box);
   drawMenu();
