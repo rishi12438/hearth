@@ -268,7 +268,8 @@ code { font-family: var(--mono); font-size: .86em; background: var(--surface); p
 .blockhead { display: flex; align-items: center; gap: 8px; }
 .blockhead .icon { color: var(--warn); }
 .block p { margin: 6px 0 0; font-size: 15px; color: var(--ink-2); }
-.blockbtns { display: flex; gap: 8px; margin-top: 8px; }
+.blockbtns { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
+.apagain { display: inline-flex; align-items: center; gap: 6px; }
 .sbtn { height: 36px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line); font-size: 15px; font-weight: var(--fw-semibold); color: var(--ink); background: var(--bg); }
 .sbtn.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
 .hello { padding: 30px 16px; }

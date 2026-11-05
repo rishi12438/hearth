@@ -10,6 +10,7 @@ import type { Config } from "./config.ts";
 import { TOKEN_RE } from "./tokenmint.ts";
 import { checkTools, type ToolStatus } from "./brains/tools.ts";
 import { registerSkills } from "./brains/skills.ts";
+import { chromeHere } from "./mac-chrome.ts";
 import { googleSkills } from "./connectors/google-agent.ts";
 
 // The computer side of a link (run on your Mac): join a hub once, then keep a line open to it and run the work it sends,
@@ -130,7 +131,7 @@ export function hasLogin(item: CopyItem): boolean {
  * other-browser.ts), run with this Mac's own enkidu-browser in a session the hub names. The page opens in a real,
  * visible Chrome here: your home connection, your logins. Screenshots go back as an image small enough for the line.
  */
-export async function browseHere(sid: string, action: string, params: Record<string, unknown>, opts: { bin?: string | null; run?: (argv: string[]) => Promise<{ code: number; out: string }> } = {}): Promise<{ ok: boolean; out?: string; png?: string; mime?: string }> {
+export async function browseHere(sid: string, action: string, params: Record<string, unknown>, opts: { bin?: string | null; run?: (argv: string[]) => Promise<{ code: number; out: string }>; frames?: boolean } = {}): Promise<{ ok: boolean; out?: string; png?: string; mime?: string; frame?: string }> {
   if (!/^hearth-other-[a-f0-9]{6,20}$/.test(sid)) return { ok: false, out: "Not a session the hub can use." };
   if (!["open", "navigate", "observe", "click", "type", "press", "scroll", "evaluate", "screenshot", "back", "close"].includes(action)) return { ok: false, out: `Unknown command ${action}.` };
   const bin = opts.bin !== undefined ? opts.bin : (existsSync(join(homedir(), ".enkidu", "bin", "enkidu-browser")) ? join(homedir(), ".enkidu", "bin", "enkidu-browser") : Bun.which("enkidu-browser"));
@@ -144,20 +145,26 @@ export async function browseHere(sid: string, action: string, params: Record<str
     return { code: await p.exited, out: (out.trim() || err.trim()).slice(0, 60_000) };
   });
   const msg = (out: string) => { try { return String(JSON.parse(out).message || out); } catch { return out; } };
-  if (action === "close") { await run(["session", "close", sid]); return { ok: true, out: "Closed." }; }
-  const use = (a: string, p: Record<string, unknown>) => run(["session", "use", sid, a, JSON.stringify(p)]);
+  // enkidu-browser never reuses a closed session's name, so each conversation's session gets a fresh one when it starts
+  // over: <sid>-1, <sid>-2…
+  const live = () => `${sid}-${generation.get(sid) ?? 0}`;
+  if (action === "close") { await run(["session", "close", live()]); generation.set(sid, (generation.get(sid) ?? 0) + 1); return { ok: true, out: "Closed." }; }
+  const use = (a: string, p: Record<string, unknown>) => run(["session", "use", live(), a, JSON.stringify(p)]);
   let r: { code: number; out: string };
   if (action === "open") {
-    // A visible Chrome: sites that stop headless ones let a real window through.
-    const fresh = async () => { await run(["session", "close", sid]); await run(["session", "new", sid, JSON.stringify({ recordName: "Hearth: a job from the hub" })]); return use("open", { ...params, headless: false }); };
-    r = (await run(["session", "get", sid])).code === 0 ? await use("open", { ...params, headless: false }) : await fresh();
+    // In the background: its own headless Chrome (your logins copied in), so nothing pops up on your screen.
+    const fresh = async () => { await run(["session", "close", live()]); generation.set(sid, (generation.get(sid) ?? 0) + 1); await run(["session", "new", live(), JSON.stringify({ recordName: "Hearth: a job from the hub" })]); return use("open", { ...params, headless: true }); };
+    r = (await run(["session", "get", live()])).code === 0 ? await use("open", { ...params, headless: true }) : await fresh();
     if (r.code !== 0 && /lost|expired|canceled|cancelled|not found|no session/i.test(msg(r.out))) r = await fresh();
   } else if (action === "back") r = await use("evaluate", { expression: "history.back()" });
   else r = await use(action, params);
   if (r.code !== 0) return { ok: false, out: msg(r.out) };
-  if (action !== "screenshot") return { ok: true, out: r.out };
-  let file = "";
-  try { file = String(JSON.parse(r.out).file || ""); } catch {}
+  if (action !== "screenshot") {
+    // A small picture of the page after each step, for the job's live view in the thread (it's headless: nothing to watch here).
+    const frame = opts.frames !== false ? await smallShot(run, live()) : undefined;
+    return { ok: true, out: r.out, ...(frame ? { frame } : {}) };
+  }
+  const file = shotFile(r.out);
   if (!file || !existsSync(file)) return { ok: false, out: "The screenshot didn't come out." };
   let bytes = readFileSync(file), mime = "image/png";
   if (bytes.length > MAX_SHOT && platform() === "darwin") {
@@ -175,11 +182,35 @@ export async function browseHere(sid: string, action: string, params: Record<str
   return { ok: true, png: bytes.toString("base64"), mime };
 }
 
+/** Which session each conversation's is on now (see browseHere). */
+const generation = new Map<string, number>();
+/** Where enkidu-browser saved a screenshot: {"result": {"file": …}} (older ones put file at the top). */
+const shotFile = (out: string) => { try { const j = JSON.parse(out); return String(j?.result?.file || j?.file || ""); } catch { return ""; } };
+
+/** The page as a small JPEG (base64), for live view; nothing if it can't. */
+async function smallShot(run: (argv: string[]) => Promise<{ code: number; out: string }>, sid: string): Promise<string | undefined> {
+  const r = await run(["session", "use", sid, "screenshot", "{}"]);
+  const file = shotFile(r.out);
+  if (r.code !== 0 || !file || !existsSync(file)) return undefined;
+  const dir = mkdtempSync(join(tmpdir(), "hearth-frame-"));
+  try {
+    const jpg = join(dir, "f.jpg");
+    Bun.spawnSync(["sips", "-s", "format", "jpeg", "-s", "formatOptions", "50", "--resampleWidth", "900", file, "--out", jpg], { stdout: "ignore", stderr: "ignore" });
+    const b = existsSync(jpg) ? readFileSync(jpg) : null;
+    return b && b.length <= 400_000 ? b.toString("base64") : undefined;
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+/** One hearth-browser command, the way you chose on its Approve card: your own Chrome, or a headless one in the background. */
+export function browseOnMac(sid: string, action: string, params: Record<string, unknown>, mode: unknown) {
+  return mode === "mine" ? chromeHere(sid, action, params) : browseHere(sid, action, params);
+}
+
 type Opts = { config: Config; link: Link; brain?: Brain; readCopy?: (item: CopyItem) => string | null; log?: (s: string) => void; copyEveryMs?: number; home?: string;
   /** How this computer's tools are (enkidu-browser, enkidu-cua), told to the hub for Settings. Swapped in tests. */
   tools?: () => Promise<ToolStatus[]>;
-  /** hearth-browser commands from the hub (browseHere); swapped in tests. */
-  browse?: typeof browseHere;
+  /** hearth-browser commands from the hub (browseOnMac); swapped in tests. */
+  browse?: typeof browseOnMac;
   /** The hub signed this computer out for good. */
   onSignedOut?: () => void };
 
@@ -306,7 +337,7 @@ export function connect(opts: Opts) {
       else if (m.t === "browse" && typeof m.id === "string" && !link.cloud) {
         const params = m.params && typeof m.params === "object" ? m.params : {};
         log(`  the hub is using this Mac's browser: ${String(m.action)}${typeof params.url === "string" ? ` ${params.url}` : ""}`);
-        (opts.browse ?? browseHere)(String(m.sid), String(m.action), params)
+        (opts.browse ?? browseOnMac)(String(m.sid), String(m.action), params, m.mode)
           .then((r) => send({ t: "browsed", id: m.id, ...r }), (e) => send({ t: "browsed", id: m.id, ok: false, out: String(e?.message || e) }));
       }
       else if (m.t === "want") { want = { items: (m.items || []).filter(isCopyItem), have: m.have || {} }; copyUp(); }

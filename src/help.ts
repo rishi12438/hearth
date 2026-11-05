@@ -80,29 +80,31 @@ const macStep = (s: StuckState, why: string): string | null => {
   if (!s.mac || s.gate === "no") return null;
   if (s.gate === "ok") return `Chrome on ${s.mac} (the user's Mac) is yours in this conversation already: run hearth-browser open <url> "<what blocked you>" and carry on there (see the get-past-blocks skill for its commands). ${why}`;
   if (s.gate === "pending") return `You already asked to use Chrome on ${s.mac}; it's waiting for the user's Approve. Finish what you can meanwhile; you'll get a turn when they answer.`;
-  return `Ask the user if you can use Chrome on their Mac (${s.mac}). ${why} Run hearth-browser open <url> "<what blocked you, in a few words>": that puts an Approve card under your reply, and those words are on it. In your reply, ask them plainly ("Can I use Chrome on your Mac for this? Tap Approve") and say what's in the way; finish what you can meanwhile. When they approve you get a turn and carry on with hearth-browser.`;
+  return `Ask the user if you can use Chrome on their Mac (${s.mac}). ${why} Run hearth-browser open <url> "<what blocked you, in a few words>": that puts a card under your reply, with those words on it and two ways to say yes: run it in the background (its own Chrome with their logins; they watch in live view) or use their own Chrome (a tab they can watch). In your reply, ask them plainly ("Can I use Chrome on your Mac for this? Pick one below") and say what's in the way; finish what you can meanwhile. When they answer you get a turn and carry on with hearth-browser.`;
 };
 
-/** A site blocks the browser: the Mac, a connected cloud browser, one to add. */
+/** A site blocks the browser: a cloud browser that's connected, then the user's Mac, then one to add (no Mac, or they said no). */
 const blockedSteps: Steps = (s) => {
   const out: string[] = [];
-  const m = macStep(s, "It's a real browser on their home connection, with their logins, so sites that block servers let it through.");
-  if (m) out.push(m);
   const on = connectedBrowsers(s.servers);
   for (const { b, server } of on) out.push(`${b.label} is connected as the MCP server ${server.name}: ${b.good}. Its tools are yours (mcp__${server.name}__<tool> on Claude; on any brain, hearth-mcp call ${server.name} <tool> '<json>'). ${b.how}`);
-  if (on.length) {
-    const more = CLOUD_BROWSERS.filter((b) => !on.some((o) => o.b.name === b.name) && !s.servers.some((x) => x.name === b.name));
-    if (more.length) out.push(`If that one can't get through either, add another yourself: ${more.map((o) => `${o.label}, ${o.good} (hearth-mcp add ${o.url} ${o.name}; ${o.free})`).join("; ")}. One Approve card each; once approved, ${keyStep(more[0])}`);
-    return out;
-  }
+  const m = macStep(s, "It's a real browser on their home connection, so sites that block servers let it through.");
+  if (m) out.push(on.length ? `If that can't get through: ${m}` : m);
+  const macOk = !!s.mac && s.gate !== "no";
   const asked = s.servers.filter((x) => CLOUD_BROWSERS.some((b) => b.name === x.name) && x.state !== "connected");
   for (const x of asked) out.push(`${x.name} is on the list but not connected (${x.state === "pending" ? "it waits for the user's Approve" : x.state === "signin" ? "it still needs signing in" : x.state}). ${x.state === "pending" ? "You'll get a turn when they answer." : keyStep(CLOUD_BROWSERS.find((b) => b.name === x.name)!)}`);
-  const pick = CLOUD_BROWSERS.filter((b) => !asked.some((x) => x.name === b.name));
-  if (pick.length) {
-    const b = pick[0];
-    out.push(`Add a cloud browser yourself (no need to ask the user to do it): ${b.label}, ${b.good}. Run: hearth-mcp add ${b.url} ${b.name}. That's one Approve card for the user; in your reply say what it's for and that it ${b.auth === "none" ? b.free : `has ${b.free}`}${b.auth === "none" ? "" : `, and that if they don't have an account you'll make a free one with their Google login`}. Once they approve, ${keyStep(b)}`
-      + (pick.length > 1 ? ` Others that work too: ${pick.slice(1).map((o) => `${o.label} (hearth-mcp add ${o.url} ${o.name}; ${o.free})`).join(", ")}.` : ""));
+  const pick = CLOUD_BROWSERS.filter((b) => !on.some((o) => o.b.name === b.name) && !asked.some((x) => x.name === b.name));
+  if (!pick.length) return out;
+  const list = (bs: CloudBrowser[]) => bs.map((o) => `${o.label}, ${o.good} (hearth-mcp add ${o.url} ${o.name}; ${o.free})`).join("; ");
+  if (macOk) {
+    // The Mac comes first; a cloud browser only if they say no (or it can't get through).
+    out.push(`If the user says no to their Mac, or it can't get through either: run hearth-help stuck blocked again, and it'll say which cloud browser to add.`);
+    return out;
   }
+  if (on.length) { out.push(`If that one can't get through either, add another yourself: ${list(pick)}. One Approve card each; once approved, ${keyStep(pick[0])}`); return out; }
+  const b = pick[0];
+  out.push(`Add a cloud browser yourself (no need to ask the user to do it): ${b.label}, ${b.good}. Run: hearth-mcp add ${b.url} ${b.name}. That's one Approve card for the user; in your reply say what it's for and that it ${b.auth === "none" ? b.free : `has ${b.free}`}${b.auth === "none" ? "" : `, and that if they don't have an account you'll make a free one with their Google login`}. Once they approve, ${keyStep(b)}`
+    + (pick.length > 1 ? ` Others that work too: ${pick.slice(1).map((o) => `${o.label} (hearth-mcp add ${o.url} ${o.name}; ${o.free})`).join(", ")}.` : ""));
   return out;
 };
 
