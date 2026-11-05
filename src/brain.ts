@@ -192,7 +192,9 @@ ${sourceDocs()}
     \`hearth-trigger-port claim --reason … --source …\`. When the webhook only says "something changed" (Plaid: item X
     has updates), the trigger's action is a script that fetches the details and prints one JSON object per line:
     {"type":"script","script":"<name>","then":"publish","into":"<another source>"}; formulas on that source test the
-    real fields.
+    real fields. Make the port's variables the sender's real fields (source.update mapping, e.g. {"from":
+    "data.message.from"}) and put the rule in the formula (from contains "14084203023" && from_me == false), not in a
+    prompt over formula "true": a model should never be the filter for facts code can check.
 EVENT PIPELINE (CONTEXT.eventPipeline: sources, watchers, triggers, timers). Everything that makes you speak first
     lives here. Anything pushes events into a SOURCE (a named inbox with its own variables); every event is saved; each
     TRIGGER on that source is a FORMULA checked with plain code (no model) against the event's variables, and when it's
@@ -220,7 +222,13 @@ EVENT PIPELINE (CONTEXT.eventPipeline: sources, watchers, triggers, timers). Eve
     without one, a variable is read from the top level. The URL shows in Triggers; tell the user to copy it from there.
 - source.update {name, description?, variables?, mapping?, status?} | source.remove {name, purgeEvents?}
 - source.test {name, payload}   push a test event through every trigger; you'll be called again with what happened
-- trigger.add {name, source, formula, judge?, action, why, to?, post?, cooldownMin?, force?}
+- trigger.add {name, source, formula, check?, judge?, action, why, to?, post?, cooldownMin?, force?}
+    check: {"script":"<name>","args":[]}  YOUR CODE DECIDES. Prefer it to a prompt whenever the rule is checkable
+    but awkward as a formula (nested JSON, normalizing a phone number, several conditions). Write it with
+    script.propose (Python is fine, read-only): it gets the whole event as JSON on stdin ({id, source, variables,
+    payload}) and prints \`true\` to fire, or a JSON line {"fire": true, "text": "…", "from": "…"} whose fields fill
+    {{check.text}} in the action; anything else means no. It runs after the formula (default "true" with a check)
+    and before any judge. If it crashes, a teammate is started to fix it (the fix waits for the user's Approve).
     judge: {"prompt":"How urgent is this message for the user?","output":{"type":"rating","min":1,"max":10,
             "low":"can wait a week","high":"needs them now"},"pass":"judge >= 8"}
     The formula can't read judge (it runs first); pass must. {{judge}} fills in the action's text.
@@ -230,7 +238,7 @@ EVENT PIPELINE (CONTEXT.eventPipeline: sources, watchers, triggers, timers). Eve
     event on "into" (quiet itself; that source's triggers speak).
     {{variable}} fills from the event (e.g. {{payload.customer.email}}, {{data.who}}).
 - trigger.dryrun {source, formula}   what it would have caught in recent events, and which triggers already catch them
-- trigger.update {name, title?, formula?, judge?, action?, why?, status?, cooldownMin?, to?, post?} | trigger.remove {name}
+- trigger.update {name, title?, formula?, check?, judge?, action?, why?, status?, cooldownMin?, to?, post?} | trigger.remove {name}
     judge: null removes it. Changing the question or the answer kind clears its corrections.
 - trigger.correct {trigger, value, event?}   when the user says a judgment was wrong ("that wasn't urgent", "that one
     was a 9"): the right value is kept as an example the judge sees next time. event defaults to the last one it judged.

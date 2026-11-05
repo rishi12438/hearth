@@ -87,6 +87,12 @@ export type EventTrigger = {
   timer: { name: string; schedule: TimerSchedule; nextAt: string | null; status: Timer["status"] } | null;
   /** The rule, checked with plain code against each event's variables. With a judge, it says which events to ask about. */
   formula: string;
+  /**
+   * Optional: your own code decides (Python, shell or TS, an approved script). It gets the whole event on stdin and
+   * fires the trigger by printing `true`, or a JSON line {"fire": true, ...fields} whose fields fill {{check.x}}.
+   * Runs after the formula (the cheap filter) and before any judge.
+   */
+  check: TriggerCheck | null;
   /** Optional: one question for the quick model, answered with one value (judge), then compared by judge.pass. */
   judge: Judge | null;
   /** Corrections you gave this trigger's judge. */
@@ -100,6 +106,20 @@ export type EventTrigger = {
   createdBy: string; teammateId: string | null; threadId: string | null;
   createdAt: string; updatedAt: string;
 };
+export type TriggerCheck = { script: string; args: string[] };
+/** What a check said: fire or not, and anything it handed on for the action. */
+export type CheckResult = { fire: boolean; data?: Record<string, unknown>; note?: string };
+/** A check's output → fire or not. Its last line counts: true/yes/1, or a JSON object with "fire". */
+export function readCheck(output: string): CheckResult {
+  const last = output.trim().split("\n").map((l) => l.trim()).filter(Boolean).at(-1) || "";
+  if (last.startsWith("{")) {
+    try {
+      const o = JSON.parse(last);
+      if (o && typeof o === "object" && !Array.isArray(o)) { const { fire, ...data } = o; return { fire: fire === true, data }; }
+    } catch { /* not JSON: read as a word */ }
+  }
+  return { fire: /^(true|yes|1)$/i.test(last), note: last && !/^(false|no|0|\(no output\))$/i.test(last) ? last.slice(0, 120) : undefined };
+}
 export type TimerSchedule =
   | { at: string; repeat?: "none" | "daily" | "weekdays" | "weekly" | "monthly" }
   | { time: string; days: number[] }
@@ -179,6 +199,14 @@ const STALE_MIN = 360;
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
 const j = (x: unknown) => JSON.stringify(x ?? null);
 const str = (x: unknown, max: number) => (typeof x === "string" ? x.trim().slice(0, max) : "");
+/** {"script":"name","args":[…]} or just "name" → a check; null/"" clears it. */
+function cleanCheck(x: unknown): TriggerCheck | null | string {
+  if (x == null || x === "") return null;
+  const o: any = typeof x === "string" ? { script: x } : x;
+  const script = String(o?.script ?? "").trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(script)) return 'check must name a script: {"script":"<name>","args":[]} (write it with script.propose; .py works).';
+  return { script, args: Array.isArray(o.args) ? o.args.slice(0, 8).map((a: unknown) => String(a).slice(0, 200)) : [] };
+}
 const slug = (x: unknown) => str(x, 48).toLowerCase().replace(/\s+/g, "-");
 
 /** Fill {{var.path}} from an event's variables (missing ones become empty). */
@@ -216,6 +244,10 @@ export class EventPipeline {
   run: Runner = async () => ({ quiet: true });
   /** Set by the hub: the quick model answers judge questions. */
   judgeFn: JudgeFn = async () => { throw new Error("No model to judge with."); };
+  /** Set by the hub: a trigger's script crashed on an event; start someone on fixing it. Returns what it did, for the log. */
+  onScriptFailed: (t: EventTrigger, e: PipelineEvent, script: string, error: string) => Promise<string | null> = async () => null;
+  /** Set by the hub: runs a trigger's check script on an event (or throws: not approved, crashed). */
+  checkFn: (check: TriggerCheck, e: PipelineEvent) => Promise<CheckResult> = async () => { throw new Error("No scripts here."); };
   /** Extra checks on an action (e.g. the workflow exists). Returns an error, or null. */
   checkAction: (a: TriggerAction) => Promise<string | null> = async () => null;
   /** Something changed: the hub tells open apps. */
@@ -303,7 +335,7 @@ export class EventPipeline {
       CREATE INDEX IF NOT EXISTS held_until ON held (until);
     `);
     // Files made before judges and reminders existed get the new columns.
-    for (const [table, col, def] of [["triggers", "judge", "TEXT"], ["event_log", "value", "TEXT"], ["triggers", "title", "TEXT"], ["triggers", "timer_id", "TEXT REFERENCES timers(id) ON DELETE CASCADE"], ["triggers", "route", "TEXT"], ["sources", "claim", "TEXT"]]) {
+    for (const [table, col, def] of [["triggers", "judge", "TEXT"], ["event_log", "value", "TEXT"], ["triggers", "title", "TEXT"], ["triggers", "timer_id", "TEXT REFERENCES timers(id) ON DELETE CASCADE"], ["triggers", "route", "TEXT"], ["sources", "claim", "TEXT"], ["triggers", "check_script", "TEXT"]]) {
       const cols = this.db.query(`PRAGMA table_info(${table})`).all() as { name: string }[];
       if (!cols.some((c) => c.name === col)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
     }
@@ -341,7 +373,7 @@ export class EventPipeline {
   private trigger(r: any): EventTrigger {
     return { id: r.id, name: r.name, sourceId: r.source_id, sourceName: r.source_name, title: r.title || r.name, timerId: r.timer_id ?? null,
       timer: r.timer_id && r.timer_name ? { name: r.timer_name, schedule: JSON.parse(r.timer_schedule), nextAt: r.timer_next_at, status: r.timer_status } : null,
-      formula: r.formula, judge: r.judge ? JSON.parse(r.judge) : null,
+      formula: r.formula, judge: r.judge ? JSON.parse(r.judge) : null, check: r.check_script ? JSON.parse(r.check_script) : null,
       examples: r.examples ?? 0, action: JSON.parse(r.action), route: cleanRoute(r.route ? JSON.parse(r.route) : null),
       why: r.why, status: r.status, cooldownMin: r.cooldown_min, lastFiredAt: r.last_fired_at, fireCount: r.fire_count,
       createdBy: r.created_by, teammateId: r.teammate_id, threadId: r.thread_id, createdAt: r.created_at, updatedAt: r.updated_at };
@@ -662,7 +694,10 @@ export class EventPipeline {
     if (!NAME.test(name)) return { error: "A trigger needs a short name: lowercase letters, numbers and dashes." };
     const s = this.findSource(str(input?.source, 60));
     if (!s) return { error: `No source called "${str(input?.source, 60)}". Sources: ${this.sources().map((x) => x.name).join(", ")}.` };
-    const formula = str(input?.formula ?? input?.when, 2000);
+    const check = cleanCheck(input?.check);
+    if (typeof check === "string") return { error: check };
+    // With a check, the formula is optional: the code decides.
+    const formula = str(input?.formula ?? input?.when, 2000) || (check ? "true" : "");
     const bad = this.checkFormula(formula, s);
     if (bad) return this.conflict({ kind: "variables", message: bad, options: ["fix the formula", `source.update "${s.name}" to add the variable`] });
     const action = this.cleanAction(input?.action, o.system);
@@ -673,16 +708,16 @@ export class EventPipeline {
     if (extra) return { error: extra };
     const clash = this.findTrigger(name);
     if (clash) return this.conflict({ kind: "name", message: `There's already a trigger called "${name}".`, existing: clash, options: [`trigger.update "${name}"`, "pick a different name"] });
-    if (!input?.force && !o.timerId) {
+    if (!input?.force && !o.timerId && !check) {
       const over = this.overlapping(s, formula, action, judge);
       if (over) return this.conflict(over);
     }
     const now = this.now(), id = randomUUID();
     const cooldown = Math.max(0, Math.min(10080, Math.round(Number(input?.cooldownMin) || 0)));
     const route = cleanRoute(input?.route);
-    this.db.query(`INSERT INTO triggers (id, name, title, source_id, formula, judge, action, why, status, cooldown_min, created_by, teammate_id, thread_id, timer_id, route, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(id, name, str(input?.title, 80) || null, s.id, formula, judge ? j(judge) : null, j(action), str(input?.why, 300), cooldown, str(createdBy, 40) || "you", str(input?.teammateId, 64) || null, str(input?.threadId, 64) || null, o.timerId ?? null, j(route), now, now);
+    this.db.query(`INSERT INTO triggers (id, name, title, source_id, formula, check_script, judge, action, why, status, cooldown_min, created_by, teammate_id, thread_id, timer_id, route, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, name, str(input?.title, 80) || null, s.id, formula, check ? j(check) : null, judge ? j(judge) : null, j(action), str(input?.why, 300), cooldown, str(createdBy, 40) || "you", str(input?.teammateId, 64) || null, str(input?.threadId, 64) || null, o.timerId ?? null, j(route), now, now);
     this.onChange("triggers", { created: id, by: str(createdBy, 40) || "you" });
     return { value: this.findTrigger(id)! };
   }
@@ -693,7 +728,9 @@ export class EventPipeline {
     const onlyStatus = Object.keys(input || {}).every((k) => k === "status");
     if (t.createdBy === "system" && !onlyStatus) return this.conflict({ kind: "protected", message: `"${t.name}" is the hub's own; it can only be paused or resumed.`, existing: t, options: ["leave it", "pause it"] });
     const s = this.findSource(t.sourceId)!;
-    const formula = input?.formula !== undefined || input?.when !== undefined ? str(input.formula ?? input.when, 2000) : t.formula;
+    let check = t.check;
+    if (input?.check !== undefined) { const c = cleanCheck(input.check); if (typeof c === "string") return { error: c }; check = c; }
+    const formula = input?.formula !== undefined || input?.when !== undefined ? str(input.formula ?? input.when, 2000) || (check ? "true" : "") : t.formula;
     const bad = this.checkFormula(formula, s);
     if (bad) return this.conflict({ kind: "variables", message: bad, options: ["fix the formula"] });
     let action = t.action;
@@ -710,7 +747,7 @@ export class EventPipeline {
       if (typeof jd === "string") return { error: jd };
       judge = jd;
     }
-    if (!input?.force && (formula !== t.formula || input?.action !== undefined || input?.judge !== undefined)) {
+    if (!input?.force && !check && (formula !== t.formula || input?.action !== undefined || input?.judge !== undefined)) {
       const over = this.overlapping(s, formula, action, judge, t.id);
       if (over) return this.conflict(over);
     }
@@ -722,8 +759,8 @@ export class EventPipeline {
     const route = input?.route !== undefined ? cleanRoute(input.route, t.route) : t.route;
     // A new question or answer kind makes old corrections meaningless.
     if (input?.judge !== undefined && j(judge?.prompt ?? null) + j(judge?.output ?? null) !== j(t.judge?.prompt ?? null) + j(t.judge?.output ?? null)) this.db.query("DELETE FROM judge_examples WHERE trigger_id = ?").run(t.id);
-    this.db.query("UPDATE triggers SET formula = ?, judge = ?, action = ?, status = ?, cooldown_min = ?, why = ?, title = ?, teammate_id = ?, route = ?, updated_at = ? WHERE id = ?")
-      .run(formula, judge ? j(judge) : null, j(action), status, cooldown, why, title, teammateId, j(route), this.now(), t.id);
+    this.db.query("UPDATE triggers SET formula = ?, check_script = ?, judge = ?, action = ?, status = ?, cooldown_min = ?, why = ?, title = ?, teammate_id = ?, route = ?, updated_at = ? WHERE id = ?")
+      .run(formula, check ? j(check) : null, judge ? j(judge) : null, j(action), status, cooldown, why, title, teammateId, j(route), this.now(), t.id);
     this.onChange("triggers");
     return { value: this.findTrigger(t.id)! };
   }
@@ -1063,6 +1100,21 @@ export class EventPipeline {
         this.log(e.id, "cooldown", `${t.name}: matched, but it ran less than ${t.cooldownMin} min ago`, t.id);
         continue;
       }
+      // Your code decides: the check script runs on the whole event; what it hands on fills {{check.x}}.
+      let ev = e;
+      if (t.check) {
+        let r: CheckResult;
+        try { r = await this.depth.run(e.depth, () => this.checkFn(t.check!, e)); } catch (err: any) {
+          const why = String(err?.message || err).slice(0, 2000);
+          this.log(e.id, "check-failed", `${t.name}: ${t.check.script}: ${why.slice(0, 300)}`, t.id);
+          if (!err?.notCrash) { const fix = await this.onScriptFailed(t, e, t.check.script, why).catch(() => null); if (fix) this.log(e.id, "repair", `${t.name}: ${fix}`, t.id); }
+          failed++;
+          continue;
+        }
+        this.log(e.id, "checked", `${t.name}: ${t.check.script} said ${r.fire ? "fire" : "no"}${r.note ? ` (${r.note})` : ""}`, t.id);
+        if (!r.fire) continue;
+        if (r.data && Object.keys(r.data).length) ev = { ...e, variables: { ...e.variables, check: r.data } };
+      }
       let value: JudgeValue | undefined;
       if (t.judge) {
         const hourAgo = new Date(now.getTime() - 3_600_000).toISOString();
@@ -1080,8 +1132,8 @@ export class EventPipeline {
         this.log(e.id, "judged", `${t.name}: judge = ${value} → ${passes ? "acts" : "doesn't act"} (${t.judge.pass})`, t.id, value);
         if (!passes) continue;
       }
-      this.log(e.id, "matched", `${t.name}: ${t.formula}${t.judge ? ` and ${t.judge.pass}` : ""}`, t.id);
-      const r = await this.runOne(t, e, value, false);
+      this.log(e.id, "matched", `${t.name}: ${t.formula}${t.check ? ` and ${t.check.script}` : ""}${t.judge ? ` and ${t.judge.pass}` : ""}`, t.id);
+      const r = await this.runOne(t, ev, value, false);
       if (r === "held") held++; else if (r === "failed") failed++; else ran++;
     }
     // A one-time reminder that has rung is done (only this event's timer: others may still have events waiting).
@@ -1126,7 +1178,10 @@ export class EventPipeline {
       const t = this.findTrigger(h.trigger_id), e = this.getEvent(h.event_id);
       if (!t || !e || t.status === "paused") continue;
       this.log(e.id, "released", `${t.name}: quiet hours are over`, t.id);
-      const r = await this.runOne(t, e, h.value == null ? undefined : JSON.parse(h.value), true);
+      // The check's hand-on fields aren't saved with the hold: ask it again (it's code, so it says the same).
+      let ev = e;
+      if (t.check) { try { const c = await this.checkFn(t.check, e); if (c.data && Object.keys(c.data).length) ev = { ...e, variables: { ...e.variables, check: c.data } }; } catch { /* runs without them */ } }
+      const r = await this.runOne(t, ev, h.value == null ? undefined : JSON.parse(h.value), true);
       const still = (this.db.query("SELECT count(*) AS n FROM held WHERE event_id = ?").get(e.id) as any).n;
       if (r === "ran" || !still) this.db.query("UPDATE events SET status = ? WHERE id = ?").run(r === "ran" ? "matched" : still ? "held" : "failed", e.id);
       this.onChange("events");
