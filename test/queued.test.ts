@@ -33,7 +33,7 @@ const settled = async (n: number) => { const j = await jobs(); return j.length =
 const working = async () => (await jobs()).some((j) => j.status === "working");
 const starts = () => readFileSync(log, "utf8").split("\n").filter((l) => l.startsWith("start")).length;
 
-afterEach(async () => { hub.stop(); await hub.idle(20_000); await store.close(); });
+afterEach(async () => { delete process.env.FAKE_PROMPTS; hub.stop(); await hub.idle(20_000); await store.close(); });
 
 test("thread replies sent mid-run queue, then go out together as the next turn when the run ends", async () => {
   await setup();
@@ -65,8 +65,10 @@ test("thread replies sent mid-run queue, then go out together as the next turn w
   expect((await store.get<Job>("jobs", first.job.id))!.task).not.toContain("vegetarian");
 });
 
-test("Send now puts a queued DM into the run (it starts over with it); × drops one unsent", async () => {
+test("Send now puts a queued DM into the run, which carries on with it; × drops one unsent", async () => {
   await setup();
+  const prompts = join(dir, "prompts.log");
+  process.env.FAKE_PROMPTS = prompts;
   process.env.FAKE_MS = "1500";
   const first = (await hub.askTeammate("scout", "find a pottery studio")).value!;
   await until(working);
@@ -86,6 +88,11 @@ test("Send now puts a queued DM into the run (it starts over with it); × drops 
   expect(all[0].id).toBe(first.job.id);
   expect(all[0].task).toContain("The user added: in Oakland please");
   expect(all[0].task).not.toContain("never mind");
+  // The restarted run is told it was interrupted and to carry on, not handed the task as if it were new.
+  const runs = readFileSync(prompts, "utf8").split("=====\n").filter((p) => p.includes("pottery"));
+  expect(runs.at(-1)).toContain("were stopped partway");
+  expect(runs.at(-1)).toContain("don't redo what already worked");
+  expect(all[0].interrupted).toBeUndefined(); // cleared once it finished
 });
 
 test("without queue (voice, apps, older clients) a mid-run DM still folds in as before", async () => {

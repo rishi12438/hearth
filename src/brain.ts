@@ -1140,7 +1140,12 @@ export class Brain {
     // of the job: it has no tools, but a big table or app can take the lead minutes to write.
     const limitMs = web || b.mode === "voice" ? this.config.jobTimeoutMs : this.config.agentTimeoutMs;
     const timer = limitMs > 0 ? setTimeout(() => { timedOut = true; proc.kill(); }, limitMs) : undefined;
-    const stop = () => proc.kill();
+    // Stopped for a new message: Codex ends its turn cleanly first (so the thread keeps what it did); either way the
+    // process goes within a few seconds.
+    const stop = () => {
+      if (app?.interrupt()) { const t = setTimeout(() => proc.kill(), 5000); app.done.then(() => { clearTimeout(t); proc.kill(); }); }
+      else proc.kill();
+    };
     meter?.signal?.addEventListener("abort", stop);
     // Read stdout as it comes so a streaming harness (claude stream-json) can report progress along the way.
     // Codex streams JSONL events (--json): its notes, searches and commands become progress; the answer is still in outFile.
@@ -1167,6 +1172,7 @@ export class Brain {
         : it.type === "reasoning" && e.type === "item.completed" ? noteStep(String(it.text || "").replace(/\*\*/g, "")) : null;
       if (step) meter.onProgress(step);
     };
+    let started: string | undefined;
     const readOut = async () => {
       if (harness !== "claude" && harness !== "codex") return new Response(proc.stdout).text();
       let all = "", buf = "";
@@ -1178,6 +1184,8 @@ export class Brain {
         while ((i = buf.indexOf("\n")) >= 0) {
           const line = buf.slice(0, i); buf = buf.slice(i + 1);
           if (app) { for (const l of app.line(line)) codexLine(l); continue; }
+          // The session it's in, as soon as it starts: a run stopped for a new message must still be resumable.
+          if (thread && !started && line.includes('"subtype":"init"')) { try { const id = JSON.parse(line)?.session_id; if (typeof id === "string") started = id; } catch {} }
           if (line.includes('"rate_limit_event"')) { try { this.usage.noteClaudeEvent(JSON.parse(line)?.rate_limit_info); } catch {} continue; }
           // A tool call that failed (a skill command's error): into the log, so "it couldn't" always has the real reason.
           if (line.includes('"is_error":true')) {
@@ -1216,7 +1224,12 @@ export class Brain {
     const code = await proc.exited;
     clearTimeout(timer);
     meter?.signal?.removeEventListener("abort", stop);
-    if (meter?.signal?.aborted) throw new Error("Restarted with your new message.");
+    if (meter?.signal?.aborted) {
+      // Keep the session it was in, so the restart carries on that conversation instead of starting from nothing.
+      const kept = app ? app.threadId : started;
+      if (thread && kept) this.sessions.set(thread, harness as SessionHarness, kept);
+      throw new Error("Restarted with your new message.");
+    }
     if (timedOut) throw new Error(`${name} took longer than ${limitMs >= 120_000 ? `${Math.round(limitMs / 60_000)} min` : `${limitMs / 1000}s`}.`);
     let reply = out;
     // Codex's app-server is closed by us once the turn ends, so its exit code says nothing: the turn's own end does.

@@ -1,7 +1,7 @@
 import { chmodSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export type CodexScenario = { events?: { method: string; params: unknown }[]; answer?: string; fail?: string; log?: string; state?: string };
+export type CodexScenario = { events?: { method: string; params: unknown }[]; answer?: string; fail?: string; log?: string; state?: string; hang?: boolean };
 
 /** Puts a fake `codex` in dir that runs fake-codex-app.ts (a stand-in app-server) with this scenario. */
 export function fakeCodex(dir: string, sc: CodexScenario) {

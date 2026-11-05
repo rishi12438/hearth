@@ -1855,7 +1855,7 @@ function drawDm(stick = true) {
 
 /**
  * Messages you sent while the teammate was mid-run: greyed under the run, going out together as its next turn when it
- * ends. Send now puts one into the run straight away (it starts over with it); New session starts it now instead, as a new
+ * ends. Send now puts one into the run straight away (it's interrupted and carries on with it); New session starts it now instead, as a new
  * thread here (a separate run, in a DM) or its own ramble; Edit takes it back into the box; × drops it.
  */
 function queuedRows(held: any[], runs: any[]) {
@@ -1895,7 +1895,7 @@ function queuedRows(held: any[], runs: any[]) {
   };
   return held.map((m: any, i: number) => row(youWho(), m.createdAt, [h("div", { class: "mtext" }, m.text),
     h("div", { class: "qbar" }, i === held.length - 1 ? h("small", null, why) : null,
-      h("button", { class: "qbtn", title: run ? `Stops ${name}'s run and starts it over with this` : `Send it to ${name}`, on: { click: act(m, "send") } }, "Send now"),
+      h("button", { class: "qbtn", title: run ? `Interrupts ${name} with this: it carries on from where it was, with this in mind` : `Send it to ${name}`, on: { click: act(m, "send") } }, "Send now"),
       h("button", { class: "qbtn", "aria-haspopup": "menu", title: "Start it on its own instead of waiting for this run", on: { click: (e: Event) => newSessionMenu(e.currentTarget as HTMLElement, m) } }, "New session", icon("chevron", 12)),
       h("button", { class: "qbtn", on: { click: act(m, "edit") } }, "Edit"),
       h("button", { class: "qbtn", "aria-label": "Don't send", title: "Don't send", on: { click: act(m, "drop") } }, icon("x", 13)))], false, "queued"));

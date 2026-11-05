@@ -376,3 +376,38 @@ test("a thread's follow-up goes back to the brain holding its session, even when
     expect(await brain.think({ mode: "clean", context: {}, input: "hi" }, sonnet, meter("thread-held"))).toBe("done");
   });
 });
+
+test("a run stopped for a new message keeps its session, so the restart carries on that conversation (Claude and Codex)", async () => {
+  // Claude: the session id comes in its first (init) event, long before the result it never gets to.
+  const bin = mkdtempSync(join(tmpdir(), "hearth-cut-"));
+  writeFileSync(join(bin, "claude"), `#!/bin/sh
+cat >/dev/null
+echo '{"type":"system","subtype":"init","session_id":"sess-cut01"}'
+exec sleep 5
+echo '{"type":"result","is_error":false,"result":"done","session_id":"sess-cut01","total_cost_usd":0.01}'
+`);
+  chmodSync(join(bin, "claude"), 0o755);
+  const brain = new Brain(loadConfig({ HEARTH_DATA: mkdtempSync(join(tmpdir(), "hearth-cut-data-")), HEARTH_AGENT: "claude", HEARTH_SKILLS: "off", HEARTH_BRAIN_JAIL: "off" }));
+  await withPath(bin, async () => {
+    const stop = new AbortController();
+    const m = { ...meter("thread-cut"), signal: stop.signal };
+    setTimeout(() => stop.abort(), 400);
+    await expect(brain.think(JOB, { harness: "claude", model: "" }, m)).rejects.toThrow(/Restarted/);
+    expect(brain.sessions.get("thread-cut", "claude")).toBe("sess-cut01");
+  });
+
+  // Codex: told to stop its turn (turn/interrupt) rather than killed mid-step, and its thread is kept.
+  const cbin = mkdtempSync(join(tmpdir(), "hearth-cutx-"));
+  const log = join(cbin, "reqs.log");
+  fakeCodex(cbin, { hang: true, log });
+  const cbrain = new Brain(loadConfig({ HEARTH_DATA: mkdtempSync(join(tmpdir(), "hearth-cutx-data-")), HEARTH_AGENT: "codex", HEARTH_SKILLS: "off", HEARTH_BRAIN_JAIL: "off" }));
+  await withPath(cbin, async () => {
+    const stop = new AbortController();
+    const m = { ...meter("thread-cutx"), signal: stop.signal };
+    setTimeout(() => stop.abort(), 600);
+    await expect(cbrain.think(JOB, { harness: "codex", model: "" }, m)).rejects.toThrow(/Restarted/);
+    const reqs = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(reqs.map((r) => r.method)).toContain("turn/interrupt");
+    expect(cbrain.sessions.get("thread-cutx", "codex")).toMatch(/^thr-/);
+  });
+});
