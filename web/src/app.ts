@@ -285,7 +285,7 @@ function onEvent(e: { type: string; data?: any }) {
       if (e.data.status === "done" || e.data.status === "failed") readIfOpen(e.data.threadId);
       // Tell them unless they're already looking at that very thread (or that DM).
       const here = (r.view === "chat" && r.job && (r.job === e.data.id || r.job === e.data.followsUp)) || (r.view === "dm" && e.data.threadId === `tm-${r.id}`);
-      if (was && was !== e.data.status && (e.data.status === "done" || e.data.status === "failed") && !e.data.parentId && !here) {
+      if (was && was !== e.data.status && (e.data.status === "done" || e.data.status === "failed") && !e.data.parentId && !here && !e.data.stopped) {
         const m = mate(e.data.teammateId);
         banner(m, `${m.name} ${e.data.status === "done" ? "finished" : "couldn't finish"}`, jobLabel(e.data),
           () => { location.hash = e.data.threadId.startsWith("tm-") ? `#t/${e.data.teammateId}` : `#c/${e.data.threadId}/${e.data.followsUp || e.data.id}`; });
@@ -1317,6 +1317,7 @@ function renderChatLayout(r: { id: string; job?: string }) {
 function drawChat(stick = true) {
   const r = route();
   if (r.view !== "chat" || !S.chat) return;
+  showStops();
   drawHeader();
   const box = document.getElementById("composer") as HTMLTextAreaElement | null;
   if (box && !r.job && S.chat.thread.id !== "new") box.placeholder = `Message #${channelName(S.chat.thread)}`;
@@ -1543,7 +1544,7 @@ function taskMessage(m: any) {
     ];
     body.push(
       appCards(latest),
-      h("button", { class: "clamp short", on: { click: open } }, plain(st === "failed" ? `Couldn't do it: ${latest.result || "it failed"}` : latest.result || "Done.")),
+      h("button", { class: "clamp short", on: { click: open } }, plain(latest.stopped ? "Stopped by you." : st === "failed" ? `Couldn't do it: ${latest.result || "it failed"}` : latest.result || "Done.")),
       small.length ? h("button", { class: "tilelink", on: { click: open } }, small.map(tile)) : null,
       more.length ? h("button", { class: "chips", on: { click: open } }, more.map((x) => h("span", { class: "tchip" }, x))) : null);
     const n = follow.length * 2;
@@ -1655,7 +1656,7 @@ function threadTabs(chat: any, activeId: string | null, min = 1): HTMLElement | 
   const latest = (x: any) => (chat.jobs as any[]).filter((y: any) => !y.parentId && (y.id === x.id || y.followsUp === x.id)).sort((a: any, b: any) => a.createdAt.localeCompare(b.createdAt)).at(-1) || x;
   const strip = h("div", { class: "threadtabs" }, roots.map((x: any) => { const now = latest(x);
     return h("button", { class: `threadtab ${x.id === activeId ? "on" : ""}`, on: { click: () => { location.hash = `#c/${chat.thread.id}/${x.id}`; } } },
-      face(mate(x.teammateId), 20, jobState(now)), h("span", null, jobLabel(x)), now.status === "done" ? null : h("i", { class: `tdot ${now.status}` })); }));
+      face(mate(x.teammateId), 20, jobState(now)), h("span", null, jobLabel(x)), now.status === "done" ? null : h("i", { class: `tdot ${now.stopped ? "stopped" : now.status}` })); }));
   if (activeId) requestAnimationFrame(() => strip.querySelector(".on")?.scrollIntoView({ inline: "center", block: "nearest" }));
   return strip;
 }
@@ -1716,7 +1717,7 @@ function answer(j: any) {
   const did = (j.did || []).filter((d: any) => ["hook", "memory", "skill", "place"].includes(d.kind)).map((d: any) => d.label);
   const canSave = j.status === "done" && !j.followsUp && (j.how === "fresh" || j.how === "repaired") && !(j.did || []).some((d: any) => d.kind === "skill");
   return row({ ...who, badge: h("small", { class: "jobmeta" }, metaLine(j)) }, at, [
-    tiles.length && (j.how === "skill" || j.how === "workflow") ? null : richText(j.status === "failed" ? `Couldn't do it: ${j.result || "it failed"}` : j.result || "Done."),
+    tiles.length && (j.how === "skill" || j.how === "workflow") ? null : richText(j.stopped ? "Stopped by you." : j.status === "failed" ? `Couldn't do it: ${j.result || "it failed"}` : j.result || "Done."),
     tiles.map(tile),
     artifacts(j),
     appCards(j),
@@ -1831,6 +1832,7 @@ function drawDm(stick = true) {
   const el = document.getElementById("dm");
   const d = S.dm;
   if (!el || !d) return;
+  showStops();
   drawHeader();
   const t = rosterEntry(d.teammate.id);
   const direct = new Set(d.messages.map((m: any) => m.id));
@@ -1948,6 +1950,7 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
         if (m.length && (e.key === "ArrowDown" || e.key === "ArrowUp")) { e.preventDefault(); pick = (pick + (e.key === "ArrowDown" ? 1 : m.length - 1)) % m.length; drawMenu(); return; }
         if (m.length && (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey))) { e.preventDefault(); runSlash(m[pick]); return; }
         if (m.length && e.key === "Escape") { e.preventDefault(); menu.hidden = true; return; }
+        if (e.key === "Escape" && escToStop(runs(), bar)) { e.preventDefault(); return; }
         if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); submit(); }
       },
       // A screenshot on the clipboard (⌘⇧⌃4, or Copy on any picture) goes in as an attachment; text still pastes as text.
@@ -1968,6 +1971,24 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
     drawChips(); swap();
   };
   const action = h("button", { class: "act", "aria-label": "Hold to talk" });
+  // What's going here right now: this thread's run, this DM's, or (in a ramble's channel) every task in it.
+  const runs = (): any[] => {
+    const going = (j: any) => !j.parentId && (j.status === "working" || j.status === "queued");
+    if (inThread) return (S.chat?.jobs || []).filter((j: any) => going(j) && (j.id === inThread || j.followsUp === inThread));
+    if (r.view === "dm") return (S.dm?.jobs || []).filter((j: any) => going(j) && j.threadId === `tm-${r.id}`);
+    if (r.view === "chat" && S.chat?.thread?.id === r.id) return (S.chat.jobs || []).filter(going);
+    return [];
+  };
+  // Stop: in the box while something's going, like a coding agent's. A tap stops it; Esc asks first (see escToStop).
+  const stop = h("button", { class: "stopbtn", hidden: true, on: { click: () => stopRuns(runs()) } }, h("i"));
+  const showStop = () => {
+    const now = runs();
+    stop.hidden = !now.length;
+    const who = stopWho(now);
+    stop.setAttribute("aria-label", `Stop ${who}`);
+    stop.title = `Stop ${who} (Esc twice)`;
+  };
+  stopShows.set(targetId, { show: showStop, runs: () => runs(), bar: () => bar });
   const canAttach = r.view !== "dm";
   const pending: any[] = waitingFiles.get(draftKey) || [];
   waitingFiles.set(draftKey, pending);
@@ -2010,12 +2031,56 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
   const bar = h("div", { class: "composer", id: targetId === "composerwrap" ? "composerbox" : undefined, on: {
     dragover: dropping(true), dragleave: dropping(false),
     drop: (e: DragEvent) => { if (!canAttach || !e.dataTransfer?.files.length) return; e.preventDefault(); bar.classList.remove("drop"); upload(Array.from(e.dataTransfer.files)); },
-  } }, clip, box, action, picker);
+  } }, clip, box, stop, action, picker);
   clear(wrap, h("div", { class: "rec", id: targetId === "composerwrap" ? "rec" : undefined, hidden: true }), chips, menu, bar);
   drawChips();
   swap();
   autosize(box);
   drawMenu();
+  showStop();
+}
+
+/** Each message box's stop button, by box: redrawn when a job starts or ends. */
+const stopShows = new Map<string, { show: () => void; runs: () => any[]; bar: () => HTMLElement }>();
+function showStops() { for (const [id, f] of stopShows) document.getElementById(id) ? f.show() : stopShows.delete(id); }
+
+// Esc with the cursor outside the message box works the same (the box handles its own, and sheets close first).
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || e.defaultPrevented || (e.target as HTMLElement)?.closest?.("textarea, input, [contenteditable], .sheet, #scrim")) return;
+  for (const [id, f] of stopShows) {
+    if (!document.getElementById(id)) continue;
+    if (escToStop(f.runs(), f.bar())) { e.preventDefault(); return; }
+  }
+});
+
+const stopWho = (runs: any[]) => {
+  const names = [...new Set(runs.map((j: any) => mate(j.teammateId).name))];
+  return runs.length > 1 ? `${runs.length} runs (${names.join(", ")})` : names[0] || "it";
+};
+
+async function stopRuns(runs: any[]) {
+  if (!runs.length) return;
+  escArmed = 0; document.getElementById("eschint")?.remove();
+  try {
+    await Promise.all(runs.map((j: any) => call(`/api/jobs/${j.id}/stop`, { body: {} })));
+    toast(`Stopped ${stopWho(runs)}`);
+  } catch (e) { handleError(e); }
+}
+
+/**
+ * Esc while something's running: the first press only warns ("Press Esc again to stop Scout"), a second one within a
+ * few seconds stops it, so a stray Esc never kills a run. True when it handled the key.
+ */
+let escArmed = 0;
+function escToStop(runs: any[], anchor: HTMLElement): boolean {
+  if (!runs.length || S.sheetOpen) return false;
+  if (Date.now() - escArmed < 3000) { stopRuns(runs); return true; }
+  escArmed = Date.now();
+  document.getElementById("eschint")?.remove();
+  const hint = h("div", { class: "eschint", id: "eschint", role: "status" }, `Press Esc again to stop ${stopWho(runs)}`);
+  anchor.before(hint);
+  setTimeout(() => { if (Date.now() - escArmed >= 2900) { hint.remove(); escArmed = 0; } }, 3000);
+  return true;
 }
 
 type SlashCommand = { cmd: string; what: string; run: () => void };

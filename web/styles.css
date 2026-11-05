@@ -116,6 +116,11 @@ code { font-family: var(--mono); font-size: .86em; background: var(--surface); p
 .plus { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; flex: none; background: rgba(30, 25, 20, .06); color: var(--ink); }
 .act { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; flex: none; color: var(--ink-2); touch-action: none; user-select: none; -webkit-user-select: none; }
 .act.send { background: var(--primary); color: #fff; }
+/* Stop: in the message box while a teammate is working (a tap stops it; Esc twice too). */
+.stopbtn { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; flex: none; background: var(--ink); }
+.stopbtn[hidden] { display: none; }
+.stopbtn i { width: 13px; height: 13px; border-radius: 3px; background: var(--bg, #fff); }
+.eschint { align-self: center; margin: 0 0 8px; padding: 6px 12px; border-radius: 999px; font-size: 14px; color: var(--ink-2); background: var(--glass); border: 1px solid var(--glass-line); }
 .rec { display: flex; align-items: center; gap: 12px; padding: 0 12px 8px; color: var(--ink-2); font-size: 15px; }
 .rec .clock { font-variant-numeric: tabular-nums; color: var(--muted); }
 .cancel { color: var(--muted); font-size: 15px; }
@@ -681,6 +686,7 @@ a.place:active { background: var(--surface-2); }
 .tdot.working, .tdot.queued { background: var(--ok); animation: pulse 1.4s infinite; }
 .tdot.waiting, .tdot.blocked { background: var(--warn); }
 .tdot.failed { background: var(--danger); }
+.tdot.stopped { background: var(--muted); }
 
 .typing.live { width: 100%; text-align: left; }
 .typing.live span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink-2); }
