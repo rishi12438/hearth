@@ -41,28 +41,18 @@ export function recall(facts: Fact[], query: string, budget = 40, now = new Date
 }
 
 /**
- * Lessons: what the team learned the hard way about getting things done (this tool gets past that site's bot wall, that
- * one doesn't; click through an aggregator's deal before quoting it). They live in their own notebook so they're never
- * crowded out by facts about the user: importance 3 ones go to every run, the rest only when they bear on the task.
+ * Lessons: general rules the team learned the hard way about how to work, for every job ("click through a deal before
+ * quoting it", "on bot-protected sites, Firecrawl interact gets through where Browserless doesn't"). Few and general, so
+ * every run gets all of them; they live in their own notebook so they're never crowded out by facts about the user.
  */
 export const LESSONS = "lessons";
+export const MAX_LESSONS = 30;
 
-export function recallLessons(facts: Fact[], query: string, now = new Date()) {
+export function allLessons(facts: Fact[], now = new Date()) {
   const active = facts.filter((f) => f.notebook === LESSONS && isActive(f, now));
-  const always = active.filter((f) => f.importance === 3).slice(-8);
-  const q = tokens(query);
-  const relevant = active
-    .filter((f) => f.importance !== 3)
-    .map((f) => {
-      let overlap = 0;
-      for (const t of tokens(f.fact)) if (q.has(t)) overlap++;
-      return { f, overlap };
-    })
-    .filter((s) => s.overlap > 0)
-    .sort((a, b) => b.overlap - a.overlap || b.f.createdAt.localeCompare(a.f.createdAt))
-    .slice(0, 8)
-    .map((s) => s.f);
-  return [...always, ...relevant];
+  // Over the cap (the review merges them back down): the ones used and made most recently stay.
+  return active.length <= MAX_LESSONS ? active
+    : [...active].sort((a, b) => (b.lastUsedAt || b.createdAt).localeCompare(a.lastUsedAt || a.createdAt)).slice(0, MAX_LESSONS);
 }
 
 export function search(facts: Fact[], query: string) {

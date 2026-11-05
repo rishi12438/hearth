@@ -280,9 +280,9 @@ EVENT PIPELINE (CONTEXT.eventPipeline: sources, watchers, triggers, timers). Eve
   PROJECTS: when CONTEXT.project is set, this ramble is part of that project (a folder of rambles). Its notebook's facts
     come first in CONTEXT.memory; save anything learned about the project with notebook = CONTEXT.project.notebook, so the
     next ramble in it knows it too.
-- lesson.add {lesson, importance?, evidence}   something learned the hard way about HOW to get things done, for every
-    later job (not a fact about the user). CONTEXT.lessons has the ones that bear on this task: follow them. The
-    learn-from-mistakes skill says when to save one and how to word it. Change one with memory.update {id, fact}.
+- lesson.add {lesson, evidence}   a general rule learned the hard way about HOW to work, for every later job (not a fact
+    about the user, not tied to one task). CONTEXT.lessons has them all: follow them. The learn-from-mistakes skill says
+    when to save one and how to word it. Sharpen one with memory.update {id, fact}; merge overlapping ones with memory.merge.
 - memory.used {ids}   the memory ids you relied on for this reply (always include when you used any)
 - notebook.summary {name, summary}   1-2 sentence "where it stands" for a topic
 - place.add {name, here:true} or {name, lat, lon, radiusM?}   save a place (triggers on the "place" source use it)
@@ -588,8 +588,8 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
     parts.push("", "You were handed ONE job from the user's ramble by the orchestrator. Do it fully now: use actions for reminders,",
       "routines, watches and memory; search the web if you need to. Then reply with the result in 1-5 short lines, written to the user.",
       b.top ? AT_THE_TOP : handUp("a stronger model"),
-      "LESSONS: follow CONTEXT.lessons. When a way failed and another worked, or the user corrected you or told you a better way,",
-      "save it with lesson.add before you reply (see the learn-from-mistakes skill).",
+      "LESSONS: CONTEXT.lessons are rules the team learned the hard way; follow them. When a way failed and another worked, or the",
+      "user corrected you or told you a better way, save the general rule behind it with lesson.add (see the learn-from-mistakes skill).",
       ...atScale(code, workspace, lead), "JOB:", b.input);
   } else if (b.mode === "legwork") {
     parts.push("", "You were handed ONE job from the user's ramble. You do the LEGWORK; a stronger model on the team (the lead) will read",
@@ -599,8 +599,8 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
       "- what you did: actions taken and their results",
       "- anything uncertain or missing, and what you'd ask the user",
       "Be complete and factual; the lead can't search again cheaply.", b.top ? AT_THE_TOP : handUp("a stronger model"),
-      "LESSONS: follow CONTEXT.lessons. When a way failed and another worked, or the user corrected you or told you a better way,",
-      "save it with lesson.add before you reply (see the learn-from-mistakes skill).",
+      "LESSONS: CONTEXT.lessons are rules the team learned the hard way; follow them. When a way failed and another worked, or the",
+      "user corrected you or told you a better way, save the general rule behind it with lesson.add (see the learn-from-mistakes skill).",
       ...atScale(code, workspace, lead), "JOB:", b.input);
   } else if (b.mode === "voice") {
     parts.push("", "You are the lead on ONE job. A teammate on a cheaper model already did the legwork (searches, actions); their notes are",
@@ -623,14 +623,18 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
       "Reply with one short line describing what changed, or " + QUIET + " if nothing.");
   } else if (b.mode === "learn") {
     parts.push("", "LESSONS REVIEW: this thread has gone quiet. Below is what was said and done in it since it was last reviewed.",
-      "Find what it taught about HOW to get things done, for every later job (not facts about the user):",
-      "- a way that failed and another that worked instead (a tool blocked or rate-limited, a different tool or setting got through);",
-      "- the user correcting the team (\"that's wrong\", \"you didn't check\") or pointing it to a better way (\"use X\"), and it worked;",
-      "- time or money wasted on something a sentence would have avoided next time.",
-      "CONTEXT.lessons has every lesson saved so far (with ids). For each new one: lesson.add {lesson, importance, evidence}, worded",
-      "WHEN (the kind of task or site), DO (what works, with the exact tool and setting), AVOID (what failed), naming the sites and",
-      "tools so later jobs find it; importance 3 if every job should see it, else 2. Already there? memory.update {id, fact} only",
-      "if this sharpens it or proved it wrong; never add it twice. Skip one-off bad luck and untested guesses.",
+      "Find what it taught about HOW to work: general rules every later job should follow, whatever the task. Look for:",
+      "- a tool or way that failed and another that worked (which tool beats which, and for what kind of problem);",
+      "- the user correcting the team (\"that's wrong\", \"you didn't check\", \"that doesn't exist\") or pointing it to a better way;",
+      "- time or money wasted on something a rule would have avoided.",
+      "Turn each into a GENERAL rule, not a note about this case: not \"Europcar's $131 deal on Kayak was dead\" but \"Before",
+      "quoting a price or listing, click through to the provider and check it's really available\"; not \"Firecrawl worked on",
+      "enterprise.com\" but \"For sites with bot protection, use Firecrawl interact; Browserless and Browserbase get blocked\".",
+      "One or two short sentences, imperative, with the exact tool names where it's about tools. Nothing about the user (their",
+      "card, their dates): that's memory. Skip one-off bad luck and untested guesses.",
+      "CONTEXT.lessons has every rule saved so far (with ids). Keep the list short and sharp: if a new one overlaps an old one,",
+      "memory.update {id, fact} the old one to cover both, or memory.merge them; never add the same rule twice. Fix or",
+      "memory.forget one this thread proved wrong. Otherwise lesson.add {lesson, evidence} (evidence: what happened, in a line).",
       "Reply with one short line naming what you saved, or " + QUIET + " if the thread taught nothing new.", "", b.input);
   } else if (b.mode === "ideas") {
     parts.push("", "IDEAS: look at memory, aboutYou, recent days, CONTEXT.eventPipeline and recent messages, and suggest up to 2 things the team",
