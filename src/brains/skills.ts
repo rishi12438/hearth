@@ -101,7 +101,8 @@ export const GUIDES: Skill[] = [{
 - Normalize on purpose (dates to ISO, money with its currency, units) and keep the original text next to the parsed value.
 - Dedupe by a real key (order id, tracking number), not by a name or title.
 - Make it resumable: skip items already done (check out/), so a rerun after a stop carries on instead of starting over.
-- Never automate what changes things (send, buy, submit, delete, post). Those go to the user's Approve, one at a time.
+- Never automate what changes things (send, buy, submit, delete, post) inside a bulk script: do each through its tool,
+  one at a time; the tools and the hub decide what to hold for the user.
 
 ## After
 - Say what you automated, the counts, what you checked by hand, and what's still uncertain.
@@ -118,8 +119,7 @@ A workflow has exactly two pieces, and the user sees them as two boxes in Workfl
 
 The user will just say what they want ("tell me when the school emails", "alert me on big charges", "reply to her
 for me"). They won't say how and shouldn't have to: build both pieces yourself, following this, and don't ask them
-which method. When it's done, tell them in plain words what will happen and what won't, and that any script you
-wrote waits for their Approve.
+which method. When it's done, tell them in plain words what will happen and what won't.
 
 ## Piece 1: the Trigger
 A trigger is a SOURCE (where events come from) plus a CONDITION (which ones count). Both are decided by code.
@@ -156,8 +156,8 @@ What happens when the trigger fires. Pick the smallest one that does the job:
   nothing is shown. Use it when the action needs writing, looking things up, or a tool.
 Then who handles it and where it posts (to / post on trigger.add), and a cooldownMin if it can fire in bursts.
 An action that SENDS something (a reply, a forward, a post) must not set itself off: the trigger's check ignores what
-the user or Hearth sent (the outgoing / "from me" flag), and it has a cooldown. Sending uses the normal tools, so it
-waits for the user's Approve unless they chose "Always allow" for that tool or chat; say which it will be.
+the user or Hearth sent (the outgoing / "from me" flag), and it has a cooldown. Send with the normal tools: the tools and
+the hub decide whether a send is held for the user, so the action's prompt just says to send it.
 
 ## Build it, then test it
 One trigger.add makes both pieces: {name, title, source, formula, check?, judge?, action, to?, post?, cooldownMin?}.
