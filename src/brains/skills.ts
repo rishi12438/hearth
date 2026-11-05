@@ -212,7 +212,16 @@ the pattern. Name a tool only when the lesson is which tool to use for a kind of
 (These only show the shape. Your lessons come from what actually happened in your own work.)
 One or two short, imperative sentences. evidence: what happened, in a line.
 
+## Check it before you save it
+- Would it change what a job on a completely different task does? If it only matters for one product, tool or kind of
+  output, save the general habit underneath it ("anything set off by events must be safe to run twice"), or skip it.
+- Is it what the user wanted, not just the fix that happened to work? If they said how they wanted it, the lesson is to
+  do what they said.
+- One rule, under about 200 characters, with no quoted error text, field names, flags or product names (a tool's name
+  only when the lesson is which tool to use for a kind of problem). Two rules are two lessons.
+
 ## Not a lesson
+- How the user likes things to look, sound or be written: a preference, memory.add {notebook: "preferences"}.
 - Facts about the user or their world (their card, their trip, a price you found): that's memory.add.
 - How to do this one subject's job step by step: the Playbook in NOTES.md, or a skill.
 - One-off bad luck (a site down for a minute) or a guess you haven't tested.
