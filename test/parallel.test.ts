@@ -489,3 +489,37 @@ test("a new ramble that's about an earlier one (even a closed one) is matched to
   expect((await hub.similarRamble("can you plan my week please"))).toBeNull(); // only common words: no match
   expect((await hub.similarRamble("weather in tokyo"))).toBeNull();
 });
+
+test("teammates working on one ramble talk: one tells the others, the other hears it mid-run", async () => {
+  await setup();
+  process.env.FAKE_MS = "1200";
+  plan([
+    { id: "a", label: "Orders", task: "list my orders TELLshipmentsSplitIn3", teammate: "Hearth" },
+    { id: "b", label: "Sheet", task: "set up the sheet READ", teammate: "Hearth" },
+  ]);
+  await hub.ramble("orders and a sheet");
+  await until(() => allDone(2), 10_000);
+  const b = (await jobs()).find((j) => j.task.includes("sheet"))!;
+  expect(b.result).toMatch(/\[heard: From Hearth \(hearth-\w+\): shipmentsSplitIn3\]/);
+  const a = (await jobs()).find((j) => j.task.includes("orders"))!;
+  expect(a.result).not.toContain("heard"); // it never reads its own note
+});
+
+test("Activity shows who's working together and what they told each other", async () => {
+  await setup();
+  process.env.FAKE_MS = "2000";
+  plan([
+    { id: "a", label: "Orders", task: "list my orders TELLfound43", teammate: "Hearth" },
+    { id: "b", label: "Sheet", task: "set up the sheet READ", teammate: "Research" },
+  ]);
+  await hub.ramble("orders and a sheet");
+  await until(async () => (await hub.inbox()).some((x: any) => x.kind === "running" && x.notes?.length));
+  const live = (await hub.inbox()).filter((x: any) => x.kind === "running");
+  const orders = live.find((x: any) => x.summary === "Orders")!, sheet = live.find((x: any) => x.summary === "Sheet")!;
+  expect(orders.tag).toMatch(/^hearth-/);
+  expect(orders.team).toEqual(["Research"]);
+  expect(orders.notes.at(-1)).toMatchObject({ to: ["Research"], text: "found43" });
+  expect(sheet.notes.at(-1)).toMatchObject({ from: "Hearth", text: "found43" });
+  await until(() => allDone(2), 10_000);
+  expect((await jobs()).find((j) => j.id === sheet.id)!.result).toContain("found43");
+}, 20_000);

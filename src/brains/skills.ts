@@ -362,6 +362,8 @@ export function installSkills(workDir: string, skills: Skill[]): string {
 export function codexRules(skills: Skill[]): string {
   const commands = [...new Set(skills.flatMap((s) => s.commands))].filter((c) => NAME_RE.test(c));
   if (!commands.length) return "";
+  // Talking to teammates writes to the run's mailbox, outside the read-only sandbox (see team.ts).
+  commands.push("hearth-team");
   return ["# Written by Hearth (src/brains/skills.ts) for the hub's skills; rewritten when they change.",
     ...commands.map((c) => `prefix_rule(pattern=[${JSON.stringify(c)}], decision="allow")`)].join("\n") + "\n";
 }
@@ -409,6 +411,7 @@ export function describeSkillStep(command: unknown): string | null {
   if (/\ssession\s+new\b/.test(c)) return tool === "enkidu-cua" ? "Getting the screen ready" : "Opening the browser";
   if (/\ssession\s+close\b/.test(c)) return tool === "enkidu-cua" ? "Done with the screen" : "Closing the browser";
   if (/\s(screenshot|get_window_state|observe)\b/.test(c)) return tool === "enkidu-cua" ? "Looking at the screen" : "Looking at the page";
+  if (/\s(evaluate|text|snapshot|extract|content|html)\b/.test(c)) return "Reading the page";
   if (/\srecord\b/.test(c)) return "Recording";
   if (/\s(click|type|type_text|press|press_key|scroll|drag)\b/.test(c)) return tool === "enkidu-cua" ? "Using the app" : "Using the page";
   return null;

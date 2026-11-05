@@ -82,6 +82,8 @@ test("installed skills are where Claude Code looks, and hearth-skill searches an
 test("skill steps read as plain progress lines", () => {
   expect(describeSkillStep(`enkidu-browser session use hearth-x open '{"url":"https://www.linkedin.com/in/a"}'`)).toBe("Browsing linkedin.com");
   expect(describeSkillStep("enkidu-browser session use hearth-x screenshot")).toBe("Looking at the page");
+  expect(describeSkillStep(`enkidu-browser session use hearth-x evaluate '{"expression":"document.body.innerText"}'`)).toBe("Reading the page");
+  expect(describeSkillStep(`enkidu-browser session use hearth-x type '{"text":"hi"}'`)).toBe("Using the page");
   expect(describeSkillStep(`enkidu-cua session use t get_window_state '{"pid":1}'`)).toBe("Looking at the screen");
   expect(describeSkillStep(`enkidu-cua session use t click '{"x":1,"y":2}'`)).toBe("Using the app");
   expect(describeSkillStep("hearth-open chrome https://x.com")).toBe("Opening an app");

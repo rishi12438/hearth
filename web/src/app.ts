@@ -362,6 +362,8 @@ function onEvent(e: { type: string; data?: any }) {
       if (S.panel === "mcp") void drawMcp();
       if (r.view === "activity") void renderActivity(); else loadInbox();
       return;
+    // Teammates talked to each other: Activity shows the latest of it under each.
+    case "team": if (r.view === "activity") { clearTimeout(teamRedraw); teamRedraw = setTimeout(renderActivity, 300); } return;
     case "inbox": if (r.view !== "activity") loadInbox(); return; // seen on another device: clear the badge here too
     case "reset": refresh(); return;
   }
@@ -1225,6 +1227,9 @@ function drawDms() {
 
 // ---------------- Activity tab ----------------
 
+let teamRedraw: any;
+
+
 async function renderActivity() {
   frame({ header: h("div"), body: h("div", { id: "activity" }) });
   drawHeader();
@@ -1252,7 +1257,10 @@ function drawActivity() {
         h("span", { class: "grow" },
           h("span", { class: "l1" }, h("b", null, it.summary), h("small", null, [t.name, chan(it.threadId)].filter(Boolean).join(" · ")),
             on && it.startedAt ? h("time", { "data-since": it.startedAt }, elapsed(it.startedAt)) : h("time", null, "Up next")),
-          h("span", { class: "l2 live" }, on ? h("i", { class: "spin" }) : null, h("span", { "data-progress": it.id }, on ? S.progress.get(it.id) || "On it" : "Waiting its turn")))),
+          h("span", { class: "l2 live" }, on ? h("i", { class: "spin" }) : null, h("span", { "data-progress": it.id }, on ? S.progress.get(it.id) || "On it" : "Waiting its turn")),
+          // Who it's working with, and the latest notes between them (like Enkidu's ledger).
+          on && it.team?.length ? h("span", { class: "l2" }, `With ${it.team.join(", ")}`) : null,
+          ...(it.notes || []).map((n: any) => h("span", { class: "l2 note" }, n.to ? `→ ${n.to.join(", ")}: ${n.text}` : `← ${n.from}: ${n.text}`)))),
       h("div", { class: "actbtns" }, stopBtn(it)));
   };
   // An agent asked for an MCP server: nothing contacts it until you approve. Approve goes straight on to its sign-in.
