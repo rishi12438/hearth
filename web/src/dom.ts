@@ -217,9 +217,17 @@ export function greeting(name?: string) {
   return name ? `${part}, ${name}` : part;
 }
 
-export function toast(text: string, kind: "ok" | "err" = "ok") {
-  const t = h("div", { class: `toast ${kind}`, role: "status" }, text);
+/** A short note at the bottom. With `sub` or `actions` it's a card that stays longer (and while you point at it). */
+export function toast(text: string, kind: "ok" | "err" = "ok", opts: { sub?: string; icon?: string; actions?: [string, () => void][] } = {}) {
+  const rich = !!(opts.sub || opts.actions?.length);
+  let timer = 0;
+  const hide = () => { t.classList.remove("show"); setTimeout(() => t.remove(), 300); };
+  const later = () => { clearTimeout(timer); timer = window.setTimeout(hide, rich ? 7000 : 2600); };
+  const t = h("div", { class: `toast ${kind}${rich ? " rich" : ""}`, role: "status", on: rich ? { mouseenter: () => clearTimeout(timer), mouseleave: later } : {} },
+    rich && opts.icon ? h("span", { class: "toast-ic" }, icon(opts.icon, 18)) : null,
+    rich ? h("div", { class: "toast-text" }, h("b", null, text), opts.sub ? h("small", null, opts.sub) : null) : text,
+    ...(opts.actions || []).map(([label, fn]) => h("button", { class: "toast-act", on: { click: () => { fn(); hide(); } } }, label)));
   document.body.appendChild(t);
   requestAnimationFrame(() => t.classList.add("show"));
-  setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 300); }, 2600);
+  later();
 }

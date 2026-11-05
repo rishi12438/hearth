@@ -451,13 +451,40 @@ async function fileBlob(f: any, inline: boolean) {
   return new Blob([await res.arrayBuffer()], { type: inline ? f.mime : "application/octet-stream" });
 }
 
-async function downloadFile(f: any) {
-  try {
-    const url = URL.createObjectURL(await fileBlob(f, false));
-    const a = h("a", { href: url, download: f.name });
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 60_000);
-  } catch (e) { handleError(e); }
+/** Save a file to this device and say where it went. In the Mac app it lands in ~/Downloads (the app reports back via
+ *  window.hearthDownloaded) with Show in Finder / Open; in a browser, the browser's own downloads take it. */
+const macBridge = () => (window as any).webkit?.messageHandlers?.hearth;
+const savesWaiting = new Map<string, ((r: any) => void)[]>();
+(window as any).hearthDownloaded = (r: any) => {
+  const q = savesWaiting.get(r.asked); const done = q?.shift(); if (!q?.length) savesWaiting.delete(r.asked);
+  if (r.error) toast(r.error, "err");
+  else toast(r.name, "ok", { icon: "check", sub: `Downloaded to ${r.where}`, actions: [
+    ["Show in Finder", () => macBridge()?.postMessage({ type: "file-reveal", path: r.path })],
+    ["Open", () => macBridge()?.postMessage({ type: "file-open", path: r.path })]] });
+  done?.(r);
+};
+function saveBlob(blob: Blob, name: string): Promise<boolean> {
+  const a = h("a", { href: URL.createObjectURL(blob), download: name });
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
+  if (!macBridge()) { toast(name, "ok", { icon: "download", sub: "Saved to your browser's downloads" }); return Promise.resolve(true); }
+  if (!(window as any).hearthSavesFiles) { toast("This Hearth app can't save files yet. Update it, or open Hearth in your browser.", "err"); return Promise.resolve(false); }
+  return new Promise((resolve) => {
+    const q = savesWaiting.get(name) || []; q.push((r) => resolve(!r.error)); savesWaiting.set(name, q);
+    setTimeout(() => resolve(false), 60_000);
+  });
+}
+
+async function downloadFile(f: any, btn?: HTMLElement) {
+  const before = btn ? [...btn.childNodes] : [];
+  const label = btn?.classList.contains("big");
+  if (btn) { (btn as HTMLButtonElement).disabled = true; btn.classList.add("busy"); if (label) clear(btn, icon("download", 16), "Downloading…"); }
+  let ok = false;
+  try { ok = await saveBlob(await fileBlob(f, false), f.name); } catch (e) { handleError(e); }
+  if (!btn) return;
+  btn.classList.remove("busy");
+  if (ok && label) clear(btn, icon("check", 16), "Downloaded");
+  setTimeout(() => { (btn as HTMLButtonElement).disabled = false; if (label) clear(btn, ...before); }, ok ? 2500 : 0);
 }
 
 /** A file shown in the app: rendered Markdown, a video/audio player, CSV as a table, calendar invites as events. */
@@ -480,7 +507,7 @@ async function viewFile(f: any) {
       else if (m === "application/json") { let t = text; try { t = JSON.stringify(JSON.parse(text), null, 2); } catch {} view = h("pre", { class: "code" }, t); }
       else view = h("pre", { class: /\.(md|txt|log)$/i.test(f.name) ? "output" : "code" }, text);
     }
-    openSheet(f.name, [view, h("button", { class: "btn primary big", on: { click: () => downloadFile(f) } }, icon("download", 16), "Download")],
+    openSheet(f.name, [view, h("button", { class: "btn primary big", on: { click: (e: Event) => downloadFile(f, e.currentTarget as HTMLElement) } }, icon("download", 16), "Download")],
       { onClose: () => URL.revokeObjectURL(url) });
   } catch (e) { handleError(e); }
 }
@@ -558,7 +585,7 @@ function fileCard(id: string) {
     h("span", { class: "ficon" }, icon(fileIcon(f.mime), 18)),
     h("span", { class: "grow" }, h("b", null, f.name), h("small", null, `${kb(f.size)}${f.source === "you" ? " · from you" : ""}`)),
     viewable(f.mime) ? h("button", { class: "btn ghost small", on: { click: () => viewFile(f) } }, "View") : null,
-    h("button", { class: "btn ghost small", "aria-label": `Download ${f.name}`, on: { click: () => downloadFile(f) } }, icon("download", 15)));
+    h("button", { class: "btn ghost small", "aria-label": `Download ${f.name}`, on: { click: (e: Event) => downloadFile(f, e.currentTarget as HTMLElement) } }, icon("download", 15)));
 }
 
 function openFiles() {
@@ -4743,9 +4770,7 @@ async function exportData() {
     const res = await fetch(hub.url + "/api/export", { headers: authHeaders(hub) });
     if (!res.ok) throw new Error("Export failed");
     const blob = await res.blob();
-    const a = h("a", { href: URL.createObjectURL(blob), download: `hearth-export-${new Date().toISOString().slice(0, 10)}.json` });
-    document.body.appendChild(a); a.click(); a.remove();
-    toast("Exported");
+    await saveBlob(blob, `hearth-export-${new Date().toISOString().slice(0, 10)}.json`);
   } catch (e) { handleError(e); }
 }
 
@@ -4979,8 +5004,7 @@ window.addEventListener("message", (e: MessageEvent) => {
   else if (e.data.hearth === "download") {
     // Plain text types only, with a safe file name.
     const type = /^(text\/(plain|csv|calendar|tab-separated-values)|application\/json)$/.test(String(e.data.type)) ? String(e.data.type) : "text/plain";
-    const a = h("a", { href: URL.createObjectURL(new Blob([String(e.data.text || "")], { type })), download: String(e.data.name || "export.txt").replace(/[^\w.\- ]/g, "_").slice(0, 80) });
-    document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    void saveBlob(new Blob([String(e.data.text || "")], { type }), String(e.data.name || "export.txt").replace(/[^\w.\- ]/g, "_").slice(0, 80));
   } else if (e.data.hearth === "link") {
     // An app asked to open a web page (YouTube, a booking page): web links only, in a new tab.
     try { const u = new URL(String(e.data.url)); if (/^https?:$/.test(u.protocol)) window.open(u.href, "_blank", "noopener,noreferrer"); } catch {}

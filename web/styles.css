@@ -452,6 +452,13 @@ textarea.field { resize: vertical; line-height: 1.4; }
   padding: 10px 16px; border-radius: 999px; font-size: 14px; font-weight: var(--fw-semibold); z-index: 100; transition: all .25s; max-width: 90%; text-align: center; pointer-events: none; }
 .toast.show { transform: translate(-50%, 0); opacity: 1; }
 .toast.err { background: var(--danger); color: #fff; }
+.toast.rich { display: flex; align-items: center; gap: 12px; text-align: left; border-radius: 16px; padding: 10px 10px 10px 14px; pointer-events: auto; width: max-content; }
+.toast-ic { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 10px; background: color-mix(in srgb, currentColor 14%, transparent); flex: none; }
+.toast-text { display: flex; flex-direction: column; min-width: 0; }
+.toast-text b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46ch; }
+.toast-text small { font-weight: 400; font-size: 12.5px; opacity: .7; }
+.toast-act { flex: none; color: inherit; background: color-mix(in srgb, currentColor 12%, transparent); border-radius: 999px; padding: 7px 12px; font: inherit; font-size: 13px; }
+.toast-act:hover { background: color-mix(in srgb, currentColor 22%, transparent); }
 .jump-results { display: flex; flex-direction: column; gap: 2px; margin-top: 10px; }
 .jump-results > small { color: var(--muted); font-size: 12px; font-weight: var(--fw-semibold); text-transform: uppercase; letter-spacing: .06em; margin: 12px 4px 4px; }
 .jump-row { display: flex; align-items: center; gap: 12px; padding: 9px 8px; border-radius: 10px; text-align: left; }
