@@ -316,7 +316,9 @@ export type Approval = Doc & {
     | { type: "skill"; name: string; repo: string; path: string; sha: string; hash: string; url: string; update?: boolean }
     /** An MCP server an agent asked for (mcp.ts). Approve turns it on; if it needs a login, the agent signs in with its
      * own browser (or saves an API key from the site). */
-    | { type: "mcp-server"; server: string; url: string };
+    | { type: "mcp-server"; server: string; url: string }
+    /** A job blocked on a site wants to carry on in Chrome on your Mac (other-browser.ts); Approve covers its conversation. */
+    | { type: "browser"; computer: string; url: string; threadId: string };
   /** expired: nobody answered within a day (APPROVAL_TTL_MS), so it didn't run and no longer asks. */
   status: "pending" | "approved" | "rejected" | "done" | "failed" | "expired";
   result?: string;

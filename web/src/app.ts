@@ -1710,8 +1710,8 @@ const approvalState = (a: any) => a.status === "done" ? "Approved and done" : a.
 
 const CHANNEL_NAME: Record<string, string> = { whatsapp: "WhatsApp", slack: "Slack", gmail: "Gmail", instagram: "Instagram", linkedin: "LinkedIn", x: "X" };
 /** "Always allow": for a message to one chat, one kind of Google change, or one MCP tool (scripts and payments always ask). */
-const alwaysBtn = (ap: any, then?: () => void) => ap?.action?.type === "message" || ap?.action?.type === "mcp" || (ap?.action?.type === "google" && GOOGLE_KINDS[ap.action.kind])
-  ? h("button", { class: "sbtn", title: ap.action.type === "mcp" ? `Let ${ap.action.server}'s ${ap.action.tool} run without asking from now on (change it in /mcp)` : ap.action.type === "google" ? `${GOOGLE_KINDS[ap.action.kind]}: do it without asking from now on` : `Send future ${CHANNEL_NAME[ap.action.channel] || ""} messages to ${ap.action.to} without asking`, on: { click: async () => { await decide(ap.id, true, true); then?.(); } } }, "Always allow")
+const alwaysBtn = (ap: any, then?: () => void) => ap?.action?.type === "message" || ap?.action?.type === "mcp" || ap?.action?.type === "browser" || (ap?.action?.type === "google" && GOOGLE_KINDS[ap.action.kind])
+  ? h("button", { class: "sbtn", title: ap.action.type === "browser" ? "Let teammates use Chrome on your Mac for blocked sites without asking from now on" : ap.action.type === "mcp" ? `Let ${ap.action.server}'s ${ap.action.tool} run without asking from now on (change it in /mcp)` : ap.action.type === "google" ? `${GOOGLE_KINDS[ap.action.kind]}: do it without asking from now on` : `Send future ${CHANNEL_NAME[ap.action.channel] || ""} messages to ${ap.action.to} without asking`, on: { click: async () => { await decide(ap.id, true, true); then?.(); } } }, "Always allow")
   : null;
 /** The Google changes that wait for Approve (connectors/google-agent.ts CHANGE_KINDS), as Settings → Always allowed names them. */
 const GOOGLE_KINDS: Record<string, string> = {
@@ -4538,6 +4538,7 @@ async function openAlwaysAllowed() {
     const { keys } = await call("/api/always-allow");
     const nice = (k: string) => {
       const [ch, ...rest] = k.split(":"); const to = rest.join(":");
+      if (ch === "browser") return { app: "Your Mac", to: "Using Chrome on your Mac when a site blocks the hub's browser" };
       if (ch === "google") return { app: to.startsWith("calendar") ? "Google Calendar" : "Google Drive", to: GOOGLE_KINDS[to] || to };
       return { app: CHANNEL_NAME[ch] || ch, to: ch === "whatsapp" ? to.replace(/@.*/, "") : to };
     };

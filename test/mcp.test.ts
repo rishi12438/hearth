@@ -12,6 +12,7 @@ import { claudeMcpConfig, codexMcpConfig } from "../src/brain.ts";
 const MCP = "https://mcp.example.com/mcp";
 const OPEN = "https://open.example.com/mcp";
 const KEYED = "https://keyed.example.com/mcp";
+const INURL = "https://bb.example.com/mcp?proxies=true";
 let dir: string, vault: Vault, mcp: Mcp, now: number;
 let calls: string[];
 let valid: Set<string>; // access tokens the MCP server takes right now
@@ -44,6 +45,7 @@ async function fakeFetch(input: any, init?: RequestInit): Promise<Response> {
   if (u.href === MCP) return mcpServer(req, () => valid.has(bearer));
   if (u.href === OPEN) return mcpServer(req, () => true);
   if (u.href === KEYED) return mcpServer(req, () => req.headers.get("x-api-key") === "sekret");
+  if (u.origin + u.pathname === "https://bb.example.com/mcp") return mcpServer(req, () => u.searchParams.get("proxies") === "true" && u.searchParams.get("apiKey") === "sekret" && !req.headers.get("authorization"));
   if (u.href === "https://mcp.example.com/.well-known/oauth-protected-resource/mcp") return ok({ resource: MCP, authorization_servers: ["https://auth.example.com"], scopes_supported: ["read", "write"] });
   if (u.href === "https://auth.example.com/.well-known/oauth-authorization-server") return ok({ issuer: "https://auth.example.com", authorization_endpoint: "https://auth.example.com/authorize", token_endpoint: "https://auth.example.com/token", registration_endpoint: "https://auth.example.com/register" });
   if (u.href === "https://auth.example.com/register") {
@@ -212,6 +214,17 @@ test("hearth-mcp key: an agent saves a key for an approved server that isn't con
   // Working now: an agent can't swap its login.
   expect(await mcpAgent(mcp, ["key", "keyed", "other", "X-Api-Key"], "an agent")).toContain("connected already");
   expect(JSON.parse(vault.get("mcp:keyed")!).value).toBe("sekret");
+});
+
+test("hearth-mcp key ?param: the key goes in the address on the way out, never in mcp.json or a header", async () => {
+  await mcp.add({ url: INURL, name: "bb" }, "an agent", { agent: true });
+  await mcp.approve("bb");
+  expect(mcp.view("bb")!.state).toBe("signin");
+  expect(await mcpAgent(mcp, ["key", "bb", "x", "?bad name"], "an agent")).toContain("isn't a parameter name");
+  expect(await mcpAgent(mcp, ["key", "bb", "wrong", "?apiKey"], "an agent")).toContain("didn't take that key");
+  expect(await mcpAgent(mcp, ["key", "bb", "sekret", "?apiKey"], "an agent")).toContain("connected");
+  expect(mcp.view("bb")!.url).toBe(INURL);
+  expect(await Bun.file(join(dir, "mcp.json")).text()).not.toContain("sekret");
 });
 
 test("bad input is refused", async () => {

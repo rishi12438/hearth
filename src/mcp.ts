@@ -51,7 +51,9 @@ type OAuthCreds = {
   kind: "oauth"; clientId: string; clientSecret?: string; authMethod: AuthMethod; tokenEndpoint: string; resource: string;
   accessToken: string; refreshToken?: string; expiresAt?: number; scope?: string;
 };
-type KeyCreds = { kind: "key"; header: string; value: string };
+/** query: the key goes in the address as ?<query>=<key> (Browserbase's browserbaseApiKey), never in mcp.json; else in header. */
+type KeyCreds = { kind: "key"; header: string; value: string; query?: string };
+const QUERY_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 type Creds = OAuthCreds | KeyCreds;
 type AuthMethod = "none" | "client_secret_post" | "client_secret_basic";
 type Client = { clientId: string; clientSecret?: string; authMethod: AuthMethod; redirectUri: string; issuer: string };
@@ -313,15 +315,18 @@ export class Mcp {
     const k = String(key || "").trim();
     if (!k || k.length > 4000 || /\s/.test(k.replace(/^Bearer /, ""))) return { error: "That doesn't look like a key." };
     const h = header.trim();
-    if (!HEADER_RE.test(h)) return { error: "That isn't a header name." };
+    // "?name": the server wants the key in its address (?name=<key>) rather than a header.
+    const query = h.startsWith("?") ? h.slice(1) : null;
+    if (query !== null ? !QUERY_RE.test(query) : !HEADER_RE.test(h)) return { error: query !== null ? "That isn't a parameter name." : "That isn't a header name." };
     const prev = this.o.vault.get(`mcp:${name}`);
-    this.o.vault.set(`mcp:${name}`, JSON.stringify({ kind: "key", header: h, value: h.toLowerCase() === "authorization" && !/^\w+ /.test(k) ? `Bearer ${k}` : k } satisfies KeyCreds));
+    this.o.vault.set(`mcp:${name}`, JSON.stringify((query !== null ? { kind: "key", header: "", value: k.replace(/^Bearer /, ""), query }
+      : { kind: "key", header: h, value: h.toLowerCase() === "authorization" && !/^\w+ /.test(k) ? `Bearer ${k}` : k }) satisfies KeyCreds));
     const st = await this.check(name);
     if (st.state !== "connected") {
       // A key the server refused isn't kept (nor does it wipe a sign-in that was there).
       if (prev) this.o.vault.set(`mcp:${name}`, prev); else this.forget(name);
       await this.check(name).catch(() => {});
-      return { error: `${name} didn't take that key${st.error ? ` (${st.error})` : ""}. Check you copied the whole key, or the header it wants (hearth-mcp key ${name} <key> <header>).` };
+      return { error: `${name} didn't take that key${st.error ? ` (${st.error})` : ""}. Check you copied the whole key, or where it wants it: a header (hearth-mcp key ${name} <key> <header>) or the address (hearth-mcp key ${name} <key> ?<param>).` };
     }
     return { value: this.view(name)! };
   }
@@ -535,7 +540,8 @@ export class Mcp {
     const c = this.creds(name);
     const headers = new Headers(init.headers);
     if (c?.kind === "oauth") headers.set("Authorization", `Bearer ${c.accessToken}`);
-    if (c?.kind === "key") headers.set(c.header, c.value);
+    if (c?.kind === "key" && !c.query) headers.set(c.header, c.value);
+    if (c?.kind === "key" && c.query) { const u = new URL(url); u.searchParams.set(c.query, c.value); url = u.href; }
     const r = await this.fetch(url, { ...init, headers, redirect: "error" });
     if (r.status === 401 && again && c?.kind === "oauth" && c.refreshToken && (await this.refresh(name))) {
       try { await r.body?.cancel(); } catch {}
@@ -732,8 +738,10 @@ tools (named mcp__<server>__<tool> on Claude). This command reaches all of them,
   what it's for. Once it's connected you get a turn to carry on, so don't ask the user to tell you.
 - \`hearth-mcp signin <server>\`: a fresh sign-in link for an approved server that's signed out. Open it in your own
   browser and go through it yourself (your browser has the user's logins; ask them only for a password you don't have).
-- \`hearth-mcp key <server> <api key> [header]\`: for an approved server whose sign-in doesn't work: get an API key
-  from its website in your browser and save it here. It's checked right away; a key it refuses isn't kept.
+- \`hearth-mcp key <server> <api key> [header | ?param]\`: for an approved server whose sign-in doesn't work: get an API key
+  from its website in your browser and save it here. It goes in the Authorization header unless you name another header,
+  or \`?param\` for a server that wants it in its address (\`?browserbaseApiKey\`). It's checked right away; a key it
+  refuses isn't kept.
 
 Use the server's own tools when you have them; \`call\` is for a server added after this run started.
 
@@ -789,12 +797,12 @@ export async function mcpAgent(mcp: Mcp, argv: string[], by: string, o: { approv
         : `${a} is connected.`;
     }
     case "key": {
-      if (!a || !b) return "usage: hearth-mcp key <server> <api key> [header]";
+      if (!a || !b) return "usage: hearth-mcp key <server> <api key> [header | ?param]";
       const r = await mcp.agentKey(a, b, c || undefined);
       if (!r.value) return r.error;
       return `Saved. ${line(r.value)}`;
     }
     default:
-      return "usage: hearth-mcp list | tools <server> | call <server> <tool> [json|-] | add <url> [name] | signin <server> | key <server> <api key> [header]";
+      return "usage: hearth-mcp list | tools <server> | call <server> <tool> [json|-] | add <url> [name] | signin <server> | key <server> <api key> [header | ?param]";
   }
 }

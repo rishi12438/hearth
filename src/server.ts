@@ -9,6 +9,7 @@ import { randomBytes } from "node:crypto";
 import { availableHarnesses } from "./brain.ts";
 import { Computers, COPY_ITEMS, isCopyItem } from "./computers.ts";
 import { Machines, realE2b, realSsh, type E2b, type Ssh } from "./machines.ts";
+import { OtherBrowser } from "./other-browser.ts";
 import { Vault } from "./vault.ts";
 import { Connect } from "./connectors/index.ts";
 import { sourceById } from "./sources/index.ts";
@@ -162,6 +163,14 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   const connect = new Connect(hub, vault, voice);
   void connect.start();
   hub.connect = connect;
+  // Another browser for jobs a site blocks (other-browser.ts): Chrome on your Mac once you approve. What else there is
+  // when that can't be, hearth-help stuck says (help.ts).
+  hub.otherBrowser = new OtherBrowser({
+    mac: { name: () => computers.macName(), act: (sid, a) => computers.browse(sid, a.action, a.params) },
+    gate: (threadId) => hub.macBrowserGate(threadId),
+    ask: (c) => hub.requestMacBrowser(c),
+  });
+  hub.macName = () => computers.macName();
   const admin = adminToken(config.dataDir);
   const machines = new Machines({
     dataDir: config.dataDir, vault,
@@ -385,6 +394,28 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (argv[0] === "key") await hub.log("mcp.agent", `hearth-mcp key ${String(argv[1] || "").slice(0, 40)} (key not logged)`);
         return new Response(out + "\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
       } catch (e: any) { return new Response(`Error: ${String(e?.message || e).slice(0, 500)}\n`, { status: 502, headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } }); }
+    }
+    // The agent's hearth-help (help.ts): what to do when it's stuck, from what's there right now. Same keys as hearth-browser.
+    if (path === "/api/agent/help" && method === "POST") {
+      const key = req.headers.get("x-hearth-agent");
+      if (!fromThisMachine(req, server) || !connect.isAgentKey(key)) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not the agent's key."); }
+      let argv: string[] = [];
+      try { argv = (await req.formData()).getAll("a").slice(0, 10).map((a) => String(a).slice(0, 2000)); } catch { throw new HttpError(400, "Send the command's words as a fields."); }
+      const out = await hub.helpAgent(argv, req.headers.get("x-hearth-job")?.slice(0, 100) || undefined);
+      return new Response(out + "\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
+    }
+    // The agent's hearth-browser (other-browser.ts): another browser when a site blocks this one. Same keys as hearth-mcp.
+    // A screenshot comes back as the image itself; the command saves it where the agent works.
+    if (path === "/api/agent/browser" && method === "POST") {
+      const key = req.headers.get("x-hearth-agent");
+      if (!fromThisMachine(req, server) || !connect.isAgentKey(key)) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not the agent's key."); }
+      let argv: string[] = [];
+      try { argv = (await req.formData()).getAll("a").slice(0, 20).map((a) => String(a).slice(0, 20_000)); } catch { throw new HttpError(400, "Send the command's words as a fields."); }
+      server.timeout(req, 0);
+      const out = await hub.browserAgent(argv, req.headers.get("x-hearth-job")?.slice(0, 100) || undefined)
+        .catch((e: any) => ({ text: `Error: ${String(e?.message || e).slice(0, 400)}` }));
+      if ("png" in out) return new Response(new Blob([out.png as Uint8Array<ArrayBuffer>]), { headers: { "Content-Type": out.mime || "image/png", "Cache-Control": "no-store" } });
+      return new Response(out.text + "\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
     }
     // The agent's hearth-skill-store (brains/skill-store.ts): find, read and install public skills. An install is an Approve
     // card in the job's thread (X-Hearth-Job); nothing is installed until you tap it. Same keys as hearth-mcp.

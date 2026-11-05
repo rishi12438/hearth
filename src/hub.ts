@@ -2067,6 +2067,80 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     } catch (e: any) { return `Error: ${String(e?.message || e).slice(0, 300)}`; }
   }
 
+  // ---------- another browser for blocked sites (other-browser.ts) ----------
+
+  /** Set by the server once the Mac link and the Browserbase key are there. */
+  otherBrowser: import("./other-browser.ts").OtherBrowser | null = null;
+  /** Conversations you said yes (or no) to using your Mac's browser in, until when. */
+  private macBrowserYes = new Map<string, number>();
+  private macBrowserNo = new Map<string, number>();
+
+  /** May this conversation use Chrome on your Mac? Always allow, an Approve in it, a No, a card still waiting, or ask. */
+  async macBrowserGate(threadId: string): Promise<import("./other-browser.ts").MacGate> {
+    const t = this.clock().getTime();
+    if ((await this.alwaysAllowed()).includes("browser:mac")) return "ok";
+    if ((this.macBrowserYes.get(threadId) ?? 0) > t) return "ok";
+    if ((this.macBrowserNo.get(threadId) ?? 0) > t) return "no";
+    const waiting = (await this.store.all<Approval>("approvals")).some((a) => a.status === "pending" && a.action.type === "browser" && a.action.threadId === threadId);
+    return waiting ? "pending" : "ask";
+  }
+
+  /** A job is stuck on a site and wants Chrome on your Mac: one Approve card in its thread. */
+  async requestMacBrowser(c: { threadId: string; jobId?: string; url: string; why?: string; mac: string }) {
+    const job = c.jobId ? await this.store.get<Job>("jobs", c.jobId) : null;
+    const mate = job?.teammateId ? await this.store.get<any>("teammates", job.teammateId) : null;
+    let site = c.url;
+    try { site = new URL(c.url).hostname.replace(/^www\./, ""); } catch {}
+    const ap = await this.store.put<Approval>("approvals", {
+      ...this.doc({}), threadId: c.threadId, jobId: job?.id,
+      summary: `Use Chrome on ${c.mac} for ${site}`.slice(0, 200),
+      details: `${mate?.name || "A teammate"} is blocked on ${site} in the hub's browser${c.why ? ` (${c.why})` : ""}. Approve and it carries on in Chrome on ${c.mac}: a window opens there, on your home connection and with your logins on that Mac. This covers this conversation for 12 hours.`,
+      action: { type: "browser", computer: c.mac, url: c.url, threadId: c.threadId },
+      status: "pending",
+    } as Approval);
+    if (job) await this.saveJob({ ...job, approvalIds: [...(job.approvalIds || []), ap.id] });
+    await this.log("approval.requested", `${ap.summary} (asked by ${mate?.name || "an agent"})`);
+    this.emit("approval", ap);
+    await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: await this.approvalLink(ap) });
+  }
+
+  private async runMacBrowserOk(act: Extract<Approval["action"], { type: "browser" }>): Promise<{ ok: boolean; output: string }> {
+    this.macBrowserYes.set(act.threadId, this.clock().getTime() + 12 * 3600_000);
+    this.macBrowserNo.delete(act.threadId);
+    return { ok: true, output: `Chrome on ${act.computer} is open to you in this conversation. Carry on: hearth-browser open ${act.url}` };
+  }
+
+  /** The online Mac's name (set by the server), for hearth-help. */
+  macName: () => string | null = () => null;
+
+  /** What `hearth-help <argv>` says, for /api/agent/help: built from what's there right now (help.ts). */
+  async helpAgent(argv: string[], jobId?: string): Promise<string> {
+    const { stuckHelp, HELP_TOPICS } = await import("./help.ts");
+    const [topic = "topics", ...rest] = argv;
+    if (topic !== "stuck") return HELP_TOPICS;
+    let job = jobId ? await this.store.get<Job>("jobs", jobId) : null;
+    if (!job) {
+      const working = (await this.store.all<Job>("jobs")).filter((j) => j.status === "working");
+      if (working.length === 1) job = working[0];
+    }
+    const mac = this.macName();
+    const gate = mac ? await this.macBrowserGate(job?.threadId || ORPHAN_THREAD) : null;
+    await this.log("help.stuck", rest.join(" ").slice(0, 200));
+    return stuckHelp({ what: rest.join(" ").slice(0, 300), mac, gate, servers: this.connect?.mcp.list() ?? [] });
+  }
+
+  /** What `hearth-browser <argv>` does, for /api/agent/browser. */
+  async browserAgent(argv: string[], jobId?: string): Promise<import("./other-browser.ts").Out> {
+    if (!this.otherBrowser) return { text: "There's no other browser on this hub." };
+    let job = jobId ? await this.store.get<Job>("jobs", jobId) : null;
+    if (!job) {
+      const working = (await this.store.all<Job>("jobs")).filter((j) => j.status === "working");
+      if (working.length === 1) job = working[0];
+    }
+    if (argv[0] === "open") await this.log("browser.other", `hearth-browser open ${String(argv[1] || "").slice(0, 160)}`);
+    return this.otherBrowser.run(argv, { threadId: job?.threadId || ORPHAN_THREAD, jobId: job?.id });
+  }
+
   /**
    * An agent called an MCP tool that asks first (mcp.ts): an Approve card, in the job's thread. The call hasn't been made;
    * Approve makes exactly this call. The same call again while one waits gets the same card, not a second one.
@@ -2380,6 +2454,11 @@ ${JSON.stringify(shown, null, 1)}
       await this.setAlwaysAllowed([...(await this.alwaysAllowed()), `google:${ap.action.kind}`]);
       await this.log("approval.always", `Always allow: ${CHANGE_KINDS[ap.action.kind]}`);
     }
+    if (yes && always && ap.action.type === "browser") {
+      await this.setAlwaysAllowed([...(await this.alwaysAllowed()), "browser:mac"]);
+      await this.log("approval.always", "Always allow teammates to use Chrome on your Mac for blocked sites");
+    }
+    if (!yes && ap.action.type === "browser") this.macBrowserNo.set(ap.action.threadId, this.clock().getTime() + 12 * 3600_000);
     if (yes && always && ap.action.type === "mcp") {
       this.connect?.mcp.setGate(ap.action.server, ap.action.tool, false);
       await this.log("approval.always", `Always allow ${ap.action.server}: ${ap.action.tool}`);
@@ -2403,6 +2482,7 @@ ${JSON.stringify(shown, null, 1)}
       const out = act.type === "google" ? await this.runGoogle(act)
         : act.type === "mcp" ? await this.runMcp(act)
         : act.type === "skill" ? await this.runSkillInstall(act)
+        : act.type === "browser" ? await this.runMacBrowserOk(act)
         : act.type === "message"
         ? await (this.senders[act.channel]?.send(act.to, act.text, { subject: act.subject, threadId: act.threadId, from: act.from }).then(() => ({ ok: true, output: "Sent." }), (e: any) => ({ ok: false, output: String(e?.message || e) }))
           ?? { ok: false, output: `${act.channel} isn't connected.` })

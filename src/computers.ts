@@ -17,6 +17,8 @@ import { ComputerGone, MODEL_RE, type BrainInput, type BrainProfile, type Meter,
 // computer -> hub   cookies {site, data, hash}   (browser cookies the owner asked this Mac to copy up)
 //                   noCookies {site, why}   (asked for a site fresh — wantCookies {fresh} — and its Chrome has no login)
 //                   logins {items}   (only to computers the hub set up itself, never to your Mac)
+// hub -> Mac        browse {id, sid, action, params}   (a job's hearth-browser command, after you approved it; other-browser.ts)
+// Mac -> hub        browsed {id, ok, out?, png?}       (enkidu-browser's answer there; a screenshot comes back as base64)
 
 /** What a computer can copy up so the cloud can work while it's off. Each is a login file the harness reads. */
 export const COPY_ITEMS = {
@@ -34,9 +36,15 @@ const MAX_COPY = 64 * 1024;
 
 type Socket = { send(data: string): unknown; close(code?: number, reason?: string): unknown };
 type Pending = { resolve: (s: string) => void; reject: (e: Error) => void; meter?: Meter };
+/** What the Mac's browser said to one hearth-browser command. */
+export type Browsed = { text: string } | { png: Uint8Array; mime?: "image/png" | "image/jpeg" };
+/** A screenshot fits in one message on the line (the hub takes up to 1 MB): the Mac shrinks bigger ones. */
+export const MAX_SHOT = 700_000;
 type Link = {
   deviceId: string; name: string; ws: Socket; harnesses: string[]; platform: string; tools: ToolStatus[];
   connectedAt: number; lastAlive: number; rttMs: number | null; running: Map<string, Pending>; want: CopyItem[];
+  /** hearth-browser commands waiting for this Mac's answer. */
+  browsing: Map<string, { done: (r: Browsed | Error) => void }>;
   /** The hub set this computer up (a sandbox or your VM), so it gets the hub's logins. */
   cloud: boolean;
   /** Opens the agent's Google commands for jobs this computer runs; made fresh for each connection, dead when it closes. */
@@ -90,7 +98,7 @@ export class Computers implements Remote {
   attach(deviceId: string, name: string, ws: Socket, want: CopyItem[] = [], cloud = false) {
     if (this.links.has(deviceId)) this.drop(deviceId, "replaced by a new connection");
     const t = this.now();
-    this.links.set(deviceId, { deviceId, name, ws, harnesses: [], platform: "", tools: [], connectedAt: t, lastAlive: t, rttMs: null, running: new Map(), want, cloud, agentKey: randomBytes(24).toString("hex") });
+    this.links.set(deviceId, { deviceId, name, ws, harnesses: [], platform: "", tools: [], connectedAt: t, lastAlive: t, rttMs: null, running: new Map(), browsing: new Map(), want, cloud, agentKey: randomBytes(24).toString("hex") });
     this.seen.set(deviceId, t);
     this.send(deviceId, { t: "ping", ts: t });
   }
@@ -138,6 +146,15 @@ export class Computers implements Remote {
         this.changed();
         return;
       }
+      case "browsed": {
+        const w = typeof m.id === "string" ? link.browsing.get(m.id) : undefined;
+        if (!w) return;
+        link.browsing.delete(m.id);
+        if (m.ok && typeof m.png === "string" && m.png.length <= MAX_SHOT * 1.4) w.done({ png: new Uint8Array(Buffer.from(m.png, "base64")), mime: m.mime === "image/jpeg" ? "image/jpeg" : "image/png" });
+        else if (m.ok) w.done({ text: String(m.out ?? "").slice(0, 60_000) });
+        else w.done(new Error(String(m.out || "The Mac's browser couldn't do it.").slice(0, 600)));
+        return;
+      }
       case "copy": this.receiveCopy(link, m); return;
       case "cookies": this.receiveCookies(link, m); return;
       case "noCookies": this.receiveNoCookies(link, m); return;
@@ -150,6 +167,7 @@ export class Computers implements Remote {
     if (!link || (ws && link.ws !== ws)) return;
     this.links.delete(deviceId);
     for (const p of link.running.values()) p.reject(new ComputerGone(`${link.name} went offline.`));
+    for (const b of link.browsing.values()) b.done(new Error(`${link.name} went offline.`));
     this.changed();
   }
 
@@ -193,6 +211,28 @@ export class Computers implements Remote {
       link.running.set(id, { resolve: (s) => done(() => resolve(s)), reject: (e) => done(() => reject(e)), meter });
       this.send(deviceId, { t: "run", id, input, profile: { harness: profile.harness, model: MODEL_RE.test(profile.model) ? profile.model : "" } });
       this.changed();
+    });
+  }
+
+  // ---- your Mac's browser, for hearth-browser (other-browser.ts) ----
+
+  /** Your own Mac that's online now (never a cloud box: they have no browser of yours). */
+  private macLink() {
+    const t = this.now();
+    return [...this.links.values()].find((l) => !l.cloud && t - l.lastAlive <= ASLEEP_MS && l.platform === "darwin") ?? null;
+  }
+  macName() { return this.macLink()?.name ?? null; }
+
+  /** One command in the Mac's browser, in its session sid. An older Mac app doesn't answer, so this gives up after ms. */
+  browse(sid: string, action: string, params: Record<string, unknown>, ms = 150_000): Promise<Browsed> {
+    const link = this.macLink();
+    if (!link) return Promise.reject(new Error("The Mac went offline."));
+    const id = randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { link.browsing.delete(id); reject(new Error(`${link.name} didn't answer. If this keeps happening, its Hearth app may be too old for this: update it.`)); }, ms);
+      (timer as any).unref?.();
+      link.browsing.set(id, { done: (r) => { clearTimeout(timer); if (r instanceof Error) reject(r); else resolve(r); } });
+      this.send(link.deviceId, { t: "browse", id, sid, action, params });
     });
   }
 
