@@ -80,10 +80,10 @@ export function portsAgent(p: EventPipeline, argv: string[], who: PortWho, base:
       const s = p.findSource(rest[0] || "");
       if (!s || s.kind !== "push") return `No port called ${rest[0] || "?"}.`;
       const v = varsFrom(flags.var);
-      if (!v.variables?.length) return 'Say which fields: hearth-trigger-port map <name> --var from=data.message.from --var text=data.message.text';
+      if (!v.variables?.length) return 'Say which fields: hearth-trigger-port map <name> --var status=data.object.status --var email=data.object.email';
       const names = new Set(v.variables.map((x) => x.name));
       const r = p.updateSource(s.id, { variables: [...s.variables.filter((x) => !names.has(x.name)), ...v.variables], mapping: { ...(s.mapping || {}), ...(v.mapping || {}) } });
-      return r.value ? `${s.name} now has: ${r.value.variables.map((x) => `${x.name}${r.value!.mapping?.[x.name] ? ` (${r.value!.mapping[x.name]})` : ""}`).join(", ")}. Put the rule in the trigger's formula, e.g. from_me == false && from contains "14084203023".`
+      return r.value ? `${s.name} now has: ${r.value.variables.map((x) => `${x.name}${r.value!.mapping?.[x.name] ? ` (${r.value!.mapping[x.name]})` : ""}`).join(", ")}. Decide with code: a formula on these, or a check script (see the make-triggers skill).`
         : `Not changed: ${r.error}${r.conflict ? `\nOptions: ${r.conflict.options.join(" · ")}` : ""}`;
     }
     case "release": {
@@ -136,14 +136,12 @@ give the service its URL. Every call becomes an event on the port's source, wher
   prints the URL once. --reason and --source are required: the hub records who claimed it, in which job, and why,
   and the user sees that in Triggers. Variables are optional; formulas can always read payload.* (what was sent).
 - \`hearth-trigger-port list [--all]\` · \`show <name>\` (its URL, triggers, last events) · \`test <name> '<json>'\`
-- \`hearth-trigger-port map <name> --var from=data.message.from --var text=data.message.text\`: make the sender's
+- \`hearth-trigger-port map <name> --var status=data.object.status --var email=data.object.email\`: make the sender's
   real fields variables. Do this as soon as you know the shape (the service's docs, or \`show\` after the first event).
 
-The rule is CODE, never a model prompt. For anything awkward as a formula (nested JSON, a phone number in several
-formats), write a Python check with script.propose and give the trigger {"check":{"script":"<name>"}}: it reads the
-event on stdin and prints \`true\` (or {"fire": true, "text": "…"}, used as {{check.text}}). Otherwise a formula: e.g. \`from_me == false && from contains
-"14084203023"\` with a notify action "WhatsApp from {{from}}: {{text}}". A formula of \`true\` plus a prompt that
-filters makes a model read every call; don't. Use a think action (or a judge) only for what needs judgment.
+The trigger on a port decides with CODE: a formula for facts on the event, a check script (Python is fine) for
+facts that are awkward as a formula, a judge only for meaning. Never formula "true" plus a prompt that filters. The
+make-triggers skill has the whole method: read it before you add the trigger.
 - \`hearth-trigger-port release <name> --reason "<why>"\`: the URL stops working. Release ports you no longer need.
 
 Push before polling: when a service can call a webhook, use a port, not a watcher that checks every few minutes.
