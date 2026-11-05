@@ -45,6 +45,12 @@ const S = {
   pipeEvents: [] as any[],
   /** Sources whose latest events are open in Triggers → Sources, and those events (newest first, up to 10). */
   pipeSrcOpen: new Set<string>(),
+  /** Triggers whose "How it works" is open, their last runs, and the scripts they use (with code). */
+  trigOpen: new Set<string>(),
+  trigRuns: {} as Record<string, any[] | undefined>,
+  trigScripts: {} as Record<string, any>,
+  /** Which box of an open workflow is selected (trigger or action). */
+  wfNode: {} as Record<string, "trigger" | "action">,
   pipeSrcEvents: {} as Record<string, any[] | undefined>,
   pipeTab: "triggers" as "triggers" | "timers" | "sources" | "events",
   /** Just made by a teammate: highlighted as it lands. */
@@ -610,7 +616,7 @@ function drawSide() {
       nav("brain", "Memory", false, openMemory),
       nav("users", "People", false, openPeople),
       nav("sparkle", "Skills", false, openSkills),
-      h("button", { class: `snav ${S.panel === "triggers" ? "on" : ""}`, id: "snav-triggers", on: { click: () => openTriggers() } }, icon("zap", 18), h("span", { class: "grow" }, "Triggers"),
+      h("button", { class: `snav ${S.panel === "triggers" ? "on" : ""}`, id: "snav-triggers", on: { click: () => openTriggers() } }, icon("zap", 18), h("span", { class: "grow" }, "Workflows"),
         liveTriggers().length ? h("small", { class: "scount" }, String(liveTriggers().filter((t) => t.status === "active").length)) : null)),
     h("div", { class: "sfoot" },
       nav("settings", "Settings", false, openSettings)),
@@ -2921,7 +2927,7 @@ function openMenu() {
       item("dms", "People", "Your relationship map", openPeople),
       item("users", "Teammates", "Who the orchestrator can hand work to", openTeammates),
       item("sparkle", "Skills", "What the team already knows how to do", openSkills),
-      item("zap", "Triggers", "Reminders, routines and rules that act when something happens", () => openTriggers()),
+      item("zap", "Workflows", "Reminders, routines and automations: a trigger and what it does", () => openTriggers()),
       item("brain", "Brains", "Which harness and model does what", openBrains),
       item("download", "Files", "Attached and made, ready to download", openFiles),
       item("settings", "Settings", "Notifications, location, data", openSettings)),
@@ -3106,7 +3112,7 @@ async function toggleSourceEvents(id: string) {
 function openTriggers(tab?: typeof S.pipeTab) {
   S.panel = "triggers";
   if (tab) S.pipeTab = tab;
-  openSheet("Triggers", h("div", { id: "triggers" }), { onClose: () => { S.panel = null; drawSide(); } });
+  openSheet("Workflows", h("div", { id: "triggers" }), { onClose: () => { S.panel = null; drawSide(); } });
   drawTriggers();
   loadPipeline();
 }
@@ -3175,8 +3181,45 @@ function routeText(t: any) {
 
 function actionText(a: any) {
   if (a.type === "workflow") return `runs workflow ${a.name}`;
-  if (a.type === "think") return `thinks: ${a.prompt}`;
+  if (a.type === "think") return `an agent: ${a.prompt}`;
+  if (a.type === "script") return a.then === "publish" ? `runs ${a.script}; what it prints becomes events on ${a.into}` : `runs ${a.script}${a.then === "think" ? ", then an agent explains what it printed" : " and tells you what it printed"}`;
   return `says: ${a.text}`;
+}
+
+/** How a trigger decides, in a few words: every event, a formula, your code, a judge. */
+function decidesText(t: any) {
+  const parts = [];
+  const every = /^\s*(true|1)?\s*$/i.test(t.formula || "");
+  if (!every) parts.push(t.formula.length > 48 ? `${t.formula.slice(0, 46)}…` : t.formula);
+  if (t.check) parts.push(`code: ${t.check.script}`);
+  if (t.judge) parts.push(`judge ${t.judge.pass}`);
+  return parts.length ? parts.join(" + ") : "every event";
+}
+/** What a trigger does, in a few words. */
+function doesText(t: any) {
+  const a = t.action;
+  if (a.type === "notify") return "notify you";
+  if (a.type === "think") return `${mate(t.teammateId || "hearth").name} (an agent)`;
+  if (a.type === "script") return a.then === "publish" ? `${a.script} → ${a.into}` : `script ${a.script}`;
+  if (a.type === "workflow") return `workflow ${a.name}`;
+  return a.type;
+}
+
+/** Open or close a trigger's "How it works": its last runs and the code it uses, fetched fresh each time. */
+async function toggleTriggerHow(t: any) {
+  if (S.trigOpen.delete(t.id)) { drawTriggers(); return; }
+  S.trigOpen.add(t.id); S.trigRuns[t.id] = undefined; drawTriggers();
+  try {
+    const names = [t.check?.script, t.action?.type === "script" ? t.action.script : null].filter(Boolean);
+    const [evs, scripts] = await Promise.all([
+      call(`/api/pipeline/events?source=${encodeURIComponent(t.sourceId)}&limit=60`),
+      names.length ? call("/api/scripts") : Promise.resolve([]),
+    ]);
+    for (const sc of scripts as any[]) if (names.includes(sc.name)) S.trigScripts[sc.name] = sc;
+    // Only the events this trigger looked at, and only its own steps in each.
+    S.trigRuns[t.id] = (evs as any[]).map((e) => ({ e, steps: (e.log || []).filter((l: any) => l.triggerId === t.id) })).filter((x) => x.steps.length).slice(0, 8);
+  } catch (e) { S.trigOpen.delete(t.id); handleError(e); }
+  if (S.panel === "triggers") drawTriggers();
 }
 
 /** Your triggers and reminders (not the hub's own jobs, not ones that are done). */
@@ -3195,7 +3238,7 @@ function drawTriggers() {
   // A reminder's timer shows on its trigger; this tab is for timers on their own.
   const timers = S.pipe.timers.filter((t: any) => !triggers.some((x: any) => x.timerId === t.id));
   const owner = !!S.state?.device?.primary;
-  const tabs: [typeof S.pipeTab, string, number][] = [["triggers", "Triggers", live.length], ["timers", "Timers", timers.filter((t) => t.status !== "done").length], ["sources", "Sources", sources.length], ["events", "Events", 0]];
+  const tabs: [typeof S.pipeTab, string, number][] = [["triggers", "Workflows", live.length], ["timers", "Timers", timers.filter((t) => t.status !== "done").length], ["sources", "Sources", sources.length], ["events", "Events", 0]];
   const fresh = (id: string) => (S.pipeFresh.has(id) ? "fresh" : "");
   // confirmSheet closes itself after the action, so Triggers opens again just after.
   const reopen = (tab?: typeof S.pipeTab) => setTimeout(() => openTriggers(tab), 0);
@@ -3212,17 +3255,73 @@ function drawTriggers() {
     }, t.status === "paused" ? "Resumed" : "Paused") } }, icon(t.status === "paused" ? "play" : "pause", 16)) : null;
 
   const sys = (t: any) => t.createdBy === "system";
-  const triggerRow = (t: any) => h("div", { class: `item pipe ${t.status} ${fresh(t.id)}`, "data-pipe": t.id },
+  // A workflow, drawn: a Trigger box (where events come from and the condition) → an Action box (what's sent to the
+  // agent, or what it does). Tap a box to see it in full underneath.
+  const workflowView = (t: any) => {
+    const src = sources.find((s: any) => s.id === t.sourceId);
+    const sel = S.wfNode[t.id] || "trigger";
+    const pick = (n: "trigger" | "action") => () => { S.wfNode[t.id] = n; drawTriggers(); };
+    const code = (name: string): any => {
+      const s = S.trigScripts[name];
+      if (!s) return h("p", { class: "muted small" }, S.trigRuns[t.id] === undefined ? "Loading…" : `No script called ${name}.`);
+      return [
+        h("p", { class: "muted small" }, `${s.lang === "py" ? "Python" : s.lang === "sh" ? "Shell" : "TypeScript"} · `,
+          s.status === "approved" ? "approved" : h("b", null, s.status === "proposed" ? "waiting for your Approve" : s.status), " · ",
+          h("button", { class: "link", on: { click: () => openScript(s) } }, s.status === "proposed" ? "Review and approve" : "Open")),
+        h("pre", { class: "code small" }, s.code || "(file missing)"),
+      ];
+    };
+    const every = /^\s*(true|1)?\s*$/i.test(t.formula || "");
+    const when = t.timer ? scheduleText(t.timer.schedule) : `an event on ${t.sourceName}`;
+    const node = (n: "trigger" | "action", ic: string, kind: string, title: string, sub: string) =>
+      h("button", { class: `wfnode ${n} ${sel === n ? "on" : ""}`, on: { click: pick(n) } },
+        h("span", { class: "wfkind" }, icon(ic, 13), kind), h("b", null, title), h("small", null, sub));
+    const runs = S.trigRuns[t.id];
+    const detail = sel === "trigger"
+      ? h("div", { class: "wfdetail" },
+          h("h5", null, "Trigger"),
+          h("p", null, "Starts on ", h("b", null, when), "."),
+          src && !t.timer ? h("p", { class: "muted small" }, src.claim?.reason || src.description || "") : null,
+          every && !t.check && !t.judge ? h("p", { class: "muted small" }, "Every event goes on to the action.") : null,
+          !every ? [h("p", { class: "muted small" }, "Only when this formula is true:"), h("code", { class: "formula" }, t.formula)] : null,
+          t.check ? [h("p", { class: "muted small" }, `Then this code decides: it gets the whole event and prints true to go on.`), code(t.check.script)] : null,
+          t.judge ? h("p", { class: "muted small" }, `Then a judge: “${t.judge.prompt}” → ${answersText(t.judge.output)}, goes on when ${t.judge.pass}.`) : null,
+          h("h5", null, "Lately"),
+          runs === undefined ? h("p", { class: "muted small" }, "Loading…")
+            : !runs.length ? h("p", { class: "muted small" }, "No events yet.")
+            : h("div", { class: "runs" }, runs.map(({ e, steps }: any) => h("div", { class: "run" },
+                h("small", { class: "muted" }, `${shortAgo(e.receivedAt)}${e.test ? " · test" : ""}`),
+                steps.map((l: any) => h("div", { class: `runstep ${l.step}` }, h("span", { class: "steptag" }, l.step), " ", l.detail.replace(`${t.name}: `, "").replace(/\d{4}-\d\d-\d\dT[\d:.]+Z/g, (iso: string) => `${dayLabel(iso)} ${clockTime(iso)}`)))))))
+      : h("div", { class: "wfdetail" },
+          h("h5", null, "Action"),
+          t.action.type === "think" ? [h("p", null, h("b", null, mate(t.teammateId || "hearth").name), " (an agent) gets the event and these instructions:"), h("pre", { class: "code small" }, t.action.prompt)]
+            : t.action.type === "notify" ? [h("p", null, "Sends you this message (fields filled in from the event):"), h("pre", { class: "code small" }, t.action.text)]
+            : t.action.type === "script" ? [h("p", null, actionText(t.action)), code(t.action.script)]
+            : h("p", null, actionText(t.action)),
+          h("p", { class: "muted small" }, routeText(t), t.cooldownMin ? ` · at most every ${t.cooldownMin} min` : ""));
+    return h("div", { class: "wf" },
+      h("div", { class: "wfcanvas" },
+        node("trigger", t.timer ? "clock" : "plug", "Trigger", t.timer ? scheduleText(t.timer.schedule) : t.sourceName, decidesText(t)),
+        h("span", { class: "wfedge" }),
+        node("action", t.action.type === "think" ? "sparkle" : t.action.type === "script" ? "code" : "bell", "Action", doesText(t), routeText(t).replace(/^→ /, ""))),
+      detail);
+  };
+
+  const triggerRow = (t: any) => S.trigOpen.has(t.id) && !sys(t) ? h("div", { class: "wfwrap" }, triggerLine(t), workflowView(t)) : triggerLine(t);
+  const triggerLine = (t: any) => h("div", { class: `item pipe ${t.status} ${fresh(t.id)}`, "data-pipe": t.id },
     h("span", { class: "dotwrap" }, t.timer ? h("span", { class: "hicon" }, icon(t.timer.schedule.at && (t.timer.schedule.repeat || "none") === "none" ? "clock" : "repeat", 16)) : t.teammateId ? face(mate(t.teammateId), 30, "idle") : h("span", { class: "hicon" }, icon(t.sourceName === "place" ? "pin" : "zap", 16))),
     h("span", { class: "grow" },
       h("b", null, t.title, t.status === "paused" ? h("span", { class: "tag" }, "Paused") : t.status === "done" ? h("span", { class: "tag" }, "Done") : null, sys(t) ? h("span", { class: "tag" }, "built in") : null),
       t.timer
         ? h("small", { class: "sub" }, scheduleText(t.timer.schedule), t.timer.nextAt && t.status === "active" && !(t.timer.schedule.at && (t.timer.schedule.repeat || "none") === "none") ? ` · next ${dayLabel(t.timer.nextAt)} ${clockTime(t.timer.nextAt)}` : "")
-        : h("small", { class: "sub" }, h("span", { class: "srcchip" }, t.sourceName), " when ", h("code", { class: "formula" }, t.formula)),
+        : sys(t) ? h("small", { class: "sub" }, h("span", { class: "srcchip" }, t.sourceName), " when ", h("code", { class: "formula" }, t.formula))
+        // The flow at a glance: where events come from → how it decides → what it does → where it says so.
+        : h("small", { class: "sub flowline" }, h("span", { class: "srcchip" }, t.sourceName), " → ", t.check ? h("span", { class: "codechip" }, decidesText(t)) : decidesText(t), " → ", doesText(t)),
       t.judge ? h("small", { class: "sub judgeline" }, h("span", { class: "judgetag" }, "judge"), ` “${t.judge.prompt}” → ${answersText(t.judge.output)}, acts when `, h("code", { class: "formula" }, t.judge.pass),
         t.examples ? h("button", { class: "link", on: { click: () => openExamples(t) } }, ` · ${t.examples} correction${t.examples === 1 ? "" : "s"}`) : null) : null,
-      sys(t) ? h("small", { class: "sub" }, t.why) : h("small", { class: "sub" }, actionText(t.action)),
+      sys(t) ? h("small", { class: "sub" }, t.why) : t.timer ? h("small", { class: "sub" }, actionText(t.action)) : null,
       sys(t) ? null : h("small", { class: "sub" }, routeText(t)),
+      sys(t) ? null : h("button", { class: "link small", on: { click: () => toggleTriggerHow(t) } }, S.trigOpen.has(t.id) ? "Close" : "Open workflow"),
       h("small", { class: "sub" }, [t.fireCount ? `ran ${t.fireCount}×` : "hasn't run yet", t.lastFiredAt ? `last ${shortAgo(t.lastFiredAt)}` : null, t.cooldownMin ? `at most every ${t.cooldownMin} min` : null, sys(t) ? null : by(t.createdBy)].filter(Boolean).join(" · "))),
     owner && t.timer && t.status !== "done" && !sys(t) ? h("button", { class: "iconbtn", "aria-label": "Run now", title: "Run now", on: { click: () => pipeDo(() => call(`/api/pipeline/timers/${encodeURIComponent(t.timer.name)}/run`, { body: {} }), "Running it now") } }, icon("play", 16)) : null,
     t.status !== "done" ? pauseTrigger(t) : null,
@@ -3308,7 +3407,7 @@ function drawTriggers() {
     h("div", { class: "pipeflow" }, h("span", null, `${sources.length} source${sources.length === 1 ? "" : "s"}`), "→", h("span", null, "events"), "→", h("span", { id: "pipe-drop" }, `${active} trigger${active === 1 ? "" : "s"}`), "→", h("span", null, "actions")),
     h("div", { class: "seg" }, tabs.map(([k, label, n]) => h("button", { class: tab === k ? "on" : "", on: { click: () => { S.pipeTab = k; if (k === "events") loadPipelineEvents(); drawTriggers(); } } }, label, n ? h("small", null, ` ${n}`) : null))),
     tab === "triggers" ? [
-      live.length ? h("div", { class: "list" }, live.map(triggerRow)) : h("p", { class: "empty" }, "Nothing yet. Say “remind me Friday at 6 to call mom”, “tell me when this page changes” or “when a GitHub PR is opened on my repo, summarize it”."),
+      live.length ? h("div", { class: "list" }, live.map(triggerRow)) : h("p", { class: "empty" }, "No workflows yet. Each one is a trigger and what it does. Say “remind me Friday at 6 to call mom”, “tell me when this page changes” or “when a GitHub PR is opened on my repo, summarize it”."),
       owner ? h("button", { class: "btn ghost", on: { click: openNewReminder } }, icon("plus", 16), "Add a reminder or routine") : null,
       done.length ? [h("h4", null, "Done"), h("div", { class: "list" }, done.map(triggerRow))] : null,
       builtIn.length ? [h("h4", null, "The hub's own"), h("div", { class: "list" }, builtIn.map(triggerRow))] : null,
