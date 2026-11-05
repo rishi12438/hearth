@@ -7,6 +7,7 @@ const task = prompt.match(/JOB:\n([^\n]*)/)?.[1] ?? "?";
 // A message that came straight to a thread but is about something else: handed back.
 if (prompt.includes("came straight to you") && task.includes("NEW")) { console.log("[[hand-back]]"); process.exit(0); }
 const log = process.env.FAKE_LOG;
+if (process.env.FAKE_PROMPTS) appendFileSync(process.env.FAKE_PROMPTS, `${prompt}\n=====\n`);
 if (log) appendFileSync(log, `start ${Date.now()} ${task}\n`);
 await Bun.sleep(Number(process.env.FAKE_MS || 300));
 if (log) appendFileSync(log, `end ${Date.now()} ${task}\n`);

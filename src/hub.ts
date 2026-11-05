@@ -1103,6 +1103,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     let cur: Job = await this.saveJob({ ...job, status: "working", startedAt: this.clock().toISOString() });
     const finish = async (patch: Partial<Job>) => {
       narrator?.stop();
+      const stepsSoFar = (this.steps.get(job.id) || []).map((x) => x.text);
       this.stops.delete(job.id); this.steps.delete(job.id); this.frames.delete(job.id); this.running.delete(job.id);
       if (stop.signal.aborted && this.cancelled.delete(job.id)) {
         this.additions.delete(job.id); this.additions.delete(`${job.id}:label`);
@@ -1116,7 +1117,10 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
         const label = this.additions.get(`${job.id}:label`)?.[0];
         this.additions.delete(job.id); this.additions.delete(`${job.id}:label`);
         await this.addSpend(job.messageId, meter.costUsd);
-        cur = await this.saveJob({ ...cur, status: "queued", task: [cur.task, ...more.map((x) => `The user added: ${x}`)].join("\n\n").slice(0, 3000), label: label || cur.label, startedAt: undefined, tier: undefined });
+        // What it was told and did before this run counts too (stopped twice before it got far).
+        const was = cur.interrupted;
+        const interrupted = { added: [...(was?.added || []), ...more].slice(-10), steps: [...(was?.steps || []), ...stepsSoFar].slice(-40) };
+        cur = await this.saveJob({ ...cur, status: "queued", task: [cur.task, ...more.map((x) => `The user added: ${x}`)].join("\n\n").slice(0, 3000), label: label || cur.label, startedAt: undefined, tier: undefined, interrupted });
         return;
       }
       const pending = (await this.store.all<Approval>("approvals")).some((a) => a.jobId === job.id && a.status === "pending");
@@ -1129,7 +1133,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       if (refused.length && typeof patch.result === "string") patch = { ...patch, result: `${patch.result}\n\nNo Approve card was made, so nothing was sent: ${refused.join("; ")}`.slice(0, 4400) };
       await this.addSpend(job.messageId, meter.costUsd);
       cur = await this.saveJob({
-        ...cur, ...patch, blocked, relogged: stored?.relogged, status, ranOn: meter.ranOn, ...(models.length ? { models } : {}),
+        ...cur, ...patch, blocked, relogged: stored?.relogged, status, interrupted: undefined, ranOn: meter.ranOn, ...(models.length ? { models } : {}),
         // A job that ran partly on a plan (Codex) keeps the dollars it did report, plus its tokens.
         durationMs: Date.now() - started, costUsd: meter.unknown && !meter.costUsd ? null : +meter.costUsd.toFixed(4),
         ...(meter.tokens ? { tokens: meter.tokens } : {}), ...(meter.estUsd ? { estCostUsd: +meter.estUsd.toFixed(4) } : {}),
@@ -1190,7 +1194,17 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     const first = brains[job.effort === "heavy" ? "heavy" : job.effort === "quick" ? "quick" : "workhorse"];
     // Whichever brain holds the session (the pool may have run the thread on Codex though the role says Claude): the run
     // goes back to it (Brain.think), so that's the one to check.
-    const direct = !!job.followsUp && !job.parentId && !!(await this.brain.sessionBrain(meter.thread, first));
+    // Stopped mid-run by a new message: like a coding agent, it goes on in the same conversation with the message added,
+    // rather than being handed the whole task again as if it were new (it read that as "start over").
+    const resumable = !!(await this.brain.sessionBrain(meter.thread, first));
+    const cut = job.interrupted;
+    if (cut?.added.length) {
+      const said = cut.added.map((x) => `"${x}"`).join("\nthen: ");
+      input = resumable
+        ? `[The user stopped you partway through to send this:]\n${said}${attached}\n\nEverything you did so far is above in this conversation, and your files are where you left them. Take what they said into account and carry on from where you were. Don't start over or redo steps that already worked; if what they said changes the plan, change course from here.`
+        : `${input}\n\nYou already started on this and were stopped partway when the user sent the message(s) above ("The user added"). What you had done so far:\n${cut.steps.length ? cut.steps.map((x) => `- ${x}`).join("\n") : "- (nothing recorded)"}\nYour files from then are still in your folder. Carry on from there with what they said in mind; don't redo what already worked.`;
+    }
+    const direct = (!!job.followsUp || (!!cut && resumable)) && !job.parentId && resumable;
     const hybrid = !direct && (await this.prefs()).hybrid !== false && label(brains.heavy) !== label(brains.workhorse);
     const attempt = async (tier: Tier) => {
       cur = await this.saveJob({ ...cur, status: "working", tier });
@@ -1325,7 +1339,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
   /** A run is going (not just waiting its turn), so folding a message in would stop it and start over. */
   private midRun(j: Job) { return j.status === "working" && this.stops.has(j.id); }
 
-  /** You tapped Send now on a queued message: it goes in the way it would have without the queue (into the run, which starts over with it). */
+  /** You tapped Send now on a queued message: it goes in the way it would have without the queue (into the run, which is interrupted and carries on with it). */
   async sendQueuedNow(id: string) {
     const m = await this.store.get<Message>("messages", id);
     if (!m?.queued) return { error: "That's already sent." };

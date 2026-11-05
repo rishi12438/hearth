@@ -56,7 +56,7 @@ export type Message = Doc & {
   fileIds?: string[];
   /** A reply inside a job's thread (Slack-style); the value is the thread's root job id. */
   replyTo?: string;
-  /** Sent while the teammate was mid-run: it waits (shown greyed) and goes out as the next turn when the run ends, or now if you tap Send now. */
+  /** Sent while the teammate was mid-run: it waits (shown greyed) and goes out as the next turn when the run ends, or now if you tap Send now (the run is interrupted and carries on with it). */
   queued?: boolean;
   error?: boolean;
 };
@@ -111,6 +111,9 @@ export type Job = Doc & {
   followsUp?: string;
   /** Came straight to this thread without planning: the teammate may hand it back if it's about something else. */
   mayHandBack?: boolean;
+  /** It was stopped mid-run by a new message from the user: what they said, and what it had done so far. The next run
+   *  carries on from there (in the same session when it has one) instead of starting the task over. */
+  interrupted?: { added: string[]; steps: string[] };
   /** Files the teammate made for this job. */
   fileIds?: string[];
   /** Jobs this one needs results from; it starts when they're done. */

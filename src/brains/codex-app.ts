@@ -58,6 +58,8 @@ export class CodexAppTurn {
   private over = false;
   /** The model its thread runs on, once it has said. */
   private model = "";
+  /** The turn that's going, once turn/start has answered: what turn/interrupt needs. */
+  private turnId: string | null = null;
 
   constructor(private write: (line: string) => void, private o: CodexAppOptions) {
     this.done = new Promise((r) => (this.finish = r));
@@ -141,8 +143,19 @@ export class CodexAppTurn {
     const model = m.result?.model ?? m.result?.thread?.model;
     if (typeof model === "string" && model) { this.model = model; this.o.onModel?.(model); }
     this.request("turn/start", { threadId: id, input: [{ type: "text", text: this.o.prompt, text_elements: [] }, ...(this.o.images || []).map((path) => ({ type: "localImage", path }))] }, (r) => {
-      if (r.error) this.fail(`Codex couldn't start the turn: ${r.error.message || "turn/start failed"}`);
+      if (r.error) return this.fail(`Codex couldn't start the turn: ${r.error.message || "turn/start failed"}`);
+      if (typeof r.result?.turn?.id === "string") this.turnId = r.result.turn.id;
     });
+  }
+
+  /**
+   * The user sent something new mid-run: stop the turn the way Codex's own Esc does (turn/interrupt), so what it did so
+   * far is saved in the thread and the next run resumes it with the new message. False when there's no turn to stop.
+   */
+  interrupt(): boolean {
+    if (this.over || !this.threadId || !this.turnId) return false;
+    this.request("turn/interrupt", { threadId: this.threadId, turnId: this.turnId }, () => {});
+    return true;
   }
 
   private answerRequest(m: Rpc) {
