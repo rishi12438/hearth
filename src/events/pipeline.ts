@@ -52,30 +52,65 @@ export type PortClaim = {
   managed?: boolean;
 };
 export type TriggerAction =
-  | { type: "notify"; text: string }
-  | { type: "think"; prompt: string }
+  /**
+   * The action: a message, delivered when the trigger fires. agent false: it's shown as written (in route.where).
+   * agent true: it goes, hidden, to an agent (route.who) as its task, with the event; only what the agent does shows.
+   * before: a bash script run on the event first (stdin and HEARTH_EVENT); what it prints fills {{before}}, and
+   * [[quiet]] (or nothing) stops the run. args: only on actions migrated from the old script actions.
+   */
+  | { type: "message"; message: string; agent: boolean; before?: string; args?: string[] }
   | { type: "workflow"; name: string; inputs: Record<string, string> }
-  /** Run an approved script; say what it printed, or have the teammate make sense of it. */
-  /** Run an approved script on the event (it gets the whole event as JSON on stdin and in HEARTH_EVENT). Then say
-   *  what it printed, have the teammate make sense of it, or publish: each JSON object line it prints becomes an
-   *  event on the source `into` (a raw "item X has updates" ping → the script fetches the details → clean events). */
-  | { type: "script"; script: string; args: string[]; then: "notify" | "think" | "publish"; into?: string }
+  /** Publish: an approved script runs on the event and each JSON object line it prints becomes an event on the
+   *  source `into` (a raw "item X has updates" ping → the script fetches the details → clean events). */
+  | { type: "script"; script: string; args: string[]; then: "publish"; into: string }
   /** The hub's own housekeeping (memory review, ideas, library cleanup). Only the hub makes these. */
   | { type: "system"; job: string };
 /**
- * Who handles a trigger when it fires, and where it says so.
- *  who: "self" = the teammate it belongs to (teammateId; Hearth when none) · "hearth" = Hearth reads what happened,
- *       picks the right teammate(s) (or makes one) and hands it out, like a ramble · "session" = one task thread
- *       (session = its root job id) goes on: same teammate, same conversation, everything said so far.
- *  where: "here" = the ramble it was made in (its DM once that's archived) · "dm" = the teammate's DM · "new" = a new ramble on Home.
+ * Who handles a trigger when it fires, and where it shows.
+ *  who: "self" = the teammate it belongs to (teammateId, which may be any teammate; Hearth when none) · "hearth" =
+ *       Hearth reads what happened, picks the right teammate(s) (or makes one) and hands it out, like a ramble.
+ *  where: "this" = the thread it was made in; with session (the task it was made in, its root job id) that task's
+ *       conversation goes on, same teammate and everything said so far · "ramble" = a ramble: the one called
+ *       `ramble` (made the first time), or a new one each time when there's no name · "dm" = the teammate's DM.
+ *  job / workspace: the task that made it and the workspace it worked in, so whoever acts starts from there.
  */
-export type TriggerRoute = { who: "self" | "hearth" | "session"; where: "here" | "dm" | "new"; session?: string };
-export const DEFAULT_ROUTE: TriggerRoute = { who: "self", where: "here" };
+export type TriggerRoute = { who: "self" | "hearth"; where: "this" | "ramble" | "dm"; ramble?: string; session?: string; job?: string; workspace?: string };
+export const DEFAULT_ROUTE: TriggerRoute = { who: "self", where: "this" };
+const ID = /^[\w-]{8,64}$/;
 export function cleanRoute(x: any, fallback: TriggerRoute = DEFAULT_ROUTE): TriggerRoute {
   if (!x || typeof x !== "object") return fallback;
-  const session = typeof x.session === "string" && /^[\w-]{8,64}$/.test(x.session) ? x.session : undefined;
-  const who = x.who === "session" && session ? "session" : x.who === "hearth" ? "hearth" : x.who === "self" ? "self" : fallback.who;
-  return { who, where: ["here", "dm", "new"].includes(x.where) ? x.where : fallback.where, ...(who === "session" ? { session: session || fallback.session } : {}) };
+  const id = (v: unknown) => typeof v === "string" && ID.test(v) ? v : undefined;
+  // Older routes: who "session" is where "this" going on in that task; "here" is "this"; "new" is a new ramble.
+  const session = id(x.session) ?? (x.who === "session" ? fallback.session : undefined);
+  const who = x.who === "hearth" ? "hearth" : x.who === "self" || x.who === "session" ? "self" : fallback.who;
+  const w = x.where === "here" ? "this" : x.where === "new" ? "ramble" : x.where;
+  const where = ["this", "ramble", "dm"].includes(w) ? w : fallback.where;
+  const ramble = where === "ramble" && typeof x.ramble === "string" ? x.ramble.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24) : "";
+  const workspace = typeof x.workspace === "string" && /^[a-z0-9][a-z0-9-]{0,63}$/.test(x.workspace) ? x.workspace : fallback.workspace;
+  return { who, where, ...(ramble ? { ramble } : {}), ...(where === "this" && session ? { session } : {}),
+    ...(id(x.job) ?? fallback.job ? { job: id(x.job) ?? fallback.job } : {}), ...(workspace ? { workspace } : {}) };
+}
+/** "this", "ramble", "ramble:<name>", "dm" (and the older "here" / "new") → the route's where (+ ramble name). */
+export function parseWhere(x: unknown): { where: TriggerRoute["where"]; ramble?: string } | null {
+  if (typeof x !== "string" || !x.trim()) return null;
+  const v = x.trim().toLowerCase();
+  if (v === "this" || v === "here") return { where: "this" };
+  if (v === "dm") return { where: "dm" };
+  if (v === "new" || v === "ramble") return { where: "ramble" };
+  const m = v.match(/^ramble\s*:\s*#?(.+)$/);
+  return m ? { where: "ramble", ramble: m[1] } : null;
+}
+/** Actions saved before there was one message action (notify, think, script then notify|think) → the message action. */
+export function upgradeAction(a: any): TriggerAction {
+  if (a?.type === "notify") return { type: "message", message: String(a.text ?? ""), agent: false };
+  if (a?.type === "think") return { type: "message", message: String(a.prompt ?? ""), agent: true };
+  if (a?.type === "script" && a.then !== "publish") {
+    const args = Array.isArray(a.args) && a.args.length ? { args: a.args.map(String) } : {};
+    return a.then === "think"
+      ? { type: "message", before: a.script, ...args, agent: true, message: `Make sense of what the script ${a.script} found for the user:\n{{before}}` }
+      : { type: "message", before: a.script, ...args, agent: false, message: "{{before}}" };
+  }
+  return a as TriggerAction;
 }
 export type EventTrigger = {
   id: string; name: string; sourceId: string; sourceName: string;
@@ -150,7 +185,7 @@ export type PipelineEvent = {
   log?: LogLine[];
 };
 export type Conflict = { kind: "name" | "duplicate" | "overlap" | "variables" | "protected" | "loop" | "filter"; message: string; existing?: { id: string; name: string }; options: string[] };
-export type Result<T> = { value: T; error?: undefined; conflict?: undefined } | { value?: undefined; error: string; conflict?: Conflict };
+export type Result<T> = { value: T; error?: undefined; conflict?: undefined; duplicate?: boolean } | { value?: undefined; error: string; conflict?: Conflict; duplicate?: undefined };
 
 /**
  * What the hub does when a trigger matches. `quiet` = it ran and chose not to speak; `hold` = not now, run it at
@@ -197,6 +232,21 @@ const KEEP_EVENTS = 5000;
 const STALE_MIN = 360;
 
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
+/** How long a repeated delivery counts as the same one. */
+const DEDUPE_MS = 24 * 3_600_000;
+/**
+ * What makes a delivery the same one again: the sender's delivery id (Idempotency-Key, Svix/Standard Webhooks,
+ * GitHub), else the payload's own event id, else the exact payload. Different messages always differ in some field.
+ */
+export function deliveryKey(payload: unknown, headers: Record<string, string> = {}): string | null {
+  for (const h of ["idempotency-key", "webhook-id", "svix-id", "x-webhook-id", "x-github-delivery", "x-delivery-id"]) {
+    if (typeof headers[h] === "string" && headers[h]) return `h:${h}:${headers[h].slice(0, 200)}`;
+  }
+  if (payload === null || payload === undefined) return null;
+  const p = payload as Record<string, unknown>;
+  for (const k of ["event_id", "eventId", "delivery_id", "webhook_id"]) if (typeof p?.[k] === "string" && p[k]) return `id:${k}:${String(p[k]).slice(0, 200)}`;
+  return `p:${hash(j(payload))}`;
+}
 const j = (x: unknown) => JSON.stringify(x ?? null);
 const str = (x: unknown, max: number) => (typeof x === "string" ? x.trim().slice(0, max) : "");
 /** {"script":"name","args":[…]} or just "name" → a check; null/"" clears it. */
@@ -335,10 +385,11 @@ export class EventPipeline {
       CREATE INDEX IF NOT EXISTS held_until ON held (until);
     `);
     // Files made before judges and reminders existed get the new columns.
-    for (const [table, col, def] of [["triggers", "judge", "TEXT"], ["event_log", "value", "TEXT"], ["triggers", "title", "TEXT"], ["triggers", "timer_id", "TEXT REFERENCES timers(id) ON DELETE CASCADE"], ["triggers", "route", "TEXT"], ["sources", "claim", "TEXT"], ["triggers", "check_script", "TEXT"]]) {
+    for (const [table, col, def] of [["triggers", "judge", "TEXT"], ["event_log", "value", "TEXT"], ["triggers", "title", "TEXT"], ["triggers", "timer_id", "TEXT REFERENCES timers(id) ON DELETE CASCADE"], ["triggers", "route", "TEXT"], ["sources", "claim", "TEXT"], ["triggers", "check_script", "TEXT"], ["events", "dedupe_key", "TEXT"]]) {
       const cols = this.db.query(`PRAGMA table_info(${table})`).all() as { name: string }[];
       if (!cols.some((c) => c.name === col)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
     }
+    this.db.exec("CREATE INDEX IF NOT EXISTS events_dedupe ON events (source_id, dedupe_key)");
     // A run cut off by a restart isn't run again (it may have half-happened); it's marked so you can see it.
     this.db.query("UPDATE events SET status = 'failed', error = 'The hub stopped while this was running.' WHERE status = 'processing'").run();
     this.ensureBuiltIns();
@@ -374,7 +425,7 @@ export class EventPipeline {
     return { id: r.id, name: r.name, sourceId: r.source_id, sourceName: r.source_name, title: r.title || r.name, timerId: r.timer_id ?? null,
       timer: r.timer_id && r.timer_name ? { name: r.timer_name, schedule: JSON.parse(r.timer_schedule), nextAt: r.timer_next_at, status: r.timer_status } : null,
       formula: r.formula, judge: r.judge ? JSON.parse(r.judge) : null, check: r.check_script ? JSON.parse(r.check_script) : null,
-      examples: r.examples ?? 0, action: JSON.parse(r.action), route: cleanRoute(r.route ? JSON.parse(r.route) : null),
+      examples: r.examples ?? 0, action: upgradeAction(JSON.parse(r.action)), route: cleanRoute(r.route ? JSON.parse(r.route) : null),
       why: r.why, status: r.status, cooldownMin: r.cooldown_min, lastFiredAt: r.last_fired_at, fireCount: r.fire_count,
       createdBy: r.created_by, teammateId: r.teammate_id, threadId: r.thread_id, createdAt: r.created_at, updatedAt: r.updated_at };
   }
@@ -641,6 +692,18 @@ export class EventPipeline {
   }
 
   private cleanAction(a: any, system = false): TriggerAction | string {
+    // The message action, as it's written: {message, agent, before?} (type optional).
+    if (a && typeof a === "object" && (a.type === "message" || (a.type === undefined && typeof a.message === "string"))) {
+      const message = str(a.message, 4000);
+      const before = a.before == null || a.before === "" ? "" : str(typeof a.before === "object" ? a.before.script : a.before, 40).toLowerCase();
+      if (!message && !before) return "A message action needs its message (what you're told, or what the agent is asked to do).";
+      const args = Array.isArray(a.args) && a.args.length ? { args: a.args.slice(0, 8).map((x: unknown) => String(x).slice(0, 200)) } : {};
+      return { type: "message", message: message || "{{before}}", agent: a.agent === true, ...(before ? { before, ...args } : {}) };
+    }
+    if (a?.type === "notify" || a?.type === "think") {
+      const v = str(a.type === "notify" ? a.text : a.prompt, 4000);
+      return v ? upgradeAction({ ...a, text: v, prompt: v }) : `A ${a.type} action needs ${a.type === "notify" ? "text" : "a prompt"}.`;
+    }
     switch (a?.type) {
       case "script": {
         const script = str(a.script, 40).toLowerCase();
@@ -652,11 +715,9 @@ export class EventPipeline {
           if (into.kind === "time" || into.kind === "place") return `The ${into.name} source is built in; publish into a source of your own.`;
           return { type: "script", script, args, then: "publish", into: into.name };
         }
-        return { type: "script", script, args, then: a.then === "think" ? "think" : "notify" };
+        return upgradeAction({ type: "script", script, args, then: a.then === "think" ? "think" : "notify" });
       }
       case "system": if (system && str(a.job, 40)) return { type: "system", job: str(a.job, 40) }; break;
-      case "notify": { const text = str(a.text, 1000); return text ? { type: "notify", text } : "A notify action needs text."; }
-      case "think": { const prompt = str(a.prompt, 2000); return prompt ? { type: "think", prompt } : "A think action needs a prompt."; }
       case "workflow": {
         const name = str(a.name, 80);
         if (!name) return "A workflow action needs the workflow's name.";
@@ -665,7 +726,7 @@ export class EventPipeline {
         return { type: "workflow", name, inputs };
       }
     }
-    return 'The action must be {"type":"notify","text"}, {"type":"think","prompt"}, {"type":"workflow","name","inputs"} or {"type":"script","script","args","then":"notify|think|publish","into"?}.';
+    return 'The action must be {"message":"…","agent":true|false,"before"?:"<bash script>","who"?,"where"?}, {"type":"workflow","name","inputs"} or {"type":"script","script","then":"publish","into":"<source>"}.';
   }
 
   /** Variables a formula may read on this source; anything else is a typo. */
@@ -794,11 +855,11 @@ export class EventPipeline {
    * well say "stay quiet if there's nothing new".
    */
   private modelAsFilter(s: EventSource, formula: string, action: TriggerAction, check: TriggerCheck | null, judge: Judge | null): Conflict | null {
-    if (check || judge || action.type !== "think" || s.kind === "time" || s.kind === "place") return null;
+    if (check || judge || action.type !== "message" || !action.agent || action.before || s.kind === "time" || s.kind === "place") return null;
     if (!/^\s*(true|1)?\s*$/i.test(formula)) return null;
-    if (!/\[\[quiet\]\]|\b(only (if|when|for)|ignore|unless|otherwise (reply|stay|say nothing)|doesn'?t (qualify|count|match)|if (it|this|the \w+) (is|isn'?t|matches|comes from))\b/i.test(action.prompt)) return null;
+    if (!/\[\[quiet\]\]|\b(only (if|when|for)|ignore|unless|otherwise (reply|stay|say nothing)|doesn'?t (qualify|count|match)|if (it|this|the \w+) (is|isn'?t|matches|comes from))\b/i.test(action.message)) return null;
     return { kind: "filter", message: "This trigger asks a model to decide which events matter (formula \"true\" and a prompt that filters). Decide with code instead, so it's predictable and doesn't cost a model call per event.",
-      options: ["put the facts in the formula (map the fields with source.update first)", "or add check: {\"script\":\"<name>\"}: a read-only script (Python is fine) that reads the event on stdin and prints true or {\"fire\": true, …}", "keep a think action only to write the message, or a judge for real judgment", "force: true only if the user insists"] };
+      options: ["put the facts in the formula (map the fields with source.update first)", "or add check: {\"script\":\"<name>\"}: a read-only script (Python is fine) that reads the event on stdin and prints true or {\"fire\": true, …}", "keep the agent's message only for what to do, or a judge for real judgment", "force: true only if the user insists"] };
   }
 
   private overlapping(s: EventSource, formula: string, action: TriggerAction, judge: Judge | null, except?: string): Conflict | null {
@@ -901,7 +962,7 @@ export class EventPipeline {
     if (!title) return { error: "A reminder needs a title (what it's about, e.g. \"Call mom\")." };
     const schedule = this.cleanSchedule(input?.schedule ?? input);
     if (typeof schedule === "string") return { error: schedule };
-    const action = input?.action ?? (input?.text ? { type: "notify", text: input.text } : input?.prompt ? { type: "think", prompt: input.prompt } : { type: "notify", text: title });
+    const action = input?.action ?? (input?.text ? { message: input.text, agent: false } : input?.prompt ? { message: input.prompt, agent: true } : { message: title, agent: false });
     // The same reminder twice (same time, same words, same teammate) is a mistake, not a second reminder.
     if (!input?.force && !o.allowPast) {
       const act = this.cleanAction(action, o.system);
@@ -1070,15 +1131,24 @@ export class EventPipeline {
       const path = s.mapping?.[v.name];
       vars[v.name] = path ? (path.startsWith("headers.") ? low[path.slice(8).toLowerCase()] ?? null : pick(payload, path)) : pick(payload, v.name);
     }
-    return { value: this.insertEvent(s, vars, payload, test, depth) };
+    // The same delivery twice (a webhook retrying, a publisher sending it again) is one event: the hub drops the
+    // copy here, so no trigger, script or agent has to remember what it has seen.
+    // Only deliveries from outside (depth 0): what triggers publish is the hub's own work, and loops are caught above.
+    const key = test || s.kind !== "push" || depth > 0 ? null : deliveryKey(payload, low);
+    if (key) {
+      const since = new Date(Date.parse(this.now()) - DEDUPE_MS).toISOString();
+      const seen = this.db.query("SELECT * FROM events WHERE source_id = ? AND dedupe_key = ? AND received_at >= ? LIMIT 1").get(s.id, key, since);
+      if (seen) { const e = this.event(seen); this.log(e.id, "duplicate", `the same delivery came again; ignored`); return { value: e, duplicate: true }; }
+    }
+    return { value: this.insertEvent(s, vars, payload, test, depth, key) };
   }
 
-  private insertEvent(s: EventSource, vars: Record<string, unknown>, payload: unknown, test: boolean, depth = 0): PipelineEvent {
+  private insertEvent(s: EventSource, vars: Record<string, unknown>, payload: unknown, test: boolean, depth = 0, key: string | null = null): PipelineEvent {
     const id = randomUUID(), now = this.now();
     let p = j(payload);
     if (p.length > MAX_PAYLOAD) p = j({ truncated: true, text: p.slice(0, 8000) });
-    this.db.query("INSERT INTO events (id, source_id, source_name, status, variables, payload, depth, test, received_at) VALUES (?, ?, ?, 'new', ?, ?, ?, ?, ?)")
-      .run(id, s.id, s.name, j(vars), p, depth, test ? 1 : 0, now);
+    this.db.query("INSERT INTO events (id, source_id, source_name, status, variables, payload, depth, test, received_at, dedupe_key) VALUES (?, ?, ?, 'new', ?, ?, ?, ?, ?, ?)")
+      .run(id, s.id, s.name, j(vars), p, depth, test ? 1 : 0, now, key);
     this.db.query("UPDATE sources SET last_event_at = ?, event_count = event_count + 1 WHERE id = ?").run(now, s.id);
     this.log(id, "received", test ? "test event" : s.kind === "time" ? `timer ${vars.time_to_run}` : `from ${s.name}`);
     this.onChange("events");

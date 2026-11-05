@@ -23,6 +23,8 @@ export type Message = Doc & {
   proactive?: { hookId: string; title: string; trigger: string; why: string };
   /** Posted by a trigger handing what happened to Hearth (route who "hearth"): shown as the trigger, not as you. */
   fromTrigger?: { id: string; title: string };
+  /** Not shown in the chat: a trigger's hand-off to an agent (and Hearth's line about it). Only what the agent does shows. */
+  hidden?: boolean;
   /**
    * Posted by the hub once what you approved for a job has run: the agent hears what came back and carries on.
    * Not from you. ok is false when any of it failed (older messages without ok were all failures).

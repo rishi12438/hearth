@@ -202,9 +202,9 @@ test("old hooks are moved into the pipeline once at start, and the old webhook U
   expect((await store.all("hooks")).length).toBe(0);
   const p = hub.pipeline;
   expect(p.findTrigger("call-mom")).toMatchObject({ createdBy: "you", timer: { nextAt: at } });
-  expect(p.findTrigger("morning-brief")).toMatchObject({ teammateId: "planner", action: { type: "think", prompt: "Brief me" }, timer: { schedule: { time: "08:00", days: [1, 2, 3, 4, 5] } } });
+  expect(p.findTrigger("morning-brief")).toMatchObject({ teammateId: "planner", action: { type: "message", message: "Brief me", agent: true }, timer: { schedule: { time: "08:00", days: [1, 2, 3, 4, 5] } } });
   expect(p.findWatcher("tickets")).toMatchObject({ kind: "page", looked: true, everyMin: 60 });
-  expect(p.findTrigger("tickets")!.action).toEqual({ type: "notify", text: "Tickets changed\n{{url}}" });
+  expect(p.findTrigger("tickets")!.action).toEqual({ type: "message", message: "Tickets changed\n{{url}}", agent: false });
   expect(p.findTrigger("charger")!.formula).toBe('place == "office" and event == "arrive"');
   expect(p.findTrigger("rang-already")).toBeNull();
   // The hub's own jobs are built in: there, protected, and not the user's to delete.
@@ -252,7 +252,7 @@ test("who handles a trigger: Hearth picks the teammate, or a named teammate, and
     { type: "remind", title: "Bill check", schedule: { at: soon }, prompt: "Look over this week's bills", to: "Bills", post: "dm" },
     { type: "remind", title: "x", schedule: { at: soon }, text: "x", to: "Nobody" }], "test");
   expect(a.runs.map((r) => r.args[0]).join("\n")).toContain('No teammate called "Nobody"');
-  expect(p.findTrigger("dinner-ideas")!.route).toEqual({ who: "hearth", where: "new" });
+  expect(p.findTrigger("dinner-ideas")!.route).toEqual({ who: "hearth", where: "ramble" });
   expect(p.findTrigger("bill-check")).toMatchObject({ teammateId: "money", route: { who: "self", where: "dm" } });
   const before = (await hub.prefs()).lastUserAt;
   now = new Date(now.getTime() + 2 * 60_000);
@@ -279,7 +279,7 @@ test('to: "this" wakes the same task thread when it fires: same teammate, same c
   const soon = new Date(now.getTime() + 60_000).toISOString();
   await hub.applyActions([{ type: "remind", title: "Check the booking", schedule: { at: soon }, prompt: "Did the booking go through?", to: "this" }], "test", { teammateId: root.teammateId, threadId: r.value!.thread.id, jobId: root.id });
   const t = hub.pipeline.findTrigger("check-the-booking")!;
-  expect(t).toMatchObject({ teammateId: "scout", route: { who: "session", session: root.id } });
+  expect(t).toMatchObject({ teammateId: "scout", route: { who: "self", where: "this", session: root.id } });
   // Outside a task there's no "this".
   const bad = await hub.applyActions([{ type: "remind", title: "x", schedule: { at: soon }, text: "x", to: "this" }], "test");
   expect(bad.runs[0].args[0]).toContain("no task thread");
@@ -291,4 +291,64 @@ test('to: "this" wakes the same task thread when it fires: same teammate, same c
   expect(next.task).toContain("Did the booking go through?");
   const m = (await store.all<any>("messages")).find((x) => x.fromTrigger)!;
   expect(m).toMatchObject({ threadId: root.threadId, continues: [root.id], fromTrigger: { title: "Check the booking" } });
+});
+
+test("an agent action: the message goes to the teammate out of sight, as a real task in the workflow's workspace; its post shows with the ⚡ once it has something", async () => {
+  await hub.ensureTeammates();
+  const r = await hub.ramble("find a cheap dinner spot");
+  for (let i = 0; i < 200 && !(await store.all<any>("jobs")).some((j) => j.status === "done"); i++) await Bun.sleep(10);
+  const root = (await store.all<any>("jobs")).find((j) => !j.followsUp)!;
+  await store.put("jobs", { ...root, workspace: "dinner-spots" });
+  const p = hub.pipeline;
+  p.createSource({ name: "texts", variables: [{ name: "from" }, { name: "text" }] }, "Hearth");
+  // Made inside the task, for another teammate, posting in this ramble: a new task each time (not that conversation).
+  const a = await hub.applyActions([{ type: "trigger.add", name: "sam-texts", title: "Sam texts", source: "texts", formula: 'from == "sam"', why: "Reply to Sam",
+    action: { message: "Write a quirky reply to {{text}} and send it to the same chat", agent: true, who: "Research", where: "this" } }], "test", { teammateId: root.teammateId, threadId: r.value!.thread.id, jobId: root.id });
+  expect(a.runs.map((x) => x.args[0]).join("")).toBe("");
+  const t = p.findTrigger("sam-texts")!;
+  expect(t).toMatchObject({ teammateId: "scout", action: { type: "message", agent: true }, route: { who: "self", where: "this", job: root.id, workspace: "dinner-spots" } });
+  expect(t.route.session).toBeUndefined(); // a named teammate starts fresh tasks; only "self" carries on the conversation
+  p.publish("texts", { from: "sam", text: "pizza tonight?" });
+  await p.drain();
+  const handoff = (await store.all<any>("messages")).find((m) => m.fromTrigger && m.role === "user")!;
+  expect(handoff).toMatchObject({ hidden: true, threadId: r.value!.thread.id, fromTrigger: { title: "Sam texts" } });
+  expect(handoff.text).toContain("Write a quirky reply to pizza tonight? and send it to the same chat");
+  expect(handoff.text).toContain("About this workflow");
+  expect(handoff.text).toContain("Reply to Sam");
+  const job = (await store.all<any>("jobs")).find((j) => j.messageId === handoff.id)!;
+  expect(job).toMatchObject({ teammateId: "scout", workspace: "dinner-spots", label: "Sam texts" });
+  expect((await store.all<any>("messages")).find((m) => m.taskJobId === job.id)).toMatchObject({ fromTrigger: { title: "Sam texts" } });
+});
+
+test("where: ramble:<name> posts in that ramble, made the first time; a plain message needs no agent", async () => {
+  const p = hub.pipeline;
+  p.createSource({ name: "door", variables: [{ name: "motion" }] }, "Hearth");
+  const a = await hub.applyActions([{ type: "trigger.add", name: "door-open", source: "door", formula: "motion == true", why: "door",
+    action: { message: "The door opened", agent: false, where: "ramble:front-door" } }], "test");
+  expect(a.runs.map((x) => x.args[0]).join("")).toBe("");
+  expect(p.findTrigger("door-open")!.route).toMatchObject({ where: "ramble", ramble: "front-door" });
+  p.publish("door", { motion: true });
+  await p.drain();
+  p.publish("door", { motion: true, at: 2 });
+  await p.drain();
+  const said = (await store.all<any>("messages")).filter((m) => m.text === "The door opened");
+  expect(said).toHaveLength(2);
+  expect(new Set(said.map((m) => m.threadId)).size).toBe(1);
+  expect((await store.get<any>("threads", said[0].threadId)).channel).toBe("front-door");
+  const bad = await hub.applyActions([{ type: "trigger.add", name: "x", source: "door", formula: "true", why: "x", action: { message: "x", where: "somewhere" } }], "test");
+  expect(bad.runs[0].args[0]).toContain("where must be");
+});
+
+test("the same delivery twice is one event: the hub drops the copy, so nothing downstream keeps a seen list", async () => {
+  const p = hub.pipeline;
+  p.createSource({ name: "hook", variables: [{ name: "id" }] }, "Hearth");
+  const first = p.publish("hook", { data: { message: { id: "m1" } } });
+  const again = p.publish("hook", { data: { message: { id: "m1" } } });
+  expect(again.duplicate).toBe(true);
+  expect(again.value!.id).toBe(first.value!.id);
+  expect(p.publish("hook", { data: { message: { id: "m2" } } }).duplicate).toBeUndefined();
+  // A sender's own delivery id counts even when the body differs (a retry with a new timestamp).
+  p.publish("hook", { at: 1 }, { "Webhook-Id": "d-9" });
+  expect(p.publish("hook", { at: 2 }, { "Webhook-Id": "d-9" }).duplicate).toBe(true);
+  expect(p.events({ source: "hook", limit: 10 })).toHaveLength(3);
 });

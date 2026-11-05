@@ -1339,7 +1339,9 @@ async function fillNow(el: HTMLElement) {
 }
 
 function drawChannel(el: HTMLElement, stick: boolean) {
-  const top = S.chat.messages.filter((m: any) => !m.replyTo);
+  // A trigger's hand-off to an agent is hidden (only what the agent does shows), and so is its task post until it has
+  // something: a quiet run then leaves nothing at all.
+  const top = S.chat.messages.filter((m: any) => !m.replyTo && !m.hidden && !triggerPostPending(m));
   if (!top.length) {
     // A fresh ramble shows what's going on (in progress, coming up, ideas), not the same examples every time.
     const live = h("div", { class: "nowlist" });
@@ -1449,6 +1451,19 @@ function jobLabel(j: any) {
   return first.charAt(0).toUpperCase() + words.slice(0, 7).join(" ").slice(1) + (words.length > 7 ? "…" : "");
 }
 
+/** A trigger's task post whose agent is still working: not shown yet (it may well stay quiet). */
+function triggerPostPending(m: any) {
+  if (!m.taskJobId || !m.fromTrigger) return false;
+  const j = S.chat?.jobs.find((x: any) => x.id === m.taskJobId);
+  return !j || j.status === "queued" || j.status === "working";
+}
+
+/** The small ⚡ above what an agent did because a workflow fired. Tap it to see what set it off. */
+function sparkLine(trigger: { title: string }, handoff: any): Node[] {
+  const what = handoff ? h("details", { class: "trigdata" }, h("summary", null, "What set it off"), h("pre", { class: "output" }, String(handoff.text).replace(/<\/?untrusted>/g, "").trim())) : null;
+  return what ? [h("div", { class: "proline spark" }, icon("zap", 13), trigger.title), what] : [h("div", { class: "proline spark" }, icon("zap", 13), trigger.title)];
+}
+
 /** A task is a post by the teammate doing it: a bold title, then the answer (or working / Approve / stuck) right there. */
 function taskMessage(m: any) {
   const j = S.chat.jobs.find((x: any) => x.id === m.taskJobId);
@@ -1459,7 +1474,10 @@ function taskMessage(m: any) {
   const open = () => { location.hash = `#c/${S.chat.thread.id}/${j.id}`; };
   const aps = (S.chat.approvals || []).filter((a: any) => (a.jobId === j.id || follow.some((f: any) => f.id === a.jobId)) && a.status === "pending");
   const st = latest.status;
-  const body: (Node | Node[] | null)[] = [h("button", { class: "ttitle", on: { click: open } }, h("span", null, jobLabel(j)), icon("chevron", 16))];
+  // Started (or carried on) by a workflow: a ⚡ with its name over the post, and the hand-off folded under it.
+  const handoff = S.chat.messages.find((x: any) => x.id === latest.messageId && x.fromTrigger);
+  const spark = m.fromTrigger || handoff?.fromTrigger;
+  const body: (Node | Node[] | null)[] = [spark ? sparkLine(spark, handoff) : null, h("button", { class: "ttitle", on: { click: open } }, h("span", null, jobLabel(j)), icon("chevron", 16))];
   if (st === "working" || st === "queued") {
     body.push(h("button", { class: "typing live", on: { click: open } }, h("i"), h("i"), h("i"),
       h("span", { "data-progress": latest.id }, st === "working" ? S.progress.get(latest.id) || (latest.tier === "heavy" ? "Thinking it through" : "On it") : latest.dependsOn?.length ? "Waiting on another task" : "Up next"),
@@ -3194,17 +3212,19 @@ async function openExamples(t: any) {
 
 /** Who handles a trigger and where it says so, in a few words. */
 function routeText(t: any) {
-  if (t.route?.who === "session") return `→ ${mate(t.teammateId || "hearth").name} carries on in the same task thread`;
-  const who = t.route?.who === "hearth" ? "Hearth picks who" : `${mate(t.teammateId || "hearth").name} handles it`;
-  const where = t.route?.where === "new" ? "in a new ramble each time" : t.route?.where === "dm" ? "in their DM" : t.threadId ? "in the ramble it came from" : "in their DM";
+  const r = t.route || {};
+  const agent = t.action?.type !== "message" || t.action.agent;
+  if (agent && r.session) return `→ ${mate(t.teammateId || "hearth").name} carries on in the task it was made in`;
+  const who = !agent ? "Shown to you" : r.who === "hearth" ? "Hearth picks who" : `${mate(t.teammateId || "hearth").name} handles it`;
+  const where = r.where === "ramble" ? (r.ramble ? `in #${r.ramble}` : "in a new ramble each time") : r.where === "dm" ? "in their DM" : t.threadId ? "in the ramble it came from" : "in their DM";
   return `→ ${who}, ${where}`;
 }
 
 function actionText(a: any) {
   if (a.type === "workflow") return `runs workflow ${a.name}`;
-  if (a.type === "think") return `an agent: ${a.prompt}`;
-  if (a.type === "script") return a.then === "publish" ? `runs ${a.script}; what it prints becomes events on ${a.into}` : `runs ${a.script}${a.then === "think" ? ", then an agent explains what it printed" : " and tells you what it printed"}`;
-  return `says: ${a.text}`;
+  if (a.type === "script") return `runs ${a.script}; what it prints becomes events on ${a.into}`;
+  if (a.type === "message") return `${a.before ? `runs ${a.before}, then ` : ""}${a.agent ? "an agent: " : "says: "}${a.message}`;
+  return a.type;
 }
 
 /** How a trigger decides, in a few words: every event, a formula, your code, a judge. */
@@ -3219,9 +3239,8 @@ function decidesText(t: any) {
 /** What a trigger does, in a few words. */
 function doesText(t: any) {
   const a = t.action;
-  if (a.type === "notify") return "notify you";
-  if (a.type === "think") return `${mate(t.teammateId || "hearth").name} (an agent)`;
-  if (a.type === "script") return a.then === "publish" ? `${a.script} → ${a.into}` : `script ${a.script}`;
+  if (a.type === "message") return !a.agent ? "a message to you" : t.route?.who === "hearth" ? "Hearth (an agent)" : `${mate(t.teammateId || "hearth").name} (an agent)`;
+  if (a.type === "script") return `${a.script} → ${a.into}`;
   if (a.type === "workflow") return `workflow ${a.name}`;
   return a.type;
 }
@@ -3231,7 +3250,7 @@ async function toggleTriggerHow(t: any) {
   if (S.trigOpen.delete(t.id)) { drawTriggers(); return; }
   S.trigOpen.add(t.id); S.trigRuns[t.id] = undefined; drawTriggers();
   try {
-    const names = [t.check?.script, t.action?.type === "script" ? t.action.script : null].filter(Boolean);
+    const names = [t.check?.script, t.action?.type === "script" ? t.action.script : t.action?.type === "message" ? t.action.before : null].filter(Boolean);
     const [evs, scripts] = await Promise.all([
       call(`/api/pipeline/events?source=${encodeURIComponent(t.sourceId)}&limit=60`),
       names.length ? call("/api/scripts") : Promise.resolve([]),
@@ -3291,8 +3310,9 @@ function drawTriggers() {
     };
     const every = /^\s*(true|1)?\s*$/i.test(t.formula || "");
     const when = t.timer ? scheduleText(t.timer.schedule) : `an event on ${t.sourceName}`;
-    const node = (n: "trigger" | "action", ic: string, kind: string, title: string, sub: string) =>
-      h("button", { class: `wfnode ${n} ${sel === n ? "on" : ""}`, on: { click: pick(n) } },
+    // The script box opens the Action panel (it shows the script first).
+    const node = (n: "trigger" | "action" | "script", ic: string, kind: string, title: string, sub: string) =>
+      h("button", { class: `wfnode ${n} ${sel === n ? "on" : ""}`, on: { click: pick(n === "script" ? "action" : n) } },
         h("span", { class: "wfkind" }, icon(ic, 13), kind), h("b", null, title), h("small", null, sub));
     const runs = S.trigRuns[t.id];
     const detail = sel === "trigger"
@@ -3312,8 +3332,12 @@ function drawTriggers() {
                 steps.map((l: any) => h("div", { class: `runstep ${l.step}` }, h("span", { class: "steptag" }, l.step), " ", l.detail.replace(`${t.name}: `, "").replace(/\d{4}-\d\d-\d\dT[\d:.]+Z/g, (iso: string) => `${dayLabel(iso)} ${clockTime(iso)}`)))))))
       : h("div", { class: "wfdetail" },
           h("h5", null, "Action"),
-          t.action.type === "think" ? [h("p", null, h("b", null, mate(t.teammateId || "hearth").name), " (an agent) gets the event and these instructions:"), h("pre", { class: "code small" }, t.action.prompt)]
-            : t.action.type === "notify" ? [h("p", null, "Sends you this message (fields filled in from the event):"), h("pre", { class: "code small" }, t.action.text)]
+          t.action.type === "message" ? [
+              t.action.before ? [h("p", null, "First this script runs on the event; what it prints is ", h("code", null, "{{before}}"), ":"), code(t.action.before)] : null,
+              t.action.agent
+                ? h("p", null, h("b", null, t.route?.who === "hearth" ? "Hearth" : mate(t.teammateId || "hearth").name), " (an agent) gets the event and this message, out of sight. You see only what it does (marked ⚡), or nothing if there's nothing worth saying:")
+                : h("p", null, "Sends you this message (fields filled in from the event):"),
+              h("pre", { class: "code small" }, t.action.message)]
             : t.action.type === "script" ? [h("p", null, actionText(t.action)), code(t.action.script)]
             : h("p", null, actionText(t.action)),
           h("p", { class: "muted small" }, routeText(t), t.cooldownMin ? ` · at most every ${t.cooldownMin} min` : ""));
@@ -3321,7 +3345,8 @@ function drawTriggers() {
       h("div", { class: "wfcanvas" },
         node("trigger", t.timer ? "clock" : "plug", "Trigger", t.timer ? scheduleText(t.timer.schedule) : t.sourceName, decidesText(t)),
         h("span", { class: "wfedge" }),
-        node("action", t.action.type === "think" ? "sparkle" : t.action.type === "script" ? "code" : "bell", "Action", doesText(t), routeText(t).replace(/^→ /, ""))),
+        ...(t.action.type === "message" && t.action.before ? [node("script", "code", "Script", t.action.before, "runs first; prints {{before}}"), h("span", { class: "wfedge" })] : []),
+        node("action", t.action.type === "message" ? (t.action.agent ? "sparkle" : "bell") : t.action.type === "script" ? "code" : "bell", t.action.type === "message" && t.action.agent ? "Agent" : "Action", doesText(t), routeText(t).replace(/^→ /, ""))),
       detail);
   };
 
@@ -4046,7 +4071,7 @@ function openNewReminder() {
       // Who does it when it's time: Hearth picks (it can split it or bring in a new teammate), or one teammate.
       const who = h("select", { class: "field" }, h("option", { value: "hearth" }, "Hearth picks who"),
         (S.teammates || []).map((m: any) => h("option", { value: m.id }, m.name))) as HTMLSelectElement;
-      const post = h("select", { class: "field" }, h("option", { value: "new" }, "In a new ramble each time"), h("option", { value: "dm" }, "In a DM")) as HTMLSelectElement;
+      const post = h("select", { class: "field" }, h("option", { value: "ramble" }, "In a new ramble each time"), h("option", { value: "dm" }, "In a DM")) as HTMLSelectElement;
       const days = new Set([1, 2, 3, 4, 5]);
       const dayRow = h("div", { class: "days" }, ["S", "M", "T", "W", "T", "F", "S"].map((l, i) => {
         const b = h("button", { class: `day ${days.has(i) ? "on" : ""}`, type: "button", on: { click: () => { days.has(i) ? days.delete(i) : days.add(i); b.classList.toggle("on"); } } }, l);

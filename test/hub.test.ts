@@ -109,6 +109,8 @@ test("a routine that finds nothing worth saying stays quiet", async () => {
   const r = await hub.pipeline.remind({ title: "Check", schedule: { everyMin: 30 }, prompt: "[[quiet]]" }, "Reminders");
   now = new Date(now.getTime() + 31 * 60000);
   await hub.tick();
+  // The routine is an agent's task now: it runs, says [[quiet]], and leaves nothing behind.
+  await until(async () => (await store.all<any>("jobs")).length === 0 && (await messages()).length === 0);
   expect((await messages()).length).toBe(0);
   expect(hub.pipeline.findTrigger(r.value!.id)!.fireCount).toBe(1);
 });
