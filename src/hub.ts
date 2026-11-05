@@ -15,7 +15,7 @@ import { readPage } from "./browser.ts";
 import { SignedOut } from "./sources/pages.ts";
 import type { Vault } from "./vault.ts";
 import { SOURCES, sourceById, formatItems, needOf, type Item } from "./sources/index.ts";
-import { recall, allLessons, isActive, validateFact, LESSONS } from "./memory.ts";
+import { recall, searchLessons, isActive, validateFact, LESSONS } from "./memory.ts";
 import { describeLocal, localDate, distanceMeters } from "./time.ts";
 import { CHANNELS, CHANNEL_LABEL, type Channel } from "./types.ts";
 import { badChatLink } from "./connectors/web-senders.ts";
@@ -276,14 +276,15 @@ export class Hub {
         you: teammate ? { name: teammate.name, role: teammate.prompt } : { name: "Hearth", role: "The user's main assistant." },
         now: describeLocal(now, prefs.tz), tz: prefs.tz, userName: prefs.userName || undefined, aboutYou: prefs.about || undefined,
         memory: recall((await this.store.all<Fact>("memory")).filter((f) => f.notebook !== LESSONS), query, 8, now).map((f) => f.fact),
-        lessons: allLessons(await this.store.all<Fact>("memory"), now).map((f) => ({ id: f.id, lesson: f.fact })),
+        lessons: searchLessons(await this.store.all<Fact>("memory"), query, 5, now).map((f) => ({ id: f.id, lesson: f.fact })),
         components: (await this.searchLibrary(query)).filter((x) => x.kind === "component"), // ready-made visuals it can fill with data
       };
     }
     const all = await this.store.all<Fact>("memory");
     // Lessons (how to get things done) go in their own list below; memory is about the user and their world.
     const facts = mode === "review" ? all : all.filter((f) => f.notebook !== LESSONS);
-    const lessons = mode === "review" ? [] : mode === "learn" ? all.filter((f) => f.notebook === LESSONS && isActive(f, now)) : allLessons(all, now);
+    // Lessons are searched like skills: the few that best match this task go in the prompt; jobs search for more.
+    const lessons = mode === "review" ? [] : mode === "learn" ? all.filter((f) => f.notebook === LESSONS && isActive(f, now)) : searchLessons(all, query, 6, now);
     // In a project's ramble: everything in its notebook comes first, then what's relevant from the rest.
     const project = await this.projectOf(threadId);
     const own = project ? facts.filter((f) => f.notebook === project.notebook && isActive(f, now)).slice(-30) : [];
@@ -2028,6 +2029,59 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     const prev = this.writeSkill(b.value, "an agent (you approved)");
     await this.log(prev ? "skill.updated" : "skill.installed", `${act.name} from ${act.repo}${act.path ? `/${act.path}` : ""} @${act.sha.slice(0, 7)}`);
     return { ok: true, output: `Installed ${act.name}. Read it with: hearth-skill show ${act.name}` };
+  }
+
+  /** What `hearth-lesson <argv>` does, for /api/agent/lessons (brains/lessons.ts). Text back for the agent to read. */
+  async lessonsAgent(argv: string[], by: string): Promise<string> {
+    const [cmd = "help", ...rest] = argv;
+    const usage = "usage: hearth-lesson search <words...> | show <id> | list | add <rule> [--why <what happened>] | update <id> <rule> | used <id...>";
+    const all = await this.store.all<Fact>("memory");
+    const line = (f: Fact) => `${f.id}  ${f.fact}${f.useCount ? `  (used ${f.useCount}×)` : ""}`;
+    const find = (id: string) => all.find((f) => f.notebook === LESSONS && !f.supersededBy && (f.id === id || f.id.startsWith(id)) && id.length >= 6);
+    switch (cmd) {
+      case "search": case "find": {
+        const q = rest.join(" ").trim();
+        if (!q) return "usage: hearth-lesson search <a few words about what you're about to do>";
+        const hits = searchLessons(all, q, 8, this.clock());
+        return hits.length ? hits.map(line).join("\n") + "\n\nRead one: hearth-lesson show <id>. Followed one: hearth-lesson used <id>."
+          : `No lesson matches "${q}". Try other words (what you're doing, not the subject), or hearth-lesson list.`;
+      }
+      case "list": {
+        const every = searchLessons(all, "", 200, this.clock());
+        return every.length ? every.map(line).join("\n") : "No lessons yet.";
+      }
+      case "show": {
+        const f = rest[0] ? find(rest[0]) : undefined;
+        if (!f) return "No such lesson. Find one: hearth-lesson search <words>";
+        return [f.fact, "", `Learned: ${f.createdAt.slice(0, 10)}${f.evidence ? `, when ${f.evidence}` : ""}`, `Used: ${f.useCount || 0}×${f.lastUsedAt ? `, last ${f.lastUsedAt.slice(0, 10)}` : ""}`, `id: ${f.id}`].join("\n");
+      }
+      case "used": {
+        const ids = rest.map((id) => find(id)?.id).filter((x): x is string => !!x);
+        if (!ids.length) return "No such lesson. The ids are in hearth-lesson search.";
+        await this.markUsed(ids);
+        return `Noted: ${ids.length} lesson(s) used.`;
+      }
+      case "add": {
+        const i = rest.indexOf("--why");
+        const rule = (i >= 0 ? rest.slice(0, i) : rest).join(" ").trim();
+        const why = i >= 0 ? rest.slice(i + 1).join(" ").trim() : "";
+        if (!rule) return "usage: hearth-lesson add \"<the rule>\" --why \"<what happened, in a line>\"";
+        const r = await this.addFact({ fact: rule, notebook: LESSONS, evidence: why || `saved by ${by}` }, "assistant");
+        if (!r.value) return r.error || "Couldn't save it.";
+        await this.log("lessons", `${by} learned: ${r.value.fact}`);
+        return `Saved: ${r.value.id}  ${r.value.fact}`;
+      }
+      case "update": {
+        const f = rest[0] ? find(rest[0]) : undefined;
+        const rule = rest.slice(1).join(" ").trim();
+        if (!f || !rule) return "usage: hearth-lesson update <id> \"<the sharper rule>\"";
+        const r = await this.updateFact(f.id, { fact: rule });
+        if (!r) return "Couldn't update it.";
+        await this.log("lessons", `${by} sharpened a lesson: ${r.fact}`);
+        return `Updated: ${r.id}  ${r.fact}`;
+      }
+      default: return usage;
+    }
   }
 
   /** What `hearth-skill-store <argv>` does, for /api/agent/skills. Text back for the agent to read. */

@@ -41,18 +41,32 @@ export function recall(facts: Fact[], query: string, budget = 40, now = new Date
 }
 
 /**
- * Lessons: general rules the team learned the hard way about how to work, for every job ("click through a deal before
- * quoting it", "on bot-protected sites, Firecrawl interact gets through where Browserless doesn't"). Few and general, so
- * every run gets all of them; they live in their own notebook so they're never crowded out by facts about the user.
+ * Lessons: general rules the team learned the hard way about how to work ("click through a deal before quoting it").
+ * They're a library, searched like skills: a job runs `hearth-lesson search <words>` (brains/lessons.ts), and every
+ * run's prompt carries the few that best match its task. They live in their own notebook, apart from facts about the user.
  */
 export const LESSONS = "lessons";
-export const MAX_LESSONS = 30;
 
-export function allLessons(facts: Fact[], now = new Date()) {
+/**
+ * Lessons that match a query, best first: words shared with the rule and what happened (evidence), then how often
+ * they've been used. No query: every lesson, most used first.
+ */
+export function searchLessons(facts: Fact[], query: string, limit = 8, now = new Date()) {
   const active = facts.filter((f) => f.notebook === LESSONS && isActive(f, now));
-  // Over the cap (the review merges them back down): the ones used and made most recently stay.
-  return active.length <= MAX_LESSONS ? active
-    : [...active].sort((a, b) => (b.lastUsedAt || b.createdAt).localeCompare(a.lastUsedAt || a.createdAt)).slice(0, MAX_LESSONS);
+  const used = (f: Fact) => Math.min(f.useCount || 0, 10) * 0.2;
+  const q = tokens(query);
+  if (!q.size) return [...active].sort((a, b) => (b.useCount || 0) - (a.useCount || 0) || b.createdAt.localeCompare(a.createdAt)).slice(0, limit);
+  return active
+    .map((f) => {
+      let hit = 0;
+      for (const t of tokens(f.fact)) if (q.has(t)) hit += 2;
+      for (const t of tokens(f.evidence || "")) if (q.has(t)) hit += 1;
+      return { f, score: hit ? hit + used(f) : 0 };
+    })
+    .filter((s) => s.score > 0)
+    .sort((a, b) => b.score - a.score || b.f.createdAt.localeCompare(a.f.createdAt))
+    .slice(0, limit)
+    .map((s) => s.f);
 }
 
 export function search(facts: Fact[], query: string) {

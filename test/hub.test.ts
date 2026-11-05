@@ -775,49 +775,40 @@ test("a ramble's look happens on its own once its tasks are done", async () => {
   } finally { delete process.env.HEARTH_PROACTIVE_DELAY_MS; }
 });
 
-test("lessons: general rules kept apart from memory, and every job gets all of them", async () => {
+test("lessons: a library apart from memory; each run gets the ones that match its task", async () => {
   await hub.applyActions([
-    { type: "lesson.add", lesson: "For sites with bot protection, use Firecrawl interact; Browserless and Browserbase get blocked.", evidence: "it worked" },
-    { type: "lesson.add", lesson: "Before quoting a price or listing, click through to the provider and check it's really available." },
+    { type: "lesson.add", lesson: "Before quoting a price or availability, confirm it on the provider's own page.", evidence: "an aggregator deal was gone" },
+    { type: "lesson.add", lesson: "When a tool fails twice the same way, switch to another instead of retrying." },
     { type: "memory.add", fact: "Has a Chase Sapphire Preferred card.", notebook: "money", importance: 2 },
   ], "");
   expect((await store.all<Fact>("memory")).filter((f) => f.notebook === "lessons").length).toBe(2);
-  for (const task of ["check enterprise car rental prices", "draft an email to the landlord"]) {
-    const ctx = (await hub.context(task, "job")) as any;
-    expect(ctx.lessons.length).toBe(2); // not matched by words: rules for every job
-    expect(ctx.memory.some((m: any) => m.notebook === "lessons")).toBe(false); // they don't crowd out what's known about the user
-  }
+  const prices = (await hub.context("find the cheapest price for a rental car", "job")) as any;
+  expect(prices.lessons.map((l: any) => l.lesson)).toEqual(["Before quoting a price or availability, confirm it on the provider's own page."]);
+  expect(prices.memory.some((m: any) => m.notebook === "lessons")).toBe(false); // they don't crowd out what's known about the user
+  expect(((await hub.context("draft a birthday note", "job")) as any).lessons).toBeUndefined(); // nothing matches: none shown
   // The same lesson twice is one lesson.
-  await hub.applyActions([{ type: "lesson.add", lesson: "Before quoting a price or listing, click through to the provider and check it's really available." }], "");
+  await hub.applyActions([{ type: "lesson.add", lesson: "When a tool fails twice the same way, switch to another instead of retrying." }], "");
   expect((await store.all<Fact>("memory")).filter((f) => f.notebook === "lessons").length).toBe(2);
-  // Job prompts point at them and at the skill that says how to save one.
+  // Job prompts say to search the library, and point at the skill that says how.
   const prompt = buildPrompt({ mode: "job", input: "x", context: {} } as any, "claude", true);
-  expect(prompt).toContain("CONTEXT.lessons");
+  expect(prompt).toContain("hearth-lesson search");
   expect(prompt).toContain("learn-from-mistakes");
 });
 
-test("lessons are a checklist every run ends on, the reply pass too, and using one is on record", async () => {
-  await hub.applyActions([{ type: "lesson.add", lesson: "Check a tool's output before saying something is done." }], "");
-  const id = (await store.all<Fact>("memory")).find((f) => f.notebook === "lessons")!.id;
-  const job = await hub.context("rename the files", "job");
-  const prompt = buildPrompt({ mode: "job", input: "rename the files", context: job } as any, "claude", true);
-  const rules = prompt.slice(prompt.indexOf("RULES FROM EXPERIENCE"));
-  expect(prompt.indexOf("RULES FROM EXPERIENCE")).toBeGreaterThan(prompt.indexOf("JOB:")); // the last thing it reads
-  expect(rules).toContain(`1. Check a tool's output before saying something is done.  [${id}]`);
-  expect(rules).toContain("BEFORE YOU REPLY");
-  expect(prompt.slice(0, prompt.indexOf("RULES FROM EXPERIENCE"))).not.toContain('"lessons"'); // not also buried in the JSON
-  // The pass that writes the user's reply gets them too, without the bookkeeping.
-  const voice = buildPrompt({ mode: "voice", input: "x", context: await hub.context("x", "voice") } as any);
-  expect(voice).toContain("1. Check a tool's output before saying something is done.");
-  expect(voice).not.toContain(`[${id}]`);
-  // The lessons review sees them with ids, and is told to fix a rule the team broke.
-  const learn = buildPrompt({ mode: "learn", input: "x", context: await hub.context("x", "learn") } as any);
-  expect(learn).toContain(id);
-  expect(learn).toContain("BROKEN RULES");
-  expect(learn).not.toContain("RULES FROM EXPERIENCE");
-  // A run that applied it says so, and it's counted.
-  await hub.applyActions([{ type: "memory.used", ids: [id] }], "");
-  expect((await store.get<Fact>("memory", id))!.useCount).toBe(1);
+test("hearth-lesson: search, show, add, update and count lessons like skills", async () => {
+  const add = await hub.lessonsAgent(["add", "Check a tool's output before saying something is done.", "--why", "a file came back empty"], "Research");
+  expect(add).toStartWith("Saved: ");
+  const id = add.split(/\s+/)[1];
+  expect(await hub.lessonsAgent(["search", "is", "the", "output", "done"], "Research")).toContain(id);
+  expect(await hub.lessonsAgent(["search", "zebra"], "Research")).toContain("No lesson matches");
+  expect(await hub.lessonsAgent(["show", id.slice(0, 8)], "Research")).toContain("a file came back empty");
+  expect(await hub.lessonsAgent(["used", id], "Research")).toContain("1 lesson(s) used");
+  expect(await hub.lessonsAgent(["list"], "Research")).toContain("(used 1×)");
+  const up = await hub.lessonsAgent(["update", id, "Open a tool's output and check it before saying something is done."], "Research");
+  expect(up).toStartWith("Updated: ");
+  expect(await hub.lessonsAgent(["list"], "Research")).toContain("Open a tool's output");
+  expect(await hub.lessonsAgent(["list"], "Research")).not.toContain("Check a tool's output"); // the old one is history now
+  expect(await hub.lessonsAgent(["nope"], "Research")).toStartWith("usage: hearth-lesson");
 });
 
 test("lessons: a thread quiet for 15 minutes is reviewed once for what it taught, then only what's new", async () => {

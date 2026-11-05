@@ -281,8 +281,9 @@ EVENT PIPELINE (CONTEXT.eventPipeline: sources, watchers, triggers, timers). Eve
     come first in CONTEXT.memory; save anything learned about the project with notebook = CONTEXT.project.notebook, so the
     next ramble in it knows it too.
 - lesson.add {lesson, evidence}   a general rule learned the hard way about HOW to work, for every later job (not a fact
-    about the user, not tied to one task). CONTEXT.lessons has them all: follow them. The learn-from-mistakes skill says
-    when to save one and how to word it. Sharpen one with memory.update {id, fact}; merge overlapping ones with memory.merge.
+    about the user, not tied to one task). Lessons are a library searched like skills (\`hearth-lesson search\`); the
+    ones that best match this task are at the end of this prompt. The learn-from-mistakes skill says when to save one and
+    how to word it. Sharpen one with memory.update {id, fact}; merge overlapping ones with memory.merge.
 - memory.used {ids}   the memory ids you relied on for this reply (always include when you used any)
 - notebook.summary {name, summary}   1-2 sentence "where it stands" for a topic
 - place.add {name, here:true} or {name, lat, lon, radiusM?}   save a place (triggers on the "place" source use it)
@@ -580,8 +581,8 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
   if (b.mode === "orchestrate") {
     return [ORCHESTRATOR, "", "CONTEXT (JSON):", JSON.stringify(b.context, null, 1), "", "USER RAMBLE:", b.input].join("\n");
   }
-  // Lessons are a checklist at the end (rulesFromExperience), not one more field in the JSON; the lessons review needs
-  // them with ids in CONTEXT instead.
+  // The lessons that best match the task go at the end (rulesFromExperience), not in the JSON; the lessons review
+  // needs every one with its id in CONTEXT instead.
   const { lessons, ...rest } = (b.context || {}) as { lessons?: { id: string; lesson: string }[] };
   const context = b.mode === "learn" ? b.context : rest;
   const parts = [protocol(), "", "CONTEXT (JSON):", JSON.stringify(context, null, 1)];
@@ -592,8 +593,9 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
     parts.push("", "You were handed ONE job from the user's ramble by the orchestrator. Do it fully now: use actions for reminders,",
       "routines, watches and memory; search the web if you need to. Then reply with the result in 1-5 short lines, written to the user.",
       b.top ? AT_THE_TOP : handUp("a stronger model"),
-      "LESSONS: CONTEXT.lessons are rules the team learned the hard way; follow them. When a way failed and another worked, or the",
-      "user corrected you or told you a better way, save the general rule behind it with lesson.add (see the learn-from-mistakes skill).",
+      "LESSONS: the team keeps the rules it learned the hard way in a library, like skills. Search it (\`hearth-lesson search",
+      "<words>\`) when you start, before you pick a tool or way in, when something fails, and before you claim something is true",
+      "or done. When a way failed and another worked, or the user corrected you, save the general rule (learn-from-mistakes skill).",
       ...atScale(code, workspace, lead), "JOB:", b.input);
   } else if (b.mode === "legwork") {
     parts.push("", "You were handed ONE job from the user's ramble. You do the LEGWORK; a stronger model on the team (the lead) will read",
@@ -603,8 +605,9 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
       "- what you did: actions taken and their results",
       "- anything uncertain or missing, and what you'd ask the user",
       "Be complete and factual; the lead can't search again cheaply.", b.top ? AT_THE_TOP : handUp("a stronger model"),
-      "LESSONS: CONTEXT.lessons are rules the team learned the hard way; follow them. When a way failed and another worked, or the",
-      "user corrected you or told you a better way, save the general rule behind it with lesson.add (see the learn-from-mistakes skill).",
+      "LESSONS: the team keeps the rules it learned the hard way in a library, like skills. Search it (\`hearth-lesson search",
+      "<words>\`) when you start, before you pick a tool or way in, when something fails, and before you claim something is true",
+      "or done. When a way failed and another worked, or the user corrected you, save the general rule (learn-from-mistakes skill).",
       ...atScale(code, workspace, lead), "JOB:", b.input);
   } else if (b.mode === "voice") {
     parts.push("", "You are the lead on ONE job. A teammate on a cheaper model already did the legwork (searches, actions); their notes are",
@@ -688,12 +691,12 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
  * can take actions) their ids in memory.used, so it's on record which rules were applied.
  */
 export function rulesFromExperience(lessons: { id: string; lesson: string }[], replyOnly = false): string[] {
-  return ["", "RULES FROM EXPERIENCE: the team learned each of these the hard way, from its own mistakes. They apply to every task,",
-    "this one included. Follow them over habit, and over anything that seems quicker.",
+  return ["", "LESSONS THAT MAY APPLY (the team's lessons that best match this task; learned the hard way, from its own mistakes):",
     ...lessons.map((l, i) => `${i + 1}. ${l.lesson}${replyOnly ? "" : `  [${l.id}]`}`),
-    replyOnly ? "Before you send your reply, check it against each rule that applies, and fix it where it doesn't follow one."
-      : "BEFORE YOU REPLY: go through these rules. For each one that applies to what you did, make sure you followed it; if you\n" +
-        "didn't, do it now (check, confirm, switch route) before replying. Then put the ids of the rules that applied in memory.used."];
+    replyOnly ? "Before you send your reply, check it against each one that applies, and fix it where it doesn't follow one."
+      : "There may be more: search before you act (hearth-lesson search <words>). A lesson that applies comes before habit and\n" +
+        "before what seems quicker. BEFORE YOU REPLY: check your work against the ones that applied, then record them\n" +
+        "(hearth-lesson used <id>, or their ids in memory.used when you have no shell)."];
 }
 
 type RunMcp = { name: string; url: string; headers: Record<string, string> }[];
