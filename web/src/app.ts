@@ -1323,11 +1323,13 @@ function drawActivity() {
   const past = of("proactive", "done", "failed");
   // Like notifications: what you've seen clears off. It's still in its chat.
   const fresh = past.filter((it: any) => isFresh(it, actVisit!));
+  // Workflow runs clear the same way once seen; one still working or waiting on you stays until it's settled.
+  const wfLive = of("workflow").filter((it: any) => it.state === "working" || it.state === "needs" || (String(it.at) > actVisit! && String(it.at) > seenAt(it.threadId)));
   markActivitySeen();
   const secs = [
     sec("Working now", running, runRow),
     sec("Needs you", [...of("mcp"), ...of("approval", "blocked")], (it: any) => (it.kind === "mcp" ? mcpAskRow(it) : row(it))),
-    sec("Workflows", of("workflow").sort((a: any, b: any) => String(b.matchedAt).localeCompare(String(a.matchedAt))), wfRow),
+    sec("Workflows", wfLive.sort((a: any, b: any) => String(b.matchedAt).localeCompare(String(a.matchedAt))), wfRow),
     sec("New", fresh, row),
   ].filter(Boolean) as Node[];
   clear(el, secs.length ? secs : h("p", { class: "hempty" }, "You're all caught up."));

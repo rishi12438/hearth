@@ -333,6 +333,21 @@ test("a trigger's message can use the payload: {{payload.data.id}} fills in", as
   expect((await hub.inbox()).find((it: any) => it.kind === "workflow")).toMatchObject({ title: "ping", state: "done" });
 });
 
+test("the hub's own housekeeping runs stay out of Activity's Workflows", async () => {
+  await hub.start(60_000);
+  hub.stop();
+  const p = hub.pipeline;
+  p.createSource({ name: "pings", variables: [{ name: "kind" }] }, "Hearth");
+  await p.addTrigger({ name: "ping", source: "pings", formula: "true", action: { type: "notify", text: "pong" } }, "Hearth");
+  now = zonedToUtc(2026, 10, 31, 4, 5, TZ); // past the nightly cleanup, memory review and an Ideas round
+  await p.tick();
+  p.publish("pings", { kind: "hello" });
+  await p.drain();
+  const housekeeping = ["library-cleanup", "memory-review", "ideas"].map((n) => p.findTrigger(n)!.id);
+  expect(p.events({ limit: 10 }).some((e: any) => e.log?.some((l: any) => l.step === "matched" && housekeeping.includes(l.triggerId)))).toBe(true);
+  expect((await hub.inbox()).filter((it: any) => it.kind === "workflow").map((it: any) => it.title)).toEqual(["ping"]);
+});
+
 test("where: ramble:<name> posts in that ramble, made the first time; a plain message needs no agent", async () => {
   const p = hub.pipeline;
   p.createSource({ name: "door", variables: [{ name: "motion" }] }, "Hearth");

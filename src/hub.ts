@@ -2691,12 +2691,13 @@ ${JSON.stringify(shown, null, 1)}
 
   /**
    * Activity's Workflows: every trigger that matched in the last day, from the pipeline's own log (so a quiet run
-   * that left no trace in a chat still shows), joined to the agent's job when it handed one over.
+   * that left no trace in a chat still shows), joined to the agent's job when it handed one over. The hub's own
+   * housekeeping (Ideas, nightly memory review, library cleanup) isn't your workflow: it only shows if it failed.
    */
   private async workflowRuns(all: Job[], msgs: Message[]) {
     const since = new Date(this.clock().getTime() - 24 * 3_600_000).toISOString();
     const handoffs = msgs.filter((m) => m.role === "user" && m.fromTrigger?.eventId);
-    return this.pipeline.recentRuns(since, 15).map((r) => {
+    return this.pipeline.recentRuns(since, 60).map((r) => {
       const t = this.pipeline.findTrigger(r.triggerId);
       const m = handoffs.find((x) => x.fromTrigger!.eventId === r.eventId && x.fromTrigger!.id === r.triggerId);
       const job = m ? all.find((j) => j.messageId === m.id && !j.parentId) : undefined;
@@ -2713,8 +2714,9 @@ ${JSON.stringify(shown, null, 1)}
       if (state === "quiet" && /^(nothing worth saying|nothing worth telling you)?$/.test(detail)) detail = "Nothing worth telling you";
       return { kind: "workflow", at: last?.at || r.at, matchedAt: r.at, id: `${r.eventId}:${r.triggerId}`, triggerId: r.triggerId, title: t?.title || t?.name || "A workflow",
         source: r.source, state, detail: detail.slice(0, 300), teammateId: job?.teammateId || t?.teammateId || "hearth",
-        threadId: job?.threadId, jobId: job ? job.followsUp || job.id : undefined, liveJobId: job?.id, ownJob: job?.id };
-    });
+        threadId: job?.threadId, jobId: job ? job.followsUp || job.id : undefined, liveJobId: job?.id, ownJob: job?.id,
+        housekeeping: t?.action?.type === "system" };
+    }).filter((w) => !w.housekeeping || w.state === "failed").slice(0, 15).map(({ housekeeping: _, ...w }) => w);
   }
 
   /** When you last looked at Activity (any device). Results after this count as new, like unread notifications. */
