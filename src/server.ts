@@ -495,7 +495,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         : await hub.google.finish(url.searchParams.get("code") || "", url.searchParams.get("state") || "");
       if (r.error && badToken.blocked(ip)) throw banned();
       if (r.error) badToken.allow(ip);
-      else { await hub.log("google.connected", `Google connected (${(r as any).value?.added || "account"})`); hub.emit("connections"); }
+      else { await hub.log("google.connected", `Google connected (${(r as any).value?.added || "account"})`); await hub.ensureInboxWatch().catch((e) => console.warn("inbox watch", e)); hub.emit("connections"); }
       const to = `/#connections=${r.error ? `error:${encodeURIComponent(r.error)}` : `google:${encodeURIComponent((r as any).value?.added || "")}`}`;
       return new Response(null, { status: 302, headers: { Location: to, "Cache-Control": "no-store" } });
     }

@@ -12,7 +12,7 @@ import { loadConfig } from "../src/config.ts";
 import { zonedToUtc } from "../src/time.ts";
 import { Google, mailText } from "../src/google.ts";
 import { cleanWatch, describeWatch } from "../src/events/watchers.ts";
-import type { Message } from "../src/types.ts";
+import type { Job, Message } from "../src/types.ts";
 
 // Google with your own OAuth client, and the Gmail and Calendar trigger modules, against a fake Google.
 
@@ -178,6 +178,34 @@ test("a Gmail watcher waits until Google is connected, remembers what's there, t
   await lookNow("school");
   expect((await sent()).length).toBe(1); // already seen
   expect(calls.filter((c) => c.endsWith("/token")).length).toBe(1); // the access token is reused
+});
+
+test("inbox watch: the hub's own once Google is connected; only email the judge says needs something goes to the team, in #inbox", async () => {
+  await hub.ensureTeammates();
+  await hub.ensureInboxWatch();
+  expect(hub.pipeline.findTrigger("inbox-watch")).toBeNull(); // not before Google
+  await connect();
+  await hub.ensureInboxWatch();
+  await hub.ensureInboxWatch(); // once
+  const t = hub.pipeline.findTrigger("inbox-watch")!;
+  expect(t).toMatchObject({ createdBy: "system", status: "active", judge: { output: { type: "yesno" } }, action: { type: "message", agent: true } });
+  expect(hub.pipeline.triggers().filter((x) => x.name === "inbox-watch").length).toBe(1);
+  expect((await hub.pipeline.updateTrigger("inbox-watch", { formula: "false" })).error).toBeTruthy(); // pause only
+  await lookNow("inbox-watch");
+  inbox.unshift({ id: "m2", from: "Sam <sam@example.com>", subject: "Urgent: can you confirm Friday?", body: "Need an answer asap" });
+  inbox.unshift({ id: "m3", from: "news@weekly.example.com", subject: "This week in shoes", body: "Our picks." });
+  await lookNow("inbox-watch");
+  await hub.idle(20_000);
+  const handed = (await store.all<Message>("messages")).filter((m) => m.role === "user" && m.fromTrigger?.id === t.id);
+  expect(handed.length).toBe(1);
+  expect((await store.all<Job>("jobs")).filter((j) => j.threadId === handed[0].threadId && !j.parentId).length).toBe(1); // one task, not split
+  expect(handed[0].text).toContain("confirm Friday");
+  const thread = (await store.all<any>("threads")).find((x) => x.id === handed[0].threadId);
+  expect(thread.channel).toBe("inbox");
+  // Wiping your data keeps the hub's own watch.
+  await hub.wipePersonal();
+  expect(hub.pipeline.findWatcher("inbox-watch")).toBeTruthy();
+  expect(hub.pipeline.findTrigger("inbox-watch")).toBeTruthy();
 });
 
 test("a calendar watcher speaks before an event starts, once", async () => {
