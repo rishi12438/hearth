@@ -1,5 +1,5 @@
-import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, statSync } from "node:fs";
-import { join, basename, extname } from "node:path";
+import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, statSync, realpathSync } from "node:fs";
+import { join, basename, extname, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { sha256 } from "./auth.ts";
 import type { Store } from "./store/index.ts";
@@ -9,6 +9,8 @@ import type { StoredFile } from "./types.ts";
 // Downloads are always served as attachments with a sandbox CSP, so a file can never run inside the app.
 
 export const MAX_FILE_BYTES = 15 * 1024 * 1024;
+/** What an agent can hand over from its workspace (a rendered video, say): bigger than what you can upload. */
+export const MAX_AGENT_FILE_BYTES = 50 * 1024 * 1024;
 const TYPES: Record<string, string> = {
   ".txt": "text/plain", ".md": "text/markdown", ".csv": "text/csv", ".json": "application/json", ".ics": "text/calendar",
   ".html": "text/html", ".xml": "application/xml", ".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
@@ -40,8 +42,8 @@ export class Files {
     mkdirSync(this.dir, { recursive: true, mode: 0o700 });
   }
 
-  async save(bytes: Uint8Array, meta: { name: string; source: StoredFile["source"]; threadId?: string; jobId?: string; teammateId?: string }) {
-    if (bytes.length > MAX_FILE_BYTES) return { error: "That file is over 15 MB." };
+  async save(bytes: Uint8Array, meta: { name: string; source: StoredFile["source"]; threadId?: string; jobId?: string; teammateId?: string }, max = MAX_FILE_BYTES) {
+    if (bytes.length > max) return { error: `That file is over ${Math.round(max / 1024 / 1024)} MB.` };
     const name = cleanName(meta.name);
     const id = randomUUID();
     writeFileSync(join(this.dir, id), bytes, { mode: 0o600 });
@@ -60,6 +62,25 @@ export class Files {
     const r = await this.save(readFileSync(path), { ...meta, name });
     rmSync(path, { force: true });
     return r;
+  }
+
+  /**
+   * Copies a file an agent made in its workspace (e.g. "out/preview.mp4") into the thread, for the user to open. The
+   * workspace keeps its copy. Only paths inside the workspace, links resolved, so nothing else on the hub can be sent.
+   */
+  async share(root: string, relPath: string, meta: Omit<Parameters<Files["save"]>[1], "name">) {
+    const want = String(relPath || "").trim().replace(/^["'`]|["'`]$/g, "");
+    if (!want) return { error: "No file named." };
+    let base: string, path: string;
+    try {
+      base = realpathSync(root);
+      path = realpathSync(resolve(base, want));
+    } catch { return { error: `No file called ${want} in the workspace.` }; }
+    if (!path.startsWith(base + sep)) return { error: `${want} isn't in the workspace.` };
+    const st = statSync(path);
+    if (!st.isFile()) return { error: `${want} isn't a file.` };
+    if (st.size > MAX_AGENT_FILE_BYTES) return { error: `${want} is over ${MAX_AGENT_FILE_BYTES / 1024 / 1024} MB.` };
+    return this.save(readFileSync(path), { ...meta, name: basename(path) }, MAX_AGENT_FILE_BYTES);
   }
 
   bytes(id: string) {
