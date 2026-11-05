@@ -65,23 +65,6 @@ export function nextScheduledRun(time: string, days: number[], tz: string, after
   return null;
 }
 
-const toMin = (s: string) => { const [h, m] = s.split(":").map(Number); return h * 60 + m; };
-
-export function inQuietHours(date: Date, tz: string, start: string, end: string) {
-  const w = wallParts(date, tz);
-  const now = w.h * 60 + w.mi, s = toMin(start), e = toMin(end);
-  return s <= e ? now >= s && now < e : now >= s || now < e;
-}
-
-/** The first moment after `date` that is outside quiet hours. */
-export function quietEndsAt(date: Date, tz: string, end: string) {
-  const [h, mi] = end.split(":").map(Number);
-  const w = wallParts(date, tz);
-  let at = zonedToUtc(w.y, w.m, w.d, h, mi, tz);
-  if (at <= date) { const n = addDays(w, 1); at = zonedToUtc(n.y, n.m, n.d, h, mi, tz); }
-  return at;
-}
-
 export function localDate(date: Date, tz: string) {
   const w = wallParts(date, tz);
   return `${w.y}-${String(w.m).padStart(2, "0")}-${String(w.d).padStart(2, "0")}`;

@@ -42,7 +42,7 @@ const S = {
   /** A sheet that refreshes live while it's open (the "Your hub" screens are pages: see hubPage()). */
   panel: null as null | "shares" | "mcp" | `share:${string}`,
   /** The event pipeline: sources, triggers (formula rules), timers, and recent events. */
-  pipe: { sources: [], triggers: [], timers: [], watchers: [], held: 0 } as { sources: any[]; triggers: any[]; timers: any[]; watchers: any[]; held: number },
+  pipe: { sources: [], triggers: [], timers: [], watchers: [] } as { sources: any[]; triggers: any[]; timers: any[]; watchers: any[] },
   pipeEvents: [] as any[],
   /** Sources whose latest events are open in Triggers → Sources, and those events (newest first, up to 10). */
   pipeSrcOpen: new Set<string>(),
@@ -3551,7 +3551,6 @@ function drawTriggers() {
   const tab = S.pipeTab;
   clear(el,
     h("p", { class: "muted" }, "Reminders, routines and rules. Anything can push events into a source (a clock, a watcher, a webhook, your location). Every event is saved, and each trigger's formula decides, with plain code, whether it acts."),
-    S.pipe.held ? h("p", { class: "muted small" }, `${S.pipe.held} waiting for quiet hours to end.`) : null,
     h("div", { class: "seg" }, tabs.map(([k, label, n]) => h("button", { class: tab === k ? "on" : "", on: { click: () => { S.pipeTab = k; if (k === "events") loadPipelineEvents(); drawTriggers(); } } }, label, n ? h("small", null, ` ${n}`) : null))),
     tab === "triggers" ? [
       live.length ? h("div", { class: "list" }, live.map(triggerRow)) : h("p", { class: "empty" }, "No workflows yet. Each one is a trigger and what it does. Say “remind me Friday at 6 to call mom”, “tell me when this page changes” or “when a GitHub PR is opened on my repo, summarize it”."),
@@ -3775,8 +3774,7 @@ function openSettings() {
       row("Name and time zone", `${p.userName || "Not set"} · ${p.tz}`, openProfile),
       // The Mac app shows them as Mac notifications (allowed or not in System Settings → Notifications → Hearth).
       inMacApp ? row("Notifications", notifProblem() || (macNotif ? `On · ${macNotif.style === "alert" ? "alerts stay until you close them" : "banners"}` : "Mac notifications · System Settings → Notifications → Hearth"), fixMacNotif)
-        : row("Notifications", st.push.subscribed ? "On for this device" : "Off", () => togglePush(st.push.subscribed), sw(st.push.subscribed)),
-      row("Quiet hours and daily limit", `${p.quietStart}–${p.quietEnd} · up to ${p.maxProactivePerDay}/day`, openQuiet)),
+        : row("Notifications", st.push.subscribed ? "On for this device" : "Off", () => togglePush(st.push.subscribed), sw(st.push.subscribed))),
     h("div", { class: "list" }, row("Brains", "Which models do what, and smart voice", openBrains),
       row("Voice", st.voice ? `On · ${st.voice === "deepgram" ? "Deepgram" : st.voice}` : "Off · connect Deepgram to talk", openVoice)),
     h("h4", null, "Location"),
@@ -4259,22 +4257,6 @@ function openProfile() {
     h("label", null, h("span", null, "Time zone"), tz, h("datalist", { id: "tzs" }, zones.map((z) => h("option", { value: z })))),
     h("button", { class: "link", on: { click: () => { tz.value = Intl.DateTimeFormat().resolvedOptions().timeZone; } } }, "Use this device's time zone"),
     h("button", { class: "btn primary big", on: { click: async () => { try { await call("/api/prefs", { method: "PATCH", body: { userName: name.value, tz: tz.value } }); toast("Saved"); closeSheet(); refreshState(); } catch (e) { handleError(e); } } } }, "Save"),
-  ]);
-}
-
-function openQuiet() {
-  const p = S.state.prefs;
-  const start = h("input", { class: "field", type: "time", value: p.quietStart });
-  const end = h("input", { class: "field", type: "time", value: p.quietEnd });
-  let n = p.maxProactivePerDay;
-  const count = h("b", null, String(n));
-  const step = (d: number) => { n = Math.max(0, Math.min(50, n + d)); count.textContent = String(n); };
-  openSheet("Speaking up", [
-    h("p", { class: "muted" }, "Outside quiet hours and under the daily limit, your assistant may message you first. Reminders you set yourself always come through."),
-    h("div", { class: "row gap" }, h("label", { class: "grow" }, h("span", null, "Quiet from"), start), h("label", { class: "grow" }, h("span", null, "Until"), end)),
-    h("div", { class: "label" }, h("span", null, "Unprompted messages per day"),
-      h("div", { class: "stepper" }, h("button", { on: { click: () => step(-1) } }, "−"), count, h("button", { on: { click: () => step(1) } }, "+"))),
-    h("button", { class: "btn primary big", on: { click: async () => { try { await call("/api/prefs", { method: "PATCH", body: { quietStart: start.value, quietEnd: end.value, maxProactivePerDay: n } }); toast("Saved"); closeSheet(); refreshState(); } catch (e) { handleError(e); } } } }, "Save"),
   ]);
 }
 

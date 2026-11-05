@@ -69,14 +69,14 @@ Then:
 
 ### How reminders reach you
 
-Reminders and routines live on your hub, and it sends them as push notifications to your phone on time, even when the app is closed. Quiet hours and a daily cap keep it from getting noisy. Reminders you asked for yourself always come through. For anything that belongs in your calendar, a teammate can make a calendar invite (`.ics`) that you tap once to add to Apple Calendar, Google Calendar or Outlook.
+Reminders and routines live on your hub, and it sends them as push notifications to your phone on time, even when the app is closed. For anything that belongs in your calendar, a teammate can make a calendar invite (`.ics`) that you tap once to add to Apple Calendar, Google Calendar or Outlook.
 
 ## Features
 
 - **You own the data.** SQLite by default, or your own Postgres, MySQL or MongoDB. Export everything as one JSON file, or wipe it, from the app.
 - **Just ramble.** Type or hold to talk. An **orchestrator** splits what you said into jobs and hands each to the right **teammate** (Reminders, Research, Bills… or a new one it creates), and you watch the job cards finish.
 - **Your agent is the brain.** Each job runs headless on the CLI you configure. Pick a harness and model per role (orchestrator, workhorse, heavy); jobs start on the cheapest model that can do them and escalate on their own. The hub stores no model keys.
-- **Proactive by design.** The assistant sets up its own *triggers* (reminders, routines, page and app watchers, places, webhooks) in an event pipeline you can see under Triggers. Each one has a reason you can tap, and all of them respect quiet hours and a daily cap.
+- **Proactive by design.** The assistant sets up its own *triggers* (reminders, routines, page and app watchers, places, webhooks) in an event pipeline you can see under Triggers. Each one has a reason you can tap.
 - **Memory you can see.** Facts live in notebooks, with history kept when they change. View, star, edit and delete anything.
 - **Skills, scripts and mini apps.** It saves what it solved so it doesn't work it out twice, writes scripts that only run after you approve the code, and builds small sandboxed apps (flashcards, checklists, countdowns) you can pin to Home.
 - **Approve before send.** Anything that sends, posts, pays, books or deletes outside the hub stops at an **Approve** card. The hub enforces this, not the model.
@@ -228,7 +228,7 @@ docs/         feature documentation
 ## Development
 
 ```bash
-bun test                        # event pipeline, quiet hours, memory, pairing, script approval
+bun test                        # event pipeline, memory, pairing, script approval
 TEST_DB=postgres://… bun test   # same suite against Postgres
 bun run typecheck
 bun run doctor                  # security self-check for a hub on the internet

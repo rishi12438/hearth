@@ -11,7 +11,7 @@ import { instagram } from "./instagram.ts";
 
 // Trigger modules: one file per source of "something new" (Gmail, Calendar…). A module only says how to fetch
 // recent items and give each a stable id. The hub does the rest: the timer, the first look (which only remembers
-// what's there, so you aren't flooded), working out what's new, quiet hours, and handing it to a teammate.
+// what's there, so you aren't flooded), working out what's new, and handing it to a teammate.
 // Same shape as Activepieces' polling triggers. To add a source, write one file and list it below.
 
 export type Item = {

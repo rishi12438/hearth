@@ -238,7 +238,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   const clientIp = (req: Request, server: Server) =>
     (config.behindProxy && req.headers.get("x-forwarded-for")?.split(",").pop()!.trim()) || server.requestIP(req)?.address || "?";
 
-  const publicPrefs = (p: Prefs) => ({ userName: p.userName, tz: p.tz, quietStart: p.quietStart, quietEnd: p.quietEnd, maxProactivePerDay: p.maxProactivePerDay, proactiveToday: p.proactiveToday });
+  const publicPrefs = (p: Prefs) => ({ userName: p.userName, tz: p.tz });
 
   /** Visitor traffic for a shared link. Never authenticated as you, never touches the hub's API or data. */
   async function visitor(req: Request, url: URL, server: Server, link: string, rest: string): Promise<Response> {
@@ -1035,7 +1035,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         const sub = seg[2], key = seg[3] ? decodeURIComponent(seg[3]) : "";
         const ok = <T,>(r: { value?: T; error?: string; conflict?: unknown }) => { if (r.error) return json({ error: r.error, conflict: r.conflict ?? null }, 409); return json(r.value); };
         const withUrl = (src: ReturnType<typeof p.sources>[number]) => ({ ...src, pushPath: src.kind === "push" && owner && p.secretOf(src.id) ? `/api/events/${src.name}/${p.secretOf(src.id)}` : null });
-        if (method === "GET" && !sub) return json({ sources: p.sources().map(withUrl), triggers: p.triggers(), timers: p.timers(), watchers: p.watchers(), held: p.heldCount() });
+        if (method === "GET" && !sub) return json({ sources: p.sources().map(withUrl), triggers: p.triggers(), timers: p.timers(), watchers: p.watchers() });
         if (method === "GET" && sub === "events" && key) { const e = p.getEvent(key); if (!e) break; return json(e); }
         if (method === "GET" && sub === "triggers" && key && seg[4] === "examples") return json(p.examples(key));
         if (method === "GET" && sub === "events") {
@@ -1165,12 +1165,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (method !== "PATCH") break;
         const b = await body(req);
         const patch: Partial<Prefs> = {};
-        const T = /^([01]\d|2[0-3]):[0-5]\d$/;
         if (typeof b.userName === "string") patch.userName = b.userName.trim().slice(0, 40);
         if (typeof b.tz === "string" && isValidTimeZone(b.tz)) patch.tz = b.tz;
-        if (T.test(b.quietStart)) patch.quietStart = b.quietStart;
-        if (T.test(b.quietEnd)) patch.quietEnd = b.quietEnd;
-        if (Number.isInteger(b.maxProactivePerDay) && b.maxProactivePerDay >= 0 && b.maxProactivePerDay <= 50) patch.maxProactivePerDay = b.maxProactivePerDay;
         return json(publicPrefs(await hub.setPrefs(patch)));
       }
       case "devices": {

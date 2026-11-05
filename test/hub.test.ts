@@ -8,7 +8,7 @@ import { Brain, buildPrompt } from "../src/brain.ts";
 import { Scripts } from "../src/scripts.ts";
 import { loadConfig } from "../src/config.ts";
 import { parseReply } from "../src/reply.ts";
-import { nextOccurrence, nextScheduledRun, inQuietHours, zonedToUtc } from "../src/time.ts";
+import { nextOccurrence, nextScheduledRun, zonedToUtc } from "../src/time.ts";
 import { recall } from "../src/memory.ts";
 import { newPairingCode, redeemPairingCode, deviceForToken } from "../src/auth.ts";
 import type { Fact, Job, Message, Thread } from "../src/types.ts";
@@ -40,8 +40,6 @@ test("time: repeating reminders keep wall-clock time across DST", () => {
   const weekday = nextOccurrence(zonedToUtc(2026, 10, 30, 9, 0, TZ).toISOString(), "weekdays", TZ, now)!; // Fri -> Mon
   expect(weekday.toISOString()).toBe(zonedToUtc(2026, 11, 2, 9, 0, TZ).toISOString());
   expect(nextScheduledRun("08:00", [1], TZ, now)!.toISOString()).toBe(zonedToUtc(2026, 11, 2, 8, 0, TZ).toISOString());
-  expect(inQuietHours(zonedToUtc(2026, 10, 30, 23, 30, TZ), TZ, "23:00", "07:30")).toBe(true);
-  expect(inQuietHours(zonedToUtc(2026, 10, 30, 7, 31, TZ), TZ, "23:00", "07:30")).toBe(false);
 });
 
 test("reply parser takes the last hearth block and hides it", () => {
@@ -78,31 +76,12 @@ test("a ramble becomes jobs for teammates; a reminder job fires proactively with
   expect(hub.pipeline.findTrigger(hook.id)!.status).toBe("done"); // a one-time reminder is done once it rang
 });
 
-test("quiet hours hold the team's reminders until they end, but not your own", async () => {
-  now = zonedToUtc(2026, 10, 30, 23, 30, TZ);
-  const mine = await hub.pipeline.remind({ title: "Pills", schedule: { at: now.toISOString() } }, "you");
-  await hub.pipeline.remind({ title: "Nudge", schedule: { at: now.toISOString() } }, "Reminders");
+test("triggers run at any hour and as often as they match: no quiet hours, no daily limit", async () => {
+  now = zonedToUtc(2026, 10, 30, 23, 30, TZ); // late at night
+  for (const t of ["A", "B", "C", "D", "E", "F", "G", "H"]) await hub.pipeline.remind({ title: t, schedule: { at: now.toISOString() } }, "Reminders");
   await hub.tick();
-  let texts = (await messages()).map((m) => m.text);
-  expect(texts).toContain("Pills");
-  expect(texts).not.toContain("Nudge");
-  expect(hub.pipeline.heldCount()).toBe(1);
-  expect(mine.value).toBeTruthy();
-  now = zonedToUtc(2026, 10, 31, 7, 31, TZ); // quiet hours are over
-  await hub.tick();
-  texts = (await messages()).map((m) => m.text);
-  expect(texts.filter((t) => t === "Nudge").length).toBe(1);
-  expect(hub.pipeline.heldCount()).toBe(0);
-  await hub.tick();
-  expect((await messages()).filter((m) => m.text === "Nudge").length).toBe(1); // once
-});
-
-test("daily cap limits unprompted messages", async () => {
-  await hub.setPrefs({ maxProactivePerDay: 1 });
-  for (const t of ["A", "B"]) await hub.pipeline.remind({ title: t, schedule: { at: now.toISOString() } }, "Reminders");
-  await hub.tick();
-  expect((await messages()).filter((m) => m.proactive).length).toBe(1);
-  expect(hub.pipeline.events({ limit: 5 }).flatMap((e) => e.log!).some((l) => l.step === "skipped" && l.detail.includes("limit"))).toBe(true);
+  expect((await messages()).filter((m) => m.proactive).map((m) => m.text).sort()).toEqual(["A", "B", "C", "D", "E", "F", "G", "H"]);
+  expect(hub.pipeline.events({ limit: 20 }).flatMap((e) => e.log!).some((l) => l.step === "skipped" || l.step === "held")).toBe(false);
 });
 
 test("a routine that finds nothing worth saying stays quiet", async () => {

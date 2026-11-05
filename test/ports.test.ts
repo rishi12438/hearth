@@ -55,7 +55,6 @@ beforeEach(async () => {
   scripts = new Scripts(store, dir, repo);
   await scripts.syncRepo();
   hub = new Hub(config, store, new Brain(config), scripts, null);
-  // Midday, so quiet hours never hold a run.
   const noon = zonedToUtc(2026, 11, 4, 12, 0, "America/Los_Angeles");
   hub.clock = () => noon;
   await hub.setPrefs({ tz: "America/Los_Angeles" });
