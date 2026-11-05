@@ -124,7 +124,7 @@ export async function googleAgent(google: Google, service: GoogleService, argv: 
   if (service === "gmail") switch (cmd) {
     case "accounts": return { accounts: accounts(), note: "Sending is a message.send action (channel gmail) that waits for the owner's Approve; pick the account with \"from\"." };
     case "search": {
-      const mails = await google.searchMail(words.join(" ") || "in:inbox", num(flags.max, 10, 25), account);
+      const mails = await google.searchMail(words.join(" ") || "in:inbox", num(flags.max, 10, 25), account, { bodies: false });
       return { count: mails.length, mails: mails.map((m) => ({ id: m.id, threadId: m.threadId, account: m.account, from: m.from, to: m.to, subject: m.subject, date: m.date, snippet: m.snippet })),
         next: "hearth-gmail read <id> --account <account> for the whole email; thread <threadId> for the conversation." };
     }
