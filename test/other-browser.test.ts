@@ -12,7 +12,7 @@ import { browseHere } from "../src/computer.ts";
 import { CLOUD_BROWSERS, STUCK, stuckHelp, stuckKind } from "../src/help.ts";
 import { describeSkillStep } from "../src/brains/skills.ts";
 import { OtherBrowser, macSession, otherBrowserSkill, parseArgv, type Act, type MacGate, type MacMode } from "../src/other-browser.ts";
-import { actionJs, chromeHere } from "../src/mac-chrome.ts";
+import { actionJs, chromeHere, ON_TAB } from "../src/mac-chrome.ts";
 import type { Approval, Job } from "../src/types.ts";
 
 test("hearth-browser's words become one action", () => {
@@ -407,4 +407,10 @@ test("the command saves a screenshot where the agent works and prints its path",
     expect(readFileSync(file, "utf8")).toBe("PNG");
     expect(await sh("click", "e3")).toContain("said click e3");
   } finally { srv.stop(true); }
+});
+
+test("your own Chrome: a tab is found by its id as text (Chrome answers ids as text, past AppleScript's integer range)", () => {
+  expect(ON_TAB).toContain("set tid to (item 1 of argv) as string");
+  expect(ON_TAB).toContain("if ((id of t) as string) is tid then");
+  expect(ON_TAB).not.toContain("as integer");
 });
