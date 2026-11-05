@@ -35,9 +35,10 @@ const NEW_TAB = `on run argv
   end tell
 end run`;
 
-/** One thing to a tab, found by its id in any window: js <code> | go <url> | loading | close | show (front, and its window's bounds). */
-const ON_TAB = `on run argv
-  set tid to (item 1 of argv) as integer
+/** One thing to a tab, found by its id in any window: js <code> | go <url> | loading | close | show (front, and its window's bounds).
+ *  Chrome answers a tab's id as text (and ids pass AppleScript's integer range), so ids are compared as text. */
+export const ON_TAB = `on run argv
+  set tid to (item 1 of argv) as string
   set what to item 2 of argv
   set arg to item 3 of argv
   tell application "Google Chrome"
@@ -45,7 +46,7 @@ const ON_TAB = `on run argv
       set i to 0
       repeat with t in tabs of w
         set i to i + 1
-        if (id of t) is tid then
+        if ((id of t) as string) is tid then
           if what is "js" then return (execute t javascript arg) as string
           if what is "go" then
             set URL of t to arg
