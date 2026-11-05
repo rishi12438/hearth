@@ -618,8 +618,18 @@ export function buildPrompt(b: BrainInput, code: "claude" | "codex" | null = nul
     parts.push("", "IDEAS: look at memory, aboutYou, recent days, CONTEXT.eventPipeline and recent messages, and suggest up to 2 things the team",
       "could do for the user RIGHT NOW that they'd be glad about: a follow-up nobody closed, a deadline coming up, prep for",
       "something on their calendar, a better way to do something they keep doing. Ground each in something concrete you saw.",
-      "- idea.add {title, body, emoji, prompt, teammate?}: title starts \"I can …\" (max ~60 chars); body is 1-2 sentences on why,",
+      "- idea.add {title, body, emoji, prompt, teammate?, kind?}: title starts \"I can …\" (max ~60 chars); body is 1-2 sentences on why,",
       "  citing what you noticed; emoji is one emoji for it; prompt is the request to run if they say yes, written as the user.",
+      "WORKFLOW IDEAS (kind \"workflow\"): when something will keep happening or has dates ahead, offer to keep doing it on its own,",
+      "  not just once. A trip booked: remind before check-in and departure, the weather and a packing list the day before, watch",
+      "  for changes to the booking in email. Meetings: a brief before each one with outside people (calendar, minutesBefore 60).",
+      "  A bill, a delivery, a deadline, a reply they're waiting on: a reminder or a watch on the email that closes it.",
+      "  Its prompt starts \"Set up a workflow:\" and says when (the source from CONTEXT.sources: calendar, gmail, a time, a",
+      "  page…) and what the team does then, so saying yes builds exactly that. If that source isn't connected, say so in the",
+      "  body and start the prompt with connecting it. Check CONTEXT.eventPipeline first: never offer what a trigger already does.",
+      "A RAMBLE JUST FINISHED (the input starts with that): look only at that ramble. Suggest at most 1 idea, preferring a",
+      "  workflow, and only when the ramble shows something that comes back or has a date ahead. A one-off question or a",
+      "  finished chore gets nothing.",
       "Never repeat anything in CONTEXT.ideas (open, accepted or dismissed) or something a trigger already covers. If nothing is",
       "genuinely useful, add nothing and reply " + QUIET + ". Otherwise reply with one short line.");
   } else {
@@ -1334,6 +1344,11 @@ function echoBrain(b: BrainInput): string {
   if (b.mode === "advise") return "Try the export first, and count rows before and after.";
   if (b.mode === "voice") return (b.input.split("NOTES FROM THE LEGWORK:")[1] || b.input).replace(/<\/?untrusted>/g, "").trim();
   if (b.mode === "ideas") {
+    const ramble = /^A RAMBLE JUST FINISHED: (#\S+) "([^"]*)"/.exec(b.input);
+    if (ramble) {
+      if (!/\b(trip|flight|meeting|every|weekly|daily|deadline|bill)\b/i.test(b.input)) return QUIET;
+      return "One workflow idea." + "\n```hearth\n" + JSON.stringify([{ type: "idea.add", kind: "workflow", title: `I can keep an eye on ${ramble[2]}`.slice(0, 60), body: `From ${ramble[1]}.`, emoji: "🔁", prompt: `Set up a workflow: keep an eye on ${ramble[2]} and remind me before anything is due.` }]) + "\n```";
+    }
     const facts = ((b.context as any).memory || []) as { fact: string }[];
     const open = (((b.context as any).ideas?.open || []) as string[]).length + (((b.context as any).ideas?.dismissed || []) as string[]).length;
     if (!facts.length || open) return QUIET;

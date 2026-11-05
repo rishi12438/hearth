@@ -672,6 +672,41 @@ test("ideas: suggested, accepted into a ramble or dismissed for good; near-dupli
   expect((await hub.ideaTitlesForTest()).dismissed).toEqual(["I can plan your half marathon training"]);
 });
 
+test("a finished ramble gets one look: a workflow idea when something comes back, nothing for one-offs or hand-offs", async () => {
+  await hub.ensureTeammates();
+  const doneAll = async (threadId: string) => until(async () => { const js = (await store.all<Job>("jobs")).filter((j) => j.threadId === threadId); return js.length > 0 && js.every((j) => j.status === "done"); });
+  const trip = (await hub.ramble("book my flight to Tokyo for the trip on Dec 3")).value!.thread;
+  await doneAll(trip.id);
+  expect(await hub.lookAtRamble(trip.id)).toBe(true);
+  const ideas = await hub.listIdeas();
+  expect(ideas.length).toBe(1);
+  expect(ideas[0].kind).toBe("workflow");
+  expect(ideas[0].prompt).toStartWith("Set up a workflow:");
+  // A one-off: looked at, nothing suggested.
+  const q = (await hub.ramble("what is 2 plus 2")).value!.thread;
+  await doneAll(q.id);
+  expect(await hub.lookAtRamble(q.id)).toBe(true);
+  expect((await hub.listIdeas()).length).toBe(1);
+  // Saying yes builds it in a new ramble, which isn't looked at again.
+  const yes = await hub.acceptIdea(ideas[0].id);
+  await doneAll(yes.value!.thread.id);
+  expect(await hub.lookAtRamble(yes.value!.thread.id)).toBe(false);
+  // A trigger's hand-off isn't something you asked for.
+  const handoff = (await hub.ramble("a flight email came in for the trip", undefined, [], undefined, { fromTrigger: { id: "t1", title: "Flights" } })).value!.thread;
+  await doneAll(handoff.id);
+  expect(await hub.lookAtRamble(handoff.id)).toBe(false);
+});
+
+test("a ramble's look happens on its own once its tasks are done", async () => {
+  process.env.HEARTH_PROACTIVE_DELAY_MS = "0";
+  try {
+    await hub.ensureTeammates();
+    await hub.ramble("plan the weekly team meeting agenda");
+    await until(async () => (await hub.listIdeas()).length > 0);
+    expect((await hub.listIdeas())[0].kind).toBe("workflow");
+  } finally { delete process.env.HEARTH_PROACTIVE_DELAY_MS; }
+});
+
 test("about you is always in context; past conversations are searchable by the brain", async () => {
   await hub.ensureTeammates();
   await hub.setAbout("Sister Priya, turns 30 on Dec 12.\nTraining for a half marathon.", true);
