@@ -20,6 +20,7 @@ import { googleSkills } from "./google-agent.ts";
 import { leadSkill } from "../brains/lead.ts";
 import { Mcp, mcpSkill } from "../mcp.ts";
 import { storeSkill } from "../brains/skill-store.ts";
+import { lessonsSkill } from "../brains/lessons.ts";
 import { claude, codex, takeLogin } from "./brains.ts";
 import { whatsappSource } from "./whatsapp-source.ts";
 import { registerSource } from "../sources/index.ts";
@@ -101,6 +102,8 @@ export class Connect {
     registerSkills(() => [portsSkill(base, this.agentKey)]);
     // Public skills: find, read and install them (brains/skill-store.ts); an install waits for your Approve.
     registerSkills(() => [storeSkill(base, this.agentKey)]);
+    // Lessons: the team's rules learned the hard way, searched like skills (brains/lessons.ts).
+    registerSkills(() => [lessonsSkill(base, this.agentKey)]);
     // A site blocks the browser here: carry on in Chrome on your Mac (once you approve) or Browserbase (other-browser.ts).
     registerSkills(() => [otherBrowserSkill(base, this.agentKey)]);
     // Stuck on something: hearth-help stuck says what's there right now (help.ts).

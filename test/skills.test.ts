@@ -3,8 +3,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describeSkillStep, hubSkills as allSkills, installSkills, skillCatalog, skillFlags } from "../src/brains/skills.ts";
-// hearth-lead, hearth-mcp, hearth-trigger-port, install-skills, get-past-blocks and hearth-help are registered by any hub another test started (a global registry, like the hub's): left out of these lists.
-const HUB_ADDED = ["hearth-lead", "hearth-mcp", "hearth-trigger-port", "install-skills", "get-past-blocks", "hearth-help"];
+// hearth-lead, hearth-mcp, hearth-trigger-port, install-skills, get-past-blocks, hearth-help and learn-from-mistakes are registered by any hub another test started (a global registry, like the hub's): left out of these lists.
+const HUB_ADDED = ["hearth-lead", "hearth-mcp", "hearth-trigger-port", "install-skills", "get-past-blocks", "hearth-help", "learn-from-mistakes"];
 const hubSkills = (...a: Parameters<typeof allSkills>) => allSkills(...a).filter((s) => !HUB_ADDED.includes(s.name));
 
 /** A home with fake enkidu-browser / enkidu-cua that print a skill, and a data dir with one skill of your own. */
@@ -25,14 +25,14 @@ function hub() {
 test("the hub's skills: Enkidu's tools with Hearth's rules on top, then your own", () => {
   const { home, data } = hub();
   const skills = hubSkills(data, {}, home);
-  expect(skills.map((s) => s.name)).toEqual(["enkidu-browser", "enkidu-cua", "automate-repetitive-work", "build-workflows", "learn-from-mistakes", "send-files", "write-trigger-judges", "weekly-report"]);
+  expect(skills.map((s) => s.name)).toEqual(["enkidu-browser", "enkidu-cua", "automate-repetitive-work", "build-workflows", "send-files", "write-trigger-judges", "weekly-report"]);
   const browser = skills[0];
   expect(browser.body).toContain("# Enkidu browser (CLI)");
   expect(browser.body).not.toContain("name: enkidu-browser");
   expect(browser.body).toContain("so the user can Approve it");
   expect(skills[1].commands).toEqual(["enkidu-cua", "hearth-open"]);
   expect(skills[2].commands).toEqual([]);
-  expect(hubSkills(data, { HEARTH_CUA: "off" }, home).map((s) => s.name)).toEqual(["enkidu-browser", "automate-repetitive-work", "build-workflows", "learn-from-mistakes", "send-files", "write-trigger-judges", "weekly-report"]);
+  expect(hubSkills(data, { HEARTH_CUA: "off" }, home).map((s) => s.name)).toEqual(["enkidu-browser", "automate-repetitive-work", "build-workflows", "send-files", "write-trigger-judges", "weekly-report"]);
   expect(hubSkills(data, { HEARTH_SKILLS: "off" }, home)).toEqual([]);
 });
 
@@ -45,7 +45,7 @@ test("the catalog names the common skills and how to search; flags allow only th
   expect(cat).toContain("- enkidu-cua: Control a desktop app");
   expect(cat).not.toContain("weekly-report");
   expect(cat).toContain("- automate-repetitive-work: Doing the same thing many times");
-  expect(cat).toContain("8 skill(s)");
+  expect(cat).toContain("7 skill(s)");
   expect(cat).toContain("- send-files: Making something the user should open");
   expect(cat).toContain("- build-workflows: Building an automation");
   expect(cat).not.toContain("write-trigger-judges"); // not common: found by search
@@ -67,7 +67,7 @@ test("installed skills are where Claude Code looks, and hearth-skill searches an
   expect(run("search", "zzzqqq").out).toContain("No skill matches");
   expect(run("show", "weekly-report").out).toContain("List what got done.");
   expect(run("show", "../etc").ok).toBe(false);
-  expect(run("list").out.trim().split("\n")).toHaveLength(8);
+  expect(run("list").out.trim().split("\n")).toHaveLength(7);
   expect(run("search", "webhook", "trigger").out.split("\n")[0]).toStartWith("build-workflows:");
   expect(run("search", "judge", "urgent").out.split("\n")[0]).toStartWith("write-trigger-judges:");
   expect(run("search", "automate", "repetitive").out.split("\n")[0]).toStartWith("automate-repetitive-work:");

@@ -434,6 +434,19 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       const out = await hub.skillStoreAgent(argv, `${mate?.name || "an agent"}${from === "hub" ? "" : ` on ${from}`}`, jobId);
       return new Response(out + "\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
     }
+    // The agent's hearth-lesson (brains/lessons.ts): search, read, save and count the team's lessons. Same keys as hearth-mcp.
+    if (path === "/api/agent/lessons" && method === "POST") {
+      const key = req.headers.get("x-hearth-agent");
+      const from = fromThisMachine(req, server) && connect.isAgentKey(key) ? "hub" : computers.agentKeyOwner(key);
+      if (!from) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not the agent's key."); }
+      let argv: string[] = [];
+      try { argv = (await req.formData()).getAll("a").slice(0, 40).map((a) => String(a).slice(0, 1000)); } catch { throw new HttpError(400, "Send the command's words as a fields."); }
+      const jobId = req.headers.get("x-hearth-job")?.slice(0, 100) || undefined;
+      const job = jobId ? await store.get<any>("jobs", jobId) : null;
+      const mate = job?.teammateId ? await store.get<any>("teammates", job.teammateId) : null;
+      const out = await hub.lessonsAgent(argv, `${mate?.name || "an agent"}${from === "hub" ? "" : ` on ${from}`}`);
+      return new Response(out + "\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
+    }
     // The agent's hearth-trigger-port (events/ports.ts): claim a callback URL for a webhook, list, release. The claim
     // records which teammate and job took it (X-Hearth-Job), so every live URL can be traced to the task that wanted it.
     if (path === "/api/agent/ports" && method === "POST") {

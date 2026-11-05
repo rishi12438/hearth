@@ -187,51 +187,6 @@ A check or script that crashes starts a repair: a teammate gets the error, the c
 fix that waits for the user's Approve. When you're that teammate, fix the cause (often the event's shape), keep the
 same script name, and say in a line what broke.`,
 }, {
-  name: "learn-from-mistakes", common: true, commands: [], reads: [],
-  description: "A way failed and another worked, or the user corrected you or told you a better way? Save the general rule behind it (lesson.add) so no later job makes that mistake again.",
-  body: `# Learning from mistakes
-
-CONTEXT.lessons is the team's rules for how to work, each learned the hard way. Every job gets all of them. Follow them
-before you pick a tool or say anything is true; if one proves wrong now, fix it (memory.update {id, fact}).
-
-## When to save one (lesson.add)
-- A tool or way failed and another worked: blocked, rate-limited, empty pages, a wrong answer, and something else got
-  through. Save which beats which, and for what kind of problem.
-- The user corrected you ("that doesn't exist", "you didn't check", "that's wrong"): save the habit that would have
-  caught it.
-- The user told you a better way, and it worked.
-- You wasted real time or money on something a rule would have avoided.
-Save it the moment you know it, not at the end: you can be stopped at any time.
-
-## Make it general
-A lesson is a rule for every job, not a note about this one. Take out this case's names, places and dates and keep
-the pattern. Name a tool only when the lesson is which tool to use for a kind of problem.
-- "The table lost a page when I parsed it" -> "After extracting data, check the counts against the source before using them."
-- "The same tool failed three times the same way" -> "When a tool fails twice the same way, switch to another instead of retrying."
-- "I said done but the file was empty" -> "Check a tool's output before saying something is done."
-(These only show the shape. Your lessons come from what actually happened in your own work.)
-One or two short, imperative sentences. evidence: what happened, in a line.
-
-## Check it before you save it
-- Would it change what a job on a completely different task does? If it only matters for one product, tool or kind of
-  output, save the general habit underneath it ("anything set off by events must be safe to run twice"), or skip it.
-- Is it what the user wanted, not just the fix that happened to work? If they said how they wanted it, the lesson is to
-  do what they said.
-- One rule, under about 200 characters, with no quoted error text, field names, flags or product names (a tool's name
-  only when the lesson is which tool to use for a kind of problem). Two rules are two lessons.
-
-## Not a lesson
-- How the user likes things to look, sound or be written: a preference, memory.add {notebook: "preferences"}.
-- Facts about the user or their world (their card, their trip, a price you found): that's memory.add.
-- How to do this one subject's job step by step: the Playbook in NOTES.md, or a skill.
-- One-off bad luck (a site down for a minute) or a guess you haven't tested.
-
-## Keep the list short and true
-- Already covered in CONTEXT.lessons? Don't add it again. Sharpen that one with memory.update {id, fact}, or merge
-  overlapping ones with memory.merge, so it stays a short list every job can read.
-- Proved wrong or out of date (a tool got fixed, a better one came along)? memory.update or memory.forget it.
-- Say it in a short line in your reply ("Noted for next time: check a tool's output before saying it's done").`,
-}, {
   name: "send-files", common: true, commands: [], reads: [],
   description: "Making something the user should open (a video, picture, PDF, spreadsheet, deck, export), or working files they shouldn't see? How files reach them: shown by themselves, @file for the rest, drafts in _scratchpad/.",
   body: `# Sending the user a file
