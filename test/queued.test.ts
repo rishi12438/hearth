@@ -196,3 +196,19 @@ test("chats are read on the hub: a reply after you last looked is unread on ever
   await until(() => settled(2));
   expect((await hub.roster()).find((x) => x.id === "scout")!.lastDmAt).toBeTruthy();
 });
+
+test("a job left 'working' by a hub restart goes back in the queue and runs again on startup", async () => {
+  await setup();
+  process.env.FAKE_PLAN = JSON.stringify({ title: "t", reply: "On it", jobs: [{ task: "find a restaurant", teammate: "Scout" }] });
+  await hub.ramble("dinner");
+  await until(() => settled(1));
+  const [done] = await jobs();
+  // What a restart leaves behind: saved as working, no run in this process.
+  await store.put<Job>("jobs", { ...done, status: "working", result: undefined, finishedAt: undefined, startedAt: new Date().toISOString() });
+  const before = starts();
+  await hub.start(60_000);
+  await until(() => settled(1));
+  const after = (await store.get<Job>("jobs", done.id))!;
+  expect(after.status).toBe("done");
+  expect(starts()).toBeGreaterThan(before);
+});

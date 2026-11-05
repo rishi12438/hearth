@@ -3684,6 +3684,7 @@ ${JSON.stringify(shown, null, 1)}
     await this.migrateHooks();
     await this.ensureBuiltIns();
     await this.ensureStarterComponents();
+    await this.resumeAfterRestart();
     // Rambles from before they had names: name them from their titles (Hearth refines it on the next message).
     for (const t of await this.store.all<Thread>("threads")) if (t.num && !t.channel && t.title) await this.renameThread(t.id, nameFrom(t.title), false);
     this.timer = setInterval(() => this.tick().catch((e) => console.error("tick failed", e)), intervalMs);
@@ -3694,6 +3695,30 @@ ${JSON.stringify(shown, null, 1)}
       try { if (this.brain.skills().skills.some((s) => s.name === "enkidu-browser")) this.giveBrowserLogins(); } catch {}
     }
     await this.tick();
+  }
+
+  /**
+   * A restart (a deploy) kills every run in flight, but their jobs stay saved as "working" with nothing behind them, so the
+   * thread says "still going" forever. On startup they go back in the queue, like a run stopped for a restart, and start
+   * again; queued jobs left from before the restart start too (nothing else would pump them).
+   */
+  async resumeAfterRestart() {
+    const all = await this.store.all<Job>("jobs");
+    const again = new Set<string>();
+    for (const j of all) {
+      if (j.status === "working" && !this.started.has(j.id)) {
+        if (j.parentId) {
+          // A helper's sub-run: its parent starts over and makes new ones.
+          await this.saveJob({ ...j, status: "failed", result: "Stopped: the hub restarted.", finishedAt: this.clock().toISOString() });
+          continue;
+        }
+        const was = j.interrupted;
+        await this.saveJob({ ...j, status: "queued", startedAt: undefined, tier: undefined, interrupted: { added: was?.added || [], steps: [...(was?.steps || []), "The hub restarted, so this started again"].slice(-40) } });
+        again.add(j.messageId);
+        await this.log("job.resumed", `${j.label || j.task.slice(0, 80)}: was running when the hub restarted, started again`).catch(() => {});
+      } else if (j.status === "queued" && !j.parentId) again.add(j.messageId);
+    }
+    for (const id of again) if (id) this.pump(id);
   }
 
   /** Why the brain's browser can't get your logins right now, or null. Said once when it starts and once when it's fixed. */
