@@ -252,6 +252,8 @@ code { font-family: var(--mono); font-size: .86em; background: var(--surface); p
 @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); opacity: .5; } 30% { transform: translateY(-3px); opacity: 1; } }
 .repdiv { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 14px; padding: 6px 16px; }
 .repdiv::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.cutline { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; padding: 4px 16px; }
+.cutline::before, .cutline::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 .did-line { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 13px; color: var(--muted); }
 .linkbtn { color: var(--blue); font-size: 14px; font-weight: var(--fw-semibold); margin-top: 4px; display: inline-flex; align-items: center; gap: 4px; }
 .linkbtn + .linkbtn { margin-left: 16px; }

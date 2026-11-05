@@ -1419,6 +1419,14 @@ function withMentions(text: string) {
 }
 
 /** You talking, or the hub passing back what came of something you approved (that isn't you, so it isn't shown as you). */
+/** Your message stopped a teammate partway (like a coding agent's "Interrupted"): a quiet line above it says so. */
+function cutHere(m: any, node: Node): Node {
+  if (!m?.interrupted) return node;
+  const f = document.createDocumentFragment();
+  f.append(h("div", { class: "cutline" }, `Interrupted ${mate(m.interrupted)?.name || "the run"} · it carries on with this`), node);
+  return f;
+}
+
 function userRow(m: any, extra: any[] = [], grouped = false) {
   if (m.fromApproval) {
     const back = [...String(m.text).matchAll(/<untrusted>\n?([\s\S]*?)\n?<\/untrusted>/g)].map((x) => x[1]).join("\n\n");
@@ -1666,7 +1674,7 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
   const live = (x: any) => x.status === "queued" || x.status === "working";
   const when = (x: any) => (live(x) ? Infinity : Date.parse(x.finishedAt || x.updatedAt || x.createdAt) || 0);
   const items = [
-    ...yours.map((m: any) => ({ at: Date.parse(m.createdAt) || 0, node: () => userRow(m) })),
+    ...yours.map((m: any) => ({ at: Date.parse(m.createdAt) || 0, node: () => cutHere(m, userRow(m)) })),
     ...[j, ...follow].map((x: any) => ({ at: when(x), node: () => answer(x) })),
   ].sort((a, b) => a.at - b.at);
   const n = items.filter((x) => x.at !== Infinity).length;
@@ -1829,7 +1837,7 @@ function drawDm(stick = true) {
   const items: { at: string; nodes: Node[] }[] = [];
   const saved = S.chat;
   S.chat = { approvals: d.approvals, jobs: d.jobs, messages: d.messages, thread: { id: `tm-${t.id}` } };
-  for (const m of d.messages) if (!m.queued && !d.jobs.some((j: any) => j.messageId === m.id)) items.push({ at: m.createdAt, nodes: [plainMessage(m)] });
+  for (const m of d.messages) if (!m.queued && !d.jobs.some((j: any) => j.messageId === m.id)) items.push({ at: m.createdAt, nodes: [cutHere(m, plainMessage(m))] });
   for (const j of d.jobs.filter((j: any) => direct.has(j.messageId))) {
     const m = d.messages.find((x: any) => x.id === j.messageId);
     items.push({ at: j.createdAt, nodes: [userRow(m), answer(j)] });

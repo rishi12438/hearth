@@ -93,6 +93,8 @@ test("Send now puts a queued DM into the run, which carries on with it; × drops
   expect(runs.at(-1)).toContain("were stopped partway");
   expect(runs.at(-1)).toContain("don't redo what already worked");
   expect(all[0].interrupted).toBeUndefined(); // cleared once it finished
+  // The thread shows where it was cut off.
+  expect((await store.get<Message>("messages", keep.message.id))!.interrupted).toBe("scout");
 });
 
 test("without queue (voice, apps, older clients) a mid-run DM still folds in as before", async () => {
