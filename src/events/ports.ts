@@ -75,6 +75,17 @@ export function portsAgent(p: EventPipeline, argv: string[], who: PortWho, base:
       const evs = p.events({ source: s.id, limit: 5, log: false });
       return `${line(s, base, s.claim?.releasedAt ? null : p.secretOf(s.id))}\n  triggers: ${p.triggers(s.id).map((t) => `${t.name} (${t.formula})`).join("; ") || "none yet"}\n  recent events:${evs.length ? "\n" + evs.map((e) => `   - ${e.receivedAt} [${e.status}] ${JSON.stringify(e.payload).slice(0, 300)}`).join("\n") : " none"}`;
     }
+    case "map": {
+      // Name the fields that matter, from what the sender really sends (see `show`): they become variables formulas test.
+      const s = p.findSource(rest[0] || "");
+      if (!s || s.kind !== "push") return `No port called ${rest[0] || "?"}.`;
+      const v = varsFrom(flags.var);
+      if (!v.variables?.length) return 'Say which fields: hearth-trigger-port map <name> --var from=data.message.from --var text=data.message.text';
+      const names = new Set(v.variables.map((x) => x.name));
+      const r = p.updateSource(s.id, { variables: [...s.variables.filter((x) => !names.has(x.name)), ...v.variables], mapping: { ...(s.mapping || {}), ...(v.mapping || {}) } });
+      return r.value ? `${s.name} now has: ${r.value.variables.map((x) => `${x.name}${r.value!.mapping?.[x.name] ? ` (${r.value!.mapping[x.name]})` : ""}`).join(", ")}. Put the rule in the trigger's formula, e.g. from_me == false && from contains "14084203023".`
+        : `Not changed: ${r.error}${r.conflict ? `\nOptions: ${r.conflict.options.join(" · ")}` : ""}`;
+    }
     case "release": {
       const r = p.releasePort(rest[0] || "", who.by, one("reason"));
       return r.value ? `Released ${r.value.name}: its URL no longer works. Its record, triggers and events stay (delete them in Triggers if you want).` : `Not released: ${r.error}`;
@@ -97,6 +108,7 @@ const USAGE = `usage:
   hearth-trigger-port list [--all]
   hearth-trigger-port show <name>
   hearth-trigger-port test <name> '<json>'
+  hearth-trigger-port map <name> --var name=path.in.body ...
   hearth-trigger-port release <name> --reason "<why>"`;
 
 /** The agent's hearth-trigger-port command: a few lines of curl to the hub with its agent key (like hearth-mcp). */
@@ -124,6 +136,14 @@ give the service its URL. Every call becomes an event on the port's source, wher
   prints the URL once. --reason and --source are required: the hub records who claimed it, in which job, and why,
   and the user sees that in Triggers. Variables are optional; formulas can always read payload.* (what was sent).
 - \`hearth-trigger-port list [--all]\` · \`show <name>\` (its URL, triggers, last events) · \`test <name> '<json>'\`
+- \`hearth-trigger-port map <name> --var from=data.message.from --var text=data.message.text\`: make the sender's
+  real fields variables. Do this as soon as you know the shape (the service's docs, or \`show\` after the first event).
+
+The rule is CODE, never a model prompt. For anything awkward as a formula (nested JSON, a phone number in several
+formats), write a Python check with script.propose and give the trigger {"check":{"script":"<name>"}}: it reads the
+event on stdin and prints \`true\` (or {"fire": true, "text": "…"}, used as {{check.text}}). Otherwise a formula: e.g. \`from_me == false && from contains
+"14084203023"\` with a notify action "WhatsApp from {{from}}: {{text}}". A formula of \`true\` plus a prompt that
+filters makes a model read every call; don't. Use a think action (or a judge) only for what needs judgment.
 - \`hearth-trigger-port release <name> --reason "<why>"\`: the URL stops working. Release ports you no longer need.
 
 Push before polling: when a service can call a webhook, use a port, not a watcher that checks every few minutes.

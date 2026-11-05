@@ -35,6 +35,19 @@ beforeEach(async () => {
     "    print(json.dumps({'item': item, 'amount': amt, 'merchant': m, 'kind': 'transaction'}))",
     "print('done')",
   ].join("\n"));
+  // A check in Python: fires only for real incoming messages from one number, handing on who and what.
+  writeFileSync(join(repo, "from-one-number.py"), [
+    "#!/usr/bin/env python3",
+    "# description: is this WhatsApp message from +1 408 420 3023?",
+    "import json, re, sys",
+    "m = (json.load(sys.stdin).get('payload') or {}).get('data', {}).get('message') or {}",
+    "who = re.sub(r'\\D', '', str(m.get('from', '')).split('@')[0])",
+    "if m.get('from_me') or who != '14084203023':",
+    "    print('false')",
+    "else:",
+    "    print(json.dumps({'fire': True, 'from': '+' + who, 'text': m.get('text', '')}))",
+  ].join("\n"));
+  writeFileSync(join(repo, "broken-check.py"), "#!/usr/bin/env python3\n# description: crashes\nimport json, sys\nprint(json.load(sys.stdin)['payload']['missing'])\n");
   writeFileSync(join(repo, "echo-code.sh"), "#!/usr/bin/env bash\n# description: say the webhook code\necho \"code: $(cat | sed -E 's/.*\"webhook_code\":\"([A-Z_]+)\".*/\\1/')\"\n");
   store = await createStore(process.env.TEST_DB || "sqlite::memory:", dir);
   for (const c of COLLECTIONS) await store.clear(c);
@@ -212,4 +225,53 @@ test("a trigger's run that says [[quiet]] leaves no trace; next to one that spok
   // Not from a trigger: left alone.
   await put("messages", { id: "m6", createdAt: t0, role: "user", threadId: "r2", text: "hi" });
   expect(await (hub as any).quietTriggerRun({ id: "j5", messageId: "m6" })).toBe(false);
+});
+
+const parley = (from: string, text: string, fromMe = false) => JSON.stringify({ type: "message.received", data: { chat: { id: from }, message: { from, text, from_me: fromMe } } });
+
+test("a Python check decides: it reads the event and fires with what it hands on; a formula isn't needed", async () => {
+  const p = hub.pipeline;
+  const [, name, secret] = urlOf(portsAgent(p, ["claim", "--reason", "WhatsApp from one number", "--source", "parley"], who, BASE));
+  const r = await p.addTrigger({ name: "from-mom", source: name, check: { script: "from-one-number" }, action: { type: "notify", text: "WhatsApp from {{check.from}}: {{check.text}}" } }, "Bills");
+  expect(r.value).toMatchObject({ formula: "true", check: { script: "from-one-number", args: [] } });
+  p.push(name, secret, parley("14084203023@s.whatsapp.net", "call me"));
+  p.push(name, secret, parley("15550001111@s.whatsapp.net", "spam 14084203023"));
+  p.push(name, secret, parley("14084203023@s.whatsapp.net", "my own", true));
+  await p.drain();
+  expect((await sent()).map((m) => m.text)).toEqual(["WhatsApp from +14084203023: call me"]);
+  const logs = p.events({ source: name }).flatMap((e) => e.log!.filter((l) => l.step === "checked").map((l) => l.detail));
+  expect(logs.filter((l) => l.endsWith("said fire"))).toHaveLength(1);
+  expect(logs.filter((l) => l.endsWith("said no"))).toHaveLength(2);
+  expect(await p.addTrigger({ name: "bad", source: name, check: { script: "../x" }, action: { type: "notify", text: "x" } }, "Bills")).toMatchObject({ error: expect.stringContaining("check must name a script") });
+});
+
+test("a check that crashes starts one repair (with the error, the code and the event), not one per event", async () => {
+  const p = hub.pipeline;
+  const [, name, secret] = urlOf(portsAgent(p, ["claim", "--reason", "test parley port", "--source", "parley"], who, BASE));
+  await p.addTrigger({ name: "flaky", source: name, check: { script: "broken-check" }, action: { type: "notify", text: "x" } }, "Bills");
+  const asks: string[] = [];
+  (hub as any).ramble = async (text: string) => { asks.push(text); return { value: {} }; };
+  p.push(name, secret, parley("1", "a"));
+  p.push(name, secret, parley("1", "b"));
+  await p.drain();
+  expect(asks).toHaveLength(1);
+  expect(asks[0]).toContain('script.propose under the same name "broken-check"');
+  expect(asks[0]).toContain("KeyError");
+  expect(asks[0]).toContain("print(json.load(sys.stdin)['payload']['missing'])");
+  expect(asks[0]).toContain('"text":"a"');
+  const ev = p.events({ source: name });
+  expect(ev.flatMap((e) => e.log!.map((l) => l.step))).toContain("repair");
+  expect((await sent())).toEqual([]);
+});
+
+test("a hand-off carries what was sent, not just the variables; map turns the real fields into variables", async () => {
+  const { handoffText } = await import("../src/hub.ts");
+  const t = handoffText({ sourceName: "parley", variables: { text: null }, payload: JSON.parse(parley("14084203023@s.whatsapp.net", "hi")) });
+  expect(t).toContain('"from":"14084203023@s.whatsapp.net"');
+  const p = hub.pipeline;
+  const [, name, secret] = urlOf(portsAgent(p, ["claim", "--reason", "test parley port", "--source", "parley"], who, BASE));
+  expect(portsAgent(p, ["map", name, "--var", "from=data.message.from", "--var", "text=data.message.text", "--var", "from_me=data.message.from_me"], who, BASE)).toContain("from (data.message.from)");
+  p.push(name, secret, parley("14084203023@s.whatsapp.net", "hello"));
+  await p.drain();
+  expect(p.events({ source: name, log: false })[0].variables).toEqual({ text: "hello", from: "14084203023@s.whatsapp.net", from_me: false });
 });
