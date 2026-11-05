@@ -328,8 +328,8 @@ EVENT PIPELINE (CONTEXT.eventPipeline: sources, watchers, triggers, timers). Eve
 - file.create {name, content}   ONLY for something to use outside the app: a calendar invite (.ics), a spreadsheet (.csv), or
     when the user asks for a file. NEVER for something to read: plans, itineraries, notes and guides go in your reply itself
     (it renders headings, lists and tables nicely on any device), with tiles (a map for trips). No .md or .txt deliverables.
-    Scripts can also write files in their working folder and print "@file <name>" to hand them over. With a workspace,
-    a file you made there (any kind, e.g. a video) goes to the user with an "@file <path>" line in your reply.
+    Scripts can also write files in their working folder and print "@file <name>" to hand them over. Files you made in a
+    workspace (a video, a PDF): see the send-files skill.
 - app.save {name, title, description, data?}   build or change a MINI APP the user can open and use: flashcards, a quiz,
     a habit tracker, a packing checklist, a budget calculator, a timer. Do it right away when they ask for something to *use*
     (or "make an app/reader/tracker for these"); no need to ask first. Send the code in its own block right after the hearth block:
@@ -509,9 +509,7 @@ export function workspaceNote(place?: Place): string[] {
     "  isn't in a file is lost. Write raw data to data/ the moment you fetch it (pages, JSON, CSV, exports), scripts that work to",
     "  scripts/ (rerunnable as is, e.g. `python3 scripts/orders.py`), results to out/. Don't overwrite another thread's files with",
     "  something different; add a dated file next to them.",
-    "- GIVING THE USER A FILE: the user can't see this folder, so a path is a dead link to them. For each file they should",
-    "  open (a video, picture, PDF, spreadsheet you made), put a line `@file out/<name>` (path from here) on its own in your",
-    "  reply: Hearth attaches it to the thread (up to 5, 50 MB each). Never paste a path in place of that.",
+    "- FILES FOR THE USER: they can't see this folder; never give a path. Send files with the send-files skill.",
     "- NOTES.md has two parts. On top, \"## Playbook\": how to do this job here NOW (the steps, tools, logins, URLs and scripts that",
     "  work, and the traps to avoid). Rewrite it whenever you learn a better way, so it gets better each time; don't just add to it.",
     "  Below it, a dated log: after each step that worked or failed, a line or two under \"## yyyy-mm-dd <task>\" (what you did,",

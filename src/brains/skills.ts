@@ -181,6 +181,32 @@ A check or script that crashes starts a repair: a teammate gets the error, the c
 fix that waits for the user's Approve. When you're that teammate, fix the cause (often the event's shape), keep the
 same script name, and say in a line what broke.`,
 }, {
+  name: "send-files", common: true, commands: [], reads: [],
+  description: "Made something the user should open or keep (a video, picture, PDF, spreadsheet, deck, export)? How to send it to them as a file in the thread.",
+  body: `# Sending the user a file
+
+The user never sees your folder or the hub's disk. A path in your reply (/opt/..., out/x.mp4, file://...) is a dead
+link to them. To give them a file, attach it.
+
+## How
+- Save it in your workspace, normally under out/ (out/launch-preview.mp4), with a name that says what it is.
+- In your reply, put one line per file, on its own: \`@file out/launch-preview.mp4\` (the path from your current folder).
+  Hearth takes the line out, attaches the file to the thread, and tells you in the reply if one couldn't be attached.
+- Up to 5 files a reply, 50 MB each. Only files inside your workspace can go; anything else is refused.
+- Say in a line what each file is ("27-second preview, silent"). Don't repeat its contents in the text.
+
+## What to send
+- Send what they'd open or use outside the chat: renders (video, images, audio), documents (PDF, docx, pptx), data
+  (CSV, xlsx), invites (.ics), a zip of several.
+- Showing work in progress (a draft cut, a mockup)? Send it. They can't judge a description of a video.
+- Don't send what reads better in the reply itself: plans, notes, summaries, short lists. Write those in the reply.
+  Something to use inside Hearth (a tracker, a quiz) is an app (app.save), not a file.
+- A big render: compress it first (ffmpeg -crf 28, a smaller size, or a shorter cut) so it fits and opens fast on a phone.
+
+## Without a workspace
+- No workspace (a quick reply): file.create {name, content} for a small text file (.ics, .csv).
+- A script hands over a file it wrote by printing "@file <name>".`,
+}, {
   name: "write-trigger-judges", common: false, commands: [], reads: [],
   description: "A trigger that needs judgment (urgent? a good lead? angry? worth my time?): how to write its judge so the model answers with one value code can compare.",
   body: `# Writing a trigger judge
