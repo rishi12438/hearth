@@ -1,0 +1,31 @@
+test/hub.test.ts
+  s_ecc5f16f1c9872::t_d344ef0a102e55 811-812
+web/styles.css
+  s_ecc5f16f1c9872::t_e0c65dbac52fb5 689
+  s_ecc5f16f1c9872::t_ad375f7d524182 119-123
+web/src/app.ts
+  s_ecc5f16f1c9872::t_aaeb1c5ede28b2 2049
+  s_ecc5f16f1c9872::t_ad375f7d524182 1320,1835,1953,1991,2044-2048,2050-2054,2075,2081
+  s_ecc5f16f1c9872::t_e0c65dbac52fb5 288,1547,1659,1720
+  s_ecc5f16f1c9872::t_afd91f8740e02e 1974-1990,2034,2040-2043,2055-2074,2076-2080,2082-2083
+src/hub.ts
+  s_ecc5f16f1c9872::t_e0c65dbac52fb5 1111,1541,1566,2617
+src/types.ts
+  s_ecc5f16f1c9872::t_e0c65dbac52fb5 119-120
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "098c3637ef0fb4fae598b40d6f427d89835ac72e",
+  "prompts": {},
+  "sessions": {
+    "s_ecc5f16f1c9872": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9ee9baae-e2e3-4da5-8c69-34c9cadb72da",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
