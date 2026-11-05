@@ -339,6 +339,7 @@ function onEvent(e: { type: string; data?: any }) {
       // Everything made in a chat flies in, even a reminder you asked for; what you just made on this screen doesn't.
       loadPipeline().then(() => { if (d.created && Date.now() > S.pipeSelfUntil) landInTriggers(d.what, d.created); });
       if (r.view === "dm" && (d.what === "triggers" || d.what === "timers")) loadDm(r.id); // its routines
+      if (d.what === "events") soon(); // a workflow matched or finished: Activity shows it
       return;
     }
     case "ideas": loadIdeas().then(() => { if (route().view === "home") drawHome(); }); return;
@@ -880,7 +881,7 @@ function needsYouCount() {
 // Activity works like notifications: a result counts as new until you open Activity (on any device; the hub keeps the mark), or the chat it landed in.
 let actSeen = "";
 let actVisit: string | null = null; // what was already seen when you opened Activity this time, so new rows stay marked while you look
-const isFresh = (it: any, since = actSeen) => (it.kind === "done" || it.kind === "failed" || it.kind === "proactive") &&
+const isFresh = (it: any, since = actSeen) => (it.kind === "done" || it.kind === "failed" || it.kind === "proactive" || (it.kind === "workflow" && (it.state === "done" || it.state === "failed"))) &&
   String(it.at) > since && String(it.at) > seenAt(it.threadId);
 const unseenCount = () => (S.inbox || []).filter((it: any) => isFresh(it)).length;
 /** MCP servers an agent asked for, waiting for you to approve (they're in Activity's "Needs you"). */
@@ -1250,6 +1251,15 @@ function drawActivity() {
       it.kind === "approval" ? h("div", { class: "actbtns" }, h("button", { class: "sbtn", on: { click: async () => { await decide(it.approval.id, false); renderActivity(); } } }, "No"), h("button", { class: "sbtn primary", on: { click: async () => { await decide(it.approval.id, true); renderActivity(); } } }, "Approve"), alwaysBtn(it.approval, renderActivity)) : null,
       it.kind === "blocked" ? h("div", { class: "actbtns" }, h("button", { class: "sbtn primary", on: { click: async () => { await retry(it.id); renderActivity(); } } }, "Try again"), dismissBtn(it.id, renderActivity)) : null);
   };
+  // A workflow that matched: what it's doing or how it ended. Tapping it opens the agent's thread, or Workflows.
+  const wfState: Record<string, string> = { working: "Working", needs: "Needs you", done: "Done", quiet: "Ran · nothing to say", failed: "Failed" };
+  const wfRow = (it: any) => h("div", { class: `actrow ${it.state === "needs" || it.state === "failed" ? "hot" : ""}` },
+    h("button", { class: "actmain", on: { click: it.threadId ? go(it) : () => openTriggers("triggers") } }, h("span", { class: "trigav big" }, icon("zap", 20)),
+      h("span", { class: "grow" },
+        h("span", { class: "l1" }, h("b", null, it.title), h("small", null, `matched on ${it.source}`), h("time", null, shortAgo(it.at))),
+        h("span", { class: `l2 wf-${it.state} ${it.state === "working" ? "live" : ""}` }, it.state === "working" ? h("i", { class: "spin" }) : null,
+          h("span", { class: "wfstate" }, wfState[it.state] || it.state), " ",
+          h("span", it.state === "working" && it.liveJobId ? { "data-progress": it.liveJobId } : null, it.state === "working" ? S.progress.get(it.liveJobId) || it.detail : it.detail)))));
   const of = (...k: string[]) => items.filter((it: any) => k.includes(it.kind));
   const running = [...of("running"), ...of("queued")];
   const sec = (title: string, list: any[], draw: (it: any) => Node) => list.length ? h("section", { class: "actsec" }, h("h4", null, title, h("em", null, String(list.length))), list.map(draw)) : null;
@@ -1261,6 +1271,7 @@ function drawActivity() {
   const secs = [
     sec("Working now", running, runRow),
     sec("Needs you", [...of("mcp"), ...of("approval", "blocked")], (it: any) => (it.kind === "mcp" ? mcpAskRow(it) : row(it))),
+    sec("Workflows", of("workflow").sort((a: any, b: any) => String(b.matchedAt).localeCompare(String(a.matchedAt))), wfRow),
     sec("New", fresh, row),
   ].filter(Boolean) as Node[];
   clear(el, secs.length ? secs : h("p", { class: "hempty" }, "You're all caught up."));
@@ -1429,6 +1440,7 @@ function cutHere(m: any, node: Node): Node {
 }
 
 function userRow(m: any, extra: any[] = [], grouped = false) {
+  if (m?.fromTrigger) return triggerRow(m, extra, grouped); // a workflow handing over, not you
   if (m.fromApproval) {
     const back = [...String(m.text).matchAll(/<untrusted>\n?([\s\S]*?)\n?<\/untrusted>/g)].map((x) => x[1]).join("\n\n");
     const ok = m.fromApproval.ok === true;
@@ -1462,12 +1474,6 @@ function plainMessage(m: any, grouped = false) {
   const goes = (m.continues || []).map((id: string) => { const j = S.chat?.jobs.find((x: any) => x.id === id);
     return j ? h("button", { class: "fromchip", on: { click: () => { location.hash = `#c/${S.chat.thread.id}/${id}`; } } }, face(mate(j.teammateId), 18, jobState(j)), `Continued in ${jobLabel(j)}`, icon("chevron", 13)) : null; });
   // A trigger handing what happened to Hearth: shown as the trigger (it's not you talking). The event data stays folded.
-  if (m.role === "user" && m.fromTrigger) {
-    const [ask, rest] = String(m.text).split(/\n\nWhat happened \(/);
-    const data = rest ? h("details", { class: "trigdata" }, h("summary", null, "What happened"), h("pre", { class: "output" }, `(${rest}`.replace(/<\/?untrusted>/g, "").trim())) : null;
-    return row({ face: h("span", { class: "trigav" }, icon("zap", 18)), name: m.fromTrigger.title, badge: h("span", { class: "apptag" }, "TRIGGER") }, m.createdAt,
-      [h("div", { class: "mtext" }, ask), data, ...goes], grouped);
-  }
   if (m.role === "user") return userRow(m, goes, grouped);
   const from = m.fromThreadId ? S.threads.find((t) => t.id === m.fromThreadId) : null;
   const body: (Node | null)[] = [m.proactive ? h("div", { class: "proline" }, icon("bell", 13), m.proactive.title) : null, richText(m.text),
@@ -1478,6 +1484,17 @@ function plainMessage(m: any, grouped = false) {
     body.push(h("button", { class: "whybtn", on: { click: () => { why.hidden = !why.hidden; } } }, "Why did I get this?"), why);
   }
   return row(mateWho(m.teammateId || "hearth"), m.createdAt, body, grouped, m.error ? "err" : "");
+}
+
+/**
+ * A trigger handing what happened to an agent: shown as the workflow (it's not you talking). Its instructions and
+ * the event data stay folded.
+ */
+function triggerRow(m: any, extra: any[] = [], grouped = false) {
+  const [ask, rest] = String(m.text).split(/\n\nWhat happened \(/);
+  const fold = (label: string, text: string) => h("details", { class: "trigdata" }, h("summary", null, label), h("pre", { class: "output" }, text.replace(/<\/?untrusted>/g, "").trim()));
+  return row({ face: h("span", { class: "trigav" }, icon("zap", 18)), name: m.fromTrigger.title, badge: h("span", { class: "apptag" }, "WORKFLOW") }, m.createdAt,
+    [h("div", { class: "mtext" }, "Matched, and handed it to the agent."), fold("What it was asked", ask), rest ? fold("What happened", `(${rest}`) : null, ...extra], grouped);
 }
 
 /** Markdown answer as one plain line of text for previews. */

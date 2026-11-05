@@ -1194,6 +1194,12 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 .sugg.warn .grow { color: var(--danger); font-weight: var(--fw-semibold); }
 .sugg.warn small { color: var(--danger); font-weight: var(--fw-semibold); }
 .trigav { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; background: rgba(47, 111, 235, .12); color: var(--blue); }
+/* Activity → Workflows: what a matched trigger is doing, or how it ended. */
+.actrow .trigav.big { flex: none; }
+.wfstate { font-weight: 600; }
+.wf-done .wfstate { color: var(--green, #1f9d55); }
+.wf-failed .wfstate, .wf-needs .wfstate { color: var(--red, #d64545); }
+.wf-quiet .wfstate { color: var(--muted, #888); font-weight: 500; }
 .trigdata { margin-top: 4px; font-size: 13px; color: var(--muted); }
 .trigdata summary { cursor: pointer; }
 

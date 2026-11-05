@@ -487,6 +487,21 @@ export class EventPipeline {
     return (this.db.query("SELECT at, trigger_id, step, detail, value FROM event_log WHERE event_id = ? ORDER BY id").all(eventId) as any[])
       .map((r) => ({ at: r.at, triggerId: r.trigger_id, step: r.step, detail: r.detail, ...(r.value != null ? { value: JSON.parse(r.value) } : {}) }));
   }
+  /** What became of a run later (the agent it handed to finished): one more line in that event's log. */
+  noteRun(eventId: string, triggerId: string, step: string, detail: string) {
+    if (!this.db.query("SELECT 1 FROM events WHERE id = ?").get(eventId)) return; // tidied away already
+    this.log(eventId, step, detail, triggerId);
+    this.onChange("events");
+  }
+
+  /** Recent trigger runs, newest first: each (event, trigger) that matched, with every step after the match. */
+  recentRuns(since: string, limit = 15): { eventId: string; triggerId: string; source: string; at: string; steps: { at: string; step: string; detail: string }[] }[] {
+    const rows = this.db.query(`SELECT l.id, l.event_id, l.trigger_id, l.at, e.source_name FROM event_log l JOIN events e ON e.id = l.event_id
+      WHERE l.step = 'matched' AND l.trigger_id IS NOT NULL AND l.at >= ? AND e.test = 0 ORDER BY l.id DESC LIMIT ?`).all(since, limit) as any[];
+    return rows.map((r) => ({ eventId: r.event_id, triggerId: r.trigger_id, source: r.source_name, at: r.at,
+      steps: this.db.query("SELECT at, step, detail FROM event_log WHERE event_id = ? AND trigger_id = ? AND id > ? ORDER BY id").all(r.event_id, r.trigger_id, r.id) as any[] }));
+  }
+
   private log(eventId: string, step: string, detail = "", triggerId: string | null = null, value?: JudgeValue) {
     this.db.query("INSERT INTO event_log (event_id, trigger_id, at, step, detail, value) VALUES (?, ?, ?, ?, ?, ?)").run(eventId, triggerId, this.now(), step, detail.slice(0, 2000), value === undefined ? null : j(value));
   }

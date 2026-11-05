@@ -44,6 +44,7 @@ beforeEach(async () => {
 
 afterEach(async () => { hub.stop(); await hub.idle(20_000); await store.close(); });
 
+async function until(ok: () => Promise<boolean>, ms = 5000) { const end = Date.now() + ms; while (!(await ok()) && Date.now() < end) await Bun.sleep(20); }
 const sent = async () => (await store.all<Message>("messages")).filter((m) => m.proactive);
 
 test("watcher rules: pages need a web address and 15 min, scripts need a real name", () => {
@@ -311,6 +312,25 @@ test("an agent action: the message goes to the teammate out of sight, as a real 
   const job = (await store.all<any>("jobs")).find((j) => j.messageId === handoff.id)!;
   expect(job).toMatchObject({ teammateId: "scout", workspace: "dinner-spots", label: "Sam texts" });
   expect((await store.all<any>("messages")).find((m) => m.taskJobId === job.id)).toMatchObject({ fromTrigger: { title: "Sam texts" } });
+  // Activity's Workflows shows the run: matched on its source, then how the agent's task ended.
+  for (let i = 0; i < 300 && (await store.get<any>("jobs", job.id))?.status !== "done"; i++) await Bun.sleep(10);
+  await until(async () => (await hub.inbox()).some((it: any) => it.kind === "workflow" && it.state === "done"));
+  const inbox = await hub.inbox();
+  const wf = inbox.find((it: any) => it.kind === "workflow")!;
+  expect(wf).toMatchObject({ title: "Sam texts", source: "texts", state: "done", jobId: job.id, threadId: r.value!.thread.id });
+  expect(inbox.some((it: any) => it.kind === "done" && it.id === job.id)).toBe(false); // shown once, as the workflow
+  expect(p.events({ limit: 1 })[0].log!.map((l) => l.step)).toEqual(["received", "matched", "ran", "done"]);
+});
+
+test("a trigger's message can use the payload: {{payload.data.id}} fills in", async () => {
+  const p = hub.pipeline;
+  p.createSource({ name: "pings", variables: [{ name: "kind" }] }, "Hearth");
+  await p.addTrigger({ name: "ping", source: "pings", formula: "true", action: { type: "notify", text: "Got {{payload.data.id}} ({{kind}})" } }, "Hearth");
+  p.publish("pings", { kind: "hello", data: { id: "m-42" } });
+  await p.drain();
+  expect((await sent()).map((m) => m.text)).toEqual(["Got m-42 (hello)"]);
+  // A message that just says something shows under Workflows as done.
+  expect((await hub.inbox()).find((it: any) => it.kind === "workflow")).toMatchObject({ title: "ping", state: "done" });
 });
 
 test("where: ramble:<name> posts in that ramble, made the first time; a plain message needs no agent", async () => {
