@@ -775,6 +775,47 @@ test("a ramble's look happens on its own once its tasks are done", async () => {
   } finally { delete process.env.HEARTH_PROACTIVE_DELAY_MS; }
 });
 
+test("lessons: saved apart from memory, every-job ones always in context, the rest only when relevant", async () => {
+  await hub.applyActions([
+    { type: "lesson.add", lesson: "Live prices on bot-protected booking sites (enterprise.com): Firecrawl interact gets through; Browserless and Browserbase were blocked.", evidence: "it worked" },
+    { type: "lesson.add", lesson: "Check a tool's output before relying on it.", importance: 3 },
+    { type: "memory.add", fact: "Has a Chase Sapphire Preferred card.", notebook: "money", importance: 2 },
+  ], "");
+  const facts = await store.all<Fact>("memory");
+  expect(facts.filter((f) => f.notebook === "lessons").length).toBe(2);
+  const car = (await hub.context("check enterprise car rental prices for PHX", "job")) as any;
+  expect(car.lessons.map((l: any) => l.lesson).join(" ")).toContain("Firecrawl interact");
+  expect(car.lessons.length).toBe(2);
+  expect(car.memory.some((m: any) => m.notebook === "lessons")).toBe(false); // lessons don't crowd out what's known about the user
+  const other = (await hub.context("draft an email to the landlord", "job")) as any;
+  expect(other.lessons.map((l: any) => l.lesson)).toEqual(["Check a tool's output before relying on it."]);
+  // The same lesson twice is one lesson.
+  await hub.applyActions([{ type: "lesson.add", lesson: "Check a tool's output before relying on it.", importance: 3 }], "");
+  expect((await store.all<Fact>("memory")).filter((f) => f.notebook === "lessons").length).toBe(2);
+  // Job prompts point at them and at the skill that says how to save one.
+  const prompt = buildPrompt({ mode: "job", input: "x", context: {} } as any, "claude", true);
+  expect(prompt).toContain("CONTEXT.lessons");
+  expect(prompt).toContain("learn-from-mistakes");
+});
+
+test("lessons: a thread quiet for 15 minutes is reviewed once for what it taught, then only what's new", async () => {
+  await hub.ensureTeammates();
+  const t = (await hub.ramble("using firecrawl interact worked for enterprise")).value!.thread;
+  await until(async () => { const js = (await store.all<Job>("jobs")).filter((j) => j.threadId === t.id); return js.length > 0 && js.every((j) => ["done", "failed"].includes(j.status)); });
+  const now = new Date((await messages()).at(-1)!.createdAt); // the hub's own clock in tests
+  expect(await hub.learnFromQuietThreads(now)).toBe(0); // not quiet long enough yet
+  const later = new Date(now.getTime() + 16 * 60_000);
+  expect(await hub.learnFromQuietThreads(later)).toBe(1);
+  const lessons = () => store.all<Fact>("memory").then((fs) => fs.filter((f) => f.notebook === "lessons"));
+  expect((await lessons()).map((f) => f.fact).join(" ")).toContain("firecrawl interact");
+  expect(await hub.learnFromQuietThreads(new Date(later.getTime() + 60 * 60_000))).toBe(0); // nothing new since
+  expect((await store.get<Thread>("threads", t.id))!.lessonsAt).toBeTruthy();
+  // A thread that went quiet long before this existed isn't dug up.
+  const old = (await hub.ramble("try kayak first")).value!.thread;
+  await until(async () => (await store.all<Job>("jobs")).filter((j) => j.threadId === old.id).every((j) => ["done", "failed"].includes(j.status)));
+  expect(await hub.learnFromQuietThreads(new Date(now.getTime() + 3 * 864e5))).toBe(0);
+});
+
 test("about you is always in context; past conversations are searchable by the brain", async () => {
   await hub.ensureTeammates();
   await hub.setAbout("Sister Priya, turns 30 on Dec 12.\nTraining for a half marathon.", true);

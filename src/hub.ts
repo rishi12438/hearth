@@ -15,7 +15,7 @@ import { readPage } from "./browser.ts";
 import { SignedOut } from "./sources/pages.ts";
 import type { Vault } from "./vault.ts";
 import { SOURCES, sourceById, formatItems, needOf, type Item } from "./sources/index.ts";
-import { recall, isActive, validateFact } from "./memory.ts";
+import { recall, recallLessons, isActive, validateFact, LESSONS } from "./memory.ts";
 import { describeLocal, localDate, distanceMeters } from "./time.ts";
 import { CHANNELS, CHANNEL_LABEL, type Channel } from "./types.ts";
 import { badChatLink } from "./connectors/web-senders.ts";
@@ -186,6 +186,8 @@ export class Hub {
   private additions = new Map<string, string[]>();    // what the user added to a running job, applied when it restarts
   private inflight = 0;                   // orchestrations, splits and retries still running
   private rambleSpend = new Map<string, number>(); // message id -> USD
+  private lessonsSweptAt = 0;
+  private learning = false;
   private rambleLooks = new Map<string, ReturnType<typeof setTimeout>>(); // thread id -> its pending "anything to set up?" look
 
   constructor(
@@ -277,7 +279,11 @@ export class Hub {
         components: (await this.searchLibrary(query)).filter((x) => x.kind === "component"), // ready-made visuals it can fill with data
       };
     }
-    const facts = await this.store.all<Fact>("memory");
+    const all = await this.store.all<Fact>("memory");
+    // Lessons (how to get things done) go in their own list below; memory is about the user and their world.
+    const facts = mode === "review" ? all : all.filter((f) => f.notebook !== LESSONS);
+    const lessons = mode === "review" ? [] : mode === "learn" ? all.filter((f) => f.notebook === LESSONS && isActive(f, now)).slice(-80)
+      : recallLessons(all, query, now);
     // In a project's ramble: everything in its notebook comes first, then what's relevant from the rest.
     const project = await this.projectOf(threadId);
     const own = project ? facts.filter((f) => f.notebook === project.notebook && isActive(f, now)).slice(-30) : [];
@@ -312,6 +318,7 @@ export class Hub {
         rambles: (await this.store.all<Thread>("threads")).filter((t) => t.projectId === project.id).map((t) => channelOf(t)).slice(0, 20) } } : {}),
       memory: memory.map((f) => ({ id: f.id, fact: f.fact, notebook: f.notebook, importance: f.importance, ...(f.expiresAt ? { expiresAt: f.expiresAt } : {}) })),
       notebooks: (await this.store.all<Notebook>("notebooks")).map((n) => ({ name: n.name, summary: n.summary })),
+      ...(lessons.length ? { lessons: lessons.map((f) => ({ id: f.id, lesson: f.fact })) } : {}),
       scripts: (await this.scripts.list()).filter((s) => s.status !== "rejected").map((s) => ({ name: s.name, description: s.description, status: s.status })),
       recentMessages: history.map((m) => ({ role: m.role, at: m.createdAt, text: m.text.slice(0, 600) })),
       library: mode === "review" ? undefined : await this.searchLibrary(query),
@@ -2521,6 +2528,12 @@ ${JSON.stringify(shown, null, 1)}
             if (r.value) done.push({ kind: "memory", label: `Remembered: ${r.value.fact}`, id: r.value.id });
             break;
           }
+          case "lesson.add": {
+            // A lesson is a memory fact in the lessons notebook: same dedupe, superseding, forgetting and nightly tidy.
+            const r = await this.addFact({ fact: a.lesson ?? a.fact, notebook: LESSONS, importance: a.importance, evidence: a.evidence || evidence.slice(0, 300) }, "assistant");
+            if (r.value) done.push({ kind: "memory", label: `Learned: ${r.value.fact}`, id: r.value.id });
+            break;
+          }
           case "memory.update": {
             const r = await this.updateFact(String(a.id), a);
             if (r) done.push({ kind: "memory", label: `Updated: ${r.fact}`, id: r.id });
@@ -3110,6 +3123,52 @@ ${JSON.stringify(shown, null, 1)}
     return true;
   }
 
+  /**
+   * Learning from mistakes: a thread that's been quiet for HEARTH_LESSONS_IDLE_MS (default 15 min) with something new
+   * since its last review gets one cheap look for lessons (a tool that failed and one that worked, the user correcting the
+   * team). What it finds goes in the lessons notebook, which every later job sees (CONTEXT.lessons). Below 0 turns it off.
+   * Threads quiet for over a day before this ran aren't backfilled. One sweep at a time.
+   */
+  async learnFromQuietThreads(now = this.clock()) {
+    const idle = Number(process.env.HEARTH_LESSONS_IDLE_MS ?? 900_000);
+    if (!(idle >= 0) || this.learning) return 0;
+    this.learning = true;
+    let n = 0;
+    try {
+      const msgs = await this.store.all<Message>("messages");
+      const last = new Map<string, string>();
+      for (const m of msgs) if (m.threadId && (last.get(m.threadId) || "") < m.createdAt) last.set(m.threadId, m.createdAt);
+      const busy = new Set((await this.store.all<Job>("jobs")).filter((j) => !["done", "failed"].includes(j.status)).map((j) => j.threadId));
+      for (const t of await this.store.all<Thread>("threads")) {
+        const at = last.get(t.id);
+        if (!at || busy.has(t.id) || (t.lessonsAt && t.lessonsAt >= at)) continue;
+        const quiet = now.getTime() - new Date(at).getTime();
+        if (quiet < idle || (!t.lessonsAt && quiet > 864e5)) continue;
+        if (await this.learnFromThread(t.id, at)) n++;
+      }
+    } finally { this.learning = false; }
+    return n;
+  }
+
+  /** The look itself: what was said and done since lessonsAt, then lessonsAt moves up to upTo. */
+  async learnFromThread(threadId: string, upTo: string): Promise<boolean> {
+    const thread = await this.store.get<Thread>("threads", threadId);
+    if (!thread) return false;
+    const since = thread.lessonsAt || "";
+    await this.store.put<Thread>("threads", { ...thread, lessonsAt: upTo });
+    const msgs = (await this.store.all<Message>("messages")).filter((m) => m.threadId === threadId && m.createdAt > since && m.createdAt <= upTo)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const jobs = (await this.store.all<Job>("jobs")).filter((j) => j.threadId === threadId && (j.finishedAt || j.createdAt) > since);
+    // Nothing to learn from without both sides: the user asking or correcting, and the team doing something.
+    if (!msgs.some((m) => m.role === "user") || !msgs.some((m) => m.role !== "user")) return false;
+    const said = msgs.slice(-40).map((m) => `${m.role === "user" ? "USER" : "TEAM"}: ${m.text.replace(/\s+/g, " ").slice(0, 700)}`);
+    const did = jobs.slice(-10).map((j) => `- [${j.status}] ${j.task.slice(0, 200)}${j.result ? ` → ${j.result.replace(/\s+/g, " ").slice(0, 500)}` : ""}`);
+    const input = [`THREAD: #${channelOf(thread)} "${thread.title}"`, "", "WHAT WAS SAID:", ...said, ...(did.length ? ["", "WHAT THE TEAM DID:", ...did] : [])].join("\n");
+    const r = await this.turn("learn", input, "lessons review", { profile: (await this.brains()).workhorse });
+    await this.log("lessons", `after #${channelOf(thread)}: ${r.text && r.text !== QUIET ? r.text : "nothing new"}`);
+    return true;
+  }
+
   /** Ask the team for ideas now (the system hook does this every few hours). */
   async thinkOfIdeas() {
     const r = await this.turn("ideas", "Suggest ideas.", "ideas", { profile: (await this.brains()).workhorse });
@@ -3598,6 +3657,10 @@ ${JSON.stringify(shown, null, 1)}
 
   async tick() {
     await this.archiveQuietRambles();
+    if (Date.now() - this.lessonsSweptAt > 60_000) {
+      this.lessonsSweptAt = Date.now();
+      try { await this.learnFromQuietThreads(); } catch (e: any) { console.error("lessons review failed", e); }
+    }
     try { await this.expireApprovals(); } catch (e: any) { console.error("expiring approvals failed", e); }
     if (Date.now() - this.tidiedAt > 86_400_000) {
       this.tidiedAt = Date.now();
