@@ -1,0 +1,45 @@
+src/server.ts
+  s_a62c474b26f7ae::t_94c1610032c7f7 13,805
+  s_a62c474b26f7ae::t_5b7541438ffadd 70-71,176-185
+src/hooks.ts
+  s_a62c474b26f7ae::t_fbd16a3baaca37 1,12-13,53-62,64,109,138-139,144
+  s_a62c474b26f7ae::t_f2a55a8de4ca25 63
+  s_a62c474b26f7ae::t_324d4522d95d42 4,14,65-72,117,140
+  s_a62c474b26f7ae::t_3ce8a717eaf16a 145
+src/hub.ts
+  s_a62c474b26f7ae::t_bfd53c738add06 12,1050-1053,1055,1911-1932,1948,1972-1976,1983,2005
+  s_a62c474b26f7ae::t_324d4522d95d42 1054,1275,1933-1944,1946-1947,1977,1979
+  s_a62c474b26f7ae::t_f2a55a8de4ca25 1273-1274
+  s_a62c474b26f7ae::t_6f282afc51c556 1945,1978,1980-1982,2003
+src/scripts.ts
+  s_a62c474b26f7ae::t_324d4522d95d42 122,139-140
+web/src/app.ts
+  s_a62c474b26f7ae::t_88cc969f5d00f4 2004,2015-2021
+src/brain.ts
+  s_a62c474b26f7ae::t_75f188dce68b76 44-45,51-55
+  s_a62c474b26f7ae::t_324d4522d95d42 56-62
+test/triggers.test.ts
+  s_a62c474b26f7ae::t_6f282afc51c556 80
+  s_a62c474b26f7ae::t_7f0dc4e70c5d5d 1-79,81-105
+src/watch.ts
+  s_a62c474b26f7ae::t_36772ae69d2eea 1-72
+src/types.ts
+  s_a62c474b26f7ae::t_fbd16a3baaca37 47-50,77
+  s_a62c474b26f7ae::t_324d4522d95d42 51-53,76
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "b934e569020c159e12c4bf566cc2b3a595aa0be9",
+  "prompts": {},
+  "sessions": {
+    "s_a62c474b26f7ae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4c826b8c-287f-4f16-ac8d-eafba60501f3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

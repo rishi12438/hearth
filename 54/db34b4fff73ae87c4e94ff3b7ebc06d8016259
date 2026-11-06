@@ -1,0 +1,27 @@
+web/src/app.ts
+  s_d994421d2b64f1::t_ea7bf89063c2a8 1109,1599,1973-1991,1999-2000,2002,2017,2046
+  s_d994421d2b64f1::t_0b6d864fed84bd 1952,1957-1962,1967,1969,2026-2040,2051,2063
+web/styles.css
+  s_d994421d2b64f1::t_ea7bf89063c2a8 764
+  s_d994421d2b64f1::t_756e819d8a2b57 767
+  s_d994421d2b64f1::t_2ee35904379991 766
+  s_d994421d2b64f1::t_0b6d864fed84bd 765,768-769
+web/src/dom.ts
+  s_d994421d2b64f1::t_ea7bf89063c2a8 36
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "54db34b4fff73ae87c4e94ff3b7ebc06d8016259",
+  "prompts": {},
+  "sessions": {
+    "s_d994421d2b64f1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "86403106-4ceb-4bb5-ad21-404643c5be6c",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,25 @@
+test/browser-tool.test.ts
+  s_f00f78c305b664::t_ba32c5e52a345f 1-38
+src/brain.ts
+  s_f00f78c305b664::t_77ebad467522db 2,9
+  s_f00f78c305b664::t_66ccd4202ff670 344-346,390-391,546-549,551-552
+src/brains/browser.ts
+  s_f00f78c305b664::t_66ccd4202ff670 24
+  s_f00f78c305b664::t_a395db3eb75065 1-23,25-60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "16211fa7a4dbe30a44d84beb00c3d5dfd45893ad",
+  "prompts": {},
+  "sessions": {
+    "s_f00f78c305b664": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "da112a7f-bf76-42e8-9da1-efce8d02f39f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

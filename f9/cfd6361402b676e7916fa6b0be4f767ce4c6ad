@@ -1,0 +1,19 @@
+web/styles.css
+  s_d063f8f1dd1105::t_82cafe980eca12 132-133
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "f9cfd6361402b676e7916fa6b0be4f767ce4c6ad",
+  "prompts": {},
+  "sessions": {
+    "s_d063f8f1dd1105": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "92054c36-d56c-42cc-8c9b-7a8400f14e70",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,37 @@
+src/brain-logins.ts
+  s_c3abf54b0d0d60::t_1a8f8f689e84ff 1-152
+src/brain-usage.ts
+  s_c3abf54b0d0d60::t_239b5f2ebe7e45 3,5-132,135-299
+  s_c3abf54b0d0d60::t_638396e375b3ca 1-2,4,133-134
+test/brains.test.ts
+  s_c3abf54b0d0d60::t_c0bc291cce12ed 1-56,58-98
+  s_c3abf54b0d0d60::t_71d5daa9af94fa 57
+docs/plan-setup-and-connections.md
+  s_c3abf54b0d0d60::t_7000e5d7e97101 9-10
+  s_c3abf54b0d0d60::t_27c2bb0104d59e 11-17
+  s_c3abf54b0d0d60::t_4533cb53b15548 1-8,18-67
+src/hub.ts
+  s_c3abf54b0d0d60::t_ffaa0eae77b966 7,298-324,703-707,787-799
+  s_c3abf54b0d0d60::t_2a2fdafdae3e30 121-123,2009
+src/brain.ts
+  s_c3abf54b0d0d60::t_f80b208e09dfa0 7,326,330-331,333-334,338-352,354-356,416-419,450-483,545,563
+  s_c3abf54b0d0d60::t_638396e375b3ca 8,332
+src/types.ts
+  s_c3abf54b0d0d60::t_ffaa0eae77b966 104,208-209
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "c41a00da861530e7dc1231c62ce91d136be3126b",
+  "prompts": {},
+  "sessions": {
+    "s_c3abf54b0d0d60": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5d7396f8-5253-434f-b3b7-b8db95db4fed",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

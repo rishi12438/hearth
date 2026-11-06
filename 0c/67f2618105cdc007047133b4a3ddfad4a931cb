@@ -1,0 +1,63 @@
+src/server.ts
+  s_af012936b7cbc4::t_78d02b30007e04 387-398,401-404
+  s_af012936b7cbc4::t_21b23f088f56e3 342-344,469-471
+  s_af012936b7cbc4::t_86d73a5f6785b1 1036,1048
+  s_af012936b7cbc4::t_786f9dec310435 69,399-400
+src/events/pipeline.ts
+  s_af012936b7cbc4::t_81d13052d845b0 57-60
+  s_af012936b7cbc4::t_8ee1244855fe94 304
+  s_af012936b7cbc4::t_3cfa3712919564 336-337
+  s_af012936b7cbc4::t_51b5fc09ead49c 530
+  s_af012936b7cbc4::t_d76a358d2c61ed 38-50
+  s_af012936b7cbc4::t_21b23f088f56e3 537-549
+  s_af012936b7cbc4::t_a62288dce0b052 612
+  s_af012936b7cbc4::t_56764c4f96baec 1089
+  s_af012936b7cbc4::t_404e12b25254ba 512-529,531-536,550-565
+  s_af012936b7cbc4::t_28c4a8dbc05709 593-598
+  s_af012936b7cbc4::t_f32d39bd6bb132 505
+web/src/app.ts
+  s_af012936b7cbc4::t_86d73a5f6785b1 3238-3245,3247,3249-3250
+test/ports.test.ts
+  s_af012936b7cbc4::t_61fc4a38f06dc5 134-152
+  s_af012936b7cbc4::t_9e5e72346aeac6 1-133
+src/events/ports.ts
+  s_af012936b7cbc4::t_da265e57860514 1-137
+src/scripts.ts
+  s_af012936b7cbc4::t_dfe4a8642f3de2 41-63
+  s_af012936b7cbc4::t_371a2b73cb58e0 27-30
+  s_af012936b7cbc4::t_21b23f088f56e3 65,81-82,173,175-176
+  s_af012936b7cbc4::t_bbe9f551c714d7 24-26,37
+  s_af012936b7cbc4::t_a92753baf20620 91-92,99-100,106,122-123,130-133,138,180-184,202-203,206-207,213
+src/types.ts
+  s_af012936b7cbc4::t_a92753baf20620 181-182
+src/hub.ts
+  s_af012936b7cbc4::t_51b5fc09ead49c 3367-3368,3370
+  s_af012936b7cbc4::t_847b7c70e86aaf 3543-3557,3560
+  s_af012936b7cbc4::t_52d91353d9e13e 3369
+  s_af012936b7cbc4::t_686f04731d0d37 3558-3559
+  s_af012936b7cbc4::t_523b75a27c2a22 2096
+test/skills.test.ts
+  s_af012936b7cbc4::t_c3c077ba9a8eae 6-8
+src/connectors/index.ts
+  s_af012936b7cbc4::t_5c7e559ddde70e 71
+  s_af012936b7cbc4::t_786f9dec310435 1,96-97
+  s_af012936b7cbc4::t_21b23f088f56e3 58-60,106-112
+src/brain.ts
+  s_af012936b7cbc4::t_5d5ea75e336c85 184-191,224-226,273-276
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "0c67f2618105cdc007047133b4a3ddfad4a931cb",
+  "prompts": {},
+  "sessions": {
+    "s_af012936b7cbc4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9cb3193d-cb29-47a2-821f-2283d4641a2e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

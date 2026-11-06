@@ -1,0 +1,48 @@
+src/hub.ts
+  s_a62c474b26f7ae::t_2494a85f663128 13-14,74-76,189,222,1177-1179,1984-2014,2050-2055
+src/types.ts
+  s_a62c474b26f7ae::t_2494a85f663128 53-55
+src/server.ts
+  s_a62c474b26f7ae::t_8ee84a15f48d6c 186-196,433-455
+test/google.test.ts
+  s_a62c474b26f7ae::t_bdd414b05c9b31 1-154
+src/hooks.ts
+  s_a62c474b26f7ae::t_2494a85f663128 5,16,75-84,129,152-155
+web/styles.css
+  s_a62c474b26f7ae::t_bd877e7ed00eb1 789-804
+src/sources/index.ts
+  s_a62c474b26f7ae::t_e1fadedccf1974 1-44
+src/brain.ts
+  s_a62c474b26f7ae::t_3f1463646e29da 6-9
+  s_a62c474b26f7ae::t_2494a85f663128 67-70,88-89
+src/sources/gmail.ts
+  s_a62c474b26f7ae::t_908cdb404f65fd 1-31
+src/google.ts
+  s_a62c474b26f7ae::t_a83bd731a8e1ef 43
+  s_a62c474b26f7ae::t_1cb71fea05cd82 1-42,44-165
+src/sources/calendar.ts
+  s_a62c474b26f7ae::t_470a0f117467c0 1-40
+web/src/app.ts
+  s_a62c474b26f7ae::t_bd877e7ed00eb1 80,1390-1454,1456-1463,1468,1485-1487,1691
+  s_a62c474b26f7ae::t_2f82915f4f4510 68-70,81,1388-1389,1464-1467,1469-1483,1488-1499,1504-1510
+  s_a62c474b26f7ae::t_885b978c3c3e8c 1503
+  s_a62c474b26f7ae::t_14384ab6944e02 1455
+  s_a62c474b26f7ae::t_b893d7a86ac4e4 1874,2140
+  s_a62c474b26f7ae::t_efa3e08aa0bafa 1484,1500-1502
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "4ccedebf606beec13fa56a1d51ec073d6749f10c",
+  "prompts": {},
+  "sessions": {
+    "s_a62c474b26f7ae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4c826b8c-287f-4f16-ac8d-eafba60501f3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

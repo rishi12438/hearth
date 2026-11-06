@@ -1,0 +1,27 @@
+src/server.ts
+  s_f00f78c305b664::t_f83f87055fa9fe 326
+src/hub.ts
+  s_f00f78c305b664::t_f83f87055fa9fe 139,2207-2214
+web/src/app.ts
+  s_f00f78c305b664::t_f83f87055fa9fe 474-475,3208-3218
+src/brains/health.ts
+  s_f00f78c305b664::t_f83f87055fa9fe 32-33,40,48,58-59
+web/styles.css
+  s_f00f78c305b664::t_f83f87055fa9fe 933-940
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "63c01eede28df8720612e8e41412b35ee6d0ea59",
+  "prompts": {},
+  "sessions": {
+    "s_f00f78c305b664": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "da112a7f-bf76-42e8-9da1-efce8d02f39f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

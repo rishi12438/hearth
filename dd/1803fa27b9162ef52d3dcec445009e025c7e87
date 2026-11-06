@@ -1,0 +1,64 @@
+deploy/setup-mac.sh
+  s_842be64ddc7b43::t_35a11710b86319 68
+src/auth.ts
+  s_842be64ddc7b43::t_cdc73aac08a7bc 52-60
+src/hub.ts
+  s_842be64ddc7b43::t_44f59883a46da5 626-628,701-703
+SECURITY.md
+  s_842be64ddc7b43::t_e5cd46d1361e6c 51-54
+web/styles.css
+  s_842be64ddc7b43::t_0da108ffc0f283 783,785-787
+  s_842be64ddc7b43::t_3567c2f2e92dfc 784
+src/server.ts
+  s_842be64ddc7b43::t_35a11710b86319 61-62,104
+  s_842be64ddc7b43::t_66472ceea09c6b 4,11,60,90-103,105-108,572,635-655,678,686,724,729-734,736,820
+  s_842be64ddc7b43::t_4522badd746966 12,81-82
+README.md
+  s_842be64ddc7b43::t_e5cd46d1361e6c 112
+src/computer.ts
+  s_842be64ddc7b43::t_48d10d19276f1f 1,3,13-14,75-95,164-167
+  s_842be64ddc7b43::t_35a11710b86319 72-74,138
+  s_842be64ddc7b43::t_4522badd746966 66-71
+src/cli.ts
+  s_842be64ddc7b43::t_35a11710b86319 35-36
+test/machines.test.ts
+  s_842be64ddc7b43::t_96f794acaaf930 102-103,118-119
+  s_842be64ddc7b43::t_3567c2f2e92dfc 249-255
+  s_842be64ddc7b43::t_56f077d957eb1c 1-101,104-117,120-248
+web/src/app.ts
+  s_842be64ddc7b43::t_0da108ffc0f283 2251,2278,2316,2318,2323-2324,2340,2343-2347,2349,2351-2352,2361-2445
+.env.example
+  s_842be64ddc7b43::t_e5cd46d1361e6c 15-18
+src/computers.ts
+  s_842be64ddc7b43::t_4522badd746966 69-70,241
+  s_842be64ddc7b43::t_67a9008758ebb1 14,35-36,77,80,97,226-227,231-240,242
+src/machines.ts
+  s_842be64ddc7b43::t_cdc73aac08a7bc 265-266
+  s_842be64ddc7b43::t_1e39dfa57a010a 1-66,69,74-76,79-100,103-189,191-225,227-264,267-294,303-377
+  s_842be64ddc7b43::t_35a11710b86319 67-68,70-73,77-78,101-102,190
+  s_842be64ddc7b43::t_3567c2f2e92dfc 226,295-302
+src/types.ts
+  s_842be64ddc7b43::t_cdc73aac08a7bc 9-11
+deploy/lightsail.md
+  s_842be64ddc7b43::t_e5cd46d1361e6c 118-126
+bun.lock
+  s_842be64ddc7b43::t_fa25ec00d5f669 9,22-31,50-51,54-55,62-65,72-73,80-81,90-91,106-107,110-111,114-117,120-123,132-135,154-155,158-159,162-163,172-173
+package.json
+  s_842be64ddc7b43::t_9dc70bef1b1b09 23
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "dd1803fa27b9162ef52d3dcec445009e025c7e87",
+  "prompts": {},
+  "sessions": {
+    "s_842be64ddc7b43": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2b58baca-9866-4d7e-8d9a-756cd0841a98",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

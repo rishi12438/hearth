@@ -1,0 +1,104 @@
+test/shares.test.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-349
+deploy/hearth-boxctl.path
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-12
+deploy/box.Dockerfile
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-11
+deploy/hearth-boxctl.service
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-8
+src/public/box.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-460
+.gitignore
+  s_129e70c6c12e11::t_88b9f7d83daed1 9
+deploy/hearth-boxctl
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-88
+deploy/lightsail.md
+  s_129e70c6c12e11::t_88b9f7d83daed1 177-216
+README.md
+  s_129e70c6c12e11::t_88b9f7d83daed1 83,189-192,218-219,223
+src/public/selftest.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-52
+src/public/gateway.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-29
+docs/screenshots/sharing/seal-selftest.txt
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-14
+package.json
+  s_129e70c6c12e11::t_88b9f7d83daed1 18,23
+src/cli.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 9,21-23,42-47,70-77,112-140,151-152,154,161
+  s_129e70c6c12e11::t_d4ccb4f1c33b21 165
+src/sandboxes.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-223
+src/server.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 25-26,71-72,92,190-223,551-586,967,972-982,997-999
+test/public.test.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-248
+web/src/dom.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 36
+web/styles.css
+  s_129e70c6c12e11::t_88b9f7d83daed1 966-1003
+src/tokenmint.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-108
+test/fake-model.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-24
+src/client.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-258
+.env.example
+  s_129e70c6c12e11::t_88b9f7d83daed1 90-94
+deploy/box-selftest.sh
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-20
+src/public/model.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-71
+deploy/client/build.sh
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-72
+src/share-page.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-111
+web/src/app.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 43,239-242,1296,2030,2384,2393-2671
+  s_129e70c6c12e11::t_dcc8d891a1dd54 2672
+src/public/egress.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-95
+src/public/types.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-65
+src/public/rules.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-95
+src/store/types.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 7
+src/computer.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-2,10,27,32,44-46,53-96
+  s_129e70c6c12e11::t_b6471ccc44eae8 97
+SECURITY.md
+  s_129e70c6c12e11::t_88b9f7d83daed1 44-74
+src/shares.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-729
+src/public/guard.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-98
+docs/design/public-teammates.md
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-261
+src/public/diff.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-67
+src/config.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 32-33,67
+src/types.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 380-438
+test/sandboxes.test.ts
+  s_129e70c6c12e11::t_88b9f7d83daed1 1-51
+bun.lock
+  s_129e70c6c12e11::t_9deb864168df94 8,24-27,112-113,134-135,226-227,268-269,356,366-367,372,378-380
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "5d167846ef2cae4f5a091f242dfa54d9dec1a55b",
+  "prompts": {},
+  "sessions": {
+    "s_129e70c6c12e11": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80ee8953-b925-4f31-b3de-0ea59b6acea7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

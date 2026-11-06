@@ -1,0 +1,80 @@
+src/server.ts
+  s_5c150ec11ea3ca::t_1b26b36023d905 364
+web/src/app.ts
+  s_5c150ec11ea3ca::t_edc41582d18f87 1080
+  s_159f38eb181975::t_5f9ba3ddfd3257 3644
+  s_5c150ec11ea3ca::t_dd538c0ac10143 465-476,494,499,557,576-606,609,1079,1419,1422
+  s_159f38eb181975::t_176e89075690db 444,3637-3639
+  s_0f4a4142496f64::t_473cc75baa8532 1783-1789,1798,1856,1865,1888,1893-1894,1898,1901-1908,1912,1921
+  s_5b194f37cdc70b::t_1362fa96449a3a 1023-1025,1363-1364
+src/hub.ts
+  s_0f4a4142496f64::t_473cc75baa8532 2427,2433,2447
+  s_5c150ec11ea3ca::t_1b26b36023d905 503,512-515
+web/src/connectors.ts
+  s_612115f94fe4ae::t_3284a8b30e2b33 103
+web/styles.css
+  s_612115f94fe4ae::t_3284a8b30e2b33 838-839
+  s_159f38eb181975::t_c5970a07d87ce6 530,532
+  s_5c150ec11ea3ca::t_396cd446863b6d 237-243,957-963
+  s_159f38eb181975::t_176e89075690db 531
+test/hub.test.ts
+  s_5c150ec11ea3ca::t_f0566c2efe3f30 462-466
+src/sources/instagram.ts
+  s_2731c68d7d125e::t_fe4018bbd5e3bd 8-9,11
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "042d1dd5e235bb2734efc5f994296a2202675ad0",
+  "prompts": {},
+  "sessions": {
+    "s_0f4a4142496f64": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "29a49887-c65c-4948-97ed-8628272051dc",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    },
+    "s_159f38eb181975": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6d389aae-a977-4ee0-8d39-752aab6e4ed0",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    },
+    "s_2731c68d7d125e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d54cf7d8-dcf6-45e2-bcc8-1d13a5e80eee",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    },
+    "s_5b194f37cdc70b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38d0e054-f2d3-449b-9063-c01110332485",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    },
+    "s_5c150ec11ea3ca": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b512c11-bcec-42a9-bcc2-dfac16ad124d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    },
+    "s_612115f94fe4ae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5781e9fb-9bdf-48d4-a43b-2b77ec11262e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

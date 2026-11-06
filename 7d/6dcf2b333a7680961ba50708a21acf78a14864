@@ -1,0 +1,29 @@
+src/help.ts
+  s_8dd153d4cc40c2::t_16197fe238ff2e 128
+  s_8dd153d4cc40c2::t_3c44d0e55a3bb2 8-9,71-89,91,94-95,97-103,105-127,129-175,189,200,203-207,212
+src/other-browser.ts
+  s_8dd153d4cc40c2::t_3c44d0e55a3bb2 79,175
+src/hub.ts
+  s_8dd153d4cc40c2::t_3c44d0e55a3bb2 2118-2119,2121-2123,2131-2133
+src/brains/skills.ts
+  s_8dd153d4cc40c2::t_3c44d0e55a3bb2 63
+test/other-browser.test.ts
+  s_8dd153d4cc40c2::t_f661a9ca103119 62,277
+  s_8dd153d4cc40c2::t_16197fe238ff2e 12,83-100,104,108,110,116,119,125,130,138,140-145,147-155
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "7d6dcf2b333a7680961ba50708a21acf78a14864",
+  "prompts": {},
+  "sessions": {
+    "s_8dd153d4cc40c2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "edf3ddc4-03be-4b4f-9c11-0df546c5df64",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

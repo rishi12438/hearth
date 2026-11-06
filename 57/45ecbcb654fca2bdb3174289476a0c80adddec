@@ -1,0 +1,21 @@
+src/hub.ts
+  s_a62c474b26f7ae::t_2e01dff40e7965 72-73,1919-1927,1931-1945
+test/triggers.test.ts
+  s_a62c474b26f7ae::t_3696e2eb9dc20d 125-132
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "5745ecbcb654fca2bdb3174289476a0c80adddec",
+  "prompts": {},
+  "sessions": {
+    "s_a62c474b26f7ae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4c826b8c-287f-4f16-ac8d-eafba60501f3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

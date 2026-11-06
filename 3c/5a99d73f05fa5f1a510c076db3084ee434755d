@@ -1,0 +1,23 @@
+src/connectors/whatsapp.ts
+  s_77a662a8979961::t_1263b0537d244b 290-295
+test/connectors.test.ts
+  s_77a662a8979961::t_1263b0537d244b 288-299
+patches/baileys@6.7.24.patch
+  s_77a662a8979961::t_c8f80dcc7ee97f 1-3,20,23,28,33,36,43-46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "3c5a99d73f05fa5f1a510c076db3084ee434755d",
+  "prompts": {},
+  "sessions": {
+    "s_77a662a8979961": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f62379c6-c427-4225-8f37-3e91680c2add",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

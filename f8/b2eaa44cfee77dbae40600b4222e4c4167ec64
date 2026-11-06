@@ -1,0 +1,20 @@
+mac/Hearth/main.swift
+  s_0473ff9ceb6da8::t_bb42c673e664fd 353-354
+  s_0473ff9ceb6da8::t_719e7d7ce104d8 347-352
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "f8b2eaa44cfee77dbae40600b4222e4c4167ec64",
+  "prompts": {},
+  "sessions": {
+    "s_0473ff9ceb6da8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bcd31c4d-5237-4bec-8463-63e47145b27b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

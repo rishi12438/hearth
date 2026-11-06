@@ -1,0 +1,20 @@
+web/src/app.ts
+  s_d063f8f1dd1105::t_a2407b3bed7e56 1959
+  s_d063f8f1dd1105::t_e01f3ebb7eb80b 1921-1922
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "643cff8a6b74b016f3809433efac9f01a4cc128f",
+  "prompts": {},
+  "sessions": {
+    "s_d063f8f1dd1105": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "92054c36-d56c-42cc-8c9b-7a8400f14e70",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

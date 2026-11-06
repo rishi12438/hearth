@@ -1,0 +1,21 @@
+web/setup.html
+  s_c3abf54b0d0d60::t_055613700c536b 50-56,75
+web/src/connectors.ts
+  s_c3abf54b0d0d60::t_055613700c536b 34-37,40-41
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "3f190faccea6a60e51870c65e7de0dc10285388f",
+  "prompts": {},
+  "sessions": {
+    "s_c3abf54b0d0d60": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5d7396f8-5253-434f-b3b7-b8db95db4fed",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

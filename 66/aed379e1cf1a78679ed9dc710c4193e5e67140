@@ -1,0 +1,22 @@
+deploy/setup-lightsail.sh
+  s_f00f78c305b664::t_74003e5f647796 71-75
+deploy/install-browser.sh
+  s_f00f78c305b664::t_9533ae8c0451fd 13,29,46-50
+  s_f00f78c305b664::t_94bfbfe353c4c8 1-12,14-28,30-45,51-58
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "66aed379e1cf1a78679ed9dc710c4193e5e67140",
+  "prompts": {},
+  "sessions": {
+    "s_f00f78c305b664": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "da112a7f-bf76-42e8-9da1-efce8d02f39f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

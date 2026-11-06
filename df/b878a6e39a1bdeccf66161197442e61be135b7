@@ -1,0 +1,36 @@
+web/styles.css
+  s_75f1435d84d94a::t_82898c69fbb264 129-131,198-204,1171-1172
+  s_75f1435d84d94a::t_5faa6e6c3582a8 460
+src/brains/codex-app.ts
+  s_75f1435d84d94a::t_82898c69fbb264 20-21,141
+test/images.test.ts
+  s_75f1435d84d94a::t_82898c69fbb264 1-85
+src/server.ts
+  s_75f1435d84d94a::t_82898c69fbb264 613-618,620,762
+src/hub.ts
+  s_75f1435d84d94a::t_82898c69fbb264 6,63,168,326,683-685,690-704,1042-1046,1055,1154-1155,1158-1159,1161-1163,1165-1170,1172-1205,1208-1235,1237,1822,2275,2283-2287,2289-2291,2295
+test/queued.test.ts
+  s_75f1435d84d94a::t_82898c69fbb264 1-101
+web/src/app.ts
+  s_75f1435d84d94a::t_82898c69fbb264 233-234,1473-1474,1489,1615,1630-1631,1635-1661,1680-1686,1691,1694-1700,1702,1707-1709,1712-1713,1715,1726-1732,1737-1759,1766,1770-1771
+src/types.ts
+  s_75f1435d84d94a::t_82898c69fbb264 51-52
+src/brain.ts
+  s_75f1435d84d94a::t_82898c69fbb264 1,3,40-41,43-67,974-976,989-991,1028
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "dfb878a6e39a1bdeccf66161197442e61be135b7",
+  "prompts": {},
+  "sessions": {
+    "s_75f1435d84d94a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3865f265-4f2e-4731-aa57-d8af1d6c0278",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+test/other-browser.test.ts
+  s_50069167d89697::t_cb63db85c1f43c 15,411-416
+src/mac-chrome.ts
+  s_50069167d89697::t_4f038015bd1f84 38-41,49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "0e129df2682ccfc4d9a1eb260e0b7a5dd306a192",
+  "prompts": {},
+  "sessions": {
+    "s_50069167d89697": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5194d5a9-e935-401e-bb02-1e572bff6dab",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

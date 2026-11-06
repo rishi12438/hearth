@@ -1,0 +1,21 @@
+docs/features.md
+  s_3c60b36c5216ae::t_c1d386ff8f4df7 23
+src/brains/prices.ts
+  s_3c60b36c5216ae::t_c1d386ff8f4df7 2
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "b249eee42d8f6fa89c2bf2d08462e55fb9b828f0",
+  "prompts": {},
+  "sessions": {
+    "s_3c60b36c5216ae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4ef99076-5fea-48ef-885a-6e60ff78d177",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

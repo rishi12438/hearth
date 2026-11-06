@@ -1,0 +1,29 @@
+web/styles.css
+  s_0473ff9ceb6da8::t_38172d7ef31656 455-461
+mac/Hearth/main.swift
+  s_0473ff9ceb6da8::t_f94eeaf21ffa3c 38,44-45,185-186,206-259,342-347
+  s_0473ff9ceb6da8::t_93ce61264a5212 55-56
+web/src/app.ts
+  s_0473ff9ceb6da8::t_8adacb2c9b1bc5 4773,5007
+  s_0473ff9ceb6da8::t_93ce61264a5212 471
+  s_0473ff9ceb6da8::t_9ada80cba06e56 510,588
+  s_0473ff9ceb6da8::t_4937bf8d9161c3 454-470,472-487
+web/src/dom.ts
+  s_0473ff9ceb6da8::t_3855151504dffc 220-229,232
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "73264db7e5ef1e30683cedb26974f1b598f46d1b",
+  "prompts": {},
+  "sessions": {
+    "s_0473ff9ceb6da8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bcd31c4d-5237-4bec-8463-63e47145b27b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

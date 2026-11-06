@@ -1,0 +1,55 @@
+src/computer.ts
+  s_842be64ddc7b43::t_27fdfb8cfcf36d 102-103
+src/brain.ts
+  s_842be64ddc7b43::t_66a456bbd30cd9 1
+  s_842be64ddc7b43::t_a00cde094cffd1 17-18,290,294-301,337-338,372-375,423-424,445,452-458,460-461,522
+deploy/setup-lightsail.sh
+  s_842be64ddc7b43::t_295e2ced7f8c3c 92-116
+src/tools-mcp.ts
+  s_842be64ddc7b43::t_73f1d68cf79837 1-47
+src/server.ts
+  s_842be64ddc7b43::t_e9a78d581b57fb 13,20,64,113-120,193-201,677-698
+  s_842be64ddc7b43::t_27fdfb8cfcf36d 863-865
+src/types.ts
+  s_842be64ddc7b43::t_eb7f5bc43c78c3 193-199,202,204-207,209-216
+  s_842be64ddc7b43::t_2e9c12d592126a 200-201,203,208
+src/workbench.ts
+  s_842be64ddc7b43::t_2e9c12d592126a 2,22,104-152,248,260-261,263,284
+  s_842be64ddc7b43::t_4d829565e80125 1,3-21,23-74,78-103,153-247,249-259,262,264-283,285-294,297-381,390-421
+  s_842be64ddc7b43::t_26fee71c6b4a66 75-77,295-296,382-389
+src/hub.ts
+  s_842be64ddc7b43::t_ac5117b354e2a2 220-225
+  s_842be64ddc7b43::t_bc254f7bd536bf 198-200,202-215,226,258
+src/store/types.ts
+  s_842be64ddc7b43::t_eb7f5bc43c78c3 6
+test/workbench.test.ts
+  s_842be64ddc7b43::t_7172ff9c33b6f0 197-204
+  s_842be64ddc7b43::t_d619a89f2cae27 1-161,163-164,172-186,188-196
+  s_842be64ddc7b43::t_4e16636e5bbe65 162,165-171,187
+web/src/app.ts
+  s_842be64ddc7b43::t_d5dab7b9b21e61 1913,2462-2500
+SECURITY.md
+  s_842be64ddc7b43::t_9caca238503993 56-63
+deploy/hearth.service
+  s_842be64ddc7b43::t_295e2ced7f8c3c 21-22
+web/styles.css
+  s_842be64ddc7b43::t_d72d53b91a226a 788-790
+README.md
+  s_842be64ddc7b43::t_9caca238503993 100-115
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "647ee1f2c1aaba31830f8772994c7a9ef233c9b5",
+  "prompts": {},
+  "sessions": {
+    "s_842be64ddc7b43": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2b58baca-9866-4d7e-8d9a-756cd0841a98",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}

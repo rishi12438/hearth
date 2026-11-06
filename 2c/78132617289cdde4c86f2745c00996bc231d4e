@@ -1,0 +1,19 @@
+src/sandboxes.ts
+  s_129e70c6c12e11::t_5847c4f126f1cd 41-42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "2c78132617289cdde4c86f2745c00996bc231d4e",
+  "prompts": {},
+  "sessions": {
+    "s_129e70c6c12e11": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80ee8953-b925-4f31-b3de-0ea59b6acea7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
