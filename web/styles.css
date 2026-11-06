@@ -1389,3 +1389,4 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 .workingoff:hover { color: var(--ink); }
 div.workingoff { gap: 8px; max-width: 560px; text-align: left; }
 div.workingoff .linkbtn { margin-top: 0; font-size: 12.5px; flex: none; }
+.srow.closed .snav { opacity: .5; }

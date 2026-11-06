@@ -764,14 +764,23 @@ export class Hub {
     if (!p || !members.length) { await checked(); if (why) await this.log("project.left", `#${channelOf(t)} stays loose: ${why}`); return { filed: false, action: String(d?.action || "unreadable"), why }; }
     const proj = workspaceName(p.name);
     const filed: Thread[] = [];
+    const ids = new Set(members.map((m) => m.id));
     for (const m of members) {
       const cur = (await this.store.get<Thread>("threads", m.id))!;
-      filed.push(await this.store.put<Thread>("threads", { ...cur, projectId: p.id, groupedWhy: why, ...(m.id === t.id ? { groupCheckedAt: this.clock().toISOString() } : {}) }));
+      // It started in another ramble's workspace because of a word match (see similarRamble); filed away from that ramble,
+      // that guess was wrong, so its work goes in its own place in this project.
+      const from = cur.workspaceFrom && !ids.has(cur.workspaceFrom) ? await this.store.get<Thread>("threads", cur.workspaceFrom) : null;
+      const wrong = !!cur.workspaceFrom && from?.projectId !== p.id && !ids.has(cur.workspaceFrom);
+      filed.push(await this.store.put<Thread>("threads", { ...cur, projectId: p.id, groupedWhy: why, ...(wrong ? { workspace: undefined, workspaceFrom: undefined } : {}),
+        ...(m.id === t.id ? { groupCheckedAt: this.clock().toISOString() } : {}) }));
     }
+    const allJobs = await this.store.all<Job>("jobs");
     for (const cur of filed) {
-      // Its workspace folder comes along, unless a ramble outside the project also works there (then it stays theirs).
+      // Its workspace folder comes along, unless a ramble outside the project did work there too (then it stays theirs).
+      // Only work done counts: a ramble that was only pointed at the folder and never ran anything doesn't hold it.
       const ws = await this.workspaceOf(cur);
-      const shared = ws && (await this.store.all<Thread>("threads")).some((x) => x.projectId !== p!.id && !x.id.startsWith("tm-") && (workspaceName(x.workspace) === ws || channelWorkspace(x.channel) === ws));
+      const worked = (x: Thread) => allJobs.some((j) => j.threadId === x.id && !j.parentId && (workspaceName(j.workspace) === ws || workspaceName(x.workspace) === ws || channelWorkspace(x.channel) === ws));
+      const shared = ws && (await this.store.all<Thread>("threads")).some((x) => x.projectId !== p!.id && !x.id.startsWith("tm-") && worked(x));
       if (ws && proj && !shared) this.brain.sessions?.move({ workspace: ws }, { project: proj, workspace: ws });
     }
     await this.log("project.grouped", `${members.map((m) => `#${channelOf(m)}`).join(", ")} filed in ${p.name}: ${why}`);

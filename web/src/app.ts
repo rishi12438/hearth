@@ -751,7 +751,7 @@ function drawSide() {
     h("button", { class: `snav ${on ? "on" : ""}`, on: { click: go }, ...(title ? { title } : {}) }, icon(ic, 18), h("span", { class: "grow" }, label), badge ? h("em", { class: typeof badge === "string" ? "warn" : "" }, String(badge)) : null);
   const warns: string[] = S.state?.connectorWarnings || [];
   // A ramble row: drag it onto a project (or onto Rambles to take it out); the folder button or right-click files it too.
-  const ramble = (t: any, nested = false) => h("div", { class: "srow", draggable: "true",
+  const ramble = (t: any, nested = false, closed = false) => h("div", { class: `srow ${closed ? "closed" : ""}`, draggable: "true", ...(closed ? { title: "Archived" } : {}),
       on: { dragstart: (e: DragEvent) => { e.dataTransfer?.setData("text/hearth-thread", t.id); e.dataTransfer!.effectAllowed = "move"; },
         contextmenu: (e: MouseEvent) => { e.preventDefault(); projectMenuAt({ x: e.clientX, y: e.clientY }, t.projectId || null, (id) => fileRamble(t.id, id)); } } },
     h("button", { class: `snav ${nested ? "nested" : ""} ${r.view === "chat" && r.id === t.id ? "on" : ""} ${unread(t.id, t.lastReplyAt) ? "unread" : ""}`, on: { click: () => { location.hash = `#c/${t.id}`; } } },
@@ -810,6 +810,8 @@ function drawSide() {
         p.emoji ? h("span", { class: "semoji" }, p.emoji) : icon("folder", 18), h("span", { class: "grow" }, p.name), p.rambles ? h("small", { class: "scount" }, String(p.rambles)) : null),
       // Open when you're in it; else its rambles with work going or something new still show, so nothing goes missing.
       live.filter((t: any) => t.projectId === p.id && (openProject === p.id || t.working || unread(t.id, t.lastReplyAt))).map((t: any) => ramble(t, true)),
+      // Its closed rambles too, grayed out, so what's listed matches its count.
+      openProject === p.id ? S.threads.filter((t: any) => t.projectId === p.id && t.archived && !t.routine).map((t: any) => ramble(t, true, true)) : null,
     ]) : h("p", { class: "snone" }, "Group rambles, files and memory, like Wedding or Move to SF.")),
     h("div", { class: "slabel" }, "Rambles", h("button", { class: "sadd", "aria-label": "New ramble", on: { click: () => { S.newProject = null; location.hash = "#c/new"; } } }, icon("plus", 14))),
     h("nav", { class: "sgroup", on: dropTo(null) }, loose.length || past.length ? loose.map((t: any) => ramble(t)) : h("p", { class: "snone" }, "Tap + to start one."),
