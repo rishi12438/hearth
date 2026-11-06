@@ -62,7 +62,7 @@ const inbox = Bun.serve({ port: 0, fetch(req) {
     const all = ["Nikita Garg", "Jason Hanks", "Kashyab Ambarani", "Kashyab Ambarani", "Kashyab Amb"]; let open = 0, q = "";
     const draw = () => { document.getElementById("l").innerHTML = all.map((n, i) => [n, i]).filter(([n]) => n.toLowerCase().includes(q))
       .map(([n, i]) => '<li class="msg-conversation-listitem"><div class="msg-conversation-listitem__link" tabindex=0 data-i=' + i + '><h3 class="msg-conversation-listitem__participant-names">' + n + '</h3><p>hi</p></div></li>').join("");
-      document.querySelectorAll(".msg-conversation-listitem__link").forEach((e) => e.onclick = () => setTimeout(() => { open = +e.dataset.i; document.getElementById("hd").innerText = all[open]; }, 300)); };
+      document.querySelectorAll(".msg-conversation-listitem__link").forEach((e) => e.onclick = () => setTimeout(() => { open = +e.dataset.i; document.getElementById("hd").innerHTML = all[open] + (open === 2 ? ' <span>Status is online</span> <span>Active now</span> <span>Open the options list in your conversation with Rishi Mahadevan and ' + all[open] + '</span>' : ""); }, 300)); };
     document.getElementById("hd").innerText = all[0];
     document.getElementById("search-conversations").addEventListener("keydown", (e) => { if (e.key === "Enter") setTimeout(() => { q = e.target.value.toLowerCase(); draw(); }, 200); });
     const box = document.getElementById("box");

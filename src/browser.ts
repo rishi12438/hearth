@@ -274,10 +274,16 @@ async function openByName(send: Cdp, o: OpenByName, signedOut: RegExp, deadline:
   const header = `(() => { const e = document.querySelector(${JSON.stringify(o.header.join(", "))}); return e ? e.innerText : ""; })()`;
   const until = Math.min(Date.now() + 10_000, deadline - 8000);
   let shown = "";
+  const want = normName(o.name);
   while (Date.now() < until) {
     await Bun.sleep(500);
-    shown = normName(String(await evalIn(send, header) || ""));
-    if (shown === normName(o.name)) return;
+    const raw = String(await evalIn(send, header) || "");
+    shown = normName(raw);
+    // The header can carry screen-reader text after the name when they're online ("Kashyab Ambarani Status is
+    // online Active now Open the options list…"): the name is its first line, or it's the name then only that.
+    const firstLine = normName(raw.split("\n").find((l) => l.trim()) || "");
+    if (firstLine === want || shown === want) return;
+    if (shown.startsWith(`${want} `) && /^(•|·|status is|active|online|offline|away|busy|mobile|reachable|open the options)/.test(shown.slice(want.length + 1))) return;
   }
   throw new Error(`Opened a conversation but it shows "${shown || "no name"}", not "${o.name}". Nothing was sent.`);
 }
