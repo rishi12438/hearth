@@ -81,6 +81,8 @@ export function filesNote(paths: string[], cwd: string, harness: string) {
 export const QUIET = "[[quiet]]";
 /** A routine's run ends with this when the user has to answer before it can go on; without it the run closes itself. */
 export const ANSWER_NEEDED = "[[answer-needed]]";
+/** A routine's run starts its reply with [[name: Frontier check-in tomorrow]]: the run's own short name. */
+export const RUN_NAME = /^\s*\[\[name:\s*([^\]\n]{1,80})\]\]\s*/i;
 export const ESCALATE = "[[escalate]]";
 /** Why a model handed a job up: the line it wrote after the marker, or a stand-in when it gave none. */
 export function escalateWhy(text: string): string {
