@@ -222,7 +222,65 @@ export type SendIn = {
   chrome?: string | null;
   fingerprint?: Fingerprint | null;
   timeoutMs?: number;
+  /** The page is the inbox, not the chat: search for the conversation named `name`, open it, and check it's the one
+   *  that opened (its header shows that name) before typing. For sites whose list has no link per conversation. */
+  open?: OpenByName;
 };
+
+export type OpenByName = {
+  name: string;
+  /** The site's search box. */
+  search: string[];
+  /** Conversation rows, tried in order. */
+  rows: string[];
+  /** In a row: its participants' names. */
+  rowName: string[];
+  /** In a row: what to click to open it. */
+  rowClick: string[];
+  /** The open conversation's name, at the top of the chat. */
+  header: string[];
+};
+
+const normName = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+
+/** Search the inbox for a conversation by its name, open the newest whose name matches exactly, and check it opened. */
+async function openByName(send: Cdp, o: OpenByName, signedOut: RegExp, deadline: number) {
+  let n = 0;
+  while (!n && Date.now() < deadline - 15_000) {
+    await Bun.sleep(500);
+    if (signedOut.test(String(await evalIn(send, "location.href")))) throw new Error("The site signed Hearth out. Reconnect it in Connectors.");
+    n = Number(await evalIn(send, countRows(o.rows))) || 0;
+  }
+  if (!n) throw new Error("Couldn't find the conversation list (the site may have changed). Nothing was sent.");
+  await searchIn(send, { box: o.search, text: o.name.replace(/\s+/g, " ").trim() }, o.rows, deadline);
+  const pick = `(() => {
+    const want = ${JSON.stringify(normName(o.name))};
+    const norm = (s) => String(s || "").replace(/\\s+/g, " ").trim().toLowerCase();
+    for (const s of ${JSON.stringify(o.rows)}) {
+      const rows = [...document.querySelectorAll(s)];
+      if (!rows.length) continue;
+      const names = rows.map((r) => { const e = r.querySelector(${JSON.stringify(o.rowName.join(", "))}); return String(e ? e.innerText : (r.innerText || "").split("\\n")[0]).replace(/\\s+/g, " ").trim(); });
+      const i = names.map(norm).indexOf(want);
+      if (i < 0) return { names: [...new Set(names)].slice(0, 8) };
+      const row = rows[i];
+      const c = row.querySelector(${JSON.stringify(o.rowClick.join(", "))}) || row;
+      c.scrollIntoView(); c.click();
+      return { clicked: true };
+    }
+    return { names: [] };
+  })()`;
+  const r = await evalIn(send, pick);
+  if (!r?.clicked) throw new Error(`No conversation named "${o.name}"${r?.names?.length ? ` (the search found: ${r.names.join(", ")})` : ""}. Use the name exactly as the inbox read shows it. Nothing was sent.`);
+  const header = `(() => { const e = document.querySelector(${JSON.stringify(o.header.join(", "))}); return e ? e.innerText : ""; })()`;
+  const until = Math.min(Date.now() + 10_000, deadline - 8000);
+  let shown = "";
+  while (Date.now() < until) {
+    await Bun.sleep(500);
+    shown = normName(String(await evalIn(send, header) || ""));
+    if (shown === normName(o.name)) return;
+  }
+  throw new Error(`Opened a conversation but it shows "${shown || "no name"}", not "${o.name}". Nothing was sent.`);
+}
 
 /**
  * Types `text` into a conversation you're logged into and sends it, like you would: open the chat, click the message
@@ -230,6 +288,7 @@ export type SendIn = {
  */
 export async function sendInPage(url: string, text: string, o: SendIn): Promise<void> {
   await withPage(url, { cookies: o.cookies, chrome: o.chrome, fingerprint: o.fingerprint, timeoutMs: o.timeoutMs ?? 60_000 }, async (send, deadline) => {
+    if (o.open) await openByName(send, o.open, o.signedOut, deadline);
     const box = JSON.stringify(o.composer.join(", "));
     let found = false;
     while (!found && Date.now() < deadline - 8000) {

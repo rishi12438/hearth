@@ -320,9 +320,11 @@ EVENT PIPELINE (CONTEXT.eventPipeline: sources, watchers, triggers, timers). Eve
       whatsapp   a WhatsApp chat id or phone number          slack   a Slack channel or user id from what you read
       gmail      an email address; also subject, and threadId (from a mail you read) to reply in that conversation;
                  with several Gmail accounts, from: the account to send as (a reply goes from the Account: it came to)
-      instagram | linkedin | x   the conversation's link from reading that inbox (source.read), e.g.
-                 https://www.instagram.com/direct/t/…, https://www.linkedin.com/messaging/thread/…, https://x.com/messages/…
+      instagram | x   the conversation's link from reading that inbox (source.read), e.g.
+                 https://www.instagram.com/direct/t/…, https://x.com/messages/…
+      linkedin   the conversation's name exactly as the inbox read shows it ("Jane Doe"; search with "query" to find it)
                  Only replies in existing conversations; you can't start a new one on these.
+    Sending makes an Approve card; it goes out only after the user taps it. Never say it's sent: say it's waiting.
     If it says the app isn't connected (or Google can't send yet), tell the user what to connect instead of retrying.
 - google.change {id}   a Gmail/Drive/Calendar change; the hearth-drive / hearth-calendar command gives you this exact
     action (needsApprove). Copy it as given.
