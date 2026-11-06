@@ -200,3 +200,9 @@ export function lookArt(name: string): SVGSVGElement {
 }
 
 export const LOOK_NAMES = Object.keys(LOOKS).filter((k) => !OUTFITS.includes(k));
+
+// While working, the look picks up a small change every 10 minutes (shades, blush, goggles…), so a long run isn't the
+// same face all along. Back to plain when it stops. The first stretch is plain.
+const EXTRAS = ["", "shades", "blush", "goggles", "sweat", "sparkle", "stache"];
+export const EXTRA_EVERY_MS = 10 * 60_000;
+export const extraNow = (now = Date.now()) => EXTRAS[Math.floor(now / EXTRA_EVERY_MS) % EXTRAS.length];
