@@ -112,6 +112,26 @@ describe("the grid", () => {
     expect((await hub.requestMessage({ channel: "whatsapp", to: "15550111", text: "Again" }, {})).value!.status).toBe("pending");
   });
 
+  test("a redraft to the same person in the same task replaces the older card; other people and tasks keep theirs", async () => {
+    const out: string[] = [];
+    hub.senders.whatsapp = { connected: () => true, send: async (to, text) => { out.push(`${to}: ${text}`); return "id"; } };
+    const now = new Date().toISOString();
+    const job = (id: string, extra: any = {}) => hub.store.put<any>("jobs", { id, createdAt: now, threadId: "th1", messageId: `m-${id}`, task: "Reply", teammateId: "hearth", status: "waiting", ...extra });
+    await job("root"); await job("redo", { followsUp: "root" }); await job("other");
+    const first = (await hub.requestMessage({ channel: "whatsapp", to: "15550333", text: "Long draft with travel details" }, { threadId: "th1", jobId: "root" })).value!;
+    const elsewhere = (await hub.requestMessage({ channel: "whatsapp", to: "15550333", text: "Separate task" }, { threadId: "th1", jobId: "other" })).value!;
+    const someoneElse = (await hub.requestMessage({ channel: "whatsapp", to: "15550444", text: "Hi" }, { threadId: "th1", jobId: "redo" })).value!;
+    const second = (await hub.requestMessage({ channel: "whatsapp", to: "15550333", text: "Free next week?" }, { threadId: "th1", jobId: "redo" })).value!;
+    const get = (id: string) => hub.store.get<Approval>("approvals", id);
+    expect(await get(first.id)).toMatchObject({ status: "replaced", replacedBy: second.id });
+    expect((await get(elsewhere.id))!.status).toBe("pending");
+    expect((await get(someoneElse.id))!.status).toBe("pending");
+    expect((await hub.store.get<any>("jobs", "root"))!.status).toBe("done");
+    expect((await hub.decideApproval(first.id, true)).error).toContain("newer draft");
+    expect((await hub.decideApproval(second.id, true)).value!.status).toBe("done");
+    expect(out).toEqual(["15550333: Free next week?"]);
+  });
+
   test("Gmail sends to an email address after Approve, with its subject; a reply stays in its thread", async () => {
     const out: any[] = [];
     hub.senders.gmail = { connected: () => true, send: async (to, text, x) => { out.push({ to, text, ...x }); return "id"; } };
