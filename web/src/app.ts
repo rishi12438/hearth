@@ -648,7 +648,29 @@ function frame(opts: { header: Node; body: Node; composer?: boolean; fab?: boole
         opts.composer ? h("div", { class: "composer-wrap", id: "composerwrap" }) : null,
         tabs)));
   if (opts.composer) renderComposer();
+  fitBottom();
   drawSide();
+}
+
+/** The composer floats over the page and grows (a Stop bar, attachments, a longer draft): the page leaves room for
+ *  all of it, so the newest message never hides behind it, and stays at the bottom when it was there. */
+let bottomWatch: ResizeObserver | null = null;
+function fitBottom() {
+  bottomWatch?.disconnect();
+  const foot = document.querySelector(".screen > .chrome-bottom") as HTMLElement | null;
+  const s = document.getElementById("scroll");
+  if (!foot || !s || typeof ResizeObserver === "undefined") return;
+  const base = parseFloat(getComputedStyle(s).paddingBottom) || 0;
+  let last = 0;
+  bottomWatch = new ResizeObserver(() => {
+    const need = Math.max(base, foot.offsetHeight + 16);
+    if (need === last) return;
+    const atBottom = s.scrollHeight - s.scrollTop - s.clientHeight < 120;
+    last = need;
+    s.style.paddingBottom = `${need}px`;
+    if (atBottom) s.scrollTop = s.scrollHeight;
+  });
+  bottomWatch.observe(foot);
 }
 
 /** Where a routine's run lives: its thread, opened at that run (or the DM it posted in). */
