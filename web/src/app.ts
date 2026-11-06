@@ -655,23 +655,31 @@ function frame(opts: { header: Node; body: Node; composer?: boolean; fab?: boole
 /** The composer floats over the page and grows (a Stop bar, attachments, a longer draft): the page leaves room for
  *  all of it, so the newest message never hides behind it, and stays at the bottom when it was there. */
 let bottomWatch: ResizeObserver | null = null;
+/** At the bottom of a conversation: it stays there while things below keep growing (a long answer, a picture, a live
+ *  view, fonts) until you scroll up yourself. */
+let pinned = false;
+const nearBottom = (s: HTMLElement) => s.scrollHeight - s.scrollTop - s.clientHeight < 120;
+function stickBottom() {
+  pinned = true;
+  requestAnimationFrame(() => { const s = document.getElementById("scroll"); if (s) s.scrollTop = s.scrollHeight; });
+}
 function fitBottom() {
   bottomWatch?.disconnect();
+  pinned = false;
   const foot = document.querySelector(".screen > .chrome-bottom") as HTMLElement | null;
   const s = document.getElementById("scroll");
   if (!foot || !s || typeof ResizeObserver === "undefined") return;
+  s.addEventListener("scroll", () => { pinned = nearBottom(s); }, { passive: true });
   // Exactly the composer's height plus a little air: the newest message sits right above it, no empty gap (the fixed
   // 150px in the CSS is the phone's tab bar plus composer, too tall on a wide window).
   let last = 0;
   bottomWatch = new ResizeObserver(() => {
     const need = foot.offsetHeight + 12;
-    if (need === last) return;
-    const atBottom = s.scrollHeight - s.scrollTop - s.clientHeight < 120;
-    last = need;
-    s.style.paddingBottom = `${need}px`;
-    if (atBottom) s.scrollTop = s.scrollHeight;
+    if (need !== last) { last = need; s.style.paddingBottom = `${need}px`; }
+    if (pinned) s.scrollTop = s.scrollHeight;
   });
   bottomWatch.observe(foot);
+  for (const c of s.children) bottomWatch.observe(c);
 }
 
 /** Where a routine's run lives: its thread, opened at that run (or the DM it posted in). */
@@ -1549,7 +1557,7 @@ function drawChannel(el: HTMLElement, stick: boolean) {
   nodes.push(...looseApprovals((S.chat.approvals || []).filter((a: any) => !S.chat.jobs.some((x: any) => x.id === a.jobId)), new Set()).map((x) => x.node));
   const atBottom = el.parentElement!.scrollHeight - el.parentElement!.scrollTop - el.parentElement!.clientHeight < 120;
   clear(el, nodes);
-  if (stick || atBottom) requestAnimationFrame(() => { const s = document.getElementById("scroll")!; s.scrollTop = s.scrollHeight; });
+  if (stick || atBottom) stickBottom();
   const rt = route();
   if (rt.view === "chat" && !rt.job) revealApproval();
 }
@@ -1916,7 +1924,7 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
     ...queuedRows(mine.filter((m: any) => m.queued), [j, ...follow]),
   ];
   clear(el, nodes);
-  if (stick) requestAnimationFrame(() => { const s = document.getElementById("scroll")!; s.scrollTop = s.scrollHeight; });
+  if (stick) stickBottom();
   revealApproval();
 }
 
@@ -2082,7 +2090,7 @@ function drawDm(stick = true) {
       S.state?.device.primary ? h("button", { class: "btn small ghost sharebtn", on: { click: () => shareTeammate(t.id) } }, icon("share", 15), "Share") : null),
     items.flatMap((x) => x.nodes),
     queuedRows(d.messages.filter((m: any) => m.queued), d.jobs.filter((j: any) => !j.parentId && direct.has(j.messageId))));
-  if (stick) requestAnimationFrame(() => { const s = document.getElementById("scroll")!; s.scrollTop = s.scrollHeight; });
+  if (stick) stickBottom();
   revealApproval();
 }
 
