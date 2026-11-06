@@ -85,6 +85,8 @@ export type Thread = Doc & { title: string; updatedAt: string; preview?: string;
    *  its jobs work there, so they can search and use what the earlier work saved. workspaceFrom is that ramble. */
   workspace?: string;
   workspaceFrom?: string;
+  /** You chose to keep it separate from workspaceFrom (the app stops offering to move it there). */
+  workspaceKept?: boolean;
   /** Lessons review: messages up to this time were already looked at for lessons (see Hub.learnFromThread). */
   lessonsAt?: string };
 
