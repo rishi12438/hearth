@@ -210,7 +210,17 @@ export class Hub {
     brain.health.onSeen = () => this.emit("brains");
     // Every phone notification also goes out on the live stream, so the Mac app can show it as a Mac notification.
     if (push) push.onSend = (payload, only) => this.emit("notify", { ...payload, only: only ?? null });
+    // A ramble you moved into an earlier one (joinRamble) is gone, but its running jobs and planning still hold it: what
+    // they save lands in the ramble it moved into, and it isn't brought back.
+    const put = store.put.bind(store);
+    store.put = (async (col: Collection, doc: any) => {
+      if (col === "threads" && this.merged.has(doc.id)) return doc;
+      const to = typeof doc?.threadId === "string" ? this.merged.get(doc.threadId) : undefined;
+      return put(col, to ? { ...doc, threadId: to } : doc);
+    }) as Store["put"];
   }
+  /** Rambles moved into an earlier one: old id -> where they went (see joinRamble). */
+  private merged = new Map<string, string>();
 
   // ---------- plumbing ----------
 
@@ -573,6 +583,26 @@ export class Hub {
     const ok = await this.store.remove("threads", id);
     this.emit("threads");
     return ok;
+  }
+
+  /**
+   * A ramble started in an earlier one's workspace (see ramble): move all of it (messages, tasks, even running ones,
+   * approvals, files) into that earlier ramble, or keep it separate. Returns where it is now.
+   */
+  async joinRamble(id: string, how: "move" | "keep") {
+    const t = await this.store.get<Thread>("threads", id);
+    const into = t?.workspaceFrom ? await this.store.get<Thread>("threads", t.workspaceFrom) : null;
+    if (!t || !into) return { error: "Nothing to move it into." };
+    if (how === "keep") { await this.store.put<Thread>("threads", { ...t, workspaceKept: true }); this.emit("threads"); return { value: { threadId: t.id } }; }
+    this.merged.set(t.id, into.id);
+    for (const col of ["messages", "jobs", "approvals", "files", "ideas", "apps", "lessonEvents"] as const)
+      for (const d of await this.store.all<any>(col)) if (d.threadId === t.id) await this.store.put(col, d);
+    await this.store.remove("threads", t.id);
+    const { archivedAt: _, ...open } = into;
+    await this.store.put<Thread>("threads", { ...(open as Thread), updatedAt: this.clock().toISOString(), preview: t.preview || into.preview });
+    await this.log("ramble.joined", `#${channelOf(t)} moved into #${channelOf(into)}`);
+    this.emit("threads");
+    return { value: { threadId: into.id } };
   }
 
   /** Name a ramble's channel ("japan-trip"). Names are lowercase words and dashes, unique among rambles. */

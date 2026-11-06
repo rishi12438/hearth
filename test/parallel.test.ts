@@ -499,3 +499,28 @@ test("a new ramble on an earlier one's subject is its own ramble, started in tha
   plan([{ label: "Ramen near me", task: "find a good ramen place nearby", teammate: "Hearth" }]);
   expect((await hub.ramble("find me a good ramen place")).value!.thread.workspace).toBeUndefined();
 });
+
+test("moving a ramble into the earlier one it was started like takes everything along, even a task still running", async () => {
+  await setup();
+  process.env.FAKE_MS = "20";
+  plan([{ label: "Your Robinhood balance", task: "check my Robinhood balance and holdings", teammate: "Hearth", workspace: "robinhood-account" }]);
+  const money = (await hub.ramble("what's my robinhood balance")).value!.thread.id;
+  await until(() => allDone(1));
+  process.env.FAKE_MS = "1500";
+  plan([{ label: "Robinhood this month", task: "how Robinhood did this month", teammate: "Hearth" }]);
+  const next = (await hub.ramble("how is my robinhood doing this month?")).value!.thread.id;
+  await until(async () => (await jobs()).some((j) => j.label === "Robinhood this month" && j.status === "working"), 10_000);
+  expect((await hub.joinRamble(next, "move")).value?.threadId).toBe(money);
+  await until(() => allDone(2), 10_000);
+  expect(await store.get("threads", next)).toBeNull(); // not brought back by the job finishing
+  expect((await jobs()).every((j) => j.threadId === money)).toBe(true);
+  const said = (await store.all<any>("messages")).filter((m) => m.threadId === money).map((m) => m.text);
+  expect(said).toContain("how is my robinhood doing this month?");
+  expect((await store.all<any>("messages")).some((m) => m.threadId === next)).toBe(false);
+  // Keep separate: it stays, and isn't offered again.
+  process.env.FAKE_MS = "20";
+  plan([{ label: "Robinhood taxes", task: "robinhood tax forms", teammate: "Hearth" }]);
+  const third = (await hub.ramble("robinhood tax forms")).value!.thread.id;
+  await hub.joinRamble(third, "keep");
+  expect((await store.get<any>("threads", third))?.workspaceKept).toBe(true);
+}, 30_000);

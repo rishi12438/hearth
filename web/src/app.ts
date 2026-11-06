@@ -1553,6 +1553,25 @@ async function fillNow(el: HTMLElement) {
   ].map((x) => h("button", { on: { click: () => send(x) } }, x))));
 }
 
+/** Started in an earlier ramble's folder (it looked like the same subject): say so, and offer to move it all in there. */
+function joinCard(t: any): Node | null {
+  if (!t?.workspaceFrom || t.workspaceKept) return null;
+  const from = S.threads.find((x: any) => x.id === t.workspaceFrom);
+  if (!from) return null;
+  const pick = async (how: "move" | "keep", btn: HTMLButtonElement) => {
+    btn.disabled = true;
+    try {
+      const r = await call(`/api/threads/${t.id}/join`, { body: { how } });
+      if (how === "keep") { t.workspaceKept = true; drawChat(false); return; }
+      S.chat = null; loadThreads(); location.hash = `#c/${r.threadId}`;
+    } catch (e) { btn.disabled = false; handleError(e); }
+  };
+  return h("div", { class: "joincard" },
+    h("span", { class: "grow" }, h("b", null, `Looks like #${channelName(from)}`), h("small", null, `Working in its folder, so it can use what was done there.`)),
+    h("button", { class: "btn small ghost", on: { click: (e: Event) => pick("keep", e.currentTarget as HTMLButtonElement) } }, "Keep separate"),
+    h("button", { class: "btn small primary", on: { click: (e: Event) => pick("move", e.currentTarget as HTMLButtonElement) } }, `Move into #${channelName(from)}`));
+}
+
 function drawChannel(el: HTMLElement, stick: boolean) {
   // A trigger's hand-off to an agent is hidden (only what the agent does shows), and so is its task post until it has
   // something: a quiet run then leaves nothing at all.
@@ -1566,6 +1585,8 @@ function drawChannel(el: HTMLElement, stick: boolean) {
     return;
   }
   const nodes: Node[] = [];
+  const join = joinCard(S.chat.thread);
+  if (join) nodes.push(join);
   let lastDay = "", lastWho = "", lastAt = 0;
   for (const m of top) {
     const day = new Date(m.createdAt).toDateString();
