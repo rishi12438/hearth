@@ -74,6 +74,12 @@ type ReadOpts = {
   waitFor?: string;
   /** A JavaScript expression run in the page; its JSON-able result comes back as "data". */
   extract?: string;
+  /** Before reading, type `text` into the first of these boxes and press Enter (a site's own search, e.g. LinkedIn's
+   *  "Search messages"), then wait for the results. */
+  search?: { box: string[]; text: string };
+  /** Before reading, scroll a lazily-loaded list until it shows `until` rows (the first of `items` that matches
+   *  anything), or it stops growing. */
+  more?: { items: string[]; until: number };
 };
 
 type Cdp = (method: string, params?: object) => Promise<any>;
@@ -140,6 +146,55 @@ async function withPage<T>(url: string, opts: { cookies?: Cookie[]; timeoutMs?: 
 
 const evalIn = async (send: Cdp, expression: string) => (await send("Runtime.evaluate", { expression, returnByValue: true }).catch(() => null))?.result?.value;
 
+/** In the page: how many rows the first of these selectors that matches anything finds. */
+const countRows = (items: string[]) => `(() => { for (const s of ${JSON.stringify(items)}) { const n = document.querySelectorAll(s).length; if (n) return n; } return 0; })()`;
+
+/** Wait until the list's row count holds still for a moment (a search or a scroll has finished loading). */
+async function settle(send: Cdp, items: string[], deadline: number, first = 0) {
+  let last = first, still = 0;
+  while (still < 2 && Date.now() < deadline - 3000) {
+    await Bun.sleep(700);
+    const n = Number(await evalIn(send, countRows(items))) || 0;
+    still = n === last ? still + 1 : 0;
+    last = n;
+  }
+  return last;
+}
+
+/** Type into the site's own search box and press Enter, like you would. */
+async function searchIn(send: Cdp, s: { box: string[]; text: string }, items: string[], deadline: number) {
+  const box = JSON.stringify(s.box);
+  const find = `(() => { for (const q of ${box}) { const e = document.querySelector(q); if (e) { e.scrollIntoView(); e.focus(); e.click && e.click(); if ("value" in e) e.value = ""; return true; } } return false; })()`;
+  let found = false;
+  for (let i = 0; i < 10 && !found && Date.now() < deadline - 8000; i++) {
+    found = (await evalIn(send, find)) === true;
+    if (!found) await Bun.sleep(500);
+  }
+  if (!found) throw new Error("Couldn't find the site's search box (the page may have changed). Nothing was searched.");
+  await Bun.sleep(300);
+  await send("Input.insertText", { text: s.text.slice(0, 100) });
+  await Bun.sleep(400);
+  await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await Bun.sleep(1500);
+  if (items.length) await settle(send, items, deadline, -1);
+}
+
+/** Scroll the list's last row into view (and every scrollable box around it to its end) until enough rows show. */
+async function scrollForMore(send: Cdp, m: { items: string[]; until: number }, deadline: number) {
+  const scroll = `(() => { for (const s of ${JSON.stringify(m.items)}) { const els = document.querySelectorAll(s); if (!els.length) continue;
+    const last = els[els.length - 1]; last.scrollIntoView({ block: "end" });
+    for (let p = last.parentElement; p; p = p.parentElement) if (p.scrollHeight > p.clientHeight + 10) p.scrollTop = p.scrollHeight;
+    return els.length; } return 0; })()`;
+  let have = Number(await evalIn(send, countRows(m.items))) || 0, stuck = 0;
+  while (have < m.until && stuck < 2 && Date.now() < deadline - 5000) {
+    await evalIn(send, scroll);
+    const now = await settle(send, m.items, deadline, have);
+    stuck = now > have ? 0 : stuck + 1;
+    have = now;
+  }
+}
+
 /** Opens a page in headless Chrome and returns its final URL, visible text, and what "extract" pulled out. */
 export async function readPage(url: string, opts: ReadOpts = {}): Promise<{ url: string; text: string; data?: unknown }> {
   return withPage(url, opts, async (send, deadline) => {
@@ -150,6 +205,8 @@ export async function readPage(url: string, opts: ReadOpts = {}): Promise<{ url:
       await Bun.sleep(400);
       if ((await evalIn(send, ready)) === true) { await Bun.sleep(800); break; } // a moment more for the rest of the list
     }
+    if (opts.search?.text) await searchIn(send, opts.search, opts.more?.items || (opts.waitFor ? [opts.waitFor] : []), deadline);
+    if (opts.more && opts.more.until > 0) await scrollForMore(send, opts.more, deadline);
     const expr = `JSON.stringify({ url: location.href, text: document.body ? document.body.innerText : '', data: ${opts.extract ? `(() => { try { return ${opts.extract}; } catch (e) { return null; } })()` : "undefined"} })`;
     return JSON.parse(await evalIn(send, expr));
   });

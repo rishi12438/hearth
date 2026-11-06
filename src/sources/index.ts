@@ -57,9 +57,13 @@ export function needOf(src: Source<any>, config: any): string {
 
 export const sourceById = (id: string) => SOURCES.find((s) => s.id === id) || null;
 
-/** Items as the brain sees them: untrusted, capped. */
-export function formatItems(items: Item[], max = 10) {
-  if (!items.length) return "(nothing)";
-  return items.slice(0, max).map((i) => `### ${i.title}${i.at ? ` (${i.at})` : ""}${i.url ? `\n${i.url}` : ""}\n${i.text.slice(0, 1500)}`).join("\n\n")
-    + (items.length > max ? `\n\n…and ${items.length - max} more` : "");
+/** Items as the brain sees them: untrusted, capped. With `page` (a source that pages), that page of `max` rows. */
+export function formatItems(items: Item[], max = 10, page?: number) {
+  const p = page && page > 1 ? page : 1;
+  const shown = items.slice((p - 1) * max, p * max);
+  if (!shown.length) return p > 1 ? `(nothing on page ${p}: the list ends after ${items.length} rows)` : "(nothing)";
+  const more = items.length > p * max;
+  return shown.map((i) => `### ${i.title}${i.at ? ` (${i.at})` : ""}${i.url ? `\n${i.url}` : ""}\n${i.text.slice(0, 1500)}`).join("\n\n")
+    + (page === undefined ? (more ? `\n\n…and ${items.length - max} more` : "")
+      : `\n\n(page ${p}, rows ${(p - 1) * max + 1}–${(p - 1) * max + shown.length}${more ? `; more on page ${p + 1}: read again with "page": ${p + 1}` : "; that's the end of the list"})`);
 }

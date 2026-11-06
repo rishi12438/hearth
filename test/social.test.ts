@@ -131,6 +131,55 @@ test.skipIf(!chromePath())("headless Chrome reads a logged-in list with your coo
   } finally { server.stop(true); }
 }, 60_000);
 
+test("source.read pages LinkedIn 10 rows at a time and passes a name search through", async () => {
+  hub.connections.saveCookies("linkedin", "li_at=abc");
+  page = { url: "https://www.linkedin.com/messaging/", data: Array.from({ length: 25 }, (_, i) => conv(`Person${i + 1}`, `hello ${i + 1}`)) };
+  let opts: any[] = [];
+  const read = hub.readPage;
+  hub.readPage = (async (url: string, o: any) => { opts.push(o); return read(url, o); }) as any;
+  const p1 = await hub.readSource({ source: "linkedin", config: { what: "messages" } });
+  expect(p1).toContain("### Person1\n");
+  expect(p1).toContain("### Person10\n");
+  expect(p1).not.toContain("### Person11\n");
+  expect(p1).toContain(`read again with "page": 2`);
+  const p3 = await hub.readSource({ source: "linkedin", config: { what: "messages", page: 3 } });
+  expect(p3).toContain("### Person21\n");
+  expect(p3).toContain("end of the list");
+  expect(opts.at(-1).more.until).toBe(31); // it scrolls far enough to know whether there's a page 4
+  expect(await hub.readSource({ source: "linkedin", config: { what: "messages", page: 4 } })).toContain("nothing on page 4");
+  await hub.readSource({ source: "linkedin", config: { what: "messages", query: "Jane Doe" } });
+  expect(opts.at(-1).search.text).toBe("Jane Doe");
+  expect(await hub.readSource({ source: "linkedin", config: { what: "invitations", query: "x" } })).toContain("Only LinkedIn messages can be searched");
+  // A search that finds nobody is an empty list, not a "page changed" error.
+  page = { url: "https://www.linkedin.com/messaging/", data: null };
+  expect(await hub.readSource({ source: "linkedin", config: { what: "messages", query: "Nobody" } })).toContain("(nothing)");
+});
+
+// The real thing for search and paging: a search box that filters on Enter, and older rows that load as you scroll.
+test.skipIf(!chromePath())("headless Chrome searches a list and scrolls it for older rows", async () => {
+  const server = Bun.serve({ port: 0, fetch() {
+    return new Response(`<input id=search-conversations><ul id=l style="height:200px;overflow:auto"></ul><script>
+      const names = Array.from({ length: 45 }, (_, i) => "Person" + (i + 1)); let shown = 12, q = "";
+      const draw = () => { document.getElementById("l").innerHTML = names.filter((n) => n.includes(q)).slice(0, shown)
+        .map((n) => '<li class="msg-conversation-listitem" style="height:40px"><a href="/t/' + n + '">' + n + '</a><p>hi</p></li>').join(""); };
+      document.getElementById("l").addEventListener("scroll", (e) => { const el = e.target;
+        if (el.scrollTop + el.clientHeight >= el.scrollHeight - 5 && shown < names.length) setTimeout(() => { shown += 10; draw(); }, 200); });
+      document.getElementById("search-conversations").addEventListener("keydown", (e) => { if (e.key === "Enter") setTimeout(() => { q = e.target.value; draw(); }, 200); });
+      setTimeout(draw, 200);</script>`, { headers: { "Content-Type": "text/html" } });
+  } });
+  try {
+    const li = { url: `http://localhost:${server.port}/`, selectors: ["li.msg-conversation-listitem"], signedOut: /login/, search: ["input#search-conversations"] };
+    const ctx: any = { readPage };
+    const cookies = parseCookies("li_at=good", "localhost");
+    expect((await readList("LinkedIn", li, cookies, ctx)).length).toBe(12);
+    const deep = await readList("LinkedIn", li, cookies, ctx, { page: 3 });
+    expect(deep.length).toBeGreaterThanOrEqual(31);
+    expect(deep[30].title).toBe("Person31");
+    const found = await readList("LinkedIn", li, cookies, ctx, { query: "Person4" });
+    expect(found.map((i) => i.title)).toEqual(["Person4", "Person40", "Person41", "Person42", "Person43", "Person44", "Person45"]);
+  } finally { server.stop(true); }
+}, 120_000);
+
 // A linked Mac copies LinkedIn/X cookies up to a server hub, and the hub re-asks when a session dies.
 test("a Mac copies a login up over the link; the hub stores it and re-asks on sign-out", async () => {
   const { Computers } = await import("../src/computers.ts");
