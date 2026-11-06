@@ -469,6 +469,37 @@ test("an Approve nobody answers expires after a day: it never runs, leaves Needs
   (hub as any).connect = null;
 });
 
+test("typing a new message instead of tapping is a No to the cards waiting in that conversation", async () => {
+  const made: unknown[] = [];
+  (hub as any).connect = { mcp: { get: () => ({}), call: async (...a: unknown[]) => { made.push(a); return { content: [] }; }, setGate: () => {} } };
+  await hub.ensureTeammates();
+  const seen: string[] = [];
+  (hub.brain as any).think = async (b: any) => {
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "Write the orders to the sheet", teammate: "Hearth", effort: "light" }] });
+    seen.push(String(b.input));
+    if (seen.length > 1) return "Made a new tab for today.";
+    const [job] = await store.all<Job>("jobs");
+    await hub.requestMcp({ server: "sheets", tool: "write_rows", args: {}, jobId: job.id });
+    return "It's waiting for your Approve.";
+  };
+  await hub.ramble("put my orders in the sheet");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "waiting"));
+  const root = (await store.all<Job>("jobs")).find((j) => !j.followsUp && !j.parentId)!;
+  await hub.replyToJob(root.id, "make a new tab with today's date instead");
+  const [ap] = await store.all<any>("approvals");
+  expect(ap.status).toBe("rejected");
+  await until(async () => seen.length === 2 && (await store.all<Job>("jobs")).every((j) => j.status === "done"));
+  expect(made).toEqual([]); // it never ran
+  expect(seen[1]).toContain("make a new tab with today's date instead");
+  expect(seen[1]).toContain("sheets: write rows");
+  expect(seen[1]).toContain("didn't run");
+  expect((await messages()).some((m) => m.fromApproval)).toBe(false); // your message is the agent's next turn, not an extra one
+  expect((await store.get<Job>("jobs", root.id))!.result).toContain("You wrote something else instead, so it didn't run");
+  // What you see is just what you typed.
+  expect((await messages()).filter((m) => m.role === "user").at(-1)!.text).toBe("make a new tab with today's date instead");
+  (hub as any).connect = null;
+});
+
 test("an approved read goes back to the agent, which carries on instead of saying it's still waiting", async () => {
   (hub as any).connect = { mcp: { get: () => ({}), call: async () => ({ content: [{ type: "text", text: '{"messages":[{"text":"At least I can see you"}]}' }] }), setGate: () => {} } };
   await hub.ensureTeammates();
