@@ -16,6 +16,8 @@ export type Page = {
   signedOut: RegExp;
   /** The site's own search box, tried in order (LinkedIn's "Search messages"), so a read can look for one name. */
   search?: string[];
+  /** Rows have no link of their own (LinkedIn): leave url empty rather than hand out the list page as if it were one. */
+  noRowLinks?: boolean;
 };
 
 /** Rows per page when a teammate pages through a list (source.read with "page"). */
@@ -76,7 +78,7 @@ export async function readList(site: string, page: Page, cookies: Cookie[], ctx:
       id: createHash("sha256").update(stableText(x.text)).digest("hex").slice(0, 24),
       title: `${x.unread ? "● " : ""}${lines[0] || site}`.slice(0, 120),
       text: lines.slice(1).join("\n") || lines[0] || "",
-      url: x.href || page.url,
+      url: x.href || (page.noRowLinks ? "" : page.url),
     };
   });
 }

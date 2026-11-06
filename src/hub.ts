@@ -394,7 +394,9 @@ export class Hub {
     applied2.fileIds.push(...handed2.fileIds);
     const tiles = [...applied.tiles, ...applied2.tiles, ...scriptTiles].slice(0, 4);
     const fileIds = [...applied.fileIds, ...applied2.fileIds, ...scriptFiles];
-    return { text: second.text || first.text, did: [...applied.done, ...applied2.done], used: [...applied.used, ...applied2.used], split: applied.split ?? applied2.split, tiles, fileIds };
+    // An ask the hub refused the first time was handed back above; the second reply says what became of it.
+    const refusedFirst = (d: Done) => d.kind === "approval" && !d.id && d.label.startsWith("Couldn't draft:");
+    return { text: second.text || first.text, did: [...applied.done.filter((d) => !refusedFirst(d)), ...applied2.done], used: [...applied.used, ...applied2.used], split: applied.split ?? applied2.split, tiles, fileIds };
   }
 
   /**
@@ -3084,6 +3086,9 @@ ${JSON.stringify(shown, null, 1)}
             if (where.recipe) break;
             const r = await this.requestMessage(a, where);
             done.push({ kind: "approval", label: r.value ? `Waiting for your Approve: ${r.value.summary}` : `Couldn't draft: ${r.error}`, id: r.value?.id });
+            // The reply was written before this ran, and may say it's sent: give the agent the refusal so it fixes the
+            // message or tells the user plainly that nothing went out.
+            if (!r.value) runs.push({ name: "@pipeline", args: [`## message.send: not sent\n${r.error}\nNo Approve card was made and nothing was sent. Fix it and send again, or tell the user plainly that it wasn't sent and why. Don't say it was sent.`] });
             break;
           }
           case "google.change": {

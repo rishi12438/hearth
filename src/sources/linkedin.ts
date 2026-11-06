@@ -12,7 +12,8 @@ const SIGNED_OUT = /linkedin\.com\/(login|authwall|checkpoint|uas\/login|signup)
 const PAGES: Record<What, Page> = {
   messages: { url: "https://www.linkedin.com/messaging/", signedOut: SIGNED_OUT,
     selectors: ["li.msg-conversation-listitem", "[class*='msg-conversation-listitem']", ".msg-conversations-container__conversations-list li"],
-    search: ["input#search-conversations", "input[name='searchTerm']", "input[placeholder*='Search messages' i]", "input[aria-label*='Search messages' i]", ".msg-search-form input"] },
+    search: ["input#search-conversations", "input[name='searchTerm']", "input[placeholder*='Search messages' i]", "input[aria-label*='Search messages' i]", ".msg-search-form input"],
+    noRowLinks: true },
   notifications: { url: "https://www.linkedin.com/notifications/", signedOut: SIGNED_OUT,
     selectors: ["[componentkey^='notification-card']", "article.nt-card", "[class*='nt-card']", "[data-finite-scroll-hotkey-item]"] },
   // Each request is a list item with an "Accept <name>'s invitation" button (2026 layout; class names are hashed).
@@ -28,7 +29,8 @@ export const linkedin: Source<Config> = {
   doc: `LinkedIn through the user's logged-in session. config {"what":"messages"} (a new message in any conversation),
            {"what":"notifications"} or {"what":"invitations"} (connection requests). Minutes >= 15, default 30.
            Reading (source.read): 10 rows a page, newest first. {"what":"messages","query":"Jane Doe"} searches
-           conversations by name (or words in them); add "page":2, 3… (up to 10) for older rows, of any list.`,
+           conversations by name (or words in them); add "page":2, 3… (up to 10) for older rows, of any list.
+           Rows have no link; to reply, message.send channel linkedin with "to" = the row's name exactly as shown.`,
   validate(c) {
     const what = (["messages", "notifications", "invitations"] as const).find((w) => w === c?.what) ?? "messages";
     const query = typeof c?.query === "string" ? c.query.trim().slice(0, 100) : "";

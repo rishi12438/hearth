@@ -397,6 +397,27 @@ test("a refused ask says so in the reply instead of leaving 'Tap Approve' with n
   expect(job.result).toContain("takes the name of a saved script, not code");
 });
 
+test("a refused message.send goes back to the agent, whose next reply replaces the one that said it was sent", async () => {
+  await hub.ensureTeammates();
+  hub.senders.linkedin = { connected: () => true, send: async () => "" };
+  const told: string[] = [];
+  (hub.brain as any).think = async (b: any) => {
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "Message Kashyab on LinkedIn", teammate: "Hearth", effort: "light" }] });
+    if (!b.toolResults?.includes("message.send: not sent"))
+      return 'I\'ve sent it.\n```hearth\n[{"type":"message.send","channel":"linkedin","to":"https://www.linkedin.com/messaging/","text":"Hey"}]\n```';
+    told.push(b.toolResults);
+    return 'Fixed: waiting for your Approve.\n```hearth\n[{"type":"message.send","channel":"linkedin","to":"Kashyab Ambarani","text":"Hey"}]\n```';
+  };
+  await hub.ramble("message kashyab on linkedin");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "waiting" || j.status === "done"));
+  expect(told[0]).toContain("conversation's name");
+  const [job] = await store.all<Job>("jobs");
+  expect(job.result).toBe("Fixed: waiting for your Approve.");
+  expect(job.did!.some((d) => d.label.startsWith("Couldn't draft"))).toBe(false);
+  const aps = await store.all<any>("approvals");
+  expect(aps.map((a) => a.action.to)).toEqual(["Kashyab Ambarani"]);
+});
+
 test("a held MCP call is an Approve card in its job's thread; Approve makes that exact call, Always allow stops the asking", async () => {
   const made: any[] = [], gates: any[] = [];
   (hub as any).connect = { mcp: { get: () => ({}), call: async (server: string, tool: string, args: unknown) => { made.push({ server, tool, args }); return { content: [{ type: "text", text: "sent ok" }] }; },
