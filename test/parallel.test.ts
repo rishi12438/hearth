@@ -568,6 +568,19 @@ test("deleting a project moves its folders back out; checking an old ramble on d
   const r = (await hub.checkRambleProject("old-fl")).value!;
   expect(r).toMatchObject({ filed: true, project: "Phoenix trip", with: ["#phoenix-trip"], why: "Both are for the same Phoenix trip." });
   expect((await hub.checkRambleProject("old-fl")).error).toContain("already");
+  // A ramble that only inherited another's workspace (no work there) doesn't keep that folder from moving, and loses the
+  // inherited workspace when it's filed elsewhere.
+  await store.put<Thread>("threads", { id: "old-sim", createdAt: at, updatedAt: at, title: "RC plane 3D sim", channel: "rc-plane-sim" } as Thread);
+  await store.put<any>("jobs", { id: "sim-job-1", createdAt: at, updatedAt: at, threadId: "old-sim", messageId: "m", task: "sim", label: "sim", teammateId: "hearth", status: "done", workspace: "3d-simulation" });
+  await store.put<Thread>("threads", { id: "old-pl", createdAt: at, updatedAt: at, title: "RC plane frame", channel: "rc-plane" } as Thread);
+  await store.put<Thread>("threads", { id: "old-ph", createdAt: at, updatedAt: at, title: "Flight number", channel: "phoenix-flight-2", workspace: "3d-simulation", workspaceFrom: "old-sim" } as Thread);
+  process.env.FAKE_GROUP = JSON.stringify({ action: "new", name: "RC Plane Build", with: ["old-sim"], why: "Same RC plane." });
+  expect((await hub.checkRambleProject("old-pl")).value?.filed).toBe(true);
+  expect(hub.brain.sessions.placeOf("thread-old-fl-1")).toEqual({ project: "rc-plane-build", workspace: "3d-simulation" });
+  const trip = (await hub.listProjects()).find((x) => x.name === "Phoenix trip")!;
+  process.env.FAKE_GROUP = JSON.stringify({ action: "join", project: trip.id, why: "Same trip." });
+  expect((await hub.checkRambleProject("old-ph")).value?.filed).toBe(true);
+  expect((await store.get<Thread>("threads", "old-ph"))!.workspace).toBeUndefined();
   delete process.env.FAKE_GROUP;
 });
 
