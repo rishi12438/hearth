@@ -173,13 +173,13 @@ export class Sessions {
     return true;
   }
 
-  /** Every workspace of one project into another (see move); the old project's folder goes. */
-  moveProject(from: string, to: string) {
-    if (from === to || !WORKSPACE_RE.test(from) || !WORKSPACE_RE.test(to)) return;
+  /** Every workspace of one project into another, or out of any project with no `to` (see move); the old project's folder goes. */
+  moveProject(from: string, to?: string) {
+    if (from === to || !WORKSPACE_RE.test(from) || (to !== undefined && !WORKSPACE_RE.test(to))) return;
     const root = join(this.workDir, "projects", from);
     let names: string[] = [];
     try { names = readdirSync(root).filter((n) => WORKSPACE_RE.test(n)); } catch { return; }
-    for (const n of names) this.move({ project: from, workspace: n }, { project: to, workspace: n });
+    for (const n of names) this.move({ project: from, workspace: n }, to ? { project: to, workspace: n } : { workspace: n });
     try { rmdirSync(root); } catch {}
   }
 

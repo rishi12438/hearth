@@ -645,7 +645,10 @@ export class Hub {
   async removeProject(id: string) {
     const p = await this.store.get<Project>("projects", id);
     if (!p) return false;
-    for (const t of (await this.store.all<Thread>("threads")).filter((t) => t.projectId === id)) await this.store.put("threads", { ...t, projectId: undefined });
+    for (const t of (await this.store.all<Thread>("threads")).filter((t) => t.projectId === id)) await this.store.put("threads", { ...t, projectId: undefined, groupedWhy: undefined });
+    // Its workspaces' folders go back out with the rambles, so their jobs keep the files.
+    const w = workspaceName(p.name);
+    if (w) this.brain.sessions?.moveProject(w);
     await this.store.remove("projects", id);
     await this.log("project.removed", p.name);
     this.emit("projects"); this.emit("threads");
@@ -683,14 +686,28 @@ export class Hub {
       && !busy.has(t.id) && (roots(t).some((j) => j.status === "done") || now - new Date(t.createdAt).getTime() > 15 * 60_000));
     let filed = 0;
     for (const t of fresh.slice(0, max)) {
-      try { if (await this.groupOne(t, threads, busy, jobs)) filed++; }
+      try { if ((await this.groupOne(t, threads, busy, jobs)).filed) filed++; }
       catch (e: any) { console.warn(`grouping #${channelOf(t)} failed: ${String(e?.message || e).slice(0, 200)}`); }
     }
     if (filed) { this.emit("threads"); this.emit("projects"); }
     return filed;
   }
 
-  private async groupOne(t: Thread, threads: Thread[], busy: Set<string>, jobs: Job[]) {
+  /** Ask Hearth's agent about one ramble now, even one looked at before or from before grouping started (to try it out). */
+  async checkRambleProject(id: string) {
+    const t = await this.store.get<Thread>("threads", id);
+    if (!t || t.routine || t.id.startsWith("tm-") || t.id === "main") return { error: "No such ramble." };
+    if (t.projectId) return { error: "It's already in a project." };
+    if (t.filedBy) return { error: "You filed this one yourself, so Hearth leaves it." };
+    const jobs = await this.store.all<Job>("jobs");
+    const busy = new Set(jobs.filter((j) => j.status === "working" || j.status === "queued").map((j) => j.threadId));
+    if (busy.has(t.id)) return { error: "Something's running in it; try once it's done." };
+    const r = await this.groupOne(t, await this.store.all<Thread>("threads"), busy, jobs);
+    if (r.filed) { this.emit("threads"); this.emit("projects"); }
+    return { value: r };
+  }
+
+  private async groupOne(t: Thread, threads: Thread[], busy: Set<string>, jobs: Job[]): Promise<{ filed: boolean; action: string; project?: string; with?: string[]; why: string }> {
     const since = this.clock().getTime() - 45 * 86400_000;
     const projects = await this.store.all<Project>("projects");
     const msgs = await this.store.all<Message>("messages");
@@ -736,7 +753,7 @@ export class Hub {
       members = [t];
     } else if (d?.action === "new" && why && typeof d.name === "string" && Array.isArray(d.with)) {
       const others = loose.filter((x) => d.with.includes(x.id));
-      if (others.some((x) => busy.has(x.id))) return false; // one of them is working: ask again next sweep
+      if (others.some((x) => busy.has(x.id))) return { filed: false, action: "wait", why: "one of the rambles it goes with is busy" }; // ask again next sweep
       if (others.length) {
         const name = d.name.replace(/\s+/g, " ").trim().slice(0, 60);
         p = projects.find((x) => x.name.toLowerCase() === name.toLowerCase()) || null;
@@ -744,7 +761,7 @@ export class Hub {
         members = [t, ...others];
       }
     }
-    if (!p || !members.length) { await checked(); if (why) await this.log("project.left", `#${channelOf(t)} stays loose: ${why}`); return false; }
+    if (!p || !members.length) { await checked(); if (why) await this.log("project.left", `#${channelOf(t)} stays loose: ${why}`); return { filed: false, action: String(d?.action || "unreadable"), why }; }
     const proj = workspaceName(p.name);
     const filed: Thread[] = [];
     for (const m of members) {
@@ -758,7 +775,7 @@ export class Hub {
       if (ws && proj && !shared) this.brain.sessions?.move({ workspace: ws }, { project: proj, workspace: ws });
     }
     await this.log("project.grouped", `${members.map((m) => `#${channelOf(m)}`).join(", ")} filed in ${p.name}: ${why}`);
-    return true;
+    return { filed: true, action: d.action, project: p.name, with: members.filter((m) => m.id !== t.id).map((m) => `#${channelOf(m)}`), why };
   }
 
   /** One project joins another (dragged onto it): its rambles, its memory and its workspaces' folders move in, and it goes. */
