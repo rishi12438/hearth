@@ -1067,7 +1067,7 @@ function drawHeader() {
     const t = mate(j?.teammateId);
     // The ramble's other threads stay in view up here (like switching threads in Slack), with how many are running.
     const others = new Set((chat?.jobs || []).filter((x: any) => !x.parentId && (x.status === "working" || x.status === "queued")).map((x: any) => x.followsUp || x.id).filter((id: string) => id !== r.job)).size;
-    clear(top, h("div", { class: "toprow stagerow" }, back, stage("chat", t, j ? jobState(j) : "idle", t.name, [`Thread in #${name}`, others ? `${others} other${others === 1 ? "" : "s"} running` : null].filter(Boolean).join(" · "), null), search),
+    clear(top, h("div", { class: "toprow stagerow" }, back, stage("chat", t, j ? jobState(j) : "idle", t.name, [`Thread in #${name}`, others ? `${others} other${others === 1 ? "" : "s"} running` : null].filter(Boolean).join(" · "), null, false, [], lookFor(chat?.thread)), search),
       threadTabs(chat, r.job, 2));
     return;
   }
@@ -1082,7 +1082,7 @@ function drawHeader() {
     clear(top, h("div", { class: "toprow stagerow" }, back,
       h("div", { class: "stage crowd" },
         h("div", { class: "crowdfaces" }, busy.slice(0, 4).map((a) =>
-          h("button", { class: "crowdface", "aria-label": `${a.t.name}: open thread`, on: { click: () => { location.hash = `#c/${chat.thread.id}/${a.jobId}`; } } }, face(a.t, 46, a.state)))),
+          h("button", { class: "crowdface", "aria-label": `${a.t.name}: open thread`, on: { click: () => { location.hash = `#c/${chat.thread.id}/${a.jobId}`; } } }, face(a.t, 46, a.state, lookFor(chat?.thread))))),
         h("button", { class: "stagepill", on: { click: chatMenu } }, h("b", null, names)),
         h("small", null, [`#${name}`, `${open} working`].join(" · "))),
       projectButton()), threadTabs(chat, null));
@@ -1091,7 +1091,7 @@ function drawHeader() {
   const who = speaker(chat);
   const others = [...new Set(jobs.map((j: any) => j.teammateId))].filter((id) => id !== who.t.id).slice(0, 3).map((id) => mate(id as string));
   clear(top, h("div", { class: "toprow stagerow" }, back,
-    stage("chat", who.t, who.state, who.t.name, [`#${name}`, open ? `${open} working` : null].filter(Boolean).join(" · "), chatMenu, false, others),
+    stage("chat", who.t, who.state, who.t.name, [`#${name}`, open ? `${open} working` : null].filter(Boolean).join(" · "), chatMenu, false, others, lookFor(chat?.thread)),
     projectButton()), threadTabs(chat, null));
 }
 
@@ -1178,16 +1178,20 @@ function speaker(chat: any): { t: any; state: string } {
 
 // The stage keeps one face per place and morphs it (color, badge, a little squash) when someone else takes over.
 const stages = new Map<string, { id: string; face: HTMLElement }>();
-function stage(place: string, t: any, state: string, title: string, sub: string | null, onTap: (() => void) | null, live = false, others: any[] = []) {
+/** look: the ramble's look (looks.ts), so the big face on top dresses like the ones in the messages. */
+function stage(place: string, t: any, state: string, title: string, sub: string | null, onTap: (() => void) | null, live = false, others: any[] = [], look: string | null = null) {
   const prev = stages.get(place);
   let f: HTMLElement;
   if (prev && prev.id === t.id) {
     f = prev.face;
-    const fresh = face(t, 58, state);
+    const fresh = face(t, 58, state, look);
+    const was = f.className.match(/look-\w+/)?.[0], now = fresh.className.match(/look-\w+/)?.[0];
     f.className = fresh.className;
+    if (was !== now) { f.classList.add("morph"); setTimeout(() => f.classList.remove("morph"), 700); }
+    for (const v of ["--ex", "--ey"]) { const x = fresh.style.getPropertyValue(v); if (x) f.style.setProperty(v, x); else f.style.removeProperty(v); }
     clear(f, ...Array.from(fresh.childNodes));
   } else {
-    f = face(prev ? { ...t, color: prev.face.style.getPropertyValue("--c") || t.color } : t, 58, state);
+    f = face(prev ? { ...t, color: prev.face.style.getPropertyValue("--c") || t.color } : t, 58, state, look);
     if (prev) { requestAnimationFrame(() => requestAnimationFrame(() => f.style.setProperty("--c", t.color))); f.classList.add("morph"); setTimeout(() => f.classList.remove("morph"), 700); }
     stages.set(place, { id: t.id, face: f });
   }
