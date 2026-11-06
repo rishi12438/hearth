@@ -316,6 +316,12 @@ code { font-family: var(--mono); font-size: .86em; background: var(--surface); p
 .routine { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; background: var(--surface); font-size: 15px; text-align: left; }
 .routine > span:not(.face) { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .routine small { color: var(--muted); font-size: 12.5px; }
+.routine > .rtext { display: flex; flex-direction: column; gap: 1px; }
+.routine > .rtext > b { font-weight: var(--fw-semibold); overflow: hidden; text-overflow: ellipsis; }
+.routine > .rtext > small { overflow: hidden; text-overflow: ellipsis; }
+.block.replaced { opacity: .5; }
+.block.replaced .predetails { text-decoration: line-through; }
+.routine > .rwhen { flex-shrink: 0; white-space: nowrap; }
 .routine.paused { opacity: .55; }
 
 @media (min-width: 980px) {

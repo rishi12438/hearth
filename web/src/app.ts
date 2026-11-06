@@ -1697,7 +1697,7 @@ function apButtons(ap: any, then?: () => void) {
 }
 /** One ask, as a card in its conversation. data-ap is what a link from Activity or a notification scrolls to. */
 function approvalCard(a: any) {
-  return h("div", { class: "block", "data-ap": a.id },
+  return h("div", { class: a.status === "replaced" ? "block replaced" : "block", "data-ap": a.id },
     h("div", { class: "blockhead" }, icon("lock", 15), h("b", null, a.summary)), a.details ? h("p", { class: "predetails" }, a.details) : null, codeToApprove(a),
     a.action?.type === "skill" ? h("a", { class: "small", href: a.action.url, target: "_blank", rel: "noopener" }, "Read the skill on GitHub") : null,
     a.status === "pending" ? h("div", { class: "blockbtns" }, ...apButtons(a))
@@ -1727,7 +1727,7 @@ function revealApproval() {
     history.replaceState(null, "", location.href.replace(/[?&]ap=[\w-]+/, ""));
   });
 }
-const approvalState = (a: any) => a.status === "done" ? "Approved and done" : a.status === "failed" ? "Approved, but it failed" : a.status === "rejected" ? "You said no" : a.status === "expired" ? "Expired: nobody answered within a day, so it didn't run" : a.status === "approved" ? "Approved" : "Waiting for you";
+const approvalState = (a: any) => a.status === "done" ? "Approved and done" : a.status === "failed" ? "Approved, but it failed" : a.status === "rejected" ? "You said no" : a.status === "expired" ? "Expired: nobody answered within a day, so it didn't run" : a.status === "replaced" ? "Replaced by a newer draft, so this one won't run" : a.status === "approved" ? "Approved" : "Waiting for you";
 
 const CHANNEL_NAME: Record<string, string> = { whatsapp: "WhatsApp", slack: "Slack", gmail: "Gmail", instagram: "Instagram", linkedin: "LinkedIn", x: "X" };
 /** "Always allow": for a message to one chat, one kind of Google change, or one MCP tool (scripts and payments always ask). */
@@ -1954,9 +1954,11 @@ function drawDm(stick = true) {
     h("div", { class: "dmhero" }, face(t, 72, t.state), h("h2", null, t.name), h("p", null, t.description || role(t)),
       S.state?.device.primary ? h("button", { class: "btn small ghost sharebtn", on: { click: () => shareTeammate(t.id) } }, icon("share", 15), "Share") : null,
       d.routines.length ? h("div", { class: "routines" }, h("small", null, "Routines"), d.routines.map((r: any) =>
-        h("button", { class: `routine ${r.status}`, on: { click: () => openTriggers("triggers") } }, icon(r.timed ? "clock" : "zap", 14), h("span", null, r.title), h("small", null, r.status === "paused" ? "paused" : r.when)))) : null,
+        h("button", { class: `routine ${r.status}`, on: { click: () => openTriggers("triggers") } }, icon(r.timed ? "clock" : "zap", 14),
+          h("span", { class: "rtext" }, h("b", null, r.title), h("small", null, r.why || r.when)),
+          h("small", { class: "rwhen" }, r.status === "paused" ? "paused" : r.timed ? r.when : r.lastFiredAt ? `ran ${shortAgo(r.lastFiredAt)}${r.fireCount > 1 ? ` · ${r.fireCount}×` : ""}` : "hasn't run yet")))) : null,
       elsewhere.length ? h("div", { class: "routines" }, h("small", null, "In rambles"), elsewhere.map((j: any) =>
-        h("button", { class: "routine", on: { click: () => { location.hash = `#c/${j.threadId}/${j.id}`; } } }, face(t, 18, jobState(j)), h("span", null, j.task), h("small", null, j.status === "done" ? shortAgo(j.finishedAt || j.updatedAt) : j.status)))) : null),
+        h("button", { class: "routine", on: { click: () => { location.hash = `#c/${j.threadId}/${j.id}`; } } }, face(t, 18, jobState(j)), h("span", null, j.label || j.task), h("small", null, j.status === "done" ? shortAgo(j.finishedAt || j.updatedAt) : j.status)))) : null),
     items.flatMap((x) => x.nodes),
     queuedRows(d.messages.filter((m: any) => m.queued), d.jobs.filter((j: any) => !j.parentId && direct.has(j.messageId))));
   if (stick) requestAnimationFrame(() => { const s = document.getElementById("scroll")!; s.scrollTop = s.scrollHeight; });

@@ -329,7 +329,9 @@ export type Approval = Doc & {
     /** A job blocked on a site wants to carry on in Chrome on your Mac (other-browser.ts); Approve covers its conversation. */
     | { type: "browser"; computer: string; url: string; threadId: string };
   /** expired: nobody answered within a day (APPROVAL_TTL_MS), so it didn't run and no longer asks. */
-  status: "pending" | "approved" | "rejected" | "done" | "failed" | "expired";
+  /** replaced: a newer ask for the same thing in the same task took its place (replacedBy), so it never ran. */
+  status: "pending" | "approved" | "rejected" | "done" | "failed" | "expired" | "replaced";
+  replacedBy?: string;
   result?: string;
   /** The hub's own words for the agent once it's decided (what to do next), kept apart from result (what came back). */
   note?: string;

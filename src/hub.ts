@@ -1906,6 +1906,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       if (job) await this.saveJob({ ...job, approvalIds: [...(job.approvalIds || []), ap.id] });
     }
     await this.log("approval.requested", ap.summary);
+    await this.replaceOlder(ap);
     this.emit("approval", ap);
     await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: await this.approvalLink(ap) });
     return { value: ap };
@@ -2016,6 +2017,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     } as Approval);
     if (job) await this.saveJob({ ...job, approvalIds: [...(job.approvalIds || []), ap.id] });
     await this.log("approval.requested", `${ap.summary} (asked by ${by})`);
+    await this.replaceOlder(ap);
     this.emit("approval", ap);
     await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: await this.approvalLink(ap) });
     return told;
@@ -2235,6 +2237,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     } as Approval);
     if (job) await this.saveJob({ ...job, approvalIds: [...(job.approvalIds || []), ap.id] });
     await this.log("approval.requested", `${ap.summary} (asked by ${mate?.name || "an agent"})`);
+    await this.replaceOlder(ap);
     this.emit("approval", ap);
     await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: await this.approvalLink(ap) });
   }
@@ -2307,6 +2310,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     } as Approval);
     if (job) await this.saveJob({ ...job, approvalIds: [...(job.approvalIds || []), ap.id] });
     await this.log("approval.requested", ap.summary);
+    await this.replaceOlder(ap);
     this.emit("approval", ap);
     await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: await this.approvalLink(ap) });
     return told;
@@ -2336,6 +2340,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     } as Approval);
     if (job) await this.saveJob({ ...job, approvalIds: [...(job.approvalIds || []), ap.id] });
     await this.log("mcp.requested", `MCP: ${s.addedBy} asked to add ${s.name} (${s.url})`);
+    await this.replaceOlder(ap);
     this.emit("approval", ap);
     await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: await this.approvalLink(ap) });
     return told;
@@ -2492,6 +2497,7 @@ ${JSON.stringify(shown, null, 1)}
       if (job) await this.saveJob({ ...job, approvalIds: [...(job.approvalIds || []), ap.id] });
     }
     await this.log("approval.requested", ap.summary);
+    await this.replaceOlder(ap);
     this.emit("approval", ap);
     await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: await this.approvalLink(ap) });
     return { value: ap };
@@ -2536,6 +2542,7 @@ ${JSON.stringify(shown, null, 1)}
       if (job) await this.saveJob({ ...job, approvalIds: [...(job.approvalIds || []), ap.id] });
     }
     await this.log("approval.requested", ap.summary);
+    await this.replaceOlder(ap);
     this.emit("approval", ap);
     await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: await this.approvalLink(ap) });
     return { value: ap };
@@ -2563,6 +2570,31 @@ ${JSON.stringify(shown, null, 1)}
     return `${thread.startsWith("tm-") ? `/#t/${thread.slice(3)}` : `/#c/${thread}${root ? `/${root}` : ""}`}?ap=${ap.id}`;
   }
 
+  /**
+   * A new ask replaces the older one waiting for the same thing (same message to the same person, same tool, same
+   * script…) in the same task: a redraft after "make it shorter" leaves one card to Approve, not two. The older one
+   * is marked replaced (it never runs), and a job left waiting on nothing but replaced asks ends quietly.
+   */
+  private async replaceOlder(ap: Approval) {
+    const key = approvalKey(ap.action);
+    if (!key) return;
+    const all = await this.store.all<Approval>("approvals");
+    const jobs = new Map((await this.store.all<Job>("jobs")).map((j) => [j.id, j]));
+    const task = (a: Approval) => { const j = a.jobId ? jobs.get(a.jobId) : undefined; return j ? `job:${j.followsUp || j.id}` : `thread:${a.threadId || ORPHAN_THREAD}`; };
+    const mine = task(ap);
+    const older = all.filter((a) => a.id !== ap.id && a.status === "pending" && approvalKey(a.action) === key && task(a) === mine);
+    for (const old of older) {
+      const next: Approval = { ...old, status: "replaced", replacedBy: ap.id, decidedAt: this.clock().toISOString() };
+      await this.store.put("approvals", next);
+      await this.log("approval.replaced", old.summary);
+      this.emit("approval", next);
+      const job = old.jobId && old.jobId !== ap.jobId ? jobs.get(old.jobId) : undefined;
+      if (job?.status !== "waiting") continue;
+      if ((await this.store.all<Approval>("approvals")).some((a) => a.jobId === job.id && a.status === "pending")) continue;
+      await this.saveJob({ ...job, status: "done", result: `${job.result || ""}\n\nReplaced by a newer draft, so this one didn't run: ${old.summary}`.trim(), finishedAt: this.clock().toISOString() });
+    }
+  }
+
   async expireApprovals() {
     const cutoff = this.clock().getTime() - APPROVAL_TTL_MS;
     const old = (await this.store.all<Approval>("approvals")).filter((a) => a.status === "pending" && Date.parse(a.createdAt) < cutoff);
@@ -2585,7 +2617,8 @@ ${JSON.stringify(shown, null, 1)}
   async decideApproval(id: string, yes: boolean, always = false, mode?: string) {
     const macMode: import("./other-browser.ts").MacMode = mode === "mine" ? "mine" : "background";
     const ap = await this.store.get<Approval>("approvals", id);
-    if (!ap || ap.status !== "pending") return { error: ap?.status === "expired" ? "This expired: nobody answered it within a day, so it didn't run." : "Already decided." };
+    if (!ap || ap.status !== "pending") return { error: ap?.status === "expired" ? "This expired: nobody answered it within a day, so it didn't run."
+      : ap?.status === "replaced" ? "A newer draft replaced this one, so it won't run. Approve the newer card instead." : "Already decided." };
     if (yes && always && ap.action.type === "message") {
       await this.setAlwaysAllowed([...(await this.alwaysAllowed()), allowKey(ap.action.channel, ap.action.to)]);
       await this.log("approval.always", `Always allow ${CHANNEL_LABEL[ap.action.channel]} messages to ${ap.action.to}`);
@@ -2671,7 +2704,7 @@ ${JSON.stringify(shown, null, 1)}
    * so the agent finishes the task. Nothing is sent when you said no to all of it: the thread ends on "You said no".
    */
   private async tellAgentApproved(job: Job) {
-    const aps = (await this.store.all<Approval>("approvals")).filter((a) => a.jobId === job.id && a.status !== "pending")
+    const aps = (await this.store.all<Approval>("approvals")).filter((a) => a.jobId === job.id && a.status !== "pending" && a.status !== "replaced")
       .sort((a, b) => (a.decidedAt || "").localeCompare(b.decidedAt || ""));
     const ran = aps.filter((a) => a.status === "done" || a.status === "failed");
     if (!ran.length) return;
@@ -3242,7 +3275,10 @@ ${JSON.stringify(shown, null, 1)}
     const messages = (await this.store.all<Message>("messages")).filter((m) => m.threadId === `tm-${id}`).slice(-60);
     const prefs = await this.prefs();
     const routines = this.pipeline.triggers().filter((t) => t.teammateId === id && t.status !== "done" && t.createdBy !== "system")
-      .map((t) => ({ id: t.id, name: t.name, title: t.title, status: t.status, timed: !!t.timer, when: t.timer ? scheduleWords(t.timer.schedule, prefs.tz) : `on ${t.sourceName}: ${t.formula}` }));
+      // In words, never the formula: what it watches and what it does; the code lives in Workflows.
+      .map((t) => ({ id: t.id, name: t.name, title: t.title, status: t.status, timed: !!t.timer,
+        when: t.timer ? scheduleWords(t.timer.schedule, prefs.tz) : `When ${sourceWords(t.sourceName)} sends something`,
+        why: t.why || "", lastFiredAt: t.lastFiredAt, fireCount: t.fireCount }));
     const approvals = (await this.store.all<Approval>("approvals")).filter((a) => jobs.some((j) => j.id === a.jobId)
       || (a.threadId || (id === "hearth" && !a.jobId ? ORPHAN_THREAD : "")) === `tm-${id}`);
     return { teammate, jobs, messages, routines, approvals };
@@ -4420,7 +4456,7 @@ ${JSON.stringify(shown, null, 1)}
           if (r.error) throw new Error(r.error);
           return { text: `handed to Hearth in ${where.fresh ? "a new ramble" : "its ramble"}` };
         }
-        const job = await this.startTriggerJob(t, where.threadId, teammate?.id || "hearth", task, e.id);
+        const job = await this.startTriggerJob(t, where.threadId, teammate?.id || "hearth", task, e.id, eventHeadline(e));
         return { text: `${teammate?.name || "Hearth"} is on it (task ${job.id})` };
       }
       if (!text) text = fillTemplate(a.message, vars);
@@ -4493,14 +4529,16 @@ ${JSON.stringify(shown, null, 1)}
    * A trigger hands its message to a teammate: a real task in that thread (in the workflow's workspace, with its
    * tools), started from a hidden message. Its task post stays out of sight until it has something to show.
    */
-  private async startTriggerJob(t: EventTrigger, threadId: string, mateId: string, task: string, eventId?: string) {
+  private async startTriggerJob(t: EventTrigger, threadId: string, mateId: string, task: string, eventId?: string, headline = "") {
     const from = { id: t.id, title: t.title, eventId };
+    // Each run is named for what happened ("Jason Hanks: Catching up?"), not just the routine, so three runs aren't three "Inbox watch"es.
+    const label = (headline || t.title).slice(0, 60);
     const dm = threadId.startsWith("tm-");
     const m = await this.addMessage({ role: "user", text: task, threadId, fromTrigger: from, teammateId: mateId, ...(dm ? {} : { hidden: true }) });
-    const job = await this.store.put<Job>("jobs", { ...this.doc({}), threadId, messageId: m.id, task, label: t.title.slice(0, 60), teammateId: mateId,
+    const job = await this.store.put<Job>("jobs", { ...this.doc({}), threadId, messageId: m.id, task, label, teammateId: mateId,
       status: "queued", effort: "light", ...(t.route.workspace ? { workspace: t.route.workspace } : {}) } as Job);
     await this.store.put<Message>("messages", { ...m, jobIds: [job.id] });
-    if (!dm) await this.addMessage({ role: "assistant", teammateId: "hearth", threadId, text: t.title, taskJobId: job.id, fromTrigger: from });
+    if (!dm) await this.addMessage({ role: "assistant", teammateId: "hearth", threadId, text: headline ? `${t.title} · ${headline}` : t.title, taskJobId: job.id, fromTrigger: from });
     this.emit("job", job);
     this.pump(m.id);
     return job;
@@ -4610,6 +4648,54 @@ export function shortLabel(label: unknown, task: string) {
  * What a trigger hands on (to a task thread or to Hearth): the event's variables AND what was actually sent. Variables
  * alone can be empty (a port whose mapping doesn't match the sender's JSON), and then the teammate can't tell anything.
  */
+/**
+ * What an ask is for, without its wording: a redraft of the same thing has the same key. A message is its channel and
+ * who it goes to; an MCP call its tool; a script its name. Google changes are staged one by one and keep their own cards.
+ */
+export function approvalKey(a: Approval["action"]): string | null {
+  switch (a.type) {
+    case "message": return `message:${a.channel}:${String(a.to).trim().toLowerCase()}`;
+    case "mcp": return `mcp:${a.server}:${a.tool}`;
+    case "script": return `script:${a.script}`;
+    case "skill": return `skill:${a.name}`;
+    case "mcp-server": return `mcp-server:${a.server}`;
+    case "browser": return `browser:${a.threadId}`;
+    default: return null;
+  }
+}
+
+/**
+ * A few words on what this event is about ("Jason Hanks: Catching up?"), so each run of a routine has its own name
+ * instead of the routine's. From the usual fields (an app item's title, a subject, who it's from, its text), or "".
+ */
+export function eventHeadline(e: { variables: Record<string, unknown>; payload: unknown }): string {
+  const KEYS = ["title", "subject", "name", "from_name", "sender_name", "push_name", "pushname", "from", "sender", "text", "body", "snippet", "message"];
+  const found: Record<string, string> = {};
+  const walk = (v: unknown, depth: number) => {
+    if (!v || typeof v !== "object" || depth > 4) return;
+    for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+      const key = k.toLowerCase();
+      if (typeof x === "string" && x.trim() && KEYS.includes(key) && !found[key]) found[key] = x.replace(/\s+/g, " ").trim();
+      else if (x && typeof x === "object") walk(x, depth + 1);
+    }
+  };
+  walk(e.variables, 0);
+  walk(e.payload, 0);
+  // A bare id ("14084203023@s.whatsapp.net", a uuid) says nothing to a person.
+  const human = (s?: string) => s && !/^[\w.+-]*@s\.whatsapp\.net$|^[0-9a-f-]{20,}$|^\+?\d[\d\s-]{6,}$/i.test(s) ? s : "";
+  const who = human(found.from_name || found.sender_name || found.push_name || found.pushname || found.name || found.from || found.sender).replace(/\s*<[^>]+>$/, "").replace(/^"|"$/g, "");
+  const what = human(found.title || found.subject || found.text || found.body || found.snippet || found.message);
+  const line = who && what && !what.toLowerCase().includes(who.toLowerCase()) ? `${who}: ${what}` : what || who;
+  return line.length > 48 ? `${line.slice(0, 47).trimEnd()}…` : line;
+}
+
+/** A source's name as words: "parley-whatsapp-incoming" -> "Parley WhatsApp incoming". */
+export function sourceWords(name: string) {
+  const KNOWN: Record<string, string> = { whatsapp: "WhatsApp", linkedin: "LinkedIn", gmail: "Gmail", imessage: "iMessage", sms: "SMS", github: "GitHub", ios: "iOS" };
+  const w = String(name || "").split(/[-_.\s]+/).filter(Boolean).map((x) => KNOWN[x.toLowerCase()] || x.toLowerCase());
+  return w.length ? w[0][0].toUpperCase() + w.join(" ").slice(1) : "a source";
+}
+
 export function handoffText(e: { sourceName: string; variables: Record<string, unknown>; payload: unknown }) {
   const vars = JSON.stringify(e.variables);
   const sent = e.payload == null ? "" : JSON.stringify(e.payload);

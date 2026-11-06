@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createStore, COLLECTIONS, type Store } from "../src/store/index.ts";
-import { Hub } from "../src/hub.ts";
+import { Hub, eventHeadline, sourceWords } from "../src/hub.ts";
 import { Brain } from "../src/brain.ts";
 import { Scripts } from "../src/scripts.ts";
 import { loadConfig } from "../src/config.ts";
@@ -310,7 +310,8 @@ test("an agent action: the message goes to the teammate out of sight, as a real 
   expect(handoff.text).toContain("About this workflow");
   expect(handoff.text).toContain("Reply to Sam");
   const job = (await store.all<any>("jobs")).find((j) => j.messageId === handoff.id)!;
-  expect(job).toMatchObject({ teammateId: "scout", workspace: "dinner-spots", label: "Sam texts" });
+  // Each run is named for what happened, so three runs aren't three "Sam texts".
+  expect(job).toMatchObject({ teammateId: "scout", workspace: "dinner-spots", label: "sam: pizza tonight?" });
   expect((await store.all<any>("messages")).find((m) => m.taskJobId === job.id)).toMatchObject({ fromTrigger: { title: "Sam texts" } });
   // Activity's Workflows shows the run: matched on its source, then how the agent's task ended.
   for (let i = 0; i < 300 && (await store.get<any>("jobs", job.id))?.status !== "done"; i++) await Bun.sleep(10);
@@ -379,4 +380,13 @@ test("the same delivery twice is one event: the hub drops the copy, so nothing d
   p.publish("hook", { at: 1 }, { "Webhook-Id": "d-9" });
   expect(p.publish("hook", { at: 2 }, { "Webhook-Id": "d-9" }).duplicate).toBe(true);
   expect(p.events({ source: "hook", limit: 10 })).toHaveLength(3);
+});
+
+test("a routine's run is named for its event, never a bare id; sources read as words", () => {
+  expect(eventHeadline({ variables: { title: "Jason Hanks", text: "Hey, catching up next week?" }, payload: null })).toBe("Jason Hanks");
+  expect(eventHeadline({ variables: {}, payload: { type: "message.received", data: { chat: { id: "14084203023@s.whatsapp.net" },
+    message: { from: "14084203023@s.whatsapp.net", push_name: "Harbor Table", text: "We can do Saturday" } } } })).toBe("Harbor Table: We can do Saturday");
+  expect(eventHeadline({ variables: { from: "14084203023@s.whatsapp.net" }, payload: null })).toBe("");
+  expect(eventHeadline({ variables: { subject: "x".repeat(80) }, payload: null }).length).toBeLessThanOrEqual(48);
+  expect(sourceWords("parley-whatsapp-incoming")).toBe("Parley WhatsApp incoming");
 });
