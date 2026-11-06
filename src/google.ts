@@ -437,6 +437,27 @@ export class Google {
     return { updatedRange: String(j.updates?.updatedRange || ""), rows: Number(j.updates?.updatedRows) || rows.length };
   }
 
+  /** A Sheet's tabs: title, the numeric id Google's grid ranges use, size. */
+  async sheetTabs(id: string, account?: string): Promise<{ title: string; sheetId: number; rows: number; columns: number }[]> {
+    const a = this.writer(account, canDriveWriteWith, "change files in Drive");
+    const j = await this.call(a, `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(id)}?fields=sheets.properties(sheetId,title,gridProperties(rowCount,columnCount))`);
+    return (j.sheets || []).map((s: any) => ({ title: String(s.properties?.title ?? ""), sheetId: Number(s.properties?.sheetId) || 0,
+      rows: Number(s.properties?.gridProperties?.rowCount) || 0, columns: Number(s.properties?.gridProperties?.columnCount) || 0 }));
+  }
+
+  /** Formatting, layout and tab changes to a Google Sheet: Sheets API batchUpdate requests. To spare the agent Google's
+   * grid maths, a range may be A1 text ("M2:M", "'Lego items'!A1:F1"), a sheetId may be a tab's title, and a color may be
+   * "#b7e1cd"; each is turned into what Google wants. Ranges without a tab are on `tab`, else the first tab. */
+  async formatSheet(id: string, requests: unknown[], tab?: string, account?: string): Promise<{ applied: number; replies: unknown[]; tabs: { title: string; sheetId: number }[] }> {
+    const a = this.writer(account, canDriveWriteWith, "change files in Drive");
+    const tabs = await this.sheetTabs(id, a.email);
+    const resolved = sheetRequests(requests, tabs, tab);
+    const j = await this.call(a, `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(id)}:batchUpdate`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ requests: resolved }) });
+    const after = await this.sheetTabs(id, a.email).catch(() => tabs);
+    return { applied: resolved.length, replies: (j.replies || []).filter((r: any) => r && Object.keys(r).length), tabs: after.map((t) => ({ title: t.title, sheetId: t.sheetId })) };
+  }
+
   /** Add an event to the owner's own calendar. No guests: inviting people emails them, which the owner approves themselves. */
   async addEvent(e: NewEvent, account?: string): Promise<CalEvent> {
     const a = this.writer(account, canCalWriteWith, "add calendar events");
@@ -488,4 +509,84 @@ export class Google {
       allDay: !e.start?.dateTime, location: e.location || "", organizer: e.organizer?.email || "", created: e.created || "", updated: e.updated || "", status: e.status || "",
       myResponse: e.organizer?.self ? "organizer" : "", link: e.htmlLink || "", description: String(e.description || "").slice(0, 800) };
   }
+}
+
+// ---------- Sheets batchUpdate helpers (formatSheet) ----------
+
+type Tab = { title: string; sheetId: number };
+const DIMENSION_REQUESTS = new Set(["updateDimensionProperties", "autoResizeDimensions", "deleteDimension", "insertDimension", "moveDimension", "appendDimension"]);
+const RANGE_KEYS = new Set(["range", "source", "destination", "sourceRange"]);
+const RANGE_LIST_KEYS = new Set(["ranges", "sources"]);
+const NAMED_COLORS: Record<string, string> = { green: "#b7e1cd", red: "#f4c7c3", yellow: "#fce8b2", orange: "#fcd8b2", blue: "#c9daf8", purple: "#d9d2e9", gray: "#e8eaed", grey: "#e8eaed", white: "#ffffff", black: "#000000" };
+
+const colIndex = (letters: string) => [...letters.toUpperCase()].reduce((n, c) => n * 26 + c.charCodeAt(0) - 64, 0) - 1;
+
+function tabFor(name: string | undefined, tabs: Tab[], fallback?: string): Tab {
+  const want = name ?? fallback;
+  if (want === undefined) {
+    if (!tabs[0]) throw new Error("That spreadsheet has no tabs.");
+    return tabs[0];
+  }
+  const t = tabs.find((x) => x.title === want) || tabs.find((x) => x.title.toLowerCase() === want.toLowerCase());
+  if (!t) throw new Error(`No tab called “${want}”. Its tabs: ${tabs.map((x) => `“${x.title}”`).join(", ")}.`);
+  return t;
+}
+
+/** "'My tab'!A2:F", "M2:M", "A:C", "2:2", "B5", or a tab's title alone, as the grid range the Sheets API takes. */
+export function a1ToGrid(text: string, tabs: Tab[], fallback?: string): Record<string, number> {
+  const s = text.trim();
+  const bang = s.lastIndexOf("!");
+  let tabName: string | undefined, ref = s;
+  if (bang >= 0) { tabName = s.slice(0, bang).replace(/^'(.*)'$/, "$1").replace(/''/g, "'"); ref = s.slice(bang + 1); }
+  const cell = /^([A-Za-z]{0,3})(\d*)$/;
+  const [from, to = from] = ref.split(":");
+  const m1 = from.match(cell), m2 = to.match(cell);
+  if (!ref || !m1 || !m2 || (!m1[1] && !m1[2])) {
+    if (bang < 0) return { sheetId: tabFor(s.replace(/^'(.*)'$/, "$1"), tabs).sheetId }; // a whole tab by its title
+    throw new Error(`“${text}” isn't a range like A1:F10, M2:M, A:C or 'Tab'!A1:B2.`);
+  }
+  const g: Record<string, number> = { sheetId: tabFor(tabName, tabs, fallback).sheetId };
+  if (m1[1]) g.startColumnIndex = colIndex(m1[1]);
+  if (m1[2]) g.startRowIndex = Number(m1[2]) - 1;
+  if (m2[1]) g.endColumnIndex = colIndex(m2[1]) + 1;
+  if (m2[2]) g.endRowIndex = Number(m2[2]);
+  return g;
+}
+
+/** "A:C" (columns) or "2:10" (rows) as a DimensionRange. */
+function a1ToDimension(text: string, tabs: Tab[], fallback?: string): Record<string, unknown> {
+  const s = text.trim(), bang = s.lastIndexOf("!");
+  const tab = tabFor(bang >= 0 ? s.slice(0, bang).replace(/^'(.*)'$/, "$1").replace(/''/g, "'") : undefined, tabs, fallback);
+  const ref = bang >= 0 ? s.slice(bang + 1) : s;
+  const [from, to = from] = ref.split(":");
+  if (/^[A-Za-z]{1,3}$/.test(from) && /^[A-Za-z]{1,3}$/.test(to)) return { sheetId: tab.sheetId, dimension: "COLUMNS", startIndex: colIndex(from), endIndex: colIndex(to) + 1 };
+  if (/^\d+$/.test(from) && /^\d+$/.test(to)) return { sheetId: tab.sheetId, dimension: "ROWS", startIndex: Number(from) - 1, endIndex: Number(to) };
+  throw new Error(`“${text}” isn't columns like A:C or rows like 2:10.`);
+}
+
+function hexColor(v: string): Record<string, number> | null {
+  const hex = (NAMED_COLORS[v.toLowerCase()] ?? v).match(/^#?([0-9a-f]{6})$/i)?.[1];
+  if (!hex) return null;
+  const n = (i: number) => Math.round(parseInt(hex.slice(i, i + 2), 16) / 255 * 1000) / 1000;
+  return { red: n(0), green: n(2), blue: n(4) };
+}
+
+/** Requests with the agent's shorthand (A1 ranges, tab titles for sheetId, hex or named colors) made into Google's own. */
+export function sheetRequests(requests: unknown[], tabs: Tab[], fallback?: string): unknown[] {
+  const walk = (v: any, type: string, key: string): any => {
+    if (typeof v === "string") {
+      if (DIMENSION_REQUESTS.has(type) && (key === "range" || key === "dimensions")) return a1ToDimension(v, tabs, fallback);
+      if (RANGE_KEYS.has(key)) return a1ToGrid(v, tabs, fallback);
+      if (key === "sheetId" && !/^\d+$/.test(v)) return tabFor(v, tabs).sheetId;
+      if (/colou?r$/i.test(key)) return hexColor(v) ?? v;
+      return v;
+    }
+    if (Array.isArray(v)) return v.map((x) => (RANGE_LIST_KEYS.has(key) && typeof x === "string" ? a1ToGrid(x, tabs, fallback) : walk(x, type, key)));
+    if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x, type, k)]));
+    return v;
+  };
+  return requests.map((r: any) => {
+    if (!r || typeof r !== "object" || Array.isArray(r)) throw new Error("Each request is an object like {\"repeatCell\": {...}}.");
+    return Object.fromEntries(Object.entries(r).map(([type, body]) => [type, walk(body, type, "")]));
+  });
 }

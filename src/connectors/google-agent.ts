@@ -59,7 +59,7 @@ export function csvRows(text: string): string[][] {
 
 const USAGE: Record<GoogleService, string> = {
   gmail: "usage: hearth-gmail accounts | search \"<gmail query>\" [--max 10] [--account A] | read <id> [--account A] | thread <threadId> [--account A]",
-  drive: "usage: hearth-drive search [words] [--days N] [--max 10] [--account A] | read <fileId> [--max 20000] | folder \"<name>\" [--in <folderId>] | sheet \"<title>\" [--in <folderId>] <<'CSV' | doc \"<title>\" [--in <folderId>] <<'TEXT' | file \"<name>\" [--in <folderId>] [--type text/markdown] <<'TEXT' | upload <path> [--in <folderId>] [--name N] | append <sheetId> [--tab T] <<'CSV' | replace <fileId> <<'CONTENT' | trash <fileId>",
+  drive: "usage: hearth-drive search [words] [--days N] [--max 10] [--account A] | read <fileId> [--max 20000] | folder \"<name>\" [--in <folderId>] | sheet \"<title>\" [--in <folderId>] <<'CSV' | doc \"<title>\" [--in <folderId>] <<'TEXT' | file \"<name>\" [--in <folderId>] [--type text/markdown] <<'TEXT' | upload <path> [--in <folderId>] [--name N] | append <sheetId> [--tab T] <<'CSV' | tabs <sheetId> | format <sheetId> [--tab T] <<'JSON' | replace <fileId> <<'CONTENT' | trash <fileId>",
   calendar: "usage: hearth-calendar list [--days 7] [--from ISO] [--to ISO] [--max 50] [--account A] | add \"<title>\" --start ISO --end ISO [--all-day] [--location L] [--notes N] [--account A] | move <eventId> [--title T] [--start ISO] [--end ISO] [--location L] [--notes N] | remove <eventId>",
 };
 
@@ -73,7 +73,37 @@ export const CHANGE_KINDS: Record<string, string> = {
   "calendar:remove-guests": "Removing meetings with other guests",
   "drive:replace": "Replacing the content of files Hearth made in Drive",
   "drive:trash": "Moving files Hearth made to Drive's trash",
+  "drive:sheet-edit": "Deleting or overwriting parts of Sheets Hearth made (tabs, rows, cells)",
 };
+
+/** Sheets requests that only change how a Sheet looks or is laid out, or add to it: they run straight away. Anything
+ * else (deleting tabs, rows or columns, merging cells, overwriting or clearing cells, find-and-replace) waits for Approve. */
+const SAFE_SHEET_REQUESTS = new Set([
+  "addConditionalFormatRule", "updateConditionalFormatRule", "deleteConditionalFormatRule", "updateBorders",
+  "updateDimensionProperties", "autoResizeDimensions", "insertDimension", "appendDimension", "updateSheetProperties", "addSheet", "duplicateSheet",
+  "setBasicFilter", "clearBasicFilter", "addFilterView", "updateFilterView", "deleteFilterView", "duplicateFilterView",
+  "addBanding", "updateBanding", "deleteBanding", "addChart", "updateChartSpec", "setDataValidation", "sortRange",
+  "addNamedRange", "updateNamedRange", "deleteNamedRange", "unmergeCells",
+]);
+/** A repeatCell is safe while it only sets formatting (fields under userEnteredFormat), never values. */
+const safeSheetRequest = (r: any) => {
+  const [type] = Object.keys(r || {});
+  if (type === "repeatCell") {
+    const fields = String(r.repeatCell?.fields || "").split(",").map((f) => f.trim()).filter(Boolean);
+    return fields.length > 0 && fields.every((f) => /^userEnteredFormat(\.|\(|$)/.test(f));
+  }
+  return SAFE_SHEET_REQUESTS.has(type);
+};
+
+/** The requests piped into `format`: a JSON array, {requests: [...]}, or one request. */
+export function sheetRequestList(body: string): unknown[] {
+  let j: any;
+  try { j = JSON.parse(body); } catch { throw new GoogleAgentError("format takes JSON: an array of Sheets API requests, like [{\"repeatCell\": {...}}]."); }
+  const list = Array.isArray(j) ? j : Array.isArray(j?.requests) ? j.requests : j && typeof j === "object" ? [j] : null;
+  if (!list?.length) throw new GoogleAgentError("format needs at least one request.");
+  if (list.length > 100) throw new GoogleAgentError("At most 100 requests at a time.");
+  return list;
+}
 
 export type GoogleChange = { service: GoogleService; args: string[]; body?: string; kind: string; summary: string; details: string };
 
@@ -95,13 +125,22 @@ export async function changeFor(google: Google, service: GoogleService, argv: st
     return { service, args: argv, kind: `calendar:${cmd}${guests ? "-guests" : ""}`, summary: summary.slice(0, 200),
       details: [summary, e.hearths ? "Hearth added this event." : "", e.organizerSelf ? "" : `Organized by ${e.organizer || "someone else"}${cmd === "remove" ? ": removing it tells them you declined." : ": Google may only change your own copy."}`, e.link].filter(Boolean).join("\n") };
   }
-  if (service === "drive" && (cmd === "replace" || cmd === "trash")) {
+  if (service === "drive" && (cmd === "replace" || cmd === "trash" || cmd === "format")) {
     const f = await google.file(id, flags.account || undefined);
     if (cmd === "replace") {
       const body = input.body ?? "";
       if (!body.trim()) return null; // the command asks for content
       if (body.length > 2_000_000) throw new GoogleAgentError("That's too much to hold for an Approve (2 MB at most). Make a new file instead.");
       return { service, args: argv, body, kind: "drive:replace", summary: `Replace everything in “${f.name}” in Drive`.slice(0, 200), details: `${f.link}\n\nNew content:\n${body.slice(0, 1500)}${body.length > 1500 ? "\n…" : ""}` };
+    }
+    if (cmd === "format") {
+      if (!(input.body ?? "").trim()) return null;
+      const list = sheetRequestList(input.body!);
+      const risky = list.filter((r) => !safeSheetRequest(r)).map((r: any) => Object.keys(r || {})[0] || "?");
+      if (!risky.length) return null;
+      const body = input.body!;
+      return { service, args: argv, body, kind: "drive:sheet-edit", summary: `Change “${f.name}” in Drive: ${[...new Set(risky)].join(", ")}`.slice(0, 200),
+        details: `${f.link}\n\nThese can delete or overwrite what's in the Sheet:\n${body.slice(0, 1500)}${body.length > 1500 ? "\n…" : ""}` };
     }
     return { service, args: argv, kind: "drive:trash", summary: `Move “${f.name}” to Drive's trash`.slice(0, 200), details: `${f.link}\nIt stays in the trash for 30 days, so it can be restored.` };
   }
@@ -172,6 +211,14 @@ export async function googleAgent(google: Google, service: GoogleService, argv: 
       const rows = csvRows(piped("CSV rows")).filter((r) => r.some((c) => c !== ""));
       return await google.appendRows(words[0], rows, flags.tab, account);
     }
+    case "tabs": {
+      if (!words[0]) throw new GoogleAgentError(USAGE.drive);
+      return { tabs: await google.sheetTabs(words[0], account) };
+    }
+    case "format": {
+      if (!words[0]) throw new GoogleAgentError(USAGE.drive);
+      return await google.formatSheet(words[0], sheetRequestList(piped("JSON requests")), flags.tab, account);
+    }
     case "replace": {
       if (!words[0]) throw new GoogleAgentError(USAGE.drive);
       return await google.replaceFile(words[0], piped("new content"), account);
@@ -212,7 +259,7 @@ export async function googleAgent(google: Google, service: GoogleService, argv: 
 /** The bash for one command: its words as form fields, what's piped in as `body` (only for the commands that save
  * something), a file for `upload`. `--form-string` keeps a word starting with @ or < from being read as a file. */
 function script(service: GoogleService, hubUrl: string, key: string) {
-  const stdin = service === "drive" ? "sheet|doc|file|append|replace" : "__none__";
+  const stdin = service === "drive" ? "sheet|doc|file|append|format|replace" : "__none__";
   return `#!/usr/bin/env bash
 # ${COMMAND[service]} <command> [flags]: the owner's Google ${service === "gmail" ? "Gmail" : service === "drive" ? "Drive" : "Calendar"} (Hearth asks Google). JSON out.
 set -uo pipefail
@@ -261,7 +308,7 @@ ${SHARED}`,
     },
     {
       name: "hearth-drive", common: true, commands: ["hearth-drive"], reads: [], scripts: { "hearth-drive": script("drive", hubUrl, key) },
-      description: "The owner's Google Drive: find and read files (Docs, Sheets as CSV, text), and save work there: new folders, Google Sheets from CSV, Docs, uploads, appending rows to a Sheet Hearth made.",
+      description: "The owner's Google Drive: find and read files (Docs, Sheets as CSV, text), and save work there: new folders, Google Sheets from CSV, Docs, uploads, appending rows to a Sheet Hearth made, and formatting it (colors, highlight rules, bold, freeze, widths, filters, charts) or adding tabs.",
       body: `# The owner's Google Drive
 
 | Command | What it does |
@@ -274,6 +321,8 @@ ${SHARED}`,
 | \`hearth-drive file "notes.md" --type text/markdown <<'TEXT'\` … \`TEXT\` | A plain file, saved as it is. |
 | \`hearth-drive upload <path> [--in <folderId>] [--name N]\` | Upload a file from this computer (a screenshot, a PDF you saved). |
 | \`hearth-drive append <sheetId> [--tab Sheet1] <<'CSV'\` … \`CSV\` | Add rows to the end of a Sheet Hearth made (no header line). |
+| \`hearth-drive tabs <sheetId>\` | A Sheet's tabs: title, sheetId, rows, columns. (\`read\` gives only the first tab.) |
+| \`hearth-drive format <sheetId> [--tab T] <<'JSON'\` … \`JSON\` | Format a Sheet Hearth made, or add or rename tabs: a JSON array of Sheets API batchUpdate requests (below). |
 | \`hearth-drive replace <fileId> <<'CSV'\` … \`CSV\` | Replace the whole content of a file Hearth made (a Sheet takes CSV). Waits for Approve. |
 | \`hearth-drive trash <fileId>\` | Move a file Hearth made to Drive's trash. Waits for Approve. |
 
@@ -283,6 +332,35 @@ ${SHARED}`,
   \`append\` to it, rather than making a new one each time. Make a folder once and reuse its id.
 - After saving, give the owner the \`link\` from the JSON. Only say it's saved once you have it.
 - Hearth can change only files it made itself: a file the owner made, it can read but not edit. Nothing is ever shared.
+
+## Formatting a Sheet and adding tabs (\`format\`)
+You can color, highlight, bold, freeze, resize, filter, chart and add tabs yourself. Don't tell the owner to do it by
+hand. \`format\` takes Google Sheets API batchUpdate requests, with shorthand that Hearth turns into Google's form:
+- ranges as A1 text: \`"range": "M2:M"\`, \`"ranges": ["A2:M"]\`, \`"'Lego items'!A1:F1"\`, \`"A:C"\`, \`"1:1"\`. Without a tab
+  name, a range is on \`--tab\`, else the first tab.
+- \`"sheetId": "<tab title>"\` wherever Google wants a tab's number.
+- colors as \`"#b7e1cd"\` or a name (green, red, yellow, orange, blue, purple, gray) for any \`...Color\` key.
+
+\`\`\`
+hearth-drive format <sheetId> <<'JSON'
+[
+ {"addConditionalFormatRule": {"index": 0, "rule": {"ranges": ["A2:M"], "booleanRule": {
+   "condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": "=REGEXMATCH($M2,\\"DELIVERED\\")"}]},
+   "format": {"backgroundColor": "green"}}}}},
+ {"repeatCell": {"range": "1:1", "cell": {"userEnteredFormat": {"textFormat": {"bold": true}, "backgroundColor": "gray"}}, "fields": "userEnteredFormat(textFormat,backgroundColor)"}},
+ {"updateSheetProperties": {"properties": {"sheetId": "Sheet1", "gridProperties": {"frozenRowCount": 1}}, "fields": "gridProperties.frozenRowCount"}},
+ {"autoResizeDimensions": {"dimensions": "A:M"}},
+ {"addSheet": {"properties": {"title": "Delivered"}}}
+]
+JSON
+\`\`\`
+- A highlight that should keep up with new rows is a conditional rule (above), not a one-off fill. Write the formula for
+  the first row of the range ($M2 for A2:M).
+- New tab: \`addSheet\`, then \`hearth-drive append <sheetId> --tab "Delivered" <<'CSV'\` to fill it (header line first).
+  Rename or color a tab with \`updateSheetProperties\` (title, tabColor).
+- Formatting, layout, filters, charts, sorting and new tabs run straight away. Requests that can lose data (deleteSheet,
+  deleteDimension, mergeCells, updateCells, findReplace, a repeatCell that sets values, and so on) wait for Approve.
+- Google's error says which request and field was wrong: fix that one and try again.
 
 ${APPROVE}
 

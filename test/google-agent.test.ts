@@ -4,8 +4,8 @@ import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Vault } from "../src/vault.ts";
-import { Google, GOOGLE_SCOPES } from "../src/google.ts";
-import { googleAgent, googleSkills, csvRows } from "../src/connectors/google-agent.ts";
+import { Google, GOOGLE_SCOPES, a1ToGrid } from "../src/google.ts";
+import { googleAgent, googleSkills, csvRows, changeFor } from "../src/connectors/google-agent.ts";
 import { Computers } from "../src/computers.ts";
 import { describeSkillStep } from "../src/brains/skills.ts";
 
@@ -41,6 +41,10 @@ function fake(url: string, init: RequestInit = {}): Response {
   if (u.pathname.startsWith("/drive/v3/files/") && !u.pathname.endsWith("/export"))
     return ok({ id: "new1", name: "Lego tracker", mimeType: "application/vnd.google-apps.spreadsheet", webViewLink: "https://docs.google.com/spreadsheets/d/new1" });
   if (u.pathname.endsWith("/export")) return new Response("Set,Price\n10294,679.99\n");
+  if (u.host === "sheets.googleapis.com" && method === "GET") return ok({ sheets: [
+    { properties: { sheetId: 0, title: "Sheet1", gridProperties: { rowCount: 1000, columnCount: 26 } } },
+    { properties: { sheetId: 77, title: "Lego items", gridProperties: { rowCount: 50, columnCount: 13 } } }] });
+  if (u.host === "sheets.googleapis.com" && u.pathname.endsWith(":batchUpdate")) return ok({ replies: JSON.parse(body).requests.map((r: any) => r.addSheet ? { addSheet: { properties: { sheetId: 9, title: r.addSheet.properties.title } } } : {}) });
   if (u.host === "sheets.googleapis.com") return ok({ updates: { updatedRange: "Sheet1!A2:B3", updatedRows: JSON.parse(body).values.length } });
   if (u.pathname === "/calendar/v3/calendars/primary/events" && method === "POST") {
     const e = { id: "ev1", ...JSON.parse(body), htmlLink: "https://calendar.google.com/ev1", organizer: { self: true } };
@@ -298,4 +302,50 @@ test("Connectors warns when an account needs reconnecting for what it can't do y
   expect(g.needs()).toEqual(["Reconnect rishi@example.com to allow saving to Drive and adding calendar events."]);
   await connect(); // the same account again, now allowing everything
   expect(g.needs()).toEqual([]);
+});
+
+test("A1 ranges become Google's grid ranges, on the named tab or the default one", () => {
+  const tabs = [{ title: "Sheet1", sheetId: 0 }, { title: "Lego items", sheetId: 77 }];
+  expect(a1ToGrid("M2:M", tabs)).toEqual({ sheetId: 0, startColumnIndex: 12, startRowIndex: 1, endColumnIndex: 13 });
+  expect(a1ToGrid("'Lego items'!A1:F1", tabs)).toEqual({ sheetId: 77, startColumnIndex: 0, startRowIndex: 0, endColumnIndex: 6, endRowIndex: 1 });
+  expect(a1ToGrid("B5", tabs, "Lego items")).toEqual({ sheetId: 77, startColumnIndex: 1, startRowIndex: 4, endColumnIndex: 2, endRowIndex: 5 });
+  expect(a1ToGrid("AA:AB", tabs)).toEqual({ sheetId: 0, startColumnIndex: 26, endColumnIndex: 28 });
+  expect(a1ToGrid("2:2", tabs)).toEqual({ sheetId: 0, startRowIndex: 1, endRowIndex: 2 });
+  expect(a1ToGrid("Lego items", tabs)).toEqual({ sheetId: 77 });
+  expect(() => a1ToGrid("Nope!A1", tabs)).toThrow("Its tabs: “Sheet1”, “Lego items”");
+});
+
+test("drive format: a highlight rule, bold header, frozen row and a new tab, in Google's own form, straight away", async () => {
+  await connect();
+  const body = JSON.stringify([
+    { addConditionalFormatRule: { index: 0, rule: { ranges: ["A2:M"], booleanRule: { condition: { type: "CUSTOM_FORMULA", values: [{ userEnteredValue: '=REGEXMATCH($M2,"DELIVERED")' }] }, format: { backgroundColor: "green" } } } } },
+    { repeatCell: { range: "1:1", cell: { userEnteredFormat: { textFormat: { bold: true } } }, fields: "userEnteredFormat.textFormat.bold" } },
+    { updateSheetProperties: { properties: { sheetId: "Lego items", gridProperties: { frozenRowCount: 1 } }, fields: "gridProperties.frozenRowCount" } },
+    { autoResizeDimensions: { dimensions: "A:M" } },
+    { addSheet: { properties: { title: "Delivered", tabColor: "#00ff00" } } },
+  ]);
+  expect(await changeFor(g, "drive", ["format", "new1", "--tab", "Lego items"], { body })).toBeNull();
+  const r: any = await googleAgent(g, "drive", ["format", "new1", "--tab", "Lego items"], { body });
+  expect(r.applied).toBe(5);
+  expect(r.replies).toEqual([{ addSheet: { properties: { sheetId: 9, title: "Delivered" } } }]);
+  const sent = JSON.parse(calls.find((c) => c.url.pathname.endsWith(":batchUpdate"))!.body).requests;
+  expect(sent[0].addConditionalFormatRule.rule.ranges).toEqual([{ sheetId: 77, startColumnIndex: 0, startRowIndex: 1, endColumnIndex: 13 }]);
+  expect(sent[0].addConditionalFormatRule.rule.booleanRule.format.backgroundColor).toEqual({ red: 0.718, green: 0.882, blue: 0.804 });
+  expect(sent[1].repeatCell.range).toEqual({ sheetId: 77, startRowIndex: 0, endRowIndex: 1 });
+  expect(sent[2].updateSheetProperties.properties.sheetId).toBe(77);
+  expect(sent[3].autoResizeDimensions.dimensions).toEqual({ sheetId: 77, dimension: "COLUMNS", startIndex: 0, endIndex: 13 });
+  expect(sent[4].addSheet.properties.tabColor).toEqual({ red: 0, green: 1, blue: 0 });
+  const tabs: any = await googleAgent(g, "drive", ["tabs", "new1"]);
+  expect(tabs.tabs.map((t: any) => t.title)).toEqual(["Sheet1", "Lego items"]);
+  await expect(googleAgent(g, "drive", ["format", "new1"], { body: "not json" })).rejects.toThrow("format takes JSON");
+});
+
+test("drive format: deleting a tab, merging, or a repeatCell that sets values waits for Approve", async () => {
+  await connect();
+  const del = (await changeFor(g, "drive", ["format", "new1"], { body: JSON.stringify([{ repeatCell: { range: "A1", cell: {}, fields: "userEnteredFormat" } }, { deleteSheet: { sheetId: 77 } }]) }))!;
+  expect(del.kind).toBe("drive:sheet-edit");
+  expect(del.summary).toBe("Change “Lego tracker” in Drive: deleteSheet");
+  expect((await changeFor(g, "drive", ["format", "new1"], { body: JSON.stringify({ repeatCell: { range: "A1", cell: {}, fields: "*" } }) }))!.kind).toBe("drive:sheet-edit");
+  expect((await changeFor(g, "drive", ["format", "new1"], { body: JSON.stringify({ requests: [{ mergeCells: { range: "A1:B1" } }] }) }))!.kind).toBe("drive:sheet-edit");
+  expect(calls.some((c) => c.method !== "GET" && c.url.host !== "oauth2.googleapis.com")).toBe(false);
 });
