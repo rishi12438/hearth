@@ -744,6 +744,20 @@ test("a stuck job a follow-up replaced stops needing you, and a stuck job can be
   expect((await scout()).needsYou).toBe(0);
 });
 
+test("a teammate's DM row shows the DM's newest line, not work it finished in a routine or ramble elsewhere", async () => {
+  await hub.ensureTeammates();
+  const scout = async () => (await hub.roster()).find((t) => t.id === "scout")!;
+  const base = { teammateId: "scout", messageId: "m-x", effort: "light", status: "done" };
+  await store.put<Message>("messages", { id: "m-dm", createdAt: "2026-10-30T09:00:00.000Z", role: "assistant", teammateId: "scout", threadId: "tm-scout", text: "Check in on the Frontier app." } as any);
+  await store.put<Job>("jobs", { id: "j-r", createdAt: "2026-10-30T10:00:00.000Z", finishedAt: "2026-10-30T10:01:00.000Z", ...base, threadId: "routine-1", task: "inbox watch", result: "F9 1192 is now leaving SFO around 1:56 PM." } as any);
+  expect((await scout()).status).toBe("Check in on the Frontier app.");
+  expect((await scout()).at).toBe("2026-10-30T09:00:00.000Z");
+
+  await store.put<Job>("jobs", { id: "j-dm", createdAt: "2026-10-30T11:00:00.000Z", finishedAt: "2026-10-30T11:01:00.000Z", ...base, threadId: "tm-scout", task: "check in", result: "Checked in.\nSeat 12A." } as any);
+  expect((await scout()).status).toBe("Checked in.");
+  expect((await scout()).at).toBe("2026-10-30T11:01:00.000Z");
+});
+
 test("seeing a stuck job clears it from the badges, on every device, until it gets stuck again", async () => {
   await hub.ensureTeammates();
   const job = { id: "j1", createdAt: "2026-10-30T10:00:00.000Z", updatedAt: "2026-10-30T10:00:00.000Z", threadId: "th-1", teammateId: "scout", messageId: "m-x", effort: "light", task: "check my orders", status: "blocked", blocked: { need: "A browser" } };
