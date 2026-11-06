@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store, Collection } from "./store/index.ts";
 import type { Brain, BrainFile, BrainInput, BrainProfile, Brains, Meter } from "./brain.ts";
-import { QUIET, ANSWER_NEEDED, ESCALATE, escalateWhy, HAND_BACK, MAX_RUN_FILES, REDO, HARNESSES, MODEL_RE, availableHarnesses, NeedsComputer, BrainsFull, POOL_HARNESSES } from "./brain.ts";
+import { QUIET, ANSWER_NEEDED, RUN_NAME, ESCALATE, escalateWhy, HAND_BACK, MAX_RUN_FILES, REDO, HARNESSES, MODEL_RE, availableHarnesses, NeedsComputer, BrainsFull, POOL_HARNESSES } from "./brain.ts";
 import type { Scripts } from "./scripts.ts";
 import type { Push } from "./push.ts";
 import { parseReply } from "./reply.ts";
@@ -775,11 +775,17 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     const msgs = new Map((await this.store.all<Message>("messages")).filter((m) => m.fromTrigger?.eventId).map((m) => [m.id, m]));
     for (const j of await this.store.all<Job>("jobs")) {
       const from = j.messageId ? msgs.get(j.messageId)?.fromTrigger : undefined;
-      if (!from?.eventId || j.parentId || j.followsUp || (j.label && j.label !== from.title.slice(0, 60))) continue;
+      // Still the routine's name, or an event's title cut mid-word by the first version of this.
+      if (!from?.eventId || j.parentId || j.followsUp || (j.label && j.label !== from.title.slice(0, 60) && !(j.label.length >= 45 && j.label.endsWith("…")))) continue;
       const e = this.pipeline.getEvent(from.eventId);
       const head = e ? eventHeadline(e) : "";
-      if (head) await this.store.put<Job>("jobs", { ...j, label: head.slice(0, 60) });
+      if (head && head !== j.label) await this.store.put<Job>("jobs", { ...j, label: head.slice(0, 60) });
     }
+    // Rambles a routine made to post in (its first message is the routine's): out of Rambles, as Routines has their runs.
+    const byThread = new Map<string, Message>();
+    for (const m of await this.store.all<Message>("messages")) if (m.threadId && (!byThread.has(m.threadId) || m.createdAt < byThread.get(m.threadId)!.createdAt)) byThread.set(m.threadId, m);
+    for (const t of await this.store.all<Thread>("threads"))
+      if (!t.routine && !t.id.startsWith("tm-") && byThread.get(t.id)?.fromTrigger) await this.store.put<Thread>("threads", { ...t, routine: true });
   }
 
   /** The root job of a routine's run (a task a trigger started), or null. */
@@ -1271,6 +1277,9 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       // It pulled a fresh login from your Mac mid-run: go again with it, without you tapping anything.
       if (this.rerunAfterLogin.delete(job.id) && status === "blocked") { await this.retryJob(job.id, { refreshed: true }); return; }
       // Started by a trigger: how it ended goes in that run's log, so Activity's Workflows shows it (quiet ones too).
+      // A routine's run names itself ([[name: …]] first): 2-5 words, instead of the email's long subject.
+      const named = String(cur.result || "").match(RUN_NAME);
+      if (named) cur = await this.saveJob({ ...cur, result: String(cur.result).replace(RUN_NAME, ""), ...(!cur.followsUp && !cur.parentId ? { label: shortName(named[1]) } : {}) });
       if (String(cur.result || "").includes(ANSWER_NEEDED)) cur = await this.saveJob({ ...cur, result: String(cur.result).replace(ANSWER_NEEDED, "").trim(), answerNeeded: true });
       if (status === "done" || status === "failed") await this.noteTriggerRun(cur).catch(() => {});
       await this.settleRoutineRun(cur).catch((e) => console.error("routine run", e));
@@ -4592,6 +4601,7 @@ ${JSON.stringify(shown, null, 1)}
       `It's "${t.title}" (trigger ${t.name}, on source ${t.sourceName}), made by ${t.createdBy} on ${t.createdAt.slice(0, 10)}${t.why ? `: ${t.why}` : "."}`,
       r.job ? `It was made in task ${r.job}${r.workspace ? `, working in the "${r.workspace}" workspace (its NOTES.md, scripts and data are there)` : ""}.` : r.workspace ? `Its notes, scripts and data are in the "${r.workspace}" workspace.` : "",
       `Do what the message asks with your normal tools. If the workflow itself is wrong for what came in (the event's shape changed, it fires on the wrong things), fix it with trigger.update and say so. If there's nothing worth doing, reply exactly ${QUIET}.`,
+      `Start your reply with ${"[[name: …]]"} on its own line: 2-5 words naming this run for the user, like [[name: Frontier check-in tomorrow]] or [[name: Jason wants to meet]]. It's the run's title in Routines, so make it say what this was about, not the routine's name.`,
       `If the user has to answer you before this can go on (a question only they can answer, a choice to make), end your reply with ${ANSWER_NEEDED}. Approve cards ask for themselves, so don't add it just for one. If you're only telling them something, leave it off: the run closes itself and goes to Past routines.`,
     ].filter(Boolean).join("\n");
   }
@@ -4639,7 +4649,7 @@ ${JSON.stringify(shown, null, 1)}
   private async newRambleFor(title: string) {
     const now = this.clock().toISOString();
     const num = Math.max(0, ...(await this.store.all<Thread>("threads")).map((t) => t.num || 0)) + 1;
-    const thread = await this.store.put<Thread>("threads", { id: randomUUID(), createdAt: now, updatedAt: now, num, title: title.slice(0, 60) });
+    const thread = await this.store.put<Thread>("threads", { id: randomUUID(), createdAt: now, updatedAt: now, num, title: title.slice(0, 60), routine: true });
     await this.renameThread(thread.id, nameFrom(title), false);
     this.emit("threads");
     return thread;
@@ -4777,7 +4787,15 @@ export function eventHeadline(e: { variables: Record<string, unknown>; payload: 
   const who = human(found.from_name || found.sender_name || found.push_name || found.pushname || found.name || found.from || found.sender).replace(/\s*<[^>]+>$/, "").replace(/^"|"$/g, "");
   const what = human(found.title || found.subject || found.text || found.body || found.snippet || found.message);
   const line = who && what && !what.toLowerCase().includes(who.toLowerCase()) ? `${who}: ${what}` : what || who;
-  return line.length > 48 ? `${line.slice(0, 47).trimEnd()}…` : line;
+  return shortName(line);
+}
+
+/** At most ~40 characters, cut at a word (never "check in to yo…"), without trailing punctuation. */
+export function shortName(s: string, max = 40) {
+  const t = String(s).replace(/\s+/g, " ").trim();
+  if (t.length <= max) return t;
+  const cut = t.slice(0, max + 1).replace(/\s+\S*$/, "").replace(/[\s,;:—–-]+$/, "");
+  return `${cut || t.slice(0, max)}…`;
 }
 
 /** A source's name as words: "parley-whatsapp-incoming" -> "Parley WhatsApp incoming". */

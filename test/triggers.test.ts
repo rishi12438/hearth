@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createStore, COLLECTIONS, type Store } from "../src/store/index.ts";
-import { Hub, eventHeadline, sourceWords } from "../src/hub.ts";
+import { Hub, eventHeadline, sourceWords, shortName } from "../src/hub.ts";
 import { Brain } from "../src/brain.ts";
 import { Scripts } from "../src/scripts.ts";
 import { loadConfig } from "../src/config.ts";
@@ -409,4 +409,18 @@ test("a routine's run closes itself when it only tells you something; one that n
   r = await hub.routineRuns();
   expect(r.open.map((x) => x.id)).toEqual(["ok"]);
   expect(r.past.map((x) => x.id).sort()).toEqual(["ask", "fyi"]);
+});
+
+test("run names are cut at a word, never mid-word", () => {
+  expect(shortName("Frontier Airlines — It's time to check in to your flight tomorrow")).toBe("Frontier Airlines — It's time to check…");
+  expect(shortName("Jason wants to meet")).toBe("Jason wants to meet");
+});
+
+test("a routine's run names itself with [[name: …]], which doesn't show in its reply", async () => {
+  const now = new Date().toISOString();
+  await store.put<any>("messages", { id: "m-n", createdAt: now, role: "user", text: "brief", threadId: "th-n", hidden: true, fromTrigger: { id: "t1", title: "Inbox watch", eventId: "e-n" } });
+  const { RUN_NAME } = await import("../src/brain.ts");
+  const reply = "[[name: Frontier check-in tomorrow]]\nCheck-in is open.";
+  expect(reply.match(RUN_NAME)![1]).toBe("Frontier check-in tomorrow");
+  expect(reply.replace(RUN_NAME, "")).toBe("Check-in is open.");
 });

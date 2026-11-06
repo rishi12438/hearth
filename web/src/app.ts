@@ -706,11 +706,12 @@ function drawSide() {
     drop: (e: DragEvent) => { e.preventDefault(); (e.currentTarget as HTMLElement).classList.remove("drop"); const id = e.dataTransfer?.getData("text/hearth-thread"); if (id) fileRamble(id, projectId); },
   });
   const team = [...(S.roster.length ? S.roster : S.teammates)].sort((a, b) => (b.at || "").localeCompare(a.at || ""));
-  const live = S.threads.filter((t: any) => !t.archived);
+  // A routine's own rambles (#inbox) aren't listed here: their runs are under Routines.
+  const live = S.threads.filter((t: any) => !t.archived && !t.routine);
   const allLoose = live.filter((t: any) => !t.projectId);
   const loose = allLoose.slice(0, 12);
   // Past rambles: archived ones (an hour after everything in them is done) and any past the first 12, newest first.
-  const past = [...allLoose.slice(12), ...S.threads.filter((t: any) => t.archived && !t.projectId)]
+  const past = [...allLoose.slice(12), ...S.threads.filter((t: any) => t.archived && !t.projectId && !t.routine)]
     .sort((a: any, b: any) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
   // Past rambles matching the search box (every one of them, not just the first 30), drawn into their own box so typing
   // doesn't redraw the whole sidebar.
@@ -1262,7 +1263,7 @@ async function fillHome(el: HTMLElement) {
     h("button", { class: "sugg", title: hover, on: { click: fn } }, h("span", { class: "suggic" }, ic), h("span", { class: "grow" }, text), meta ? h("small", null, meta) : null);
   const fill = (text: string) => { const box = document.getElementById("composer") as HTMLTextAreaElement | null; if (box) { box.value = text; box.dispatchEvent(new Event("input")); box.focus(); } };
   const when = (t: any) => t.updatedAt || t.createdAt || "";
-  const recent = [...S.threads].filter((t: any) => !fired.some((m: any) => m.threadId === t.id)).sort((a: any, b: any) => when(b).localeCompare(when(a))).slice(0, 2);
+  const recent = [...S.threads].filter((t: any) => !t.routine && !fired.some((m: any) => m.threadId === t.id)).sort((a: any, b: any) => when(b).localeCompare(when(a))).slice(0, 2);
   const idea = S.ideas[0];
   const notif = notifProblem();
   const rows = [
