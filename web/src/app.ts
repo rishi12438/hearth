@@ -2464,14 +2464,10 @@ async function send(text: string, threadJob?: string) {
   try {
     if (threadJob) { await call(`/api/jobs/${threadJob}/reply`, { body: { text: t, queue: true, fileIds } }); if (r.view === "chat") loadChat(r.id); return; }
     if (r.view === "dm") { await call(`/api/teammates/${r.id}/messages`, { body: { text: t, queue: true } }); loadDm(r.id); return; }
-    let inChat = r.view === "chat" && r.id !== "new";
-    let into = r.view === "chat" ? r.id : "";
-    // A new ramble that's really about an earlier one (even a closed one): offer to carry it on there, and do it after 5s.
-    // Each send gets its own card, so a second message sent meanwhile never drops this one.
-    if (!inChat && !S.newProject) {
-      const match = await Promise.race([call("/api/threads/similar", { body: { text: t } }).then((x: any) => x.match).catch(() => null), new Promise((ok) => setTimeout(() => ok(null), 2500))]) as any;
-      if (match && (await suggestMove(match, t)) === "move") { inChat = true; into = match.threadId; }
-    }
+    // Sent from Home (or a new ramble): always its own new ramble, sent right away. If it's on an earlier ramble's subject,
+    // the hub starts it in that ramble's workspace (see Hub.ramble).
+    const inChat = r.view === "chat" && r.id !== "new";
+    const into = r.view === "chat" ? r.id : "";
     const res = inChat ? await call(`/api/threads/${into}/messages`, { body: { text: t, fileIds } }) : await call("/api/threads", { body: { text: t, fileIds, projectId: S.newProject || undefined } });
     // Sent straight to a task's thread: nothing to plan, so no "splitting it up" line.
     if (!res.message?.continues?.length) S.planning = res.thread.id;
@@ -2554,13 +2550,6 @@ function countdownCard(key: string, title: string, sub: string, until: number, k
     const timer = setInterval(() => { count.textContent = `${left()}s`; if (left() <= 0) finish("move"); }, 250);
     countdowns.set(key, finish);
   });
-}
-
-/** "Looks like this goes with #robinhood-money": moves there after 5s unless you keep it as a new ramble. */
-let suggestSeq = 0;
-async function suggestMove(match: { threadId: string; channel: string; archived?: boolean }, text: string): Promise<"move" | "keep"> {
-  return countdownCard(`similar-${++suggestSeq}`, `Looks like this goes with #${match.channel}`,
-    `${match.archived ? "From an earlier ramble. " : ""}“${text.slice(0, 50)}${text.length > 50 ? "…" : ""}” moves there`, Date.now() + 5000, "Keep as new");
 }
 
 /** The hub thinks a message is a new topic: it moves to its own ramble when the hub's timer runs out, unless you keep it. */

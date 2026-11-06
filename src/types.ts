@@ -81,6 +81,10 @@ export type Thread = Doc & { title: string; updatedAt: string; preview?: string;
   lookAt?: string;
   /** The project this ramble is filed under, if any. */
   projectId?: string;
+  /** Started in an earlier ramble's workspace (its folder), because it looked like the same subject (see Hub.similarRamble):
+   *  its jobs work there, so they can search and use what the earlier work saved. workspaceFrom is that ramble. */
+  workspace?: string;
+  workspaceFrom?: string;
   /** Lessons review: messages up to this time were already looked at for lessons (see Hub.learnFromThread). */
   lessonsAt?: string };
 

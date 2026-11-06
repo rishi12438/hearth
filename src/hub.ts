@@ -689,8 +689,16 @@ export class Hub {
       const now = this.clock().toISOString();
       const num = Math.max(0, ...(await this.store.all<Thread>("threads")).map((t) => t.num || 0)) + 1;
       // Started from a project (or with one picked): filed before planning, so the first message already uses its memory.
-      const project = projectId ? await this.store.get<Project>("projects", projectId) : null;
-      thread = await this.store.put<Thread>("threads", { id: randomUUID(), createdAt: now, updatedAt: now, num, title: (o.title || clean.split(/\s+/).slice(0, 6).join(" ")).slice(0, 60), ...(project ? { projectId: project.id } : {}) });
+      let project = projectId ? await this.store.get<Project>("projects", projectId) : null;
+      // Looks like an earlier ramble's subject: still its own ramble, but it starts in that one's workspace (and project),
+      // so its jobs find what the earlier work saved there.
+      const like = !project && !o.fromTrigger && !o.hidden ? await this.similarRamble(clean).catch(() => null) : null;
+      const from = like ? await this.store.get<Thread>("threads", like.threadId) : null;
+      const ws = from ? await this.workspaceOf(from) : undefined;
+      if (ws && from?.projectId) project = (await this.store.get<Project>("projects", from.projectId)) || null;
+      thread = await this.store.put<Thread>("threads", { id: randomUUID(), createdAt: now, updatedAt: now, num, title: (o.title || clean.split(/\s+/).slice(0, 6).join(" ")).slice(0, 60),
+        ...(project ? { projectId: project.id } : {}), ...(ws ? { workspace: ws, workspaceFrom: from!.id } : {}) });
+      if (ws) await this.log("ramble.workspace", `new ramble starts in the "${ws}" workspace of #${like!.channel} (${like!.why.join(", ")})`);
       if (project) this.emit("projects");
     }
     const files = (await Promise.all(fileIds.slice(0, 5).map((id) => this.store.get<StoredFile>("files", id)))).filter(Boolean) as StoredFile[];
@@ -1018,7 +1026,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       // Workspaces (folders where earlier work left its files): this ramble's project's, or those outside any project.
       const project = workspaceName((await this.projectOf(thread.id))?.name);
       const workspaces = this.brain.sessions.workspaces(project);
-      const raw = await this.brain.think({ mode: "orchestrate", context: { ...ctx, thisChat: history, openTasks, recentTasks, workspaces, thisChannel: thread.id.startsWith("tm-") ? undefined : (await this.store.get<Thread>("threads", thread.id))?.channel || null, thisLook: thread.id.startsWith("tm-") ? undefined : (await this.store.get<Thread>("threads", thread.id))?.look || null }, input: said + attached }, brains.orchestrator);
+      const raw = await this.brain.think({ mode: "orchestrate", context: { ...ctx, thisChat: history, openTasks, recentTasks, workspaces, thisChannel: thread.id.startsWith("tm-") ? undefined : (await this.store.get<Thread>("threads", thread.id))?.channel || null, thisLook: thread.id.startsWith("tm-") ? undefined : (await this.store.get<Thread>("threads", thread.id))?.look || null, thisWorkspace: thread.id.startsWith("tm-") ? undefined : (await this.store.get<Thread>("threads", thread.id))?.workspace || undefined }, input: said + attached }, brains.orchestrator);
       plan = parsePlan(raw);
     } catch (err: any) {
       await this.log("orchestrator.failed", err.message);
@@ -1188,13 +1196,21 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
    * ("aliexpress-orders-3" -> "aliexpress-orders"). A ramble with only a default name ("ramble-15") gets the project's
    * "general" workspace, or none (its own folder).
    */
+  /** The workspace a ramble's work went into: its latest task's, else its own (from the ramble it was started like), else
+   *  its channel's. None for a ramble with only a default name and no tasks. */
+  private async workspaceOf(t: Thread): Promise<string | undefined> {
+    const jobs = (await this.store.all<Job>("jobs")).filter((j) => j.threadId === t.id && !j.parentId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    for (const j of jobs) { const w = workspaceName(j.workspace) || workspaceName(j.followsUp ? (await this.store.get<Job>("jobs", j.followsUp))?.workspace : undefined); if (w) return w; }
+    return workspaceName(t.workspace) || (t.channel && !/^ramble(-\d+)?$/.test(t.channel) ? channelWorkspace(t.channel) : undefined);
+  }
+
   private async placeFor(job: Job): Promise<WorkPlace | undefined> {
     const up = job.followsUp || job.parentId;
     const root = up ? (await this.store.get<Job>("jobs", up)) || job : job;
     const t = job.threadId.startsWith("tm-") ? null : await this.store.get<Thread>("threads", job.threadId);
     const project = workspaceName((await this.projectOf(job.threadId))?.name);
     const named = t?.channel && !/^ramble(-\d+)?$/.test(t.channel) ? channelWorkspace(t.channel) : undefined;
-    const workspace = workspaceName(job.workspace) || workspaceName(root.workspace) || named || (project ? "general" : undefined);
+    const workspace = workspaceName(job.workspace) || workspaceName(root.workspace) || workspaceName(t?.workspace) || named || (project ? "general" : undefined);
     return workspace ? { ...(project ? { project } : {}), workspace } : undefined;
   }
 

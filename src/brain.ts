@@ -465,6 +465,8 @@ are (in this ramble's project, if it's in one), each with when it was last used 
 "workspace": the existing one on the same subject (more about AliExpress orders, their customs or tracking -> the workspace
 where orders were checked before), else a new lowercase-dashed name for its subject, broad enough to come back to
 ("aliexpress-orders", not "aliexpress-order-8812"; "japan-trip", not "kyoto-day-3").
+CONTEXT.thisWorkspace, when there is one: this ramble was started in that workspace because it's on the same subject as
+earlier work there. Use it for its jobs unless a job is clearly about something else.
 VISUALS FIRST (the user reads on a phone): in each task brief, say what the answer should look like so it's comfortable on a
 small screen: a map for trips and places (each stop with when, one line on what to do, and how you get there + how long), a
 checklist, a weather/stat tile, or an artifact (a small interactive view) for anything with structure, like days, options to
