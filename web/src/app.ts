@@ -808,7 +808,8 @@ function drawSide() {
       h("button", { class: `snav ${r.view === "project" && r.id === p.id ? "on" : ""}`, draggable: "true", title: "Drag onto another project to put them together",
         on: { click: () => { location.hash = `#p/${p.id}`; }, dragstart: (e: DragEvent) => { e.dataTransfer?.setData("text/hearth-project", p.id); e.dataTransfer!.effectAllowed = "move"; }, ...dropTo(p.id) } },
         p.emoji ? h("span", { class: "semoji" }, p.emoji) : icon("folder", 18), h("span", { class: "grow" }, p.name), p.rambles ? h("small", { class: "scount" }, String(p.rambles)) : null),
-      openProject === p.id ? live.filter((t: any) => t.projectId === p.id).map((t: any) => ramble(t, true)) : null,
+      // Open when you're in it; else its rambles with work going or something new still show, so nothing goes missing.
+      live.filter((t: any) => t.projectId === p.id && (openProject === p.id || t.working || unread(t.id, t.lastReplyAt))).map((t: any) => ramble(t, true)),
     ]) : h("p", { class: "snone" }, "Group rambles, files and memory, like Wedding or Move to SF.")),
     h("div", { class: "slabel" }, "Rambles", h("button", { class: "sadd", "aria-label": "New ramble", on: { click: () => { S.newProject = null; location.hash = "#c/new"; } } }, icon("plus", 14))),
     h("nav", { class: "sgroup", on: dropTo(null) }, loose.length || past.length ? loose.map((t: any) => ramble(t)) : h("p", { class: "snone" }, "Tap + to start one."),
@@ -1571,6 +1572,15 @@ async function fillNow(el: HTMLElement) {
 }
 
 /** Started in an earlier ramble's folder (it looked like the same subject): a light line saying so, tap to open that one. */
+/** Hearth's agent filed this ramble in its project: in which, why, and a way to take it out. Gone once you move it yourself. */
+function groupedCard(t: any): Node | null {
+  if (!t?.projectId || !t.groupedWhy) return null;
+  const p = S.projects.find((x: any) => x.id === t.projectId);
+  if (!p) return null;
+  return h("div", { class: "workingoff" }, h("span", { class: "grow" }, `Hearth put this in ${p.name}: ${t.groupedWhy}`),
+    h("button", { class: "linkbtn", on: { click: () => fileRamble(t.id, null) } }, "Take it out"));
+}
+
 function joinCard(t: any): Node | null {
   const from = t?.workspaceFrom ? S.threads.find((x: any) => x.id === t.workspaceFrom) : null;
   if (!from) return null;
@@ -1606,6 +1616,8 @@ function drawChannel(el: HTMLElement, stick: boolean) {
   const nodes: Node[] = [];
   const join = joinCard(S.chat.thread);
   if (join) nodes.push(join);
+  const grouped = groupedCard(S.chat.thread);
+  if (grouped) nodes.push(grouped);
   let lastDay = "", lastWho = "", lastAt = 0;
   for (const m of top) {
     const day = new Date(m.createdAt).toDateString();

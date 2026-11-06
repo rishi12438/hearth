@@ -88,11 +88,17 @@ export type Thread = Doc & { title: string; updatedAt: string; preview?: string;
   /** You chose to keep it separate from workspaceFrom (the app stops offering to move it there). */
   workspaceKept?: boolean;
   /** Lessons review: messages up to this time were already looked at for lessons (see Hub.learnFromThread). */
-  lessonsAt?: string };
+  lessonsAt?: string;
+  /** When Hearth's agent looked at whether this new ramble belongs in a project (once per ramble; see Hub.groupRambles). */
+  groupCheckedAt?: string;
+  /** Why Hearth's agent filed it in its project, shown on the ramble. Gone once you move it yourself. */
+  groupedWhy?: string;
+  /** You put it in (or took it out of) a project yourself: Hearth leaves where it is alone. */
+  filedBy?: "you" };
 
 /** A folder of rambles ("Wedding", "Move to SF") with its own memory: teammates working in its rambles read and save
  *  facts in its notebook, so what's learned in one ramble is there in the next. */
-export type Project = Doc & { name: string; emoji?: string; notebook: string; about?: string };
+export type Project = Doc & { name: string; emoji?: string; notebook: string; about?: string; madeBy?: "hearth" };
 
 export type Job = Doc & {
   threadId: string;
@@ -246,6 +252,8 @@ export type ConnAudit = Doc & {
 };
 
 export type Prefs = {
+  /** Rambles started from this time on get looked at once for a project (Hub.groupRambles); older ones never are. */
+  groupingSince?: string;
   userName: string;
   tz: string;
   lastUserAt?: string;

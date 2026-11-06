@@ -3,6 +3,7 @@
 import { appendFileSync } from "node:fs";
 const prompt = await new Response(Bun.stdin.stream()).text();
 if (prompt.startsWith("You are the orchestrator")) { console.log(process.env.FAKE_PLAN); process.exit(0); }
+if (prompt.startsWith("You sort rambles")) { if (process.env.FAKE_PROMPTS) appendFileSync(process.env.FAKE_PROMPTS, `${prompt}\n=====\n`); console.log(process.env.FAKE_GROUP || '{"action":"none","why":"not sure"}'); process.exit(0); }
 const task = prompt.match(/JOB:\n([^\n]*)/)?.[1] ?? "?";
 // A message that came straight to a thread but is about something else: handed back.
 if (prompt.includes("came straight to you") && task.includes("NEW")) { console.log("[[hand-back]]"); process.exit(0); }
