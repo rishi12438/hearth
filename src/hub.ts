@@ -691,12 +691,14 @@ export class Hub {
     // Fast path: the ramble's latest task thread is idle, so it goes straight to that teammate with no planning call.
     // The teammate hands it back if it's something new, and only then is it planned (see handBack).
     // A trigger's hand-off is always planned: Hearth picks who, it doesn't just go to the last teammate.
+    // You typed instead of tapping: like a coding agent, what was waiting for your OK in this chat is a No.
+    const skipped = threadId && !o.fromTrigger && !o.hidden ? await this.declineOnTyping(thread.id) : "";
     const root = threadId && !o.fromTrigger && !thread.id.startsWith("tm-") && !this.planning.has(thread.id) ? await this.latestTask(thread.id) : null;
     const m = await this.addMessage({ role: "user", text: clean, threadId: thread.id, fileIds: files.map((f) => f.id), ...(root ? { continues: [root.id] } : {}), ...(o.fromTrigger ? { fromTrigger: o.fromTrigger } : {}), ...(o.hidden && !thread.id.startsWith("tm-") ? { hidden: true } : {}) });
     if (!o.fromTrigger) await this.setPrefs({ lastUserAt: m.createdAt }); // a trigger talking isn't you talking (silence watchers)
     if (!m.hidden) await this.touchThread(thread.id, { preview: clean.slice(0, 120) });
     if (root) {
-      const { job } = await this.followUp(root, m, clean, true);
+      const { job } = await this.followUp(root, m, clean + skipped, true);
       await this.store.put<Message>("messages", { ...m, jobIds: [job.id] });
       this.emit("job", job);
       this.pump(m.id);
@@ -1381,9 +1383,10 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     if (!clean) return { error: "Say something first." };
     // The files belong to this ramble now (they show under it in Files).
     for (const f of files) if (!f.threadId) await this.store.put<StoredFile>("files", { ...f, threadId: root.threadId });
+    const skipped = await this.declineOnTyping(root.threadId, root.id);
     const m = await this.addMessage({ role: "user", text: clean, threadId: root.threadId, replyTo: root.id, teammateId: root.teammateId, ...(files.length ? { fileIds: files.map((f) => f.id) } : {}) });
     await this.setPrefs({ lastUserAt: m.createdAt });
-    return { value: await this.deliverReply(root, m, clean, opts.queue) };
+    return { value: await this.deliverReply(root, m, clean + skipped, opts.queue) };
   }
 
   private async deliverReply(root: Job, m: Message, text: string, queue = false) {
@@ -2613,8 +2616,10 @@ ${JSON.stringify(shown, null, 1)}
     return old.length;
   }
 
-  /** mode: for a Mac-browser card, the button tapped ("background" or "mine"). */
-  async decideApproval(id: string, yes: boolean, always = false, mode?: string) {
+  /** mode: for a Mac-browser card, the button tapped ("background" or "mine").
+   * byTyping: you wrote a new message instead of tapping (declineOnTyping), so it's a No that doesn't remember a No
+   * for Mac Chrome and doesn't send the agent a turn of its own (your message is that turn). */
+  async decideApproval(id: string, yes: boolean, always = false, mode?: string, byTyping = false) {
     const macMode: import("./other-browser.ts").MacMode = mode === "mine" ? "mine" : "background";
     const ap = await this.store.get<Approval>("approvals", id);
     if (!ap || ap.status !== "pending") return { error: ap?.status === "expired" ? "This expired: nobody answered it within a day, so it didn't run."
@@ -2631,7 +2636,7 @@ ${JSON.stringify(shown, null, 1)}
       await this.setAlwaysAllowed([...(await this.alwaysAllowed()).filter((k) => !k.startsWith("browser:mac")), macMode === "mine" ? "browser:mac:mine" : "browser:mac"]);
       await this.log("approval.always", `Always let teammates use ${macMode === "mine" ? "your own Chrome" : "a background Chrome"} on your Mac for blocked sites`);
     }
-    if (!yes && ap.action.type === "browser") this.macBrowserNo.set(ap.action.threadId, this.clock().getTime() + 12 * 3600_000);
+    if (!yes && !byTyping && ap.action.type === "browser") this.macBrowserNo.set(ap.action.threadId, this.clock().getTime() + 12 * 3600_000);
     if (yes && always && ap.action.type === "mcp") {
       this.connect?.mcp.setGate(ap.action.server, ap.action.tool, false);
       await this.log("approval.always", `Always allow ${ap.action.server}: ${ap.action.tool}`);
@@ -2664,24 +2669,44 @@ ${JSON.stringify(shown, null, 1)}
       next = { ...next, status: out.ok ? "done" : "failed", result: out.output.slice(0, 2000) };
       await this.store.put("approvals", next);
     }
-    await this.log(yes ? "approval.approved" : "approval.rejected", ap.summary);
+    await this.log(yes ? "approval.approved" : byTyping ? "approval.skipped" : "approval.rejected", ap.summary);
     this.emit("approval", next);
-    await this.afterDecided(ap, next, yes);
+    await this.afterDecided(ap, next, yes, byTyping);
     return { value: next };
   }
 
+  /**
+   * You wrote a new message while cards in this conversation were still waiting for your OK: like a coding agent,
+   * that's a No to each of them (rootId: only that task's cards). Returns a note to add after your message, so the
+   * agent's next turn knows those didn't run, or "" when nothing was waiting.
+   */
+  private async declineOnTyping(threadId: string, rootId?: string): Promise<string> {
+    const jobs = new Map((await this.store.all<Job>("jobs")).map((j) => [j.id, j]));
+    const mine = (a: Approval) => {
+      const job = a.jobId ? jobs.get(a.jobId) : undefined;
+      if (rootId) return !!job && (job.id === rootId || job.followsUp === rootId);
+      return a.threadId === threadId || job?.threadId === threadId;
+    };
+    const waiting = (await this.store.all<Approval>("approvals")).filter((a) => a.status === "pending" && mine(a));
+    for (const ap of waiting) await this.decideApproval(ap.id, false, false, undefined, true);
+    if (!waiting.length) return "";
+    const what = waiting.map((a) => `"${a.summary}"`).join(", ");
+    return `\n\n(I wrote this instead of answering your ask${waiting.length > 1 ? "s" : ""} for my OK (${what}), so that's a no: ${waiting.length > 1 ? "they" : "it"} didn't run. `
+      + `Go by what I say here; if something still needs my OK, ask again.)`;
+  }
+
   /** One of a job's asks is settled: note it on the job, and once nothing's left the agent hears it all and carries on. */
-  private async afterDecided(ap: Approval, next: Approval, yes: boolean) {
+  private async afterDecided(ap: Approval, next: Approval, yes: boolean, byTyping = false) {
     if (ap.jobId) {
       const job = await this.store.get<Job>("jobs", ap.jobId);
       if (job) {
         const still = (await this.store.all<Approval>("approvals")).some((a) => a.jobId === job.id && a.status === "pending");
-        const note = yes ? `\n\n${next.status === "done" ? "Done" : "Failed"}: ${ap.summary}${next.result ? `\n${next.result.slice(0, 600)}` : ""}` : `\n\nYou said no: ${ap.summary}`;
+        const note = yes ? `\n\n${next.status === "done" ? "Done" : "Failed"}: ${ap.summary}${next.result ? `\n${next.result.slice(0, 600)}` : ""}` : byTyping ? `\n\nYou wrote something else instead, so it didn't run: ${ap.summary}` : `\n\nYou said no: ${ap.summary}`;
         await this.saveJob({ ...job, status: still ? "waiting" : "done", result: `${job.result || ""}${note}`.trim(), finishedAt: still ? undefined : this.clock().toISOString() });
         // Once nothing of this job's is left to decide, the agent hears what came back and carries on: a read it
         // asked for goes into the reply it was writing, a failure gets fixed. Otherwise its session still thinks it's
         // waiting for your Approve, and the task stops there until you nudge it.
-        if (!still) await this.tellAgentApproved(job).catch((e) => console.error("approval follow-up failed", e));
+        if (!still && !byTyping) await this.tellAgentApproved(job).catch((e) => console.error("approval follow-up failed", e));
       }
     }
   }
@@ -3102,19 +3127,21 @@ ${JSON.stringify(shown, null, 1)}
     const recent = (this.appAsks.get(id) || []).filter((t) => now - t < 60 * 60_000);
     if (recent.length >= 30 || (recent.length && now - recent[recent.length - 1] < 3000)) return { error: "That app is asking too often. Try again in a moment." };
     this.appAsks.set(id, [...recent, now]);
-    return this.askTeammate(app.teammateId || "hearth", `[from the mini app "${app.title}" (${app.name})] ${String(text).trim().slice(0, 2000)}`);
+    return this.askTeammate(app.teammateId || "hearth", `[from the mini app "${app.title}" (${app.name})] ${String(text).trim().slice(0, 2000)}`, { keepAsks: true });
   }
 
   /** Message one teammate directly: no orchestrator, the job goes straight to them in their own thread. */
-  async askTeammate(id: string, text: string, opts: { queue?: boolean } = {}) {
+  /** keepAsks: it isn't you typing (a mini app), so cards waiting in the DM stay. */
+  async askTeammate(id: string, text: string, opts: { queue?: boolean; keepAsks?: boolean } = {}) {
     const mate = await this.teammate(id);
     const clean = text.trim().slice(0, 4000);
     if (!mate) return { error: "No such teammate." };
     if (!clean) return { error: "Say something first." };
     const tid = (await this.dmThread(mate.id)).id;
+    const skipped = opts.keepAsks ? "" : await this.declineOnTyping(tid);
     const m = await this.addMessage({ role: "user", text: clean, threadId: tid, teammateId: mate.id });
     await this.setPrefs({ lastUserAt: m.createdAt });
-    return { value: await this.deliverDm(mate.id, tid, m, clean, opts.queue) };
+    return { value: await this.deliverDm(mate.id, tid, m, clean + skipped, opts.queue) };
   }
 
   private async deliverDm(mateId: string, tid: string, m: Message, text: string, queue = false) {
