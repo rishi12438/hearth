@@ -50,7 +50,10 @@ window.hearth = { data: ${j(data)}, state: ${j(state)}, view: ${j(view)},
   document.addEventListener("click", (e) => { const a = e.target && e.target.closest && e.target.closest("a[href]");
     if (a && web(a.getAttribute("href"))) { e.preventDefault(); window.hearth.link(a.getAttribute("href").trim()); } }, true);
   window.open = (u) => { if (web(String(u ?? ""))) window.hearth.link(String(u).trim()); return null; }; })();
-${view === "inline" ? `window.hearth.ready(() => { const tell = () => parent.postMessage({ hearth: "height", h: Math.ceil(document.body.getBoundingClientRect().height) }, "*");
+${view === "inline" ? `window.hearth.ready(() => { const tell = () => { const h = Math.ceil(document.body.getBoundingClientRect().height);
+    // The thread grows the frame to fit, up to 720px. Past that the page scrolls itself; the wheel then hands off to the thread at the end.
+    document.documentElement.style.overflowY = h > 720 ? "auto" : "hidden";
+    parent.postMessage({ hearth: "height", h }, "*"); };
   document.documentElement.style.height = "auto"; document.body.style.height = "auto"; document.body.style.minHeight = "0";
   new ResizeObserver(tell).observe(document.body); tell(); });` : ""}
 </script>`;
