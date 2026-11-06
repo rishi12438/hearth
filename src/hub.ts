@@ -4123,7 +4123,7 @@ ${JSON.stringify(shown, null, 1)}
       const items = await src.items(config, await this.sourceCtx());
       this.connections.problem(need, null);
       await this.audit("read", need, by, { ok: true, detail: `read ${src.label} (${items.length})` });
-      return `## ${src.label}: ${src.describe(config)}\n<untrusted>\n${formatItems(items)}\n</untrusted>`;
+      return `## ${src.label}: ${src.describe(config)}\n<untrusted>\n${formatItems(items, 10, (config as any)?.page)}\n</untrusted>`;
     } catch (e: any) {
       if (e instanceof SignedOut) this.connections.problem(need, e.message);
       await this.audit("read", need, by, { ok: false, detail: String(e.message).slice(0, 120) });
