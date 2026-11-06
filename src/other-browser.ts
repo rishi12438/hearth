@@ -173,18 +173,28 @@ fi
 `;
   return {
     name: "get-past-blocks", common: true, commands: ["hearth-browser"], reads: [] as string[], scripts: { "hearth-browser": script },
-    description: "A website blocks you or won't load in the browser here: a human check (prove you are human, press and hold), a captcha, Access Denied, 403, an error page, endless loading, or results that ignore what you typed. How to carry on: Chrome on the user's own Mac, or a cloud browser.",
+    description: "A website blocks you or won't load, however you were reading it (WebFetch, curl, a script, or the browser here): a fetch error, a human check (prove you are human, press and hold), a captcha, Access Denied, 403, an error page, endless loading, or results that ignore what you typed. How to carry on: Chrome on the user's own Mac, or a cloud browser.",
     body: `# Getting past a blocked site
 
-The browser here (enkidu-browser) runs on a server, and some sites (travel and booking sites, ticketing, big retailers)
-block servers: a human check, a captcha, Access Denied, a 403 or error page, a page that never loads, or one that
-quietly drops your search. You'll see it on the page or the screenshot; you decide you're stuck.
+Everything here runs on a server, and many sites (big retailers like Amazon, travel and booking sites, ticketing)
+block servers and bots: a fetch error, a 403/503 or error page, a human check, a captcha, Access Denied, a page that
+never loads, or one that quietly drops your search. It happens to WebFetch and curl more than to a real browser.
 
-1. Look at the page for real (observe or a screenshot): is it a block, or just a cookie banner or a slow page? A plain
-   retry or the site's other address (the mobile site, a search URL with the details in it) sometimes works. One or two
-   tries, then move on. Don't solve captchas by hand or hunt for tricks to fool the check.
-2. Run \`hearth-help stuck blocked\`. The hub answers with what you can use right now, best first (the
-   user's Mac, a cloud browser it has or can add). Do what it says.
+A page that won't load is not a dead end. Never stop at "the page wouldn't load" or answer from a guess ("the closest
+match", "similar ones weigh about…") while the real page is still reachable some other way. Make a reasonable effort,
+in this order, before you tell the user you couldn't get it:
+
+1. Look at what came back for real: a block, or just a cookie banner, a slow page, a wrong URL? One plain retry, or the
+   site's other address (the mobile site, a cleaner product or search URL with the details in it).
+2. WebFetch or curl failed: open it in the browser here (enkidu-browser). A real browser gets through more often.
+3. Still blocked: run \`hearth-help stuck blocked\`. The hub answers with what you can use right now, best first
+   (a scraper or cloud browser MCP already connected, Chrome on the user's Mac, one you can add yourself). Do what it
+   says, one after another, while there are steps left.
+4. Meanwhile, the same facts from another real source are fine (the maker's own page, another shop's listing of the
+   same item number), as long as you say where they came from.
+
+Don't solve captchas by hand or hunt for tricks to fool the check. Only when every step above has failed: say plainly
+what you tried and what each one said, and what you still need.
 
 ## hearth-browser: Chrome on the user's Mac
 Once the user lets you (hearth-help says how), it's the same as enkidu-browser, one command each:
