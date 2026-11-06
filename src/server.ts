@@ -1226,6 +1226,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       case "lessons": {
         // How the lessons library is doing (searches, found, followed, broken), for the Memory screen.
         if (method === "GET" && id === "stats") return json(await hub.lessonStats());
+        // The Lessons screen: every lesson, and what was learned, followed and found where.
+        if (method === "GET" && !id) return json(await hub.lessonsView());
         break;
       }
       case "memory": {

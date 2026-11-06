@@ -43,6 +43,7 @@ const S = {
   workflows: [] as any[],
   memory: null as any,
   lessonStats: null as any,
+  lessonsTab: "all" as "all" | "used",
   memoryQuery: "",
   today: null as any,
   conn: "connecting" as "live" | "connecting" | "offline",
@@ -3933,24 +3934,109 @@ function flyIn(what: string, id: string, next: () => void) {
 async function loadMemory() {
   try {
     S.memory = await call(`/api/memory?q=${encodeURIComponent(S.memoryQuery)}`);
-    // The lessons library's record (searches → found → followed), when there are lessons to show it for.
-    S.lessonStats = S.memory.facts.some((f: any) => f.notebook === "lessons") ? await call("/api/lessons/stats").catch(() => null) : null;
+    // The lessons, with what was learned and followed where, when there are any (they have their own card and screen).
+    S.lessonStats = S.memory.facts.some((f: any) => f.notebook === "lessons") ? await call("/api/lessons").catch(() => null) : null;
     if (hubPage() === "memory") drawMemory();
   } catch (e) { handleError(e); }
 }
 
-/** Under a lesson: how it's doing. Under anything else: its notebook and how often it was used. */
-const factSub = (f: any) => f.notebook !== "lessons" ? `${f.notebook}${f.useCount ? ` · used ${f.useCount}×` : ""}`
-  : ["lesson", `found ${f.found || 0}×`, `shown ${f.shown || 0}×`, `followed ${f.useCount || 0}×`, f.broken ? `broken ${f.broken}×` : null].filter(Boolean).join(" · ");
+/** Under a fact: its notebook and how often it was used. (Lessons have their own screen.) */
+const factSub = (f: any) => `${f.notebook}${f.useCount ? ` · used ${f.useCount}×` : ""}`;
 
+const LESSON_VERB: Record<string, string> = { learned: "learned", followed: "followed", found: "found", shown: "was shown", broken: "went against", sharpened: "reworded" };
+const LESSON_ICON: Record<string, string> = { learned: "sparkle", followed: "check", found: "search", shown: "brain", broken: "x", sharpened: "edit" };
+const lessonCount = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/** The Lessons card on the Memory screen: how many, what was last followed, and a way in. */
 function lessonsSummary() {
-  const s = S.lessonStats?.searches;
-  if (!s) return null;
-  const pct = (n: number) => (s.total ? ` (${Math.round((100 * n) / s.total)}%)` : "");
-  return h("div", { class: "aboutcard" },
-    h("div", { class: "row" }, emoji3d("🧭", "ideaicon small"), h("b", { class: "grow" }, "Lessons")),
-    h("p", { class: "muted small" }, `${s.total} search${s.total === 1 ? "" : "es"} · found something ${s.found}${pct(s.found)} · led to a lesson being followed ${s.followed}${pct(s.followed)}`),
-    s.empty.length ? h("small", { class: "muted" }, `Found nothing for: ${s.empty.slice(0, 5).map((q: string) => `"${q}"`).join(", ")}`) : null);
+  const v = S.lessonStats;
+  if (!v?.lessons) return null;
+  const week = new Date(Date.now() - 7 * 864e5).toISOString();
+  const followed = v.events.filter((e: any) => e.kind === "followed");
+  const fresh = v.lessons.filter((l: any) => l.createdAt >= week).length;
+  const last = followed[0], lastLesson = last && v.lessons.find((l: any) => l.id === last.lessonId);
+  return h("button", { class: "aboutcard lessoncard", on: { click: () => openLessons() } },
+    h("div", { class: "row" }, emoji3d("🧭", "ideaicon small"), h("b", { class: "grow" }, "Lessons"), h("span", { class: "muted small" }, "See all"), icon("chevron", 16)),
+    h("p", { class: "muted small" }, "Rules your teammates wrote for themselves after a mistake or a correction. They're shown to agents when a task looks similar."),
+    h("div", { class: "stattiles" },
+      h("div", null, h("b", null, String(v.lessons.length)), h("small", null, `lessons${fresh ? ` · ${fresh} new this week` : ""}`)),
+      h("div", null, h("b", null, String(followed.filter((e: any) => e.at >= week).length)), h("small", null, "followed this week")),
+      h("div", null, h("b", null, String(v.lessons.filter((l: any) => !l.followed).length)), h("small", null, "never followed"))),
+    lastLesson ? h("small", { class: "muted" }, `Last followed ${relTime(last.at)}${last.who ? ` by ${last.who}` : ""}${last.place ? ` in #${last.place}` : ""}: “${lastLesson.fact.slice(0, 90)}${lastLesson.fact.length > 90 ? "…" : ""}”`) : null);
+}
+
+/** One line of lesson history: who did what, where, when. Tap to open the ramble it happened in. */
+function lessonEventRow(e: any, lesson?: any) {
+  const what = e.kind === "found" ? `found it searching “${e.query || ""}”` : LESSON_VERB[e.kind] || e.kind;
+  const where = [e.place ? `#${e.place}` : null, e.job, relTime(e.at)].filter(Boolean).join(" · ");
+  const go = () => { if (e.threadId) { closeSheet(); location.hash = `#c/${e.threadId}`; } else if (lesson) openLesson(lesson); };
+  return h("button", { class: `item lessonev ${e.kind}`, on: { click: go } },
+    h("span", { class: "levicon" }, icon(LESSON_ICON[e.kind] || "sparkle", 15)),
+    h("span", { class: "grow left" },
+      h("b", { class: "light" }, `${e.who || "An agent"} ${what}`),
+      lesson ? h("span", { class: "lesstext" }, lesson.fact) : null,
+      h("small", { class: "sub" }, where)),
+    e.threadId ? icon("chevron", 16) : null);
+}
+
+function openLessons(tab: "all" | "used" = S.lessonsTab || "all") {
+  const v = S.lessonStats;
+  if (!v) return;
+  S.lessonsTab = tab;
+  const byId = new Map(v.lessons.map((l: any) => [l.id, l]));
+  const tabs = h("div", { class: "segmented" },
+    h("button", { class: tab === "all" ? "on" : "", on: { click: () => openLessons("all") } }, `All lessons (${v.lessons.length})`),
+    h("button", { class: tab === "used" ? "on" : "", on: { click: () => openLessons("used") } }, "What was used"));
+  let body: any[];
+  if (tab === "all") {
+    const sorted = [...v.lessons].sort((a: any, b: any) => (b.lastUsedAt || "").localeCompare(a.lastUsedAt || "") || b.createdAt.localeCompare(a.createdAt));
+    body = [h("p", { class: "muted small" }, "Most recently followed first. Tap one to see why it was learned and every time it was used."),
+      h("div", { class: "list" }, sorted.map((l: any) => h("button", { class: "item", on: { click: () => openLesson(l) } },
+        h("span", { class: "grow left" }, h("b", { class: "light" }, l.fact),
+          h("small", { class: "sub" }, [`learned ${relTime(l.createdAt)}`, l.followed ? `followed ${l.followed}×${l.lastUsedAt ? `, last ${relTime(l.lastUsedAt)}` : ""}` : "never followed yet",
+            l.shown ? `shown to agents ${l.shown}×` : null, l.broken ? `broken ${l.broken}×` : null].filter(Boolean).join(" · "))),
+        icon("chevron", 16))))];
+  } else {
+    // Shown-in-a-prompt is the noisy one: it's on each lesson's own page, not in this feed.
+    const feed = v.events.filter((e: any) => e.kind !== "shown" && byId.has(e.lessonId)).slice(0, 150);
+    const days: [string, any[]][] = [];
+    for (const e of feed) { const d = dayLabel(e.at); if (days.at(-1)?.[0] !== d) days.push([d, []]); days.at(-1)![1].push(e); }
+    const s = v.stats;
+    body = [
+      s?.total ? h("p", { class: "muted small" }, `Agents searched the lessons ${lessonCount(s.total, "time")}: ${s.found} found something, ${s.followed} ended with a lesson followed.${s.empty?.length ? ` Found nothing for ${s.empty.slice(0, 3).map((q: string) => `“${q}”`).join(", ")}.` : ""}`) : null,
+      days.length ? days.map(([d, list]) => [h("h4", null, d), h("div", { class: "list" }, list.map((e) => lessonEventRow(e, byId.get(e.lessonId))))])
+        : h("p", { class: "empty" }, "Nothing yet. When a teammate learns, finds or follows a lesson, it shows up here with the ramble it happened in."),
+    ];
+  }
+  openSheet("Lessons", [tabs, ...body]);
+}
+
+/** One lesson: the rule, why it was learned, its record, and each time it was learned, found, followed or broken. */
+function openLesson(l: any) {
+  const v = S.lessonStats;
+  const events = (v?.events || []).filter((e: any) => e.lessonId === l.id);
+  const shown = events.filter((e: any) => e.kind === "shown");
+  const places = [...new Set(shown.map((e: any) => e.place).filter(Boolean))];
+  const rest = events.filter((e: any) => e.kind !== "shown");
+  const fact = S.memory?.facts.find((f: any) => f.id === l.id);
+  openSheet("Lesson", [
+    h("p", { class: "lessonrule" }, l.fact),
+    l.evidence ? h("blockquote", { class: "evidence" }, "Learned when: ", l.evidence) : null,
+    h("small", { class: "muted" }, `Learned ${relTime(l.createdAt)}`),
+    h("div", { class: "stattiles four" },
+      h("div", null, h("b", null, String(l.shown)), h("small", null, "shown to an agent")),
+      h("div", null, h("b", null, String(l.found)), h("small", null, "found in a search")),
+      h("div", null, h("b", null, String(l.followed)), h("small", null, "followed")),
+      h("div", null, h("b", null, String(l.broken)), h("small", null, "broken"))),
+    l.keywords?.length ? [h("h4", null, "Found by searching"), h("div", { class: "chips" }, l.keywords.map((k: string) => h("span", { class: "chip" }, k)))] : null,
+    h("h4", null, "History"),
+    rest.length ? h("div", { class: "list" }, rest.map((e: any) => lessonEventRow(e))) : null,
+    shown.length ? h("p", { class: "muted small" }, `Put in front of an agent ${lessonCount(shown.length, "time")}${places.length ? ` in ${places.slice(0, 6).map((p) => `#${p}`).join(", ")}${places.length > 6 ? "…" : ""}` : ""}.`) : null,
+    !events.length ? h("p", { class: "muted small" }, "No details yet: the team started keeping where each lesson is used today. The counts above include earlier runs.") : null,
+    h("div", { class: "stack" },
+      fact ? h("button", { class: "btn ghost", on: { click: () => openFact(fact) } }, icon("edit", 16), "Edit") : null,
+      h("button", { class: "btn ghost", on: { click: () => openLessons() } }, icon("back", 16), "All lessons")),
+  ]);
 }
 
 // ---------------- people: the relationship map ----------------
@@ -4064,7 +4150,8 @@ function editAbout(text: string) {
 function drawMemory() {
   const el = document.getElementById("memory");
   if (!el || !S.memory) return;
-  const facts = [...S.memory.facts].sort((a: any, b: any) => b.importance - a.importance || b.createdAt.localeCompare(a.createdAt));
+  // Lessons have their own card (and screen); the list is what the team knows about you and your world.
+  const facts = S.memory.facts.filter((f: any) => f.notebook !== "lessons" || S.memoryQuery).sort((a: any, b: any) => b.importance - a.importance || b.createdAt.localeCompare(a.createdAt));
   clear(el, lessonsSummary(),
     facts.length ? h("div", { class: "list" }, facts.map((f: any) => h("div", { class: "item" },
       h("button", { class: "grow left", on: { click: () => openFact(f) } }, h("b", { class: "light" }, f.fact), h("small", { class: "sub" }, factSub(f))),
