@@ -771,7 +771,7 @@ export class Hub {
     const ids = new Set(members.map((m) => m.id));
     for (const m of members) {
       const cur = (await this.store.get<Thread>("threads", m.id))!;
-      // It started in another ramble's workspace because of a word match (see similarRamble); filed away from that ramble,
+      // It started in another ramble's workspace because the planner put its work there (see linkWorkspace); filed away from that ramble,
       // that guess was wrong, so its work goes in its own place in this project.
       const from = cur.workspaceFrom && !ids.has(cur.workspaceFrom) ? await this.store.get<Thread>("threads", cur.workspaceFrom) : null;
       const wrong = !!cur.workspaceFrom && from?.projectId !== p.id && !ids.has(cur.workspaceFrom);
@@ -868,15 +868,11 @@ export class Hub {
       const num = Math.max(0, ...(await this.store.all<Thread>("threads")).map((t) => t.num || 0)) + 1;
       // Started from a project (or with one picked): filed before planning, so the first message already uses its memory.
       let project = projectId ? await this.store.get<Project>("projects", projectId) : null;
-      // Looks like an earlier ramble's subject: still its own ramble, but it starts in that one's workspace (and project),
-      // so its jobs find what the earlier work saved there.
-      const like = !project && !o.fromTrigger && !o.hidden ? await this.similarRamble(clean, { strongOnly: true }).catch(() => null) : null;
-      const from = like ? await this.store.get<Thread>("threads", like.threadId) : null;
-      const ws = from ? await this.workspaceOf(from) : undefined;
-      // Which project it belongs in (if any) is for Hearth's agent to decide once there's something to go on (groupRambles).
+      // Whether it's on an earlier ramble's subject (and so works in that one's folder) is for the planner to say, from
+      // what was asked and the workspaces' notes (see linkWorkspace). A word match linked unrelated rambles that
+      // both said "options". Which project it belongs in is for Hearth's agent to decide later (groupRambles).
       thread = await this.store.put<Thread>("threads", { id: randomUUID(), createdAt: now, updatedAt: now, num, title: (o.title || clean.split(/\s+/).slice(0, 6).join(" ")).slice(0, 60),
-        ...(project ? { projectId: project.id } : {}), ...(ws ? { workspace: ws, workspaceFrom: from!.id } : {}) });
-      if (ws) await this.log("ramble.workspace", `new ramble starts in the "${ws}" workspace of #${like!.channel} (${like!.why.join(", ")})`);
+        ...(project ? { projectId: project.id } : {}) });
       if (project) this.emit("projects");
     }
     const files = (await Promise.all(fileIds.slice(0, 5).map((id) => this.store.get<StoredFile>("files", id)))).filter(Boolean) as StoredFile[];
@@ -1253,6 +1249,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       if (deps.length) jobs[i] = await this.store.put<Job>("jobs", { ...job, dependsOn: deps });
     }
     for (const w of (Array.isArray(plan.newWorkflows) ? plan.newWorkflows : []).slice(0, 2)) await this.proposeWorkflow(w);
+    if (!hadTasks && !movedOut && jobs.length && !batch.some((b) => b.fromTrigger || b.hidden)) await this.linkWorkspace(thread.id, jobs[0].workspace);
 
     const fresh = await this.store.get<Thread>("threads", thread.id);
     // Hearth names the ramble from its topic, and renames it when the topic changes, unless you named it yourself.
@@ -3999,38 +3996,21 @@ ${JSON.stringify(shown, null, 1)}
   }
 
   /**
-   * Is a new ramble really about an earlier one (still open or closed)? A quick word match, no model call, so the app can
-   * offer "this goes with #robinhood-money" before anything is planned. Names, titles and task labels count double.
+   * A new ramble's first plan put its work in a workspace an earlier ramble used: the planner judged them the same subject
+   * (from what was asked and the workspaces' notes, not shared words). Link them, so the app can say "Looks like #x" and
+   * offer to move it in there. A new workspace, or one no other ramble used, links nothing.
    */
-  async similarRamble(text: string, o: { skip?: string; strongOnly?: boolean } = {}) {
-    const words = subjectWords;
-    const q = words(text);
-    if (!q.size) return null;
-    const since = this.clock().getTime() - 60 * 86400_000;
-    const threads = (await this.store.all<Thread>("threads")).filter((t) => !t.id.startsWith("tm-") && t.id !== "main" && t.id !== o.skip && new Date(t.updatedAt || t.createdAt).getTime() > since);
-    if (!threads.length) return null;
-    const msgs = await this.store.all<Message>("messages"), jobs = await this.store.all<Job>("jobs");
-    const docs = threads.map((t) => {
-      const mine = jobs.filter((j) => j.threadId === t.id && !j.parentId);
-      return { t, strong: words([channelOf(t).replace(/-/g, " "), t.title, ...mine.filter((j) => !j.followsUp).map((j) => j.label || "")].join(" ")),
-        weak: words([...msgs.filter((m) => m.threadId === t.id && m.role === "user").map((m) => m.text), ...mine.map((j) => j.task)].join(" ")) };
-    });
-    const df = (w: string) => docs.filter((d) => d.strong.has(w) || d.weak.has(w)).length;
-    let best: { score: number; d: (typeof docs)[number]; hits: string[] } | null = null;
-    for (const d of docs) {
-      let score = 0, strong = 0; const hits: string[] = [];
-      for (const w of q) {
-        const s = d.strong.has(w), wk = d.weak.has(w);
-        if (!s && !wk) continue;
-        const idf = Math.log(1 + docs.length / df(w));
-        score += (s ? 2 : 1) * idf; hits.push(w); if (s) strong++;
-      }
-      // One word in its name or a task's label, or two in what was said there: enough to ask.
-      if ((strong >= 1 || (!o.strongOnly && hits.length >= 2)) && (!best || score > best.score)) best = { score, d, hits };
-    }
-    if (!best) return null;
-    const t = best.d.t;
-    return { threadId: t.id, channel: channelOf(t), title: t.title, archived: !!t.archivedAt, why: best.hits.slice(0, 4) };
+  private async linkWorkspace(threadId: string, workspace?: string) {
+    const ws = workspaceName(workspace);
+    const t = ws && !threadId.startsWith("tm-") ? await this.store.get<Thread>("threads", threadId) : null;
+    if (!t || t.workspaceFrom || t.workspaceKept) return;
+    const other = (id: string) => id !== threadId && !id.startsWith("tm-") && id !== "main";
+    const used = (await this.store.all<Job>("jobs")).filter((j) => other(j.threadId) && workspaceName(j.workspace) === ws).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    let from: Thread | null = null;
+    for (const j of used) if ((from = await this.store.get<Thread>("threads", j.threadId))) break;
+    if (!from) return;
+    await this.touchThread(threadId, { workspace: ws, workspaceFrom: from.id });
+    await this.log("ramble.workspace", `the planner put this ramble's work in the "${ws}" workspace of #${channelOf(from)}`);
   }
 
   async removeTeammate(id: string) {
@@ -5139,14 +5119,6 @@ export const channelOf = (t: Thread) => t.channel || (t.num ? `ramble-${t.num}` 
 const slugOf = (name: string) => String(name).toLowerCase().replace(/^#/, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30);
 /** A short channel name from a title: its first three words that carry meaning ("Lisbon trip and Portuguese" -> lisbon-trip-portuguese). */
 const FILLER = new Set(["a", "an", "the", "and", "or", "in", "on", "at", "to", "for", "of", "with", "before", "after", "from", "my", "your", "about", "this", "that"]);
-/** Words too common to say two rambles are about the same thing (stems: a trailing "s" is dropped first). */
-const STOP = new Set(("the and for with this that from into your you yours mine about what when where which who how why are was were will would could "
-  + "should can cant don dont does did have has had just also some any more most much many very really thing stuff lot get got make made find help want "
-  + "need please tell show give check look know like think let put take use done going doing day today tomorrow tonight week weekend month year time "
-  + "now next last good best new old one two remind reminder plan quick idea there here then than them they their our out all not but yes okay hey hi "
-  + "thank thanks hearth again other another way back keep sure same").split(" "));
-/** The words that say what something is about: 3+ letters, a trailing "s" dropped, common words left out. */
-const subjectWords = (s: string) => new Set((s.toLowerCase().match(/[a-z0-9]{3,}/g) || []).map((w) => w.replace(/(?<=\w{3})s$/, "")).filter((w) => !STOP.has(w)));
 const nameFrom = (title: string) => title.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w && !FILLER.has(w)).slice(0, 3).join(" ");
 
 /** The key an "Always allow" is saved under: one chat on one app. */
