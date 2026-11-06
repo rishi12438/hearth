@@ -467,18 +467,19 @@ test("when the planner says it's a new topic, it's offered and moved too", async
   expect(fl.threadId).not.toBe(thread);
 }, 25_000);
 
-test("a new ramble that's about an earlier one (even a closed one) is matched to it, without a model call", async () => {
+test("shared words alone never link a new ramble to an earlier one: only the planner's workspace pick does", async () => {
   await setup();
   process.env.FAKE_MS = "20";
-  plan([{ label: "Your Robinhood balance", task: "check my Robinhood balance and holdings", teammate: "Hearth" }]);
-  const money = (await hub.ramble("what's my robinhood balance")).value!.thread.id;
-  plan([{ label: "Ramen near me", task: "find a good ramen place nearby", teammate: "Hearth" }]);
-  await hub.ramble("find me a good ramen place");
+  plan([{ label: "Calf stretcher alternatives", task: "find calf stretcher alternatives and options", teammate: "Hearth", workspace: "calf-stretcher" }]);
+  await hub.ramble("find me calf stretcher alternatives, show me options");
+  await until(() => allDone(1));
+  plan([{ label: "Used manual BMW options", task: "find used manual BMWs and Japanese alternatives", teammate: "Hearth", workspace: "used-car-hunt" }]);
+  const car = (await hub.ramble("help me find a used manual BMW, explore japanese alternatives and show me options")).value!.thread;
+  expect(car.workspace).toBeUndefined(); // nothing guessed at send
   await until(() => allDone(2));
-  await hub.renameThread(money, "robinhood-money");
-  expect((await hub.similarRamble("how is my robinhood doing this month?"))?.threadId).toBe(money);
-  expect((await hub.similarRamble("can you plan my week please"))).toBeNull(); // only common words: no match
-  expect((await hub.similarRamble("weather in tokyo"))).toBeNull();
+  const t = (await store.get<Thread>("threads", car.id))!;
+  expect(t.workspaceFrom).toBeUndefined();
+  expect(t.workspace).toBeUndefined();
 });
 
 test("a new ramble on an earlier one's subject is its own ramble, started in that one's workspace", async () => {
@@ -487,12 +488,13 @@ test("a new ramble on an earlier one's subject is its own ramble, started in tha
   plan([{ label: "Your Robinhood balance", task: "check my Robinhood balance and holdings", teammate: "Hearth", workspace: "robinhood-account" }]);
   const money = (await hub.ramble("what's my robinhood balance")).value!.thread.id;
   await until(() => allDone(1));
-  plan([{ label: "Robinhood this month", task: "how Robinhood did this month", teammate: "Hearth" }]); // the planner gives no workspace
-  const next = (await hub.ramble("how is my robinhood doing this month?")).value!.thread;
-  expect(next.id).not.toBe(money);
+  plan([{ label: "Robinhood this month", task: "how Robinhood did this month", teammate: "Hearth", workspace: "robinhood-account" }]); // the planner judged it the same subject
+  const next0 = (await hub.ramble("how is my robinhood doing this month?")).value!.thread;
+  expect(next0.id).not.toBe(money);
+  await until(() => allDone(2));
+  const next = (await store.get<Thread>("threads", next0.id))!;
   expect(next.workspace).toBe("robinhood-account");
   expect(next.workspaceFrom).toBe(money);
-  await until(() => allDone(2));
   const job = (await jobs()).find((j) => j.threadId === next.id)!;
   expect((await (hub as any).placeFor(job))?.workspace).toBe("robinhood-account");
   // Nothing alike: no workspace carried over.
@@ -607,7 +609,7 @@ test("moving a ramble into the earlier one it was started like takes everything 
   const money = (await hub.ramble("what's my robinhood balance")).value!.thread.id;
   await until(() => allDone(1));
   process.env.FAKE_MS = "1500";
-  plan([{ label: "Robinhood this month", task: "how Robinhood did this month", teammate: "Hearth" }]);
+  plan([{ label: "Robinhood this month", task: "how Robinhood did this month", teammate: "Hearth", workspace: "robinhood-account" }]);
   const next = (await hub.ramble("how is my robinhood doing this month?")).value!.thread.id;
   await until(async () => (await jobs()).some((j) => j.label === "Robinhood this month" && j.status === "working"), 10_000);
   expect((await hub.joinRamble(next, "move")).value?.threadId).toBe(money);
@@ -619,8 +621,9 @@ test("moving a ramble into the earlier one it was started like takes everything 
   expect((await store.all<any>("messages")).some((m) => m.threadId === next)).toBe(false);
   // Keep separate: it stays, and isn't offered again.
   process.env.FAKE_MS = "20";
-  plan([{ label: "Robinhood taxes", task: "robinhood tax forms", teammate: "Hearth" }]);
+  plan([{ label: "Robinhood taxes", task: "robinhood tax forms", teammate: "Hearth", workspace: "robinhood-account" }]);
   const third = (await hub.ramble("robinhood tax forms")).value!.thread.id;
+  await until(async () => !!(await store.get<any>("threads", third))?.workspaceFrom, 10_000);
   await hub.joinRamble(third, "keep");
   expect((await store.get<any>("threads", third))?.workspaceKept).toBe(true);
 }, 30_000);

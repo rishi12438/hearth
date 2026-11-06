@@ -322,7 +322,7 @@ function onEvent(e: { type: string; data?: any }) {
       else if (e.data.status === "pending") toast(`Needs your OK: ${e.data.summary}`);
       soon();
       return;
-    case "threads": if (open) markSeen(open); soon(); if (open && S.chat) call("/api/threads").then((l: any[]) => { const t = l.find((x) => x.id === open); if (t && S.chat) { const was = lookFor(S.chat.thread); S.chat.thread.title = t.title; S.chat.thread.channel = t.channel; S.chat.thread.look = t.look; if (lookFor(S.chat.thread) !== was) { S.morphing = true; drawChat(); S.morphing = false; } else drawHeader(); } }).catch(() => {}); return;
+    case "threads": if (open) markSeen(open); soon(); if (open && S.chat) call("/api/threads").then((l: any[]) => { const t = l.find((x) => x.id === open); if (t && S.chat) { const was = lookFor(S.chat.thread); S.chat.thread.title = t.title; S.chat.thread.channel = t.channel; S.chat.thread.look = t.look; const linked = t.workspaceFrom && !S.chat.thread.workspaceFrom; S.chat.thread.workspace = t.workspace; S.chat.thread.workspaceFrom = t.workspaceFrom; S.chat.thread.workspaceKept = t.workspaceKept; if (linked && !t.workspaceKept) { offerJoin(t); drawChat(); } else if (lookFor(S.chat.thread) !== was) { S.morphing = true; drawChat(); S.morphing = false; } else drawHeader(); } }).catch(() => {}); return;
     case "teammates": loadTeammates().then(soon); return;
     case "skills": loadSkills(); return;
     case "frame": {
@@ -1604,8 +1604,8 @@ function joinCard(t: any): Node | null {
   return h("button", { class: "workingoff", on: { click: () => { location.hash = `#c/${from.id}`; } } }, `Working off #${channelName(from)}'s workspace`, icon("chevron", 12));
 }
 
-/** Right after a new ramble starts in an earlier one's folder: offer to move it in there. It goes away on its own (and
- *  then stays its own ramble). */
+/** Once a new ramble's first plan puts its work in an earlier one's folder: offer to move it in there. It goes away on
+ *  its own (and then stays its own ramble). */
 function offerJoin(t: any) {
   const from = S.threads.find((x: any) => x.id === t.workspaceFrom);
   const name = from ? `#${channelName(from)}` : "the earlier ramble";
@@ -2594,8 +2594,7 @@ async function send(text: string, threadJob?: string) {
       if (S.newProject) { S.newProject = null; loadThreads(); }
       S.chat = { thread: res.thread, messages: [res.message], jobs: [], approvals: [] }; location.hash = `#c/${res.thread.id}`;
       if (res.thread.projectId && !S.projects.some((p: any) => p.id === res.thread.projectId)) await loadProjects();
-      if (res.thread.workspaceFrom) offerJoin(res.thread);
-      else if (res.thread.projectId && !sentInProject) toast(`Filed in ${S.projects.find((p: any) => p.id === res.thread.projectId)?.name || "a project"}`);
+      if (res.thread.projectId && !sentInProject) toast(`Filed in ${S.projects.find((p: any) => p.id === res.thread.projectId)?.name || "a project"}`);
       return;
     }
     if (into !== (r.view === "chat" ? r.id : "") || !S.chat || S.chat.thread.id !== into) { S.chat = null; location.hash = `#c/${into}`; return; }
