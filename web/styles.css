@@ -558,6 +558,64 @@ textarea.field { resize: vertical; line-height: 1.4; }
 .face.done { animation: pop .5s ease-out 1; }
 @keyframes pop { 40% { transform: scale(1.12); } }
 
+/* Looks: in a ramble the face turns into what it's about (a plane, a rocket, a chef…, see web/src/looks.ts) and keeps
+   its eyes. Same clay, same states; while working each look acts its part (the plane banks, the car's wheels turn). */
+.face.look { background: none; box-shadow: none; border-radius: 0; overflow: visible;
+  --clay-d: color-mix(in oklab, var(--clay) 72%, #5a4632); }
+.lookart { position: absolute; left: -8%; top: -8%; width: 116%; height: 116%; overflow: visible; filter: drop-shadow(0 2px 2px rgba(90, 65, 40, .2)); }
+.lookart * { transform-box: fill-box; transform-origin: center; }
+.lookart .b { fill: var(--clay); } .lookart .d { fill: var(--clay-d); } .lookart .hi { fill: #fff; opacity: .5; }
+.lookart .k { fill: #3b2d22; } .lookart .w { fill: #fffaf2; } .lookart .a { fill: #e8705f; } .lookart .g { fill: #cfe8f6; }
+.lookart .y { fill: #ffc04d; } .lookart .l { fill: #7cbf6a; } .lookart .t { fill: #d98a5f; } .lookart .cheek { fill: #f49a9a; opacity: .7; }
+.lookart .wv { fill: none; stroke: #7fb8e6; stroke-width: 4; stroke-linecap: round; }
+.lookart .wh, .lookart .seam { fill: none; stroke: #3b2d22; stroke-width: 1.6; stroke-linecap: round; opacity: .55; }
+.lookart .band { fill: none; stroke: #3b2d22; stroke-width: 5; stroke-linecap: round; }
+.lookart .puff, .lookart .rain { fill: none; stroke: #b9ad9f; stroke-width: 3; stroke-linecap: round; opacity: 0; }
+.lookart .rain { stroke: #7fb8e6; }
+.face.look .eyes { position: absolute; left: var(--ex); top: var(--ey); translate: -50% -50%; gap: calc(var(--s) * .13); z-index: 1; }
+.face.look .eye { width: calc(var(--s) * .068); height: calc(var(--s) * .088); }
+.face.look::after { left: var(--ex); top: calc(var(--ey) + var(--s) * .07); z-index: 1; }
+.face.look.nosmile::after { display: none; }
+.face.look.waiting { box-shadow: none; animation: none; }
+.face.look.waiting .lookart { filter: drop-shadow(0 0 2px var(--warn)) drop-shadow(0 0 4px var(--warn)); }
+
+/* moving bits: only while working, and small. Idle, waiting and done faces hold still. */
+.lookart .flame { transform-origin: 50% 0; scale: 1 .45; }
+.face.look.working .lookart .flick { animation: lk-prop .5s linear infinite; }
+.face.look.working .lookart .flame { scale: 1 .8; animation: lk-flame .5s ease-in-out infinite; }
+.face.look.working .lookart .spin { animation: lk-spin 1.6s linear infinite; }
+.face.look.working .lookart .wave { animation: lk-wave 4s linear infinite; }
+.face.look.working .lookart .sway { animation: lk-sway 3s ease-in-out infinite; }
+.face.look.working .lookart .blinky { animation: lk-blinky 2.4s steps(1) infinite; }
+.face.look.working .lookart .puff { animation: lk-puff 3s ease-out infinite; }
+.face.look.working .lookart .rain { animation: lk-rain 1.6s linear infinite; }
+.face.look.working .lookart .float { animation: lk-float 3s ease-out infinite; }
+
+.face.look.working { animation: var(--lm) var(--ld, 2s) ease-in-out infinite; }
+.mv-fly { --lm: lk-fly; --ld: 3s; } .mv-rumble { --lm: lk-rumble; --ld: 2.4s; } .mv-drive { --lm: lk-drive; --ld: 1.6s; }
+.mv-rock { --lm: lk-rock; --ld: 3s; } .mv-beep, .mv-stir, .mv-groove, .mv-jingle, .mv-sway { --lm: lk-tilt; --ld: 2.6s; }
+.mv-hop, .mv-bounce, .mv-stack { --lm: lk-hop; --ld: 2.2s; } .mv-puff, .mv-type, .mv-flick { --lm: lk-breathe; --ld: 2.4s; }
+.mv-beat { --lm: lk-beat; --ld: 2s; } .mv-drift { --lm: lk-drift; --ld: 3.4s; }
+
+@keyframes lk-prop { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(.2); } }
+@keyframes lk-wave { to { transform: translateX(-16%); } }
+@keyframes lk-sway { 0%, 100% { transform: rotate(-3deg); } 50% { transform: rotate(3deg); } }
+@keyframes lk-blinky { 0% { opacity: 1; } 50% { opacity: .5; } }
+@keyframes lk-flame { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(.85); } }
+@keyframes lk-spin { to { transform: rotate(360deg); } }
+@keyframes lk-puff { 0% { opacity: 0; transform: translateY(15%); } 30% { opacity: .6; } 100% { opacity: 0; transform: translateY(-25%); } }
+@keyframes lk-rain { 0% { opacity: 0; transform: translateY(-10%); } 30% { opacity: .8; } 100% { opacity: 0; transform: translateY(25%); } }
+@keyframes lk-float { 0% { opacity: 0; transform: translateY(15%); } 30% { opacity: .8; } 100% { opacity: 0; transform: translateY(-30%); } }
+@keyframes lk-fly { 0%, 100% { transform: translateY(1%) rotate(-2deg); } 50% { transform: translateY(-4%) rotate(2deg); } }
+@keyframes lk-rumble { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3%); } }
+@keyframes lk-drive { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2%); } }
+@keyframes lk-rock { 0%, 100% { transform: rotate(-3deg); } 50% { transform: rotate(3deg); } }
+@keyframes lk-tilt { 0%, 100% { transform: rotate(-2.5deg); } 50% { transform: rotate(2.5deg); } }
+@keyframes lk-hop { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4%); } }
+@keyframes lk-breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.03, .98); } }
+@keyframes lk-beat { 0%, 60%, 100% { transform: scale(1); } 20% { transform: scale(1.06); } }
+@keyframes lk-drift { 0%, 100% { transform: translateX(-2%); } 50% { transform: translateX(2%); } }
+
 
 /* ---------- tiles ---------- */
 .tile { margin: 6px 0 4px; padding: 14px 16px; border-radius: 20px; background: var(--card); box-shadow: var(--shadow); max-width: 420px; }
@@ -1323,3 +1381,4 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 .sbtn.busy { opacity: 1; display: inline-flex; align-items: center; gap: 8px; }
 .sbtn.busy::before { content: ""; width: 12px; height: 12px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: apspin .7s linear infinite; }
 @keyframes apspin { to { transform: rotate(360deg); } }
+.face.look.morph { animation: morph .7s cubic-bezier(.3, 1.4, .5, 1) 1; }
