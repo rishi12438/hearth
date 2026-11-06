@@ -655,6 +655,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (method === "GET" && !id) return json(await hub.listProjects());
         if (method === "GET" && id) { const d = await hub.projectDetail(id); if (!d) break; return json(d); }
         if (method === "POST" && !id) { const b = await body(req); const r = await hub.createProject(String(b.name || ""), b.emoji ? String(b.emoji) : undefined); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        if (method === "POST" && id && seg[3] === "merge") { const r = await hub.mergeProject(id, String((await body(req)).into || "")); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "PATCH" && id) { const r = await hub.updateProject(id, await body(req)); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "DELETE" && id) return json({ ok: await hub.removeProject(id) });
         break;

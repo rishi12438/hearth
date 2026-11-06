@@ -759,10 +759,13 @@ function drawSide() {
       // Blinks while someone's working in it; a steady dot once something new came back that you haven't opened.
       t.working ? h("i", { class: "rundot", title: `${t.working} running` }) : unread(t.id, t.lastReplyAt) ? h("i", { class: "udot", title: "New since you last looked" }) : null),
     h("button", { class: "sact", "aria-label": t.projectId ? "Move to another project" : "Add to a project", title: t.projectId ? "Move to another project" : "Add to a project", on: { click: (e: Event) => projectMenuAt(e.currentTarget as HTMLElement, t.projectId || null, (id) => fileRamble(t.id, id)) } }, icon("folder", 14)));
+  // Drop a ramble here to file it; drop a project onto another project and it joins that one.
   const dropTo = (projectId: string | null) => ({
-    dragover: (e: DragEvent) => { if (e.dataTransfer?.types.includes("text/hearth-thread")) { e.preventDefault(); (e.currentTarget as HTMLElement).classList.add("drop"); } },
+    dragover: (e: DragEvent) => { const ty = e.dataTransfer?.types || []; if (ty.includes("text/hearth-thread") || (projectId && ty.includes("text/hearth-project"))) { e.preventDefault(); (e.currentTarget as HTMLElement).classList.add("drop"); } },
     dragleave: (e: DragEvent) => (e.currentTarget as HTMLElement).classList.remove("drop"),
-    drop: (e: DragEvent) => { e.preventDefault(); (e.currentTarget as HTMLElement).classList.remove("drop"); const id = e.dataTransfer?.getData("text/hearth-thread"); if (id) fileRamble(id, projectId); },
+    drop: (e: DragEvent) => { e.preventDefault(); (e.currentTarget as HTMLElement).classList.remove("drop");
+      const id = e.dataTransfer?.getData("text/hearth-thread"); if (id) return fileRamble(id, projectId);
+      const pid = e.dataTransfer?.getData("text/hearth-project"); if (pid && projectId && pid !== projectId) mergeProject(pid, projectId); },
   });
   const team = [...(S.roster.length ? S.roster : S.teammates)].sort((a, b) => (b.at || "").localeCompare(a.at || ""));
   // A routine's own rambles (#inbox) aren't listed here: their runs are under Routines.
@@ -802,7 +805,8 @@ function drawSide() {
       nav("plug", "Connectors", r.view === "connectors", () => { location.hash = "#connectors"; }, warns.length ? "!" : undefined, warns.join("\n") || undefined)),
     h("div", { class: "slabel" }, "Projects", h("button", { class: "sadd", "aria-label": "New project", on: { click: newProject } }, icon("plus", 14))),
     h("nav", { class: "sgroup" }, S.projects.length ? S.projects.map((p: any) => [
-      h("button", { class: `snav ${r.view === "project" && r.id === p.id ? "on" : ""}`, on: { click: () => { location.hash = `#p/${p.id}`; }, ...dropTo(p.id) } },
+      h("button", { class: `snav ${r.view === "project" && r.id === p.id ? "on" : ""}`, draggable: "true", title: "Drag onto another project to put them together",
+        on: { click: () => { location.hash = `#p/${p.id}`; }, dragstart: (e: DragEvent) => { e.dataTransfer?.setData("text/hearth-project", p.id); e.dataTransfer!.effectAllowed = "move"; }, ...dropTo(p.id) } },
         p.emoji ? h("span", { class: "semoji" }, p.emoji) : icon("folder", 18), h("span", { class: "grow" }, p.name), p.rambles ? h("small", { class: "scount" }, String(p.rambles)) : null),
       openProject === p.id ? live.filter((t: any) => t.projectId === p.id).map((t: any) => ramble(t, true)) : null,
     ]) : h("p", { class: "snone" }, "Group rambles, files and memory, like Wedding or Move to SF.")),
@@ -1014,6 +1018,19 @@ function projectMenuAt(anchor: HTMLElement | { x: number; y: number }, current: 
   closeDrop = Object.assign(close, { anchor });
   setTimeout(() => { document.addEventListener("pointerdown", outside, true); document.addEventListener("keydown", key); window.addEventListener("hashchange", close); });
   q.focus();
+}
+
+/** A project dragged onto another: it joins that one (its rambles, memory and files), after a yes. */
+function mergeProject(fromId: string, intoId: string) {
+  const a = S.projects.find((p: any) => p.id === fromId), b = S.projects.find((p: any) => p.id === intoId);
+  if (!a || !b) return;
+  confirmSheet(`Put ${a.name} into ${b.name}?`, `Its ${a.rambles === 1 ? "ramble" : `${a.rambles || 0} rambles`}, what it remembered and its files move into ${b.name}, and ${a.name} goes away.`, "Put together", async () => {
+    await call(`/api/projects/${fromId}/merge`, { body: { into: intoId } });
+    await loadProjects(); loadThreads();
+    const r = route();
+    if (r.view === "project" && r.id === fromId) location.hash = `#p/${intoId}`;
+    toast(`${a.name} joined ${b.name}`);
+  });
 }
 
 /** File a ramble under a project (or take it out with null), from the header menu or the sidebar. */
@@ -1565,7 +1582,8 @@ function joinCard(t: any): Node | null {
 function offerJoin(t: any) {
   const from = S.threads.find((x: any) => x.id === t.workspaceFrom);
   const name = from ? `#${channelName(from)}` : "the earlier ramble";
-  countdownCard(`join-${t.id}`, `Looks like ${name}`, "Working in its folder. Stays its own ramble", Date.now() + 8000, "Keep separate", { moveLabel: `Move into ${name}`, timeUp: "keep", lead: " · " })
+  const project = t.projectId ? S.projects.find((p: any) => p.id === t.projectId)?.name : "";
+  countdownCard(`join-${t.id}`, `Looks like ${name}`, project ? `Both in ${project}, working in its folder. Stays its own ramble` : "Working in its folder. Stays its own ramble", Date.now() + 8000, "Keep separate", { moveLabel: `Move into ${name}`, timeUp: "keep", lead: " · " })
     .then(async (how) => {
       if (how !== "move") return;
       try { const r = await call(`/api/threads/${t.id}/join`, { body: { how: "move" } }); if (S.chat?.thread?.id === t.id) S.chat = null; loadThreads(); location.hash = `#c/${r.threadId}`; }
@@ -2533,10 +2551,13 @@ async function send(text: string, threadJob?: string) {
     const res = inChat ? await call(`/api/threads/${into}/messages`, { body: { text: t, fileIds } }) : await call("/api/threads", { body: { text: t, fileIds, projectId: S.newProject || undefined } });
     // Sent straight to a task's thread: nothing to plan, so no "splitting it up" line.
     if (!res.message?.continues?.length) S.planning = res.thread.id;
+    const sentInProject = !!S.newProject;
     if (!inChat) {
       if (S.newProject) { S.newProject = null; loadThreads(); }
       S.chat = { thread: res.thread, messages: [res.message], jobs: [], approvals: [] }; location.hash = `#c/${res.thread.id}`;
+      if (res.thread.projectId && !S.projects.some((p: any) => p.id === res.thread.projectId)) await loadProjects();
       if (res.thread.workspaceFrom) offerJoin(res.thread);
+      else if (res.thread.projectId && !sentInProject) toast(`Filed in ${S.projects.find((p: any) => p.id === res.thread.projectId)?.name || "a project"}`);
       return;
     }
     if (into !== (r.view === "chat" ? r.id : "") || !S.chat || S.chat.thread.id !== into) { S.chat = null; location.hash = `#c/${into}`; return; }
