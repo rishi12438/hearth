@@ -1307,3 +1307,9 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 /* An Approve card's details keep their lines (a skill install lists source, code, files). */
 .predetails { white-space: pre-line; overflow-wrap: anywhere; }
 .sub.clamp2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* An Approve / No on its way: every button of that card is locked, the tapped one says what's happening. */
+.sbtn[disabled] { opacity: .5; cursor: default; pointer-events: none; }
+.sbtn.busy { opacity: 1; display: inline-flex; align-items: center; gap: 8px; }
+.sbtn.busy::before { content: ""; width: 12px; height: 12px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: apspin .7s linear infinite; }
+@keyframes apspin { to { transform: rotate(360deg); } }

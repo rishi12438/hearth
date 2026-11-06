@@ -1354,7 +1354,7 @@ function drawActivity() {
         h("span", { class: "grow" },
           h("span", { class: "l1" }, h("b", null, line), h("small", null, chan(it.threadId)), h("time", null, shortAgo(it.at))),
           h("span", { class: "l2" }, it.kind === "done" || it.kind === "failed" ? `${it.summary}${it.result ? ` — ${it.result}` : ""}` : it.kind === "blocked" ? `${it.summary}. ${it.unblock || ""}` : it.summary))),
-      it.kind === "approval" ? h("div", { class: "actbtns" }, ...(it.approval?.action?.type === "browser" ? macBrowserBtns(it.approval, renderActivity) : [h("button", { class: "sbtn", on: { click: async () => { await decide(it.approval.id, false); renderActivity(); } } }, "No"), h("button", { class: "sbtn primary", on: { click: async () => { await decide(it.approval.id, true); renderActivity(); } } }, "Approve"), alwaysBtn(it.approval, renderActivity)])) : null,
+      it.kind === "approval" ? h("div", { class: "actbtns" }, ...(it.approval?.action?.type === "browser" ? macBrowserBtns(it.approval, renderActivity) : [h("button", { class: "sbtn", ...apBtn(it.approval, "no"), on: { click: async () => { await decide(it.approval.id, false); renderActivity(); } } }, "No"), h("button", { class: "sbtn primary", ...apBtn(it.approval, "yes"), on: { click: async () => { await decide(it.approval.id, true); renderActivity(); } } }, "Approve"), alwaysBtn(it.approval, renderActivity)])) : null,
       it.kind === "blocked" ? h("div", { class: "actbtns" }, h("button", { class: "sbtn primary", on: { click: async () => { await retry(it.id); renderActivity(); } } }, "Try again"), dismissBtn(it.id, renderActivity)) : null);
   };
   // A workflow that matched: what it's doing or how it ended. Tapping it opens the agent's thread, or Workflows.
@@ -1740,7 +1740,35 @@ setInterval(() => {
   }
 }, 1000);
 
-async function decide(id: string, yes: boolean, always = false, mode?: "background" | "mine"): Promise<any> { try { return await call(`/api/approvals/${id}/${yes ? "approve" : "reject"}`, { body: { always, ...(mode ? { mode } : {}) } }); } catch (e) { handleError(e); return null; } }
+/** Cards whose answer is on its way: a second tap (here or on the same card in Activity) does nothing. */
+const deciding = new Set<string>();
+/** Every button of a card carries data-apbtn (its id) and data-kind (yes, no, always, background, mine). */
+const apBtn = (ap: any, kind: string) => ({ "data-apbtn": ap.id, "data-kind": kind });
+const BUSY_TEXT: Record<string, string> = { yes: "Approving…", always: "Approving…", background: "Starting…", mine: "Starting…", no: "Saying no…" };
+/** Lock every copy of a card's buttons while its answer goes to the hub; the one you tapped says what's happening. */
+function lockCard(id: string, kind: string | null) {
+  document.querySelectorAll<HTMLElement>(`[data-apbtn="${id}"]`).forEach((b) => {
+    if (kind === null) { b.removeAttribute("disabled"); b.classList.remove("busy"); if (b.dataset.text) b.textContent = b.dataset.text; return; }
+    b.setAttribute("disabled", "");
+    if (b.dataset.kind === kind && BUSY_TEXT[kind]) { b.dataset.text ??= b.textContent || ""; b.classList.add("busy"); b.textContent = BUSY_TEXT[kind]; }
+  });
+}
+async function decide(id: string, yes: boolean, always = false, mode?: "background" | "mine"): Promise<any> {
+  if (deciding.has(id)) return null;
+  deciding.add(id);
+  lockCard(id, mode || (always ? "always" : yes ? "yes" : "no"));
+  try {
+    const r = await call(`/api/approvals/${id}/${yes ? "approve" : "reject"}`, { body: { always, ...(mode ? { mode } : {}) } });
+    // The card shows how it ended right away, not when the live update gets here.
+    if (r?.id && r.status && r.status !== "pending") onEvent({ type: "approval", data: r });
+    return r;
+  }
+  catch (e: any) {
+    // Decided already (another tap, another device): not an error, the card just catches up.
+    if (/already decided|replaced|expired/i.test(String(e?.message || e))) { soon(); return null; }
+    lockCard(id, null); handleError(e); return null;
+  } finally { deciding.delete(id); }
+}
 /**
  * Lending your Mac's browser has two ways to say yes (src/other-browser.ts): in the background (its own headless Chrome,
  * watched here in live view) or in your own Chrome (a tab you watch). "Don't ask again" remembers the one you tap.
@@ -1749,16 +1777,16 @@ function macBrowserBtns(ap: any, then?: () => void) {
   const again = h("input", { type: "checkbox" }) as HTMLInputElement;
   const go = (mode: "background" | "mine") => async () => { await decide(ap.id, true, again.checked, mode); then?.(); };
   return [
-    h("button", { class: "sbtn primary", title: "Its own Chrome on your Mac, with your logins copied in. Nothing pops up; watch it here.", on: { click: go("background") } }, "Run in background"),
-    h("button", { class: "sbtn", title: "A new tab in the Chrome you're using, with everything you're signed in to. You can watch it.", on: { click: go("mine") } }, "Use my Chrome"),
-    h("button", { class: "sbtn", on: { click: async () => { await decide(ap.id, false); then?.(); } } }, "No"),
+    h("button", { class: "sbtn primary", ...apBtn(ap, "background"), title: "Its own Chrome on your Mac, with your logins copied in. Nothing pops up; watch it here.", on: { click: go("background") } }, "Run in background"),
+    h("button", { class: "sbtn", ...apBtn(ap, "mine"), title: "A new tab in the Chrome you're using, with everything you're signed in to. You can watch it.", on: { click: go("mine") } }, "Use my Chrome"),
+    h("button", { class: "sbtn", ...apBtn(ap, "no"), on: { click: async () => { await decide(ap.id, false); then?.(); } } }, "No"),
     h("label", { class: "apagain small muted" }, again, " Don't ask again"),
   ];
 }
 /** Approve / Always allow / No for a card (or the Mac-browser choice). */
 function apButtons(ap: any, then?: () => void) {
   if (ap?.action?.type === "browser") return macBrowserBtns(ap, then);
-  return [h("button", { class: "sbtn primary", on: { click: async () => { await decide(ap.id, true); then?.(); } } }, "Approve"), alwaysBtn(ap, then), h("button", { class: "sbtn", on: { click: async () => { await decide(ap.id, false); then?.(); } } }, "No")];
+  return [h("button", { class: "sbtn primary", ...apBtn(ap, "yes"), on: { click: async () => { await decide(ap.id, true); then?.(); } } }, "Approve"), alwaysBtn(ap, then), h("button", { class: "sbtn", ...apBtn(ap, "no"), on: { click: async () => { await decide(ap.id, false); then?.(); } } }, "No")];
 }
 /** One ask, as a card in its conversation. data-ap is what a link from Activity or a notification scrolls to. */
 function approvalCard(a: any) {
@@ -1797,7 +1825,7 @@ const approvalState = (a: any) => a.status === "done" ? "Approved and done" : a.
 const CHANNEL_NAME: Record<string, string> = { whatsapp: "WhatsApp", slack: "Slack", gmail: "Gmail", instagram: "Instagram", linkedin: "LinkedIn", x: "X" };
 /** "Always allow": for a message to one chat, one kind of Google change, or one MCP tool (scripts and payments always ask). */
 const alwaysBtn = (ap: any, then?: () => void) => ap?.action?.type === "message" || ap?.action?.type === "mcp" || (ap?.action?.type === "google" && GOOGLE_KINDS[ap.action.kind])
-  ? h("button", { class: "sbtn", title: ap.action.type === "mcp" ? `Let ${ap.action.server}'s ${ap.action.tool} run without asking from now on (change it in /mcp)` : ap.action.type === "google" ? `${GOOGLE_KINDS[ap.action.kind]}: do it without asking from now on` : `Send future ${CHANNEL_NAME[ap.action.channel] || ""} messages to ${ap.action.to} without asking`, on: { click: async () => { await decide(ap.id, true, true); then?.(); } } }, "Always allow")
+  ? h("button", { class: "sbtn", ...apBtn(ap, "always"), title: ap.action.type === "mcp" ? `Let ${ap.action.server}'s ${ap.action.tool} run without asking from now on (change it in /mcp)` : ap.action.type === "google" ? `${GOOGLE_KINDS[ap.action.kind]}: do it without asking from now on` : `Send future ${CHANNEL_NAME[ap.action.channel] || ""} messages to ${ap.action.to} without asking`, on: { click: async () => { await decide(ap.id, true, true); then?.(); } } }, "Always allow")
   : null;
 /** The Google changes that wait for Approve (connectors/google-agent.ts CHANGE_KINDS), as Settings → Always allowed names them. */
 const GOOGLE_KINDS: Record<string, string> = {
