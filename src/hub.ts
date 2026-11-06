@@ -59,6 +59,8 @@ const REVIEW_MARKER = "[[memory-review]]";
 const PURGE_MARKER = "[[library-purge]]";
 const IDEAS_MARKER = "[[ideas]]";
 const MAX_OPEN_IDEAS = 4;
+/** What a ramble's faces can turn into (the art is in web/src/looks.ts; keep the two lists the same). */
+const LOOKS = ["plane", "rocket", "car", "boat", "train", "robot", "laptop", "chef", "cat", "dog", "house", "book", "music", "plant", "money", "ball", "heart", "cloud", "brick"];
 const INBOX_WATCH = "inbox-watch";
 const LOCATION_KEEP_DAYS = 7;
 /** An Approve nobody answers stops asking after a day (expireApprovals). */
@@ -1010,7 +1012,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       // Workspaces (folders where earlier work left its files): this ramble's project's, or those outside any project.
       const project = workspaceName((await this.projectOf(thread.id))?.name);
       const workspaces = this.brain.sessions.workspaces(project);
-      const raw = await this.brain.think({ mode: "orchestrate", context: { ...ctx, thisChat: history, openTasks, recentTasks, workspaces, thisChannel: thread.id.startsWith("tm-") ? undefined : (await this.store.get<Thread>("threads", thread.id))?.channel || null }, input: said + attached }, brains.orchestrator);
+      const raw = await this.brain.think({ mode: "orchestrate", context: { ...ctx, thisChat: history, openTasks, recentTasks, workspaces, thisChannel: thread.id.startsWith("tm-") ? undefined : (await this.store.get<Thread>("threads", thread.id))?.channel || null, thisLook: thread.id.startsWith("tm-") ? undefined : (await this.store.get<Thread>("threads", thread.id))?.look || null }, input: said + attached }, brains.orchestrator);
       plan = parsePlan(raw);
     } catch (err: any) {
       await this.log("orchestrator.failed", err.message);
@@ -1067,6 +1069,9 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     // Hearth's names stay short however many topics a ramble covers: three words, 24 characters at most.
     const short = slugOf(wanted).split("-").filter(Boolean).slice(0, 3).join("-").slice(0, 24).replace(/-+$/, "");
     if (fresh && short && !thread.id.startsWith("tm-") && fresh.channelBy !== "you" && short !== fresh.channel) await this.renameThread(thread.id, short, false);
+    // What the faces turn into here (a plane, a chef…): picked with the name, kept until the topic changes.
+    const look = typeof plan.look === "string" ? plan.look.trim().toLowerCase() : "";
+    if (fresh && LOOKS.includes(look) && !thread.id.startsWith("tm-") && look !== fresh.look) await this.touchThread(thread.id, { look });
     if (plan.title && !thread.id.startsWith("tm-") && fresh?.title === batch[0].text.split(/\s+/).slice(0, 6).join(" ")) await this.touchThread(thread.id, { title: String(plan.title).slice(0, 60) });
     // Hearth's short reply, then one message per task; each task's thread (the teammate working, replies) hangs under it.
     // Keep Hearth's line short when there are task posts under it; they say the rest.

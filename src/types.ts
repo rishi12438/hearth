@@ -74,6 +74,8 @@ export type Thread = Doc & { title: string; updatedAt: string; preview?: string;
   channel?: string;
   /** Who named it: you (then it's never renamed for you) or Hearth. */
   channelBy?: "you" | "hearth";
+  /** What the teammates' faces turn into here ("plane", "rocket", "chef"…; see web/src/looks.ts). Hearth picks it with the name. */
+  look?: string;
   /** The project this ramble is filed under, if any. */
   projectId?: string;
   /** Lessons review: messages up to this time were already looked at for lessons (see Hub.learnFromThread). */

@@ -1,4 +1,5 @@
 import { h, clear, icon, richText, relTime, shortAgo, clockTime, dayLabel, greeting, toast } from "./dom.ts";
+import { LOOKS, lookArt, lookFor } from "./looks.ts";
 import { initConnectors, loadTiles, openTile, grid as connectorGrid, rows as connectorRows } from "./connectors.ts";
 import { activeHub, call, hubs, pair, removeHub, setActive, stream, normalizeUrl, ApiError, authHeaders, passkeysWork, registerPasskey, passkeyProof, unlock, requestAccess, waitForApproval, type HubRef } from "./api.ts";
 
@@ -20,6 +21,8 @@ const S = {
   threads: [] as any[],
   /** The sidebar's "Past rambles" list is open. */
   pastOpen: false,
+  /** The open ramble's look just changed: the faces drawn now play a squash-and-stretch as they turn into it. */
+  morphing: false,
   /** Routines' runs: open ones (working, or waiting on you), and Past routines (closed: on their own, or by you). */
   routines: { open: [] as any[], past: [] as any[] },
   pastRoutinesOpen: false,
@@ -319,7 +322,7 @@ function onEvent(e: { type: string; data?: any }) {
       else if (e.data.status === "pending") toast(`Needs your OK: ${e.data.summary}`);
       soon();
       return;
-    case "threads": if (open) markSeen(open); soon(); if (open && S.chat) call("/api/threads").then((l: any[]) => { const t = l.find((x) => x.id === open); if (t && S.chat) { S.chat.thread.title = t.title; drawHeader(); } }).catch(() => {}); return;
+    case "threads": if (open) markSeen(open); soon(); if (open && S.chat) call("/api/threads").then((l: any[]) => { const t = l.find((x) => x.id === open); if (t && S.chat) { const was = lookFor(S.chat.thread); S.chat.thread.title = t.title; S.chat.thread.channel = t.channel; S.chat.thread.look = t.look; if (lookFor(S.chat.thread) !== was) { S.morphing = true; drawChat(); S.morphing = false; } else drawHeader(); } }).catch(() => {}); return;
     case "teammates": loadTeammates().then(soon); return;
     case "skills": loadSkills(); return;
     case "frame": {
@@ -1457,7 +1460,8 @@ function row(who: { face: Node; name: string; badge?: Node | null }, at: string,
 }
 
 const youWho = () => ({ face: userAvatar(40), name: S.state?.prefs?.userName || "You" });
-const mateWho = (id: string, state = "idle") => { const t = mate(id); return { face: face(t, 40, state), name: t.name, badge: t.id !== "hearth" ? null : h("span", { class: "apptag" }, "APP") }; };
+// In a ramble every teammate dresses for the topic (a plane in #rc-plane-sim); DMs keep the plain face.
+const mateWho = (id: string, state = "idle") => { const t = mate(id); return { face: face(t, 40, state, lookFor(S.chat?.thread)), name: t.name, badge: t.id !== "hearth" ? null : h("span", { class: "apptag" }, "APP") }; };
 
 function dayDivider(at: string) {
   const d = new Date(at);
@@ -2474,7 +2478,11 @@ const MOVES: [RegExp, string][] = [
 ];
 const moveOf = (e: string) => MOVES.find(([re]) => re.test(e))?.[1] || "wiggle";
 
-function face(t: any, size = 44, state = "idle") {
+/** look: what the face turns into for this conversation (a plane, a rocket, a chef…; see looks.ts). It keeps its eyes. */
+function face(t: any, size = 44, state = "idle", look: string | null = null) {
+  const L = look ? LOOKS[look] : null;
+  if (L) return h("span", { class: `face look look-${look} mv-${L.move} ${L.smile === false ? "nosmile" : ""} ${S.morphing ? "morph" : ""} ${state}`, style: `--c:${t.color};--s:${size}px;--ex:${L.eyes[0]}%;--ey:${L.eyes[1]}%`, role: "img", "aria-label": `${t.name} as a ${look}, ${state}` },
+    lookArt(look!), h("span", { class: "eyes" }, h("i", { class: "eye" }), h("i", { class: "eye" })));
   const badge = size >= 26 ? badgeOf(t) : null;
   return h("span", { class: `face ${shapeOf(t.id)} ${state}`, style: `--c:${t.color};--s:${size}px`, role: "img", "aria-label": `${t.name}, ${state}` },
     h("span", { class: "eyes" }, h("i", { class: "eye" }), h("i", { class: "eye" })),
