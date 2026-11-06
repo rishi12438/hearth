@@ -661,7 +661,8 @@ let pinned = false;
 const nearBottom = (s: HTMLElement) => s.scrollHeight - s.scrollTop - s.clientHeight < 120;
 function stickBottom() {
   pinned = true;
-  requestAnimationFrame(() => { const s = document.getElementById("scroll"); if (s) s.scrollTop = s.scrollHeight; });
+  const go = () => { const s = document.getElementById("scroll"); if (s && pinned) s.scrollTop = s.scrollHeight; };
+  go(); requestAnimationFrame(go);
 }
 /** Scrolled up, reading: the message at the top of what you see. Redraws (an Approve, a new reply, a picture loading)
  *  keep it right where it is on screen, so the conversation never moves under you. */
@@ -693,7 +694,21 @@ function fitBottom() {
   const foot = document.querySelector(".screen > .chrome-bottom") as HTMLElement | null;
   const s = document.getElementById("scroll");
   if (!foot || !s || typeof ResizeObserver === "undefined") return;
-  s.addEventListener("scroll", () => { pinned = nearBottom(s); if (!pinned) grabAnchor(s); }, { passive: true });
+  // Only you (wheel, trackpad, touch, keys, the scrollbar) let go of the bottom. A page that just got taller (a new
+  // message, an answer, an inline page loading) fires scroll events too, sometimes late, after the growth (Safari, the
+  // Mac app): those never count as leaving, so the page stays pinned.
+  let touched = 0;
+  const you = () => { touched = performance.now(); };
+  s.addEventListener("wheel", (e) => { if ((e as WheelEvent).deltaY < 0) you(); }, { passive: true });
+  s.addEventListener("touchmove", you, { passive: true });
+  s.addEventListener("mousedown", (e) => { if ((e as MouseEvent).offsetX > s.clientWidth) you(); }); // the scrollbar
+  s.addEventListener("keydown", (e) => { if (["ArrowUp", "PageUp", "Home", " "].includes((e as KeyboardEvent).key)) you(); });
+  s.addEventListener("scroll", () => {
+    if (nearBottom(s)) { pinned = true; return; }
+    if (performance.now() - touched < 1200) { pinned = false; grabAnchor(s); }
+    else if (pinned) s.scrollTop = s.scrollHeight;
+    else grabAnchor(s);
+  }, { passive: true });
   // Exactly the composer's height plus a little air: the newest message sits right above it, no empty gap (the fixed
   // 150px in the CSS is the phone's tab bar plus composer, too tall on a wide window).
   let last = 0;
