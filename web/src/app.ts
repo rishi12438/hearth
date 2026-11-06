@@ -20,6 +20,9 @@ const S = {
   threads: [] as any[],
   /** The sidebar's "Past rambles" list is open. */
   pastOpen: false,
+  /** Routines' runs: open ones (working, or waiting on you), and Past routines (closed: on their own, or by you). */
+  routines: { open: [] as any[], past: [] as any[] },
+  pastRoutinesOpen: false,
   /** What's typed in the Past rambles search box. */
   pastQuery: "",
   chat: null as any,            // open group chat: { thread, messages, jobs, approvals }
@@ -607,7 +610,11 @@ async function loadRoster() {
 }
 
 async function loadThreads() {
-  try { S.threads = await call("/api/threads"); if (route().view === "home") drawHome(); drawSide(); } catch (e) { handleError(e); }
+  try {
+    const [threads, routines] = await Promise.all([call("/api/threads"), call("/api/routines").catch(() => S.routines)]);
+    S.threads = threads; S.routines = routines;
+    if (route().view === "home") drawHome(); drawSide();
+  } catch (e) { handleError(e); }
 }
 
 // ---------------- chrome: floating glass header, tab bar, search (Slack mobile) ----------------
@@ -638,6 +645,42 @@ function frame(opts: { header: Node; body: Node; composer?: boolean; fab?: boole
         tabs)));
   if (opts.composer) renderComposer();
   drawSide();
+}
+
+/** Where a routine's run lives: its thread, opened at that run (or the DM it posted in). */
+const runLink = (x: any) => x.threadId.startsWith("tm-") ? `#t/${x.threadId.slice(3)}` : `#c/${x.threadId}/${x.id}`;
+
+async function closeRun(id: string) {
+  try {
+    await call(`/api/routines/${id}/close`, { body: {} });
+    const x = S.routines.open.find((r: any) => r.id === id);
+    if (x) { S.routines.open = S.routines.open.filter((r: any) => r.id !== id); S.routines.past.unshift({ ...x, closedAt: new Date().toISOString(), closedBy: "you" }); }
+    drawSide();
+  } catch (e) { handleError(e); }
+}
+
+/**
+ * Routines, in the sidebar under Rambles: each run of a routine (named for what happened). One that needs you (it
+ * asked you something, an Approve waits, it's stuck) stays with a dot until you close it; one that only told you
+ * something closes itself into Past routines, like Past rambles.
+ */
+function routinesSide(r: Route) {
+  const { open, past } = S.routines;
+  if (!open.length && !past.length) return null;
+  const on = (x: any) => r.view === "chat" && location.hash.startsWith(`#c/${x.threadId}/${x.id}`);
+  const runRow = (x: any, nested = false) => h("div", { class: "srow" },
+    h("button", { class: `snav ${nested ? "nested" : ""} ${on(x) ? "on" : ""} ${x.needsYou ? "unread" : ""}`, title: `${x.routine}: ${x.label}`, on: { click: () => { location.hash = runLink(x); } } },
+      icon("zap", 14), h("span", { class: "grow" }, x.label),
+      x.status === "working" ? h("i", { class: "rundot", title: "Running" }) : x.needsYou ? h("i", { class: "udot", title: x.status === "waiting" ? "Needs your OK" : x.status === "blocked" ? "Stuck" : "Needs your answer" }) : null),
+    nested ? null : h("button", { class: "sact", "aria-label": "Close", title: "Close: move it to Past routines", on: { click: () => closeRun(x.id) } }, icon("x", 14)));
+  return [
+    h("div", { class: "slabel" }, "Routines", h("button", { class: "sadd", "aria-label": "Routines", title: "See and change your routines", on: { click: () => openTriggers("triggers") } }, icon("zap", 14))),
+    h("nav", { class: "sgroup" },
+      open.length ? open.slice(0, 15).map((x: any) => runRow(x)) : h("p", { class: "snone" }, "Nothing needs you."),
+      past.length ? h("button", { class: `snav spast ${S.pastRoutinesOpen ? "open" : ""}`, "aria-expanded": String(S.pastRoutinesOpen), on: { click: () => { S.pastRoutinesOpen = !S.pastRoutinesOpen; drawSide(); } } },
+        icon("chevron", 14), h("span", { class: "grow" }, "Past routines"), h("small", { class: "scount" }, String(past.length))) : null,
+      S.pastRoutinesOpen ? past.slice(0, 30).map((x: any) => runRow(x, true)) : past.filter(on).map((x: any) => runRow(x, true))),
+  ];
 }
 
 /** The desktop sidebar: where you are, your projects and rambles, your teammates, and the rest. One place for each thing. */
@@ -708,6 +751,7 @@ function drawSide() {
       past.length ? h("button", { class: `snav spast ${S.pastOpen ? "open" : ""}`, "aria-expanded": String(S.pastOpen), on: { click: () => { S.pastOpen = !S.pastOpen; if (!S.pastOpen) S.pastQuery = ""; drawSide(); if (S.pastOpen) document.querySelector<HTMLInputElement>(".spastq")?.focus(); } } },
         icon("chevron", 14), h("span", { class: "grow" }, "Past rambles"), h("small", { class: "scount" }, String(past.length))) : null,
       pastSearch, pastList),
+    routinesSide(r),
     team.length ? [h("div", { class: "slabel" }, "Teammates"), h("nav", { class: "sgroup" }, team.map((t: any) =>
       h("button", { class: `snav mate ${r.view === "dm" && r.id === t.id ? "on" : ""}`, on: { click: () => { location.hash = `#t/${t.id}`; } } },
         face(t, 22, t.state || "idle"), h("span", { class: "grow" }, t.name), t.needsYou ? h("em", null, String(t.needsYou)) : unreadDm(t) ? h("i", { class: "udot", title: "New since you last looked" }) : null)))] : null,
@@ -1580,9 +1624,29 @@ function triggerPostPending(m: any) {
   return !j || j.status === "queued" || j.status === "working";
 }
 
+/**
+ * What set a routine's run off, readable: the event's own title and text (an email's subject and body), not the
+ * routine's instructions or raw JSON. Folded; the full brief is one more tap for the curious.
+ */
+function whatSetItOff(handoff: any): Node | null {
+  if (!handoff) return null;
+  const text = String(handoff.text);
+  const raw = text.match(/What happened \(from [^)]*\):\n<untrusted>\n([\s\S]*?)\n<\/untrusted>/)?.[1] || "";
+  let shown = "";
+  try {
+    const v = JSON.parse(raw)?.variables || {};
+    shown = [v.title, v.text].filter((x: any) => typeof x === "string" && x.trim()).join("\n\n")
+      || Object.entries(v).filter(([, x]) => typeof x !== "object").map(([k, x]) => `${k}: ${x}`).join("\n");
+  } catch { shown = raw; }
+  const brief = text.split(/\n\nWhat happened \(/)[0];
+  return h("details", { class: "trigdata" }, h("summary", null, "What set it off"),
+    h("pre", { class: "output" }, (shown || "(nothing to show)").replace(/\\n/g, "\n").slice(0, 4000)),
+    h("details", { class: "trigdata" }, h("summary", null, "What the routine asked"), h("pre", { class: "output" }, brief)));
+}
+
 /** The small ⚡ above what an agent did because a workflow fired. Tap it to see what set it off. */
 function sparkLine(trigger: { title: string }, handoff: any): Node[] {
-  const what = handoff ? h("details", { class: "trigdata" }, h("summary", null, "What set it off"), h("pre", { class: "output" }, String(handoff.text).replace(/<\/?untrusted>/g, "").trim())) : null;
+  const what = whatSetItOff(handoff);
   return what ? [h("div", { class: "proline spark" }, icon("zap", 13), trigger.title), what] : [h("div", { class: "proline spark" }, icon("zap", 13), trigger.title)];
 }
 
@@ -1779,8 +1843,11 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
     ...[j, ...follow].map((x: any) => ({ at: when(x), node: () => answer(x) })),
   ].sort((a, b) => a.at - b.at);
   const n = items.filter((x) => x.at !== Infinity).length;
+  // Started by a routine: its ⚡ name and this run's own name; the routine's long brief stays folded, never the post.
+  const handoff = S.chat.messages.find((m: any) => m.id === j.messageId && m.fromTrigger);
   const nodes: (Node | null)[] = [
-    row(mateWho("hearth"), j.createdAt, [h("div", { class: "ttitle" }, jobLabel(j)), h("div", { class: "brief" }, withMentions(`@${t.name} ${String(j.task).split("\n\nThe user added: ")[0]}`))]),
+    handoff ? row(mateWho("hearth"), j.createdAt, [h("div", { class: "proline spark" }, icon("zap", 13), handoff.fromTrigger.title), h("div", { class: "ttitle" }, jobLabel(j)), whatSetItOff(handoff)])
+      : row(mateWho("hearth"), j.createdAt, [h("div", { class: "ttitle" }, jobLabel(j)), h("div", { class: "brief" }, withMentions(`@${t.name} ${String(j.task).split("\n\nThe user added: ")[0]}`))]),
     h("div", { class: "repdiv" }, n ? `${n} repl${n === 1 ? "y" : "ies"}` : "No replies yet"),
     ...items.map((x) => x.node()),
     ...looseApprovals((S.chat.approvals || []).filter((a: any) => [j, ...follow].some((x: any) => x.id === a.jobId)),
@@ -1949,16 +2016,9 @@ function drawDm(stick = true) {
   for (const x of looseApprovals(d.approvals.filter((a: any) => !d.jobs.some((j: any) => j.id === a.jobId && !direct.has(j.messageId))), shownHere)) items.push({ at: x.at, nodes: [x.node] });
   S.chat = saved;
   items.sort((a, b) => a.at.localeCompare(b.at));
-  const elsewhere = d.jobs.filter((j: any) => !direct.has(j.messageId) && !j.followsUp).slice(-6).reverse();
   clear(el,
     h("div", { class: "dmhero" }, face(t, 72, t.state), h("h2", null, t.name), h("p", null, t.description || role(t)),
-      S.state?.device.primary ? h("button", { class: "btn small ghost sharebtn", on: { click: () => shareTeammate(t.id) } }, icon("share", 15), "Share") : null,
-      d.routines.length ? h("div", { class: "routines" }, h("small", null, "Routines"), d.routines.map((r: any) =>
-        h("button", { class: `routine ${r.status}`, on: { click: () => openTriggers("triggers") } }, icon(r.timed ? "clock" : "zap", 14),
-          h("span", { class: "rtext" }, h("b", null, r.title), h("small", null, r.why || r.when)),
-          h("small", { class: "rwhen" }, r.status === "paused" ? "paused" : r.timed ? r.when : r.lastFiredAt ? `ran ${shortAgo(r.lastFiredAt)}${r.fireCount > 1 ? ` · ${r.fireCount}×` : ""}` : "hasn't run yet")))) : null,
-      elsewhere.length ? h("div", { class: "routines" }, h("small", null, "In rambles"), elsewhere.map((j: any) =>
-        h("button", { class: "routine", on: { click: () => { location.hash = `#c/${j.threadId}/${j.id}`; } } }, face(t, 18, jobState(j)), h("span", null, j.label || j.task), h("small", null, j.status === "done" ? shortAgo(j.finishedAt || j.updatedAt) : j.status)))) : null),
+      S.state?.device.primary ? h("button", { class: "btn small ghost sharebtn", on: { click: () => shareTeammate(t.id) } }, icon("share", 15), "Share") : null),
     items.flatMap((x) => x.nodes),
     queuedRows(d.messages.filter((m: any) => m.queued), d.jobs.filter((j: any) => !j.parentId && direct.has(j.messageId))));
   if (stick) requestAnimationFrame(() => { const s = document.getElementById("scroll")!; s.scrollTop = s.scrollHeight; });

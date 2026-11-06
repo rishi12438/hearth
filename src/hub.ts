@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store, Collection } from "./store/index.ts";
 import type { Brain, BrainFile, BrainInput, BrainProfile, Brains, Meter } from "./brain.ts";
-import { QUIET, ESCALATE, escalateWhy, HAND_BACK, MAX_RUN_FILES, REDO, HARNESSES, MODEL_RE, availableHarnesses, NeedsComputer, BrainsFull, POOL_HARNESSES } from "./brain.ts";
+import { QUIET, ANSWER_NEEDED, ESCALATE, escalateWhy, HAND_BACK, MAX_RUN_FILES, REDO, HARNESSES, MODEL_RE, availableHarnesses, NeedsComputer, BrainsFull, POOL_HARNESSES } from "./brain.ts";
 import type { Scripts } from "./scripts.ts";
 import type { Push } from "./push.ts";
 import { parseReply } from "./reply.ts";
@@ -768,6 +768,66 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     return `${script} crashed; started a repair (the fix waits for your Approve)`;
   }
 
+  /** Runs from before each was named for its event (all "Inbox watch"): named from their saved event, once. */
+  private async nameOldRoutineRuns() {
+    const msgs = new Map((await this.store.all<Message>("messages")).filter((m) => m.fromTrigger?.eventId).map((m) => [m.id, m]));
+    for (const j of await this.store.all<Job>("jobs")) {
+      const from = j.messageId ? msgs.get(j.messageId)?.fromTrigger : undefined;
+      if (!from?.eventId || j.parentId || j.followsUp || (j.label && j.label !== from.title.slice(0, 60))) continue;
+      const e = this.pipeline.getEvent(from.eventId);
+      const head = e ? eventHeadline(e) : "";
+      if (head) await this.store.put<Job>("jobs", { ...j, label: head.slice(0, 60) });
+    }
+  }
+
+  /** The root job of a routine's run (a task a trigger started), or null. */
+  private async routineRoot(job: Job): Promise<Job | null> {
+    if (job.parentId) return null;
+    const root = job.followsUp ? await this.store.get<Job>("jobs", job.followsUp) : job;
+    if (!root || root.parentId || root.followsUp) return null;
+    const m = root.messageId ? await this.store.get<Message>("messages", root.messageId) : null;
+    return m?.fromTrigger ? root : null;
+  }
+
+  /**
+   * A turn of a routine's run ended: it stays open if it needs you (it asked for an answer, an Approve is waiting,
+   * it's stuck or failed), and closes itself otherwise. Your reply reopens it until that turn ends too.
+   */
+  private async settleRoutineRun(job: Job) {
+    if (job.status === "queued" || job.status === "working") return;
+    const root = await this.routineRoot(job);
+    if (!root) return;
+    const fresh = (await this.store.get<Job>("jobs", root.id)) || root;
+    if (fresh.routine?.closedBy === "you") return;
+    const needs = !!job.answerNeeded || job.status !== "done";
+    await this.saveJob({ ...fresh, routine: needs ? { needsAnswer: true } : { needsAnswer: false, closedAt: this.clock().toISOString(), closedBy: "auto" } });
+  }
+
+  /** You closed a routine's run: it goes to Past routines. */
+  async closeRoutineRun(id: string) {
+    const job = await this.store.get<Job>("jobs", id);
+    if (!job || !(await this.routineRoot(job)) || job.followsUp) return { error: "That isn't a routine's run." };
+    return { value: await this.saveJob({ ...job, routine: { needsAnswer: false, closedAt: this.clock().toISOString(), closedBy: "you" } }) };
+  }
+
+  /** Routines' runs for the sidebar: open ones (working, or waiting on you), then Past routines, newest first. Quiet runs leave no trace. */
+  async routineRuns() {
+    const jobs = await this.store.all<Job>("jobs");
+    const msgs = new Map((await this.store.all<Message>("messages")).filter((m) => m.fromTrigger).map((m) => [m.id, m]));
+    const runs = jobs.filter((j) => !j.parentId && !j.followsUp && j.messageId && msgs.has(j.messageId) && !j.quiet && !String(j.result || "").includes(QUIET))
+      .map((j) => {
+        const turns = jobs.filter((x) => x.id === j.id || x.followsUp === j.id);
+        const last = turns.sort((a, b) => a.createdAt.localeCompare(b.createdAt)).at(-1)!;
+        const busy = turns.some((x) => x.status === "working" || x.status === "queued");
+        const from = msgs.get(j.messageId!)!.fromTrigger!;
+        return { id: j.id, threadId: j.threadId, label: j.label || shortLabel(undefined, j.task), routine: from.title, triggerId: from.id,
+          status: busy ? "working" : last.status, needsYou: !busy && !!j.routine?.needsAnswer, closedAt: busy ? undefined : j.routine?.closedAt,
+          closedBy: j.routine?.closedBy, at: last.finishedAt || last.updatedAt || last.createdAt };
+      })
+      .sort((a, b) => b.at.localeCompare(a.at));
+    return { open: runs.filter((r) => !r.closedAt), past: runs.filter((r) => r.closedAt).slice(0, 200) };
+  }
+
   /** A job a trigger handed an event to has finished: one line on that event's run (done, quiet or failed). */
   private async noteTriggerRun(job: Job) {
     if (job.parentId) return;
@@ -1209,7 +1269,9 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       // It pulled a fresh login from your Mac mid-run: go again with it, without you tapping anything.
       if (this.rerunAfterLogin.delete(job.id) && status === "blocked") { await this.retryJob(job.id, { refreshed: true }); return; }
       // Started by a trigger: how it ended goes in that run's log, so Activity's Workflows shows it (quiet ones too).
+      if (String(cur.result || "").includes(ANSWER_NEEDED)) cur = await this.saveJob({ ...cur, result: String(cur.result).replace(ANSWER_NEEDED, "").trim(), answerNeeded: true });
       if (status === "done" || status === "failed") await this.noteTriggerRun(cur).catch(() => {});
+      await this.settleRoutineRun(cur).catch((e) => console.error("routine run", e));
       // A trigger's run that had nothing to say ([[quiet]]): nothing shows and nothing buzzes.
       if (status === "done" && String(cur.result || "").includes(QUIET) && await this.quietTriggerRun(cur)) return;
       // The last task from a trigger finished and spoke, but earlier ones were quiet: they stay, labelled (above).
@@ -3721,6 +3783,7 @@ ${JSON.stringify(shown, null, 1)}
     await this.ensureBuiltIns();
     await this.ensureStarterComponents();
     await this.resumeAfterRestart();
+    await this.nameOldRoutineRuns().catch((e) => console.error("naming routine runs", e));
     // Rambles from before they had names: name them from their titles (Hearth refines it on the next message).
     for (const t of await this.store.all<Thread>("threads")) if (t.num && !t.channel && t.title) await this.renameThread(t.id, nameFrom(t.title), false);
     this.timer = setInterval(() => this.tick().catch((e) => console.error("tick failed", e)), intervalMs);
@@ -4502,6 +4565,7 @@ ${JSON.stringify(shown, null, 1)}
       `It's "${t.title}" (trigger ${t.name}, on source ${t.sourceName}), made by ${t.createdBy} on ${t.createdAt.slice(0, 10)}${t.why ? `: ${t.why}` : "."}`,
       r.job ? `It was made in task ${r.job}${r.workspace ? `, working in the "${r.workspace}" workspace (its NOTES.md, scripts and data are there)` : ""}.` : r.workspace ? `Its notes, scripts and data are in the "${r.workspace}" workspace.` : "",
       `Do what the message asks with your normal tools. If the workflow itself is wrong for what came in (the event's shape changed, it fires on the wrong things), fix it with trigger.update and say so. If there's nothing worth doing, reply exactly ${QUIET}.`,
+      `If the user has to answer you before this can go on (a question only they can answer, a choice to make), end your reply with ${ANSWER_NEEDED}. Approve cards ask for themselves, so don't add it just for one. If you're only telling them something, leave it off: the run closes itself and goes to Past routines.`,
     ].filter(Boolean).join("\n");
   }
 
