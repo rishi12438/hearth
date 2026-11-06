@@ -1384,8 +1384,6 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 .face.look.morph { animation: morph .7s cubic-bezier(.3, 1.4, .5, 1) 1; }
 
 
-/* "Looks like #rc-plane-sim": a new ramble started in an earlier one's folder, with the choice to move into it. */
-.joincard { display: flex; align-items: center; gap: 10px; margin: 8px 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
-.joincard .grow { display: flex; flex-direction: column; min-width: 0; }
-.joincard small { color: var(--muted); }
-@media (max-width: 600px) { .joincard { flex-wrap: wrap; } .joincard .grow { flex-basis: 100%; } }
+/* A ramble started in an earlier one's folder: one light line under the header. */
+.workingoff { display: flex; align-items: center; gap: 3px; margin: 0 auto 10px; padding: 2px 8px; color: var(--muted); font-size: 12.5px; background: none; border: 0; }
+.workingoff:hover { color: var(--ink); }

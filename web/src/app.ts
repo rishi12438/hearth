@@ -1553,23 +1553,24 @@ async function fillNow(el: HTMLElement) {
   ].map((x) => h("button", { on: { click: () => send(x) } }, x))));
 }
 
-/** Started in an earlier ramble's folder (it looked like the same subject): say so, and offer to move it all in there. */
+/** Started in an earlier ramble's folder (it looked like the same subject): a light line saying so, tap to open that one. */
 function joinCard(t: any): Node | null {
-  if (!t?.workspaceFrom || t.workspaceKept) return null;
-  const from = S.threads.find((x: any) => x.id === t.workspaceFrom);
+  const from = t?.workspaceFrom ? S.threads.find((x: any) => x.id === t.workspaceFrom) : null;
   if (!from) return null;
-  const pick = async (how: "move" | "keep", btn: HTMLButtonElement) => {
-    btn.disabled = true;
-    try {
-      const r = await call(`/api/threads/${t.id}/join`, { body: { how } });
-      if (how === "keep") { t.workspaceKept = true; drawChat(false); return; }
-      S.chat = null; loadThreads(); location.hash = `#c/${r.threadId}`;
-    } catch (e) { btn.disabled = false; handleError(e); }
-  };
-  return h("div", { class: "joincard" },
-    h("span", { class: "grow" }, h("b", null, `Looks like #${channelName(from)}`), h("small", null, `Working in its folder, so it can use what was done there.`)),
-    h("button", { class: "btn small ghost", on: { click: (e: Event) => pick("keep", e.currentTarget as HTMLButtonElement) } }, "Keep separate"),
-    h("button", { class: "btn small primary", on: { click: (e: Event) => pick("move", e.currentTarget as HTMLButtonElement) } }, `Move into #${channelName(from)}`));
+  return h("button", { class: "workingoff", on: { click: () => { location.hash = `#c/${from.id}`; } } }, `Working off #${channelName(from)}'s workspace`, icon("chevron", 12));
+}
+
+/** Right after a new ramble starts in an earlier one's folder: offer to move it in there. It goes away on its own (and
+ *  then stays its own ramble). */
+function offerJoin(t: any) {
+  const from = S.threads.find((x: any) => x.id === t.workspaceFrom);
+  const name = from ? `#${channelName(from)}` : "the earlier ramble";
+  countdownCard(`join-${t.id}`, `Looks like ${name}`, "Working in its folder. Stays its own ramble", Date.now() + 8000, "Keep separate", { moveLabel: `Move into ${name}`, timeUp: "keep", lead: " · " })
+    .then(async (how) => {
+      if (how !== "move") return;
+      try { const r = await call(`/api/threads/${t.id}/join`, { body: { how: "move" } }); if (S.chat?.thread?.id === t.id) S.chat = null; loadThreads(); location.hash = `#c/${r.threadId}`; }
+      catch (e) { handleError(e); }
+    });
 }
 
 function drawChannel(el: HTMLElement, stick: boolean) {
@@ -2539,7 +2540,9 @@ async function send(text: string, threadJob?: string) {
     if (!res.message?.continues?.length) S.planning = res.thread.id;
     if (!inChat) {
       if (S.newProject) { S.newProject = null; loadThreads(); }
-      S.chat = { thread: res.thread, messages: [res.message], jobs: [], approvals: [] }; location.hash = `#c/${res.thread.id}`; return;
+      S.chat = { thread: res.thread, messages: [res.message], jobs: [], approvals: [] }; location.hash = `#c/${res.thread.id}`;
+      if (res.thread.workspaceFrom) offerJoin(res.thread);
+      return;
     }
     if (into !== (r.view === "chat" ? r.id : "") || !S.chat || S.chat.thread.id !== into) { S.chat = null; location.hash = `#c/${into}`; return; }
     upsert(S.chat.messages, res.message);
@@ -2596,7 +2599,7 @@ const jobStatus = new Map<string, string>();
 /** An in-app notification: who, what, tap to open. Stacks at the top; goes away on its own. */
 /** A card with a countdown: does "move" when the time's up unless you tap the other choice. Several can be up at once (by key). */
 const countdowns = new Map<string, (how?: "move" | "keep") => void>();
-function countdownCard(key: string, title: string, sub: string, until: number, keepLabel: string): Promise<"move" | "keep"> {
+function countdownCard(key: string, title: string, sub: string, until: number, keepLabel: string, o: { moveLabel?: string; timeUp?: "move" | "keep"; lead?: string } = {}): Promise<"move" | "keep"> {
   countdowns.get(key)?.();
   return new Promise((done) => {
     let settled = false;
@@ -2606,14 +2609,14 @@ function countdownCard(key: string, title: string, sub: string, until: number, k
     const bar = h("i", { class: "suggestbar" });
     bar.style.animationDuration = `${Math.max(0.2, (until - Date.now()) / 1000)}s`;
     const card = h("div", { class: "banner suggest", role: "status" },
-      h("span", { class: "grow" }, h("b", null, title), h("small", null, sub, " in ", count), bar),
+      h("span", { class: "grow" }, h("b", null, title), h("small", null, sub, o.lead ?? " in ", count), bar),
       h("button", { class: "btn small ghost", on: { click: () => finish("keep") } }, keepLabel),
-      h("button", { class: "btn small primary", on: { click: () => finish("move") } }, "Move now"));
+      h("button", { class: "btn small primary", on: { click: () => finish("move") } }, o.moveLabel || "Move now"));
     let stack = document.getElementById("banners");
     if (!stack) { stack = h("div", { id: "banners", "aria-live": "polite" }); document.body.appendChild(stack); }
     stack.appendChild(card);
     requestAnimationFrame(() => card.classList.add("show"));
-    const timer = setInterval(() => { count.textContent = `${left()}s`; if (left() <= 0) finish("move"); }, 250);
+    const timer = setInterval(() => { count.textContent = `${left()}s`; if (left() <= 0) finish(o.timeUp || "move"); }, 250);
     countdowns.set(key, finish);
   });
 }
