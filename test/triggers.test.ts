@@ -396,11 +396,12 @@ test("a routine's run closes itself when it only tells you something; one that n
   const run = async (id: string, result: string, status = "done") => {
     await store.put<any>("messages", { id: `m-${id}`, createdAt: now, role: "user", text: "brief", threadId: "th-r", hidden: true, fromTrigger: { id: "t1", title: "Inbox watch", eventId: `e-${id}` } });
     const job = await store.put<any>("jobs", { id, createdAt: now, threadId: "th-r", messageId: `m-${id}`, task: "brief", label: `Run ${id}`, teammateId: "hearth", status, result, answerNeeded: result.includes("[[answer-needed]]") });
-    await (hub as any).settleRoutineRun(job);
+    return (hub as any).settleRoutineRun(job);
   };
-  await run("fyi", "Checked in reminder set.");
-  await run("ask", "Jason asked to meet. Tuesday or Wednesday? [[answer-needed]]");
-  await run("ok", "Drafted a reply.", "waiting");
+  // Only the one that closed itself skips the notification; the ones that need you still buzz.
+  expect(await run("fyi", "Checked in reminder set.")).toBe(true);
+  expect(await run("ask", "Jason asked to meet. Tuesday or Wednesday? [[answer-needed]]")).toBe(false);
+  expect(await run("ok", "Drafted a reply.", "waiting")).toBe(false);
   let r = await hub.routineRuns();
   expect(r.open.map((x) => x.id).sort()).toEqual(["ask", "ok"]);
   expect(r.open.every((x) => x.needsYou && x.routine === "Inbox watch")).toBe(true);

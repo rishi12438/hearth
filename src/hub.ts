@@ -807,15 +807,18 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
   /**
    * A turn of a routine's run ended: it stays open if it needs you (it asked for an answer, an Approve is waiting,
    * it's stuck or failed), and closes itself otherwise. Your reply reopens it until that turn ends too.
+   * True when a run's first turn closed itself: it was only telling you something, so it goes to Past routines
+   * without a notification (only runs that need you buzz; a reply to one you answered still does).
    */
-  private async settleRoutineRun(job: Job) {
-    if (job.status === "queued" || job.status === "working") return;
+  private async settleRoutineRun(job: Job): Promise<boolean> {
+    if (job.status === "queued" || job.status === "working") return false;
     const root = await this.routineRoot(job);
-    if (!root) return;
+    if (!root) return false;
     const fresh = (await this.store.get<Job>("jobs", root.id)) || root;
-    if (fresh.routine?.closedBy === "you") return;
+    if (fresh.routine?.closedBy === "you") return false;
     const needs = !!job.answerNeeded || job.status !== "done";
     await this.saveJob({ ...fresh, routine: needs ? { needsAnswer: true } : { needsAnswer: false, closedAt: this.clock().toISOString(), closedBy: "auto" } });
+    return !needs && !job.followsUp;
   }
 
   /** You closed a routine's run: it goes to Past routines. */
@@ -1292,9 +1295,11 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       if (named) cur = await this.saveJob({ ...cur, result: String(cur.result).replace(RUN_NAME, ""), ...(!cur.followsUp && !cur.parentId ? { label: shortName(named[1]) } : {}) });
       if (String(cur.result || "").includes(ANSWER_NEEDED)) cur = await this.saveJob({ ...cur, result: String(cur.result).replace(ANSWER_NEEDED, "").trim(), answerNeeded: true });
       if (status === "done" || status === "failed") await this.noteTriggerRun(cur).catch(() => {});
-      await this.settleRoutineRun(cur).catch((e) => console.error("routine run", e));
+      const closedItself = await this.settleRoutineRun(cur).catch((e) => { console.error("routine run", e); return false; });
       // A trigger's run that had nothing to say ([[quiet]]): nothing shows and nothing buzzes.
       if (status === "done" && String(cur.result || "").includes(QUIET) && await this.quietTriggerRun(cur)) return;
+      // A routine's run that only told you something: it's in Past routines, but it doesn't buzz.
+      if (closedItself) return;
       // The last task from a trigger finished and spoke, but earlier ones were quiet: they stay, labelled (above).
       // Tell the phone: "Fitness finished: Knee before volleyball". Tapping it opens the task's thread.
       if (!job.parentId && (status === "done" || status === "failed")) {
@@ -4696,7 +4701,7 @@ ${JSON.stringify(shown, null, 1)}
       r.job ? `It was made in task ${r.job}${r.workspace ? `, working in the "${r.workspace}" workspace (its NOTES.md, scripts and data are there)` : ""}.` : r.workspace ? `Its notes, scripts and data are in the "${r.workspace}" workspace.` : "",
       `Do what the message asks with your normal tools. If the workflow itself is wrong for what came in (the event's shape changed, it fires on the wrong things), fix it with trigger.update and say so. If there's nothing worth doing, reply exactly ${QUIET}.`,
       `Start your reply with ${"[[name: …]]"} on its own line: 2-5 words naming this run for the user, like [[name: Frontier check-in tomorrow]] or [[name: Jason wants to meet]]. It's the run's title in Routines, so make it say what this was about, not the routine's name.`,
-      `If the user has to answer you before this can go on (a question only they can answer, a choice to make), end your reply with ${ANSWER_NEEDED}. Approve cards ask for themselves, so don't add it just for one. If you're only telling them something, leave it off: the run closes itself and goes to Past routines.`,
+      `If the user has to answer you before this can go on (a question only they can answer, a choice to make), end your reply with ${ANSWER_NEEDED}. Approve cards ask for themselves, so don't add it just for one. If you're only telling them something, leave it off: the run closes itself and goes to Past routines without a notification. So only add it when they really have to answer; and if what came in isn't worth their attention at all (an automatic notice with nothing for them to do), reply ${QUIET} instead of a summary.`,
     ].filter(Boolean).join("\n");
   }
 
