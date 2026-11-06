@@ -1387,3 +1387,5 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 /* A ramble started in an earlier one's folder: one light line under the header. */
 .workingoff { display: flex; align-items: center; gap: 3px; margin: 0 auto 10px; padding: 2px 8px; color: var(--muted); font-size: 12.5px; background: none; border: 0; }
 .workingoff:hover { color: var(--ink); }
+div.workingoff { gap: 8px; max-width: 560px; text-align: left; }
+div.workingoff .linkbtn { margin-top: 0; font-size: 12.5px; flex: none; }

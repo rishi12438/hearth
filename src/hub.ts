@@ -657,85 +657,107 @@ export class Hub {
     const t = await this.store.get<Thread>("threads", threadId);
     if (!t || t.id.startsWith("tm-") || t.id === "main") return { error: "No such ramble." };
     if (projectId && !(await this.store.get<Project>("projects", projectId))) return { error: "No such project." };
-    const saved = await this.store.put<Thread>("threads", { ...t, projectId: projectId || undefined });
+    const saved = await this.store.put<Thread>("threads", { ...t, projectId: projectId || undefined, filedBy: "you", groupedWhy: undefined });
     this.emit("threads"); this.emit("projects");
     return { value: saved };
   }
 
   /**
-   * A project its words all name ("wedding cake ideas" fits Wedding; "Japan trip" needs both words), the longest name
-   * first. So a new ramble about a project's subject is filed there even when no earlier ramble matches.
+   * Is a new ramble part of a project? Each ramble started since groupingSince is looked at once, by the workhorse agent,
+   * after its first work is done (so there's something to go on) and while nothing in it is running (its folder may move).
+   * The agent sees the ramble, your projects and recent loose rambles, and is told to be cautious: a ramble in the wrong
+   * project is noise in that project's memory and folder, and you can always file it yourself. It joins an existing
+   * project, starts a new one with other loose rambles of the same project (two or more), or leaves it. It always says
+   * why, and the why shows on the ramble. Rambles you filed or took out yourself are never moved.
    */
-  private async projectByName(text: string): Promise<Project | null> {
-    const q = subjectWords(text);
-    if (!q.size) return null;
-    let best: Project | null = null, bestN = 0;
-    for (const p of await this.store.all<Project>("projects")) {
-      const name = [...subjectWords(p.name)];
-      if (name.length > bestN && name.every((w) => q.has(w))) { best = p; bestN = name.length; }
-    }
-    return best;
-  }
-
-  /**
-   * In the background (every couple of minutes, see tick): a loose ramble on the same subject as another ramble goes in a
-   * project with it. The other one's project, if it's in one; else a project they fit by name; else a new one named after
-   * the subject. Old rambles count too, not just new ones. No model call: the same word match as similarRamble, but only
-   * on what names the work (channel, title, task labels), so a passing word doesn't pull rambles together. A ramble with
-   * a job running or queued waits for the next sweep, since its workspace folder moves into the project.
-   */
-  async groupRambles(max = 5) {
-    const since = this.clock().getTime() - 60 * 86400_000;
+  async groupRambles(max = 3) {
+    const prefs = await this.prefs();
+    if (!prefs.groupingSince) { await this.setPrefs({ groupingSince: this.clock().toISOString() }); return 0; }
+    const now = this.clock().getTime();
     const jobs = await this.store.all<Job>("jobs");
     const busy = new Set(jobs.filter((j) => j.status === "working" || j.status === "queued").map((j) => j.threadId));
-    const groupable = (t: Thread) => !t.routine && !t.id.startsWith("tm-") && t.id !== "main";
-    const loose = (await this.store.all<Thread>("threads"))
-      .filter((t) => groupable(t) && !t.projectId && !t.archivedAt && !busy.has(t.id) && new Date(t.updatedAt || t.createdAt).getTime() > since)
-      .sort((a, b) => (b.updatedAt || b.createdAt).localeCompare(a.updatedAt || a.createdAt));
-    let grouped = 0;
-    for (const l of loose) {
-      if (grouped >= max) break;
-      const t = await this.store.get<Thread>("threads", l.id);
-      if (!t || t.projectId) continue; // filed earlier in this sweep
-      const mine = jobs.filter((j) => j.threadId === t.id && !j.parentId && !j.followsUp).map((j) => j.label || "");
-      const subject = [channelOf(t).replace(/-/g, " "), t.title, ...mine].join(" ");
-      const like = await this.similarRamble(subject, { skip: t.id, strongOnly: true });
-      const m = like ? await this.store.get<Thread>("threads", like.threadId) : null;
-      if (!m || !groupable(m) || busy.has(m.id)) continue;
-      let p = m.projectId ? await this.store.get<Project>("projects", m.projectId) : null;
-      if (!p) {
-        // The earlier one and its workspace's other rambles first: that names the project and moves its folder in.
-        const ws = await this.workspaceOf(m);
-        p = await this.projectByName(`${subject} ${m.title} ${channelOf(m).replace(/-/g, " ")}`);
-        if (!p) {
-          const name = ws || (m.channel && !/^ramble(-\d+)?$/.test(m.channel) ? channelWorkspace(m.channel) : undefined) || workspaceName(like!.why.slice(0, 2).join(" "));
-          if (!name) continue;
-          const title = name.replace(/-/g, " ").replace(/^./, (c) => c.toUpperCase());
-          p = (await this.createProject(title)).value || (await this.store.all<Project>("projects")).find((x) => x.name.toLowerCase() === title.toLowerCase()) || null;
-          if (!p) continue;
-        }
-        if (!(await this.bringIn(p, m, ws, busy))) continue;
-      }
-      if (await this.bringIn(p, t, await this.workspaceOf(t), busy)) {
-        grouped++;
-        await this.log("project.grouped", `#${channelOf(t)} filed in ${p.name} with #${channelOf(m)} (${like!.why.join(", ")})`);
-      }
+    const threads = await this.store.all<Thread>("threads");
+    const ramble = (t: Thread) => !t.routine && !t.id.startsWith("tm-") && t.id !== "main";
+    const roots = (t: Thread) => jobs.filter((j) => j.threadId === t.id && !j.parentId);
+    const fresh = threads.filter((t) => ramble(t) && !t.groupCheckedAt && !t.projectId && !t.filedBy && t.createdAt >= prefs.groupingSince!
+      && !busy.has(t.id) && (roots(t).some((j) => j.status === "done") || now - new Date(t.createdAt).getTime() > 15 * 60_000));
+    let filed = 0;
+    for (const t of fresh.slice(0, max)) {
+      try { if (await this.groupOne(t, threads, busy, jobs)) filed++; }
+      catch (e: any) { console.warn(`grouping #${channelOf(t)} failed: ${String(e?.message || e).slice(0, 200)}`); }
     }
-    if (grouped) { this.emit("threads"); this.emit("projects"); }
-    return grouped;
+    if (filed) { this.emit("threads"); this.emit("projects"); }
+    return filed;
   }
 
-  /** File a ramble in a project, with the loose rambles that worked in the same workspace, and move that workspace's
-   *  folder in so their jobs keep the files. Nothing happens while one of them has a job running (see groupRambles). */
-  private async bringIn(p: Project, t: Thread, ws: string | undefined, busy: Set<string>) {
-    const jobs = ws ? await this.store.all<Job>("jobs") : [];
-    const used = new Set(jobs.filter((j) => workspaceName(j.workspace) === ws).map((j) => j.threadId));
-    const along = (await this.store.all<Thread>("threads")).filter((x) => x.id === t.id || (ws && !x.projectId && !x.routine && !x.id.startsWith("tm-") && x.id !== "main"
-      && (used.has(x.id) || workspaceName(x.workspace) === ws || (!!x.channel && channelWorkspace(x.channel) === ws))));
-    if (along.some((x) => busy.has(x.id))) return false;
-    for (const x of along) await this.store.put<Thread>("threads", { ...x, projectId: p.id });
+  private async groupOne(t: Thread, threads: Thread[], busy: Set<string>, jobs: Job[]) {
+    const since = this.clock().getTime() - 45 * 86400_000;
+    const projects = await this.store.all<Project>("projects");
+    const msgs = await this.store.all<Message>("messages");
+    const said = (x: Thread, n: number) => msgs.filter((m) => m.threadId === x.id && m.role === "user" && !m.hidden).map((m) => m.text.replace(/\s+/g, " ")).join(" / ").slice(0, n);
+    const labels = (x: Thread) => jobs.filter((j) => j.threadId === x.id && !j.parentId && !j.followsUp).map((j) => j.label || j.task.slice(0, 60)).slice(0, 5).join("; ");
+    const line = (x: Thread) => `- ${x.id} #${channelOf(x)} "${x.title}"${labels(x) ? ` · tasks: ${labels(x)}` : ""}${said(x, 200) ? ` · said: ${said(x, 200)}` : ""}`;
+    const loose = threads.filter((x) => x.id !== t.id && !x.routine && !x.id.startsWith("tm-") && x.id !== "main" && !x.projectId && !x.filedBy
+      && new Date(x.updatedAt || x.createdAt).getTime() > since).slice(-40);
+    const prompt = [
+      "You sort rambles (chats with a personal assistant) into projects. A project is one ongoing piece of work the person",
+      "is doing over many chats: building the same RC plane, launching the same product, planning the same wedding. Its",
+      "rambles share a memory notebook and a folder of files, so a ramble put in the wrong project is noise there.",
+      "",
+      "Look at the NEW RAMBLE and decide where it goes. Be cautious: the default is to leave it. The person can always file",
+      "it themselves, so only file it when you're sure it's the same ongoing project, not just the same topic or a shared",
+      "word (\"flight number for tomorrow's trip\" is not part of an RC plane project; a one-off question is rarely a project).",
+      "- join: it clearly belongs in one of the EXISTING PROJECTS.",
+      "- new: it and one or more of the LOOSE RAMBLES are clearly the same ongoing project, and none of the existing ones fit.",
+      "  List only the loose rambles that are certainly part of it. Name the project the way the person would (2-4 words).",
+      "- none: anything else, or if unsure.",
+      "Always say why, in one plain sentence the person will read (what makes them the same project).",
+      "",
+      'ANSWER WITH: JSON only, one of {"action":"none","why":"..."} | {"action":"join","project":"<project id>","why":"..."} | {"action":"new","name":"...","with":["<ramble id>"],"why":"..."}',
+      "",
+      "<untrusted>",
+      "NEW RAMBLE:", line(t), said(t, 1500) ? `What they said there: ${said(t, 1500)}` : "",
+      "",
+      "EXISTING PROJECTS:",
+      ...(projects.length ? projects.map((p) => `- ${p.id} "${p.name}"${p.about ? ` (${p.about.slice(0, 200)})` : ""}: ${threads.filter((x) => x.projectId === p.id).slice(-8).map((x) => `#${channelOf(x)} "${x.title}"`).join(", ") || "no rambles yet"}`) : ["(none)"]),
+      "",
+      "LOOSE RAMBLES (not in a project):",
+      ...(loose.length ? loose.map(line) : ["(none)"]),
+      "</untrusted>",
+    ].join("\n");
+    const out = await this.brain.think({ mode: "judge", context: {}, input: prompt }, (await this.brains()).workhorse);
+    let d: any = null;
+    try { d = JSON.parse(out.slice(out.indexOf("{"), out.lastIndexOf("}") + 1)); } catch {}
+    const why = typeof d?.why === "string" ? d.why.replace(/\s+/g, " ").trim().slice(0, 300) : "";
+    const checked = async () => { const cur = await this.store.get<Thread>("threads", t.id); if (cur) await this.store.put<Thread>("threads", { ...cur, groupCheckedAt: this.clock().toISOString() }); };
+    let p: Project | null = null, members: Thread[] = [];
+    if (d?.action === "join" && why) {
+      p = projects.find((x) => x.id === d.project) || null;
+      members = [t];
+    } else if (d?.action === "new" && why && typeof d.name === "string" && Array.isArray(d.with)) {
+      const others = loose.filter((x) => d.with.includes(x.id));
+      if (others.some((x) => busy.has(x.id))) return false; // one of them is working: ask again next sweep
+      if (others.length) {
+        const name = d.name.replace(/\s+/g, " ").trim().slice(0, 60);
+        p = projects.find((x) => x.name.toLowerCase() === name.toLowerCase()) || null;
+        if (!p && name) { const made = (await this.createProject(name)).value; if (made) p = await this.store.put<Project>("projects", { ...made, madeBy: "hearth" }); }
+        members = [t, ...others];
+      }
+    }
+    if (!p || !members.length) { await checked(); if (why) await this.log("project.left", `#${channelOf(t)} stays loose: ${why}`); return false; }
     const proj = workspaceName(p.name);
-    if (ws && proj) this.brain.sessions?.move({ workspace: ws }, { project: proj, workspace: ws });
+    const filed: Thread[] = [];
+    for (const m of members) {
+      const cur = (await this.store.get<Thread>("threads", m.id))!;
+      filed.push(await this.store.put<Thread>("threads", { ...cur, projectId: p.id, groupedWhy: why, ...(m.id === t.id ? { groupCheckedAt: this.clock().toISOString() } : {}) }));
+    }
+    for (const cur of filed) {
+      // Its workspace folder comes along, unless a ramble outside the project also works there (then it stays theirs).
+      const ws = await this.workspaceOf(cur);
+      const shared = ws && (await this.store.all<Thread>("threads")).some((x) => x.projectId !== p!.id && !x.id.startsWith("tm-") && (workspaceName(x.workspace) === ws || channelWorkspace(x.channel) === ws));
+      if (ws && proj && !shared) this.brain.sessions?.move({ workspace: ws }, { project: proj, workspace: ws });
+    }
+    await this.log("project.grouped", `${members.map((m) => `#${channelOf(m)}`).join(", ")} filed in ${p.name}: ${why}`);
     return true;
   }
 
@@ -818,12 +840,10 @@ export class Hub {
       let project = projectId ? await this.store.get<Project>("projects", projectId) : null;
       // Looks like an earlier ramble's subject: still its own ramble, but it starts in that one's workspace (and project),
       // so its jobs find what the earlier work saved there.
-      const like = !project && !o.fromTrigger && !o.hidden ? await this.similarRamble(clean).catch(() => null) : null;
+      const like = !project && !o.fromTrigger && !o.hidden ? await this.similarRamble(clean, { strongOnly: true }).catch(() => null) : null;
       const from = like ? await this.store.get<Thread>("threads", like.threadId) : null;
       const ws = from ? await this.workspaceOf(from) : undefined;
-      // Filed right away when there's already a project for it: the earlier ramble's, or one it names. Making a new
-      // project for rambles that go together happens in the background (groupRambles).
-      if (!project && !o.fromTrigger && !o.hidden) project = from?.projectId ? (await this.store.get<Project>("projects", from.projectId)) || null : await this.projectByName(clean).catch(() => null);
+      // Which project it belongs in (if any) is for Hearth's agent to decide once there's something to go on (groupRambles).
       thread = await this.store.put<Thread>("threads", { id: randomUUID(), createdAt: now, updatedAt: now, num, title: (o.title || clean.split(/\s+/).slice(0, 6).join(" ")).slice(0, 60),
         ...(project ? { projectId: project.id } : {}), ...(ws ? { workspace: ws, workspaceFrom: from!.id } : {}) });
       if (ws) await this.log("ramble.workspace", `new ramble starts in the "${ws}" workspace of #${like!.channel} (${like!.why.join(", ")})`);

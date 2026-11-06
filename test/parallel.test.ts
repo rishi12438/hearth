@@ -500,56 +500,56 @@ test("a new ramble on an earlier one's subject is its own ramble, started in tha
   expect((await hub.ramble("find me a good ramen place")).value!.thread.workspace).toBeUndefined();
 });
 
-test("in the background, rambles on the same subject go in one project: a new one named after it, with the folder", async () => {
+test("Hearth's agent looks at each new ramble once, after its first work, and only files it with a reason", async () => {
   await setup();
   process.env.FAKE_MS = "20";
-  plan([{ label: "Your Robinhood balance", task: "check my Robinhood balance and holdings", teammate: "Hearth", workspace: "robinhood-account" }]);
-  const money = (await hub.ramble("what's my robinhood balance")).value!.thread.id;
-  await until(() => allDone(1));
-  const job = (await jobs())[0];
-  const before = hub.brain.sessions.placeOf(job.id);
+  const at = new Date(Date.now() - 86400_000).toISOString();
+  // Rambles from before grouping started are never looked at.
+  await store.put<Thread>("threads", { id: "old-plane", createdAt: at, updatedAt: at, title: "RC plane 3D sim", channel: "rc-plane-sim" } as Thread);
+  expect(await hub.groupRambles()).toBe(0); // first run only marks when grouping started
   process.env.FAKE_MS = "1500";
-  plan([{ label: "Robinhood this month", task: "how Robinhood did this month", teammate: "Hearth" }]);
-  const next = (await hub.ramble("how is my robinhood doing this month?")).value!.thread;
-  expect(next.projectId).toBeUndefined(); // nothing to wait for when you send: grouping happens in the background
-  await until(async () => (await jobs()).some((j) => j.threadId === next.id && j.status === "working"));
-  expect(await hub.groupRambles()).toBe(0); // its job is still going, so its folder isn't moved under it
-  await until(() => allDone(2), 10_000);
+  plan([{ label: "RC plane frame", task: "does the RC plane need a printed frame", teammate: "Hearth" }]);
+  const plane = (await hub.ramble("does my rc plane need a 3d printed frame")).value!.thread;
+  expect(plane.projectId).toBeUndefined(); // sending never files it
+  await until(async () => (await jobs()).some((j) => j.threadId === plane.id && j.status === "working"));
+  process.env.FAKE_GROUP = JSON.stringify({ action: "new", name: "RC plane build", with: ["old-plane"], why: "Both are about building the same RC plane." });
+  expect(await hub.groupRambles()).toBe(0); // still working: waits
+  await until(() => allDone(1), 10_000);
   process.env.FAKE_MS = "20";
-  plan([{ label: "Ramen near me", task: "find a good ramen place nearby", teammate: "Hearth" }]);
-  const ramen = (await hub.ramble("find me a good ramen place")).value!.thread.id;
-  await until(() => allDone(3));
   expect(await hub.groupRambles()).toBe(1);
-  const p = (await hub.listProjects()).find((x) => x.name === "Robinhood account")!;
-  expect(p.rambles).toBe(2);
-  expect((await store.get<Thread>("threads", next.id))?.projectId).toBe(p.id);
-  expect((await store.get<Thread>("threads", money))?.projectId).toBe(p.id);
-  expect((await store.get<Thread>("threads", ramen))?.projectId).toBeUndefined();
-  if (before) expect(hub.brain.sessions.placeOf(job.id)).toEqual({ project: "robinhood-account", workspace: "robinhood-account" });
-  const j2 = (await jobs()).find((j) => j.threadId === next.id)!;
-  expect(await (hub as any).placeFor(j2)).toEqual({ project: "robinhood-account", workspace: "robinhood-account" });
-  // Once there's a project for it, a new one is filed right away, and so is one that names an existing project.
-  plan([{ label: "Robinhood taxes", task: "robinhood tax forms", teammate: "Hearth" }]);
-  expect((await hub.ramble("robinhood tax forms please")).value!.thread.projectId).toBe(p.id);
-  const wed = (await hub.createProject("Wedding")).value!;
-  plan([{ label: "Cake", task: "cake", teammate: "Hearth" }]);
-  expect((await hub.ramble("wedding cake ideas")).value!.thread.projectId).toBe(wed.id);
+  const p = (await hub.listProjects()).find((x) => x.name === "RC plane build")!;
+  expect(p).toMatchObject({ madeBy: "hearth", rambles: 2 });
+  const filed = (await store.get<Thread>("threads", plane.id))!;
+  expect(filed).toMatchObject({ projectId: p.id, groupedWhy: "Both are about building the same RC plane." });
+  expect(filed.groupCheckedAt).toBeTruthy();
+  expect(await hub.groupRambles()).toBe(0); // looked at once
+  // Unsure: it stays loose, and isn't asked about again.
+  process.env.FAKE_GROUP = JSON.stringify({ action: "none", why: "A flight booking, not the RC plane." });
+  plan([{ label: "Flight number", task: "tomorrow's flight number", teammate: "Hearth" }]);
+  const flight = (await hub.ramble("what's my flight number tomorrow")).value!.thread.id;
+  await until(() => allDone(2));
+  expect(await hub.groupRambles()).toBe(0);
+  expect((await store.get<Thread>("threads", flight))!.projectId).toBeUndefined();
+  expect((await store.get<Thread>("threads", flight))!.groupCheckedAt).toBeTruthy();
+  // Join an existing project; a ramble you filed yourself is never moved.
+  process.env.FAKE_GROUP = JSON.stringify({ action: "join", project: p.id, why: "Same RC plane: picking its motor." });
+  plan([{ label: "Motor", task: "which motor for the plane", teammate: "Hearth" }]);
+  const motor = (await hub.ramble("which motor for the rc plane")).value!.thread.id;
+  plan([{ label: "Battery", task: "battery", teammate: "Hearth" }]);
+  const mine = (await hub.ramble("rc plane battery")).value!.thread.id;
+  await hub.fileThread(mine, null);
+  await until(() => allDone(4));
+  expect(await hub.groupRambles()).toBe(1);
+  expect((await store.get<Thread>("threads", motor))!.projectId).toBe(p.id);
+  expect((await store.get<Thread>("threads", mine))!.projectId).toBeUndefined();
+  // A made-up project id or no reason: nothing happens.
+  process.env.FAKE_GROUP = JSON.stringify({ action: "join", project: "nope", why: "x" });
+  plan([{ label: "Misc", task: "misc", teammate: "Hearth" }]);
+  const misc = (await hub.ramble("something else entirely")).value!.thread.id;
   await until(() => allDone(5));
-});
-
-test("old loose rambles about the same thing are grouped too, into the project one of them is in", async () => {
-  await setup();
-  const at = new Date().toISOString();
-  const p = (await hub.createProject("Home")).value!;
-  await store.put<Thread>("threads", { id: "old-a", createdAt: at, updatedAt: at, title: "Kitchen renovation quotes", channel: "kitchen-renovation", projectId: p.id } as Thread);
-  await store.put<Thread>("threads", { id: "old-b", createdAt: at, updatedAt: at, title: "Kitchen tiles", channel: "kitchen-tiles" } as Thread);
-  await store.put<Thread>("threads", { id: "old-c", createdAt: at, updatedAt: at, title: "Tokyo flights", channel: "tokyo-flights" } as Thread);
-  await store.put<Thread>("threads", { id: "old-d", createdAt: at, updatedAt: at, title: "Hotels in Tokyo", channel: "tokyo-hotels" } as Thread);
-  expect(await hub.groupRambles()).toBe(2);
-  expect((await store.get<Thread>("threads", "old-b"))?.projectId).toBe(p.id);
-  const tokyo = (await hub.listProjects()).find((x) => x.name === "Tokyo flights" || x.name === "Tokyo hotels")!;
-  expect(tokyo?.rambles).toBe(2);
-  expect(await hub.groupRambles()).toBe(0); // nothing left to group
+  expect(await hub.groupRambles()).toBe(0);
+  expect((await store.get<Thread>("threads", misc))!.projectId).toBeUndefined();
+  delete process.env.FAKE_GROUP;
 });
 
 test("a project dragged onto another joins it: rambles, memory and files", async () => {
