@@ -22,7 +22,7 @@ import { badChatLink } from "./connectors/web-senders.ts";
 import { googleAgent, CHANGE_KINDS, type GoogleChange } from "./connectors/google-agent.ts";
 import type { Project } from "./types.ts";
 import { channelWorkspace, workspaceName, type Place as WorkPlace } from "./brains/sessions.ts";
-import type { ConnAudit, Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow, LessonSearch } from "./types.ts";
+import type { ConnAudit, Component, DayLog, Idea, MiniApp, Person, StoredFile, Activity, Approval, Done, Fact, Job, LocationFix, Message, Notebook, Place, Prefs, Script, Skill, Teammate, Thread, Workflow, LessonSearch, LessonEvent } from "./types.ts";
 import { Library, validateSkill, validateWorkflow, fillDeep, fill, type LibraryItem } from "./library.ts";
 import { cleanTile, cleanOptions, extractTiles, type Tile } from "./tiles.ts";
 import { Files, extractFiles } from "./files.ts";
@@ -277,7 +277,7 @@ export class Hub {
         you: teammate ? { name: teammate.name, role: teammate.prompt } : { name: "Hearth", role: "The user's main assistant." },
         now: describeLocal(now, prefs.tz), tz: prefs.tz, userName: prefs.userName || undefined, aboutYou: prefs.about || undefined,
         memory: recall((await this.store.all<Fact>("memory")).filter((f) => f.notebook !== LESSONS), query, 8, now).map((f) => f.fact),
-        lessons: (await this.countShown(searchLessons(await this.store.all<Fact>("memory"), query, 5, now))).map((f) => ({ id: f.id, lesson: f.fact })),
+        lessons: (await this.countShown(searchLessons(await this.store.all<Fact>("memory"), query, 5, now), { teammateId: teammate?.id, threadId })).map((f) => ({ id: f.id, lesson: f.fact })),
         components: (await this.searchLibrary(query)).filter((x) => x.kind === "component"), // ready-made visuals it can fill with data
       };
     }
@@ -286,7 +286,7 @@ export class Hub {
     const facts = mode === "review" ? all : all.filter((f) => f.notebook !== LESSONS);
     // Lessons are searched like skills: the few that best match this task go in the prompt; jobs search for more.
     const lessons = mode === "review" ? [] : mode === "learn" ? all.filter((f) => f.notebook === LESSONS && isActive(f, now)) : searchLessons(all, query, 6, now);
-    if (mode !== "review" && mode !== "learn") await this.countShown(lessons);
+    if (mode !== "review" && mode !== "learn") await this.countShown(lessons, { teammateId: teammate?.id, threadId });
     // In a project's ramble: everything in its notebook comes first, then what's relevant from the rest.
     const project = await this.projectOf(threadId);
     const own = project ? facts.filter((f) => f.notebook === project.notebook && isActive(f, now)).slice(-30) : [];
@@ -2121,7 +2121,8 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
         const q = rest.join(" ").trim();
         if (!q) return "usage: hearth-lesson search <a few words about what you're about to do>";
         const hits = searchLessons(all, q, 8, this.clock());
-        for (const f of hits) await this.store.put("memory", { ...f, found: (f.found || 0) + 1 });
+        const at = await this.lessonWhere(jobId, by);
+        for (const f of hits) { await this.store.put("memory", { ...f, found: (f.found || 0) + 1 }); await this.lessonEvent(f.id, "found", { ...at, query: q.slice(0, 200) }); }
         await this.store.put<LessonSearch>("lessonSearches", this.doc({ query: q.slice(0, 200), hits: hits.map((f) => f.id), by, jobId }));
         await this.trim("lessonSearches", 2000);
         return hits.length ? hits.map(line).join("\n") + "\n\nRead one: hearth-lesson show <id>. Followed one: hearth-lesson used <id>."
@@ -2148,7 +2149,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       case "used": {
         const ids = rest.map((id) => find(id)?.id).filter((x): x is string => !!x);
         if (!ids.length) return "No such lesson. The ids are in hearth-lesson search.";
-        await this.markUsed(ids);
+        await this.markUsed(ids, await this.lessonWhere(jobId, by));
         // Credit the searches by this job that turned them up (the last 6 hours): found, then followed.
         if (jobId) {
           const since = new Date(this.clock().getTime() - 6 * 3600e3).toISOString();
@@ -2168,6 +2169,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
         const r = await this.addFact({ fact: rule, notebook: LESSONS, evidence: why || `saved by ${by}` }, "assistant");
         if (!r.value) return r.error || "Couldn't save it.";
         await this.lessonSaved(r.value.id, flag("--keywords") ? parseKeywords(flag("--keywords")) : undefined);
+        await this.lessonEvent(r.value.id, "learned", await this.lessonWhere(jobId, by));
         await this.log("lessons", `${by} learned: ${r.value.fact}`);
         return `Saved: ${r.value.id}  ${r.value.fact}`;
       }
@@ -2177,6 +2179,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
         if (!f || !rule) return "usage: hearth-lesson update <id> \"<the sharper rule>\"";
         const r = await this.updateFact(f.id, { fact: rule });
         if (!r) return "Couldn't update it.";
+        await this.lessonEvent(r.id, "sharpened", await this.lessonWhere(jobId, by));
         await this.log("lessons", `${by} sharpened a lesson: ${r.fact}`);
         return `Updated: ${r.id}  ${r.fact}`;
       }
@@ -2210,13 +2213,55 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     return n;
   }
 
-  /** Lessons put in a prompt as ones that may apply: counted, then handed back. */
-  private async countShown(lessons: Fact[]) {
+  /** Lessons put in a prompt as ones that may apply: counted, then handed back. Once per lesson per thread an hour:
+   *  one turn builds its prompt twice (before and after its scripts), and a busy thread shouldn't count every message. */
+  private async countShown(lessons: Fact[], at: { teammateId?: string; threadId?: string } = {}) {
+    const t = this.clock().getTime();
     for (const f of lessons) {
+      const key = `${f.id}:${at.threadId || ""}:${at.teammateId || ""}`;
+      if (t - (this.lessonShownAt.get(key) ?? -Infinity) < 3600e3) continue;
+      this.lessonShownAt.set(key, t);
       const now = await this.store.get<Fact>("memory", f.id);
-      if (now) await this.store.put("memory", { ...now, shown: (now.shown || 0) + 1 });
+      if (now) { await this.store.put("memory", { ...now, shown: (now.shown || 0) + 1 }); await this.lessonEvent(f.id, "shown", at); }
     }
+    if (this.lessonShownAt.size > 5000) this.lessonShownAt.clear();
     return lessons;
+  }
+  private lessonShownAt = new Map<string, number>();
+
+  /** Who did it and where, for a lesson event: from the job if there is one. */
+  private async lessonWhere(jobId?: string, by?: string, where: { teammateId?: string; threadId?: string } = {}): Promise<Partial<LessonEvent>> {
+    const job = jobId ? await this.store.get<Job>("jobs", jobId) : null;
+    return { by, jobId, teammateId: where.teammateId || job?.teammateId, threadId: where.threadId || job?.threadId };
+  }
+
+  private async lessonEvent(lessonId: string, kind: LessonEvent["kind"], at: Partial<LessonEvent> = {}) {
+    const clean = Object.fromEntries(Object.entries(at).filter(([, v]) => v !== undefined && v !== ""));
+    await this.store.put<LessonEvent>("lessonEvents", this.doc({ ...clean, lessonId, kind }));
+    if (++this.lessonEventsSinceTrim >= 50) { this.lessonEventsSinceTrim = 0; await this.trim("lessonEvents", 5000); }
+  }
+  private lessonEventsSinceTrim = 0;
+
+  /** The Lessons screen: every lesson with its record, and what happened to them lately (learned, followed, ...) and
+   *  where, newest first. Events on an older wording count for the lesson it became. */
+  async lessonsView() {
+    const all = await this.store.all<Fact>("memory");
+    const byId = new Map(all.map((f) => [f.id, f]));
+    const current = (id: string) => { let f = byId.get(id); for (let i = 0; f?.supersededBy && i < 20; i++) f = byId.get(f.supersededBy); return f; };
+    const lessons = all.filter((f) => f.notebook === LESSONS && isActive(f, this.clock()));
+    const [events, threads, jobs, mates] = await Promise.all([this.store.all<LessonEvent>("lessonEvents"), this.store.all<Thread>("threads"),
+      this.store.all<Job>("jobs"), this.store.all<Teammate>("teammates")]);
+    const thread = new Map(threads.map((t) => [t.id, t])), job = new Map(jobs.map((j) => [j.id, j])), mate = new Map(mates.map((m) => [m.id, m]));
+    return {
+      stats: (await this.lessonStats()).searches,
+      lessons: lessons.map((f) => ({ id: f.id, fact: f.fact, evidence: f.evidence || "", keywords: f.keywords || [], createdAt: f.createdAt, importance: f.importance,
+        found: f.found || 0, shown: f.shown || 0, followed: f.useCount || 0, broken: f.broken || 0, lastUsedAt: f.lastUsedAt || null })),
+      events: events.slice(-1500).reverse().map((e) => {
+        const t = e.threadId ? thread.get(e.threadId) : undefined, j = e.jobId ? job.get(e.jobId) : undefined;
+        return { id: e.id, at: e.createdAt, kind: e.kind, lessonId: current(e.lessonId)?.id || e.lessonId, query: e.query,
+          who: (e.teammateId && mate.get(e.teammateId)?.name) || e.by || null, threadId: t?.id || null, place: t ? channelOf(t) : null, job: j ? j.label || j.task.slice(0, 80) : null };
+      }),
+    };
   }
 
   /** How the lessons library is doing: searches that found something and led to a lesson being followed, and each lesson's record. */
@@ -2880,12 +2925,12 @@ ${JSON.stringify(shown, null, 1)}
           case "lesson.add": {
             // A lesson is a memory fact in the lessons notebook: same dedupe, superseding, forgetting and nightly tidy.
             const r = await this.addFact({ fact: a.lesson ?? a.fact, notebook: LESSONS, importance: a.importance, evidence: a.evidence || evidence.slice(0, 300) }, "assistant");
-            if (r.value) { done.push({ kind: "memory", label: `Learned: ${r.value.fact}`, id: r.value.id }); await this.lessonSaved(r.value.id, a.keywords); }
+            if (r.value) { done.push({ kind: "memory", label: `Learned: ${r.value.fact}`, id: r.value.id }); await this.lessonSaved(r.value.id, a.keywords); await this.lessonEvent(r.value.id, "learned", await this.lessonWhere(where.jobId, undefined, where)); }
             break;
           }
           case "lesson.broken": {
             const f = await this.store.get<Fact>("memory", String(a.id));
-            if (f && f.notebook === LESSONS) await this.store.put("memory", { ...f, broken: (f.broken || 0) + 1 });
+            if (f && f.notebook === LESSONS) { await this.store.put("memory", { ...f, broken: (f.broken || 0) + 1 }); await this.lessonEvent(f.id, "broken", await this.lessonWhere(where.jobId, undefined, where)); }
             break;
           }
           case "memory.update": {
@@ -2904,7 +2949,7 @@ ${JSON.stringify(shown, null, 1)}
             break;
           }
           case "memory.used":
-            if (Array.isArray(a.ids)) { const ids = a.ids.map(String).slice(0, 20); used.push(...ids); await this.markUsed(ids); }
+            if (Array.isArray(a.ids)) { const ids = a.ids.map(String).slice(0, 20); used.push(...ids); await this.markUsed(ids, await this.lessonWhere(where.jobId, undefined, where)); }
             break;
           case "notebook.summary":
             if (typeof a.name === "string" && typeof a.summary === "string") await this.setNotebook(a.name, a.summary);
@@ -3156,11 +3201,13 @@ ${JSON.stringify(shown, null, 1)}
     return ok;
   }
 
-  async markUsed(ids: string[]) {
+  async markUsed(ids: string[], at: Partial<LessonEvent> = {}) {
     const now = this.clock().toISOString();
     for (const id of ids) {
       const f = await this.store.get<Fact>("memory", id);
-      if (f) await this.store.put("memory", { ...f, useCount: (f.useCount || 0) + 1, lastUsedAt: now });
+      if (!f) continue;
+      await this.store.put("memory", { ...f, useCount: (f.useCount || 0) + 1, lastUsedAt: now });
+      if (f.notebook === LESSONS) await this.lessonEvent(f.id, "followed", at);
     }
   }
 

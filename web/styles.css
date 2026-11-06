@@ -676,6 +676,16 @@ a.place:active { background: var(--surface-2); }
 .ideaicon.small { width: 28px; height: 28px; font-size: 22px; }
 .aboutcard { background: var(--card); box-shadow: var(--shadow); border-radius: 20px; padding: 14px 16px; margin: 4px 0 14px; display: flex; flex-direction: column; gap: 8px; }
 .aboutcard .row b { font-size: 17px; }
+.lessoncard { text-align: left; width: 100%; }
+.lessoncard p { margin: 0; }
+.stattiles.four { grid-template-columns: repeat(4, 1fr); margin: 10px 0; }
+.lessonrule { font-size: 18px; line-height: 1.4; margin: 4px 0 8px; }
+.lessonev { align-items: flex-start; }
+.lessonev .levicon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--surface); color: var(--muted); flex: none; margin-top: 1px; }
+.lessonev.followed .levicon { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+.lessonev.learned .levicon { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+.lessonev.broken .levicon { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+.lessonev .lesstext { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 14px; color: var(--ink-2); margin: 2px 0; }
 .abouttext .rich { font-size: 15.5px; }
 
 /* several teammates at work: they share the stage */

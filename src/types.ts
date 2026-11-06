@@ -198,6 +198,11 @@ export type Fact = Doc & {
 /** One `hearth-lesson search`: what was asked, what came back, and which of those the same job then followed. */
 export type LessonSearch = Doc & { query: string; hits: string[]; by: string; jobId?: string; used?: string[] };
 
+/** Something that happened to one lesson, and where: learned, found by a search, shown in a prompt, followed, broken,
+ *  or sharpened (a new wording; lessonId is then the new one). For the Lessons screen's "what was used where". */
+export type LessonEvent = Doc & { lessonId: string; kind: "learned" | "found" | "shown" | "followed" | "broken" | "sharpened";
+  by?: string; teammateId?: string; threadId?: string; jobId?: string; query?: string };
+
 export type Notebook = Doc & { name: string; summary: string };
 
 export type Place = Doc & { name: string; lat: number; lon: number; radiusM: number };

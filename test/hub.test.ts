@@ -854,6 +854,30 @@ test("lessons get keywords, and every search, showing, follow and break is count
   expect((await hub.lessonStats()).lessons.find((l) => l.fact.startsWith("Confirm a price"))).toMatchObject({ found: 1, shown: 1, used: 1, broken: 1 });
 });
 
+test("the Lessons screen shows what was learned, found and followed, and where", async () => {
+  const now = new Date().toISOString();
+  await store.put("threads", { id: "thr-orders", createdAt: now, updatedAt: now, title: "Orders", channel: "aliexpress-orders" } as any);
+  await store.put("jobs", { id: "job-orders", createdAt: now, threadId: "thr-orders", messageId: "m1", task: "Track the orders in a sheet", label: "Orders sheet", teammateId: "tm-none", status: "working" } as any);
+  const add = await hub.lessonsAgent(["add", "After writing data to an outside file, read it back before saying it's saved.", "--keywords", "sheet, save, write"], "Orders", "job-orders");
+  const id = add.split(/\s+/)[1];
+  await hub.lessonsAgent(["search", "write", "sheet"], "Orders", "job-orders");
+  // Shown once per thread an hour, though a turn builds its prompt twice.
+  await hub.context("write the orders to the sheet", "job", null, "thr-orders");
+  await hub.context("write the orders to the sheet", "job", null, "thr-orders");
+  await hub.lessonsAgent(["used", id], "Orders", "job-orders");
+  const v = await hub.lessonsView();
+  expect(v.lessons.find((l) => l.id === id)).toMatchObject({ shown: 1, found: 1, followed: 1 });
+  const mine = v.events.filter((e) => e.lessonId === id);
+  expect(mine.map((e) => e.kind)).toEqual(["followed", "shown", "found", "learned"]); // newest first
+  expect(mine.find((e) => e.kind === "followed")).toMatchObject({ who: "Orders", place: "aliexpress-orders", threadId: "thr-orders", job: "Orders sheet" });
+  expect(mine.find((e) => e.kind === "found")!.query).toBe("write sheet");
+  // Reworded: its history stays with it.
+  const up = await hub.lessonsAgent(["update", id, "After writing to an outside file, read it back and compare before saying it's saved."], "Orders", "job-orders");
+  const next = up.split(/\s+/)[1];
+  const after = (await hub.lessonsView()).events.filter((e) => e.lessonId === next).map((e) => e.kind);
+  expect(after).toEqual(["sharpened", "followed", "shown", "found", "learned"]);
+});
+
 test("hearth-lesson: search, show, add, update and count lessons like skills", async () => {
   const add = await hub.lessonsAgent(["add", "Check a tool's output before saying something is done.", "--why", "a file came back empty"], "Research");
   expect(add).toStartWith("Saved: ");
