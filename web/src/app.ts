@@ -187,7 +187,8 @@ function show() {
   closeSheet();
   const r = route();
   // Re-render the skeleton only when the layout changes (a ramble and one of its threads are different screens).
-  const layout = r.view === "chat" ? `chat:${r.id}:${r.job ? "thread" : "chat"}` : r.view === "dm" ? `dm:${r.id}` : r.view === "board" ? `board:${r.id || ""}` : r.view === "project" ? `project:${r.id}` : r.view === "hub" ? `hub:${r.id}` : r.view;
+  // Each thread is its own screen too: switching tabs must rebuild the message box, or it keeps sending to the old one.
+  const layout = r.view === "chat" ? `chat:${r.id}:${r.job ? `thread:${r.job}` : "chat"}`: r.view === "dm" ? `dm:${r.id}` : r.view === "board" ? `board:${r.id || ""}` : r.view === "project" ? `project:${r.id}` : r.view === "hub" ? `hub:${r.id}` : r.view;
   if (layout !== lastLayout) {
     lastLayout = layout;
     if (r.view === "home") renderHome();
@@ -2065,6 +2066,13 @@ function renderComposer(targetId = "composerwrap", threadJob?: string) {
     // A command typed out in full and sent (the send button on a phone) runs instead of going to the team.
     const cmd = SLASH.find((c) => c.cmd === box.value.trim().toLowerCase());
     if (cmd && !pending.length) return runSlash(cmd);
+    // Never send to a thread you're not looking at: if the screen moved on since this box was drawn, keep the text and redraw.
+    const now = route();
+    const at = (x: Route) => `${x.view}:${"id" in x ? x.id : ""}:${x.view === "chat" ? x.job || "" : ""}`;
+    if (!threadJob && at(now) !== at(r)) {
+      toast("Not sent: you switched threads. Your text is kept in the thread you wrote it in.", "err");
+      lastLayout = ""; show(); return;
+    }
     const v = box.value; box.value = ""; sessionStorage.removeItem(draftKey); box.dispatchEvent(new Event("input")); send(v, inThread);
     // send() has taken the waiting files by now; empty the tray however the message went (Enter or the send button).
     drawChips(); swap();
