@@ -660,10 +660,11 @@ function fitBottom() {
   const foot = document.querySelector(".screen > .chrome-bottom") as HTMLElement | null;
   const s = document.getElementById("scroll");
   if (!foot || !s || typeof ResizeObserver === "undefined") return;
-  const base = parseFloat(getComputedStyle(s).paddingBottom) || 0;
+  // Exactly the composer's height plus a little air: the newest message sits right above it, no empty gap (the fixed
+  // 150px in the CSS is the phone's tab bar plus composer, too tall on a wide window).
   let last = 0;
   bottomWatch = new ResizeObserver(() => {
-    const need = Math.max(base, foot.offsetHeight + 16);
+    const need = foot.offsetHeight + 12;
     if (need === last) return;
     const atBottom = s.scrollHeight - s.scrollTop - s.clientHeight < 120;
     last = need;
