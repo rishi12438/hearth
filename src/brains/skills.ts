@@ -436,7 +436,7 @@ export function describeSkillStep(command: unknown): string | null {
   if (g) {
     const [, svc, cmd] = g;
     if (svc === "gmail") return cmd === "search" ? "Searching your email" : cmd === "accounts" ? "Checking your Google accounts" : "Reading an email";
-    if (svc === "drive") return cmd === "search" ? "Searching your Drive" : cmd === "read" ? "Reading a file from Drive" : cmd === "append" ? "Adding rows to a Google Sheet" : cmd === "folder" ? "Making a Drive folder" : "Saving to your Drive";
+    if (svc === "drive") return cmd === "search" ? "Searching your Drive" : cmd === "read" ? "Reading a file from Drive" : cmd === "append" ? "Adding rows to a Google Sheet" : cmd === "format" ? "Formatting a Google Sheet" : cmd === "tabs" ? "Reading a Sheet's tabs" : cmd === "folder" ? "Making a Drive folder" : "Saving to your Drive";
     return cmd === "list" ? "Checking your calendar" : cmd === "add" ? "Adding to your calendar" : "Changing a calendar event";
   }
   const stuck = c.match(/(?:^|[\s;&|/])hearth-help\s+stuck(?:\s+["']?([\w'-]+))?/);
