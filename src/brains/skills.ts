@@ -443,6 +443,10 @@ export function describeSkillStep(command: unknown): string | null {
   if (stuck) return stuck[1] ? `Stuck (${stuck[1].replace(/'/g, "")}): finding another way` : "Stuck: working out what to do";
   const other = c.match(/(?:^|[\s;&|/])hearth-browser\s+(\w+)/)?.[1];
   if (other) return other === "open" ? "Opening the page in Chrome on your Mac" : other === "screenshot" ? "Looking at the page on your Mac" : "Using Chrome on your Mac";
+  const phone = c.match(/(?:^|[\s;&|/])hearth-phone\s+(\w[\w-]*)/)?.[1];
+  if (phone) return phone === "open" ? "Starting the phone" : phone === "close" ? "Done with the phone"
+    : phone === "screenshot" || phone === "dump" ? "Looking at the phone"
+    : ["tap", "type", "swipe", "key", "open-app"].includes(phone) ? "Using the phone" : "On the phone";
   const find = c.match(/(?:^|[\s;&|/])hearth-skill\s+(search|show)\s+(.+)/);
   if (find) return find[1] === "search" ? `Looking for a skill: ${find[2].replace(/["']/g, "").trim().slice(0, 50)}` : `Reading the ${find[2].replace(/["']/g, "").trim().slice(0, 40)} skill`;
   const tool = c.match(/(?:^|[\s;&|/])(enkidu-browser|enkidu-cua)\s/)?.[1];

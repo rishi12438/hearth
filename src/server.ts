@@ -10,6 +10,8 @@ import { availableHarnesses } from "./brain.ts";
 import { Computers, COPY_ITEMS, isCopyItem } from "./computers.ts";
 import { Machines, realE2b, realSsh, type E2b, type Ssh } from "./machines.ts";
 import { OtherBrowser } from "./other-browser.ts";
+import { Phone, phoneSkill } from "./phone.ts";
+import { registerSkills } from "./brains/skills.ts";
 import { Vault } from "./vault.ts";
 import { Connect } from "./connectors/index.ts";
 import { sourceById } from "./sources/index.ts";
@@ -192,6 +194,15 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   machines.onChange = () => hub.emit("computers", {});
   machines.startTimer();
   hub.onNeedsComputer = () => { machines.wake().catch((e) => console.error(e)); };
+  // The on-demand Android phone (its own AWS box). Inert until an account is set in Settings → Phone, so it adds nothing
+  // to a hub that doesn't use it. The hub starts/stops it; the brain drives it with hearth-phone, which asks this hub.
+  const phone = new Phone({ dataDir: config.dataDir, vault, isBusy: () => false, ssh: drivers.ssh ?? realSsh });
+  phone.onChange = () => hub.emit("settings", {});
+  phone.startTimer();
+  {
+    const h = config.host, local = !h || h === "0.0.0.0" || h === "::" ? "127.0.0.1" : h.includes(":") ? `[${h}]` : h;
+    registerSkills(() => (phone.configured() ? [phoneSkill(`http://${local}:${config.port}`, connect.agentKeyValue())] : []));
+  }
   const computerSummary = async () => {
     const list = (await linkedComputers()).map((d) => computers.status(d.id, d.name, d.lastSeenAt));
     const rank = { online: 0, asleep: 1, offline: 2 };
@@ -518,6 +529,19 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       } catch (e: any) {
         return new Response(JSON.stringify({ error: String(e?.message || e) }, null, 1), { status: e instanceof GoogleAgentError ? 400 : 502, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
       }
+    }
+    // The agent's hearth-phone command (from this machine, with the hub's agent key): drive the owner's Android phone.
+    if (path === "/api/agent/phone" && method === "POST") {
+      if (!fromThisMachine(req, server) || !connect.isAgentKey(req.headers.get("x-hearth-agent"))) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not the agent's key."); }
+      const form = await req.formData().catch(() => null);
+      const action = String(form?.get("action") || "");
+      const args: Record<string, string> = {};
+      for (const k of ["x", "y", "x1", "y1", "x2", "y2", "ms", "text", "key", "pkg"]) { const v = form?.get(k); if (typeof v === "string") args[k] = v.slice(0, 1000); }
+      try {
+        const r = await phone.control(action, args);
+        await hub.log("phone.agent", `hearth-phone ${action}`);
+        return new Response(JSON.stringify(r, null, 1), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+      } catch (e: any) { throw new HttpError(400, e.message); }
     }
     // Plaid says a bank has news (new transactions, signed out). Only a body Plaid signed counts; answer fast, work after.
     if (path === "/api/plaid/webhook") {
@@ -1433,6 +1457,17 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (seg[3] === "start" && method === "POST") { void machines.start(m.id); return json({ ok: true }); }
         if (seg[3] === "stop" && method === "POST") { await machines.stop(m.id); return json(view()); }
         if (method === "DELETE") { await machines.remove(m.id); await hub.log("machines.remove", `${m.name} removed`); return json(view()); }
+        break;
+      }
+      // The on-demand Android phone: one AWS service account, then open/close. Primary device only.
+      case "phone": {
+        ownerOnly();
+        if (method === "GET" && !id) return json(phone.view());
+        if (id === "account" && method === "POST") { const bad = await phone.setAccount(await body(req)); if (bad) throw new HttpError(400, bad); await hub.log("phone.account", "Phone AWS account connected"); return json(phone.view()); }
+        if (id === "account" && method === "DELETE") { phone.forgetAccount(); return json(phone.view()); }
+        if (id === "open" && method === "POST") { const r = await phone.open(); if ("error" in r) throw new HttpError(400, r.error); return json(phone.view()); }
+        if (id === "close" && method === "POST") { await phone.close(); return json(phone.view()); }
+        if (id === "delete" && method === "POST") { await phone.destroy(); await hub.log("phone.delete", "Phone deleted"); return json(phone.view()); }
         break;
       }
       case "push": {

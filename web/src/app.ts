@@ -4352,6 +4352,7 @@ function openSettings() {
     h("h4", null, "Security and data"),
     h("div", { class: "list" },
       row("Devices", st.pendingAccess ? `${st.pendingAccess} waiting to join` : st.device.primary ? "This is your primary device" : "Who can talk to this hub", openDevices),
+      st.device.primary ? row("Phone", "An Android phone for apps the web can't reach", openPhone) : null,
       st.device.primary ? row("Finish setting up", "Your devices and connectors, in one place", openWelcome) : null,
       row("Hubs", inMacApp ? "Switch hubs, or set up a new one" : "Switch between your hubs", openHubs),
       passkeysWork() ? row("Face ID lock", st.device.passkey ? "On · asked each time you open the app" : "Off · a copied key alone could open this hub", toggleFaceId, sw(st.device.passkey)) : null,
@@ -5208,6 +5209,57 @@ function openAddMachine(cloud: any, kind: "e2b" | "ssh" = "e2b") {
       h("p", { class: "muted small" }, "Any Linux VM you can reach over SSH: Lightsail, Hetzner, DigitalOcean, a box at home. Hearth checks it can log in, remembers the machine's identity, installs itself and Claude Code, and links it. The key stays on your hub in a private file and is never shown again.")];
   }
   openSheet("Add a cloud computer", [tabs, ...warnings, ...body]);
+}
+
+/** The on-demand Android phone (its own AWS box): set the service account, then open/close/delete it. */
+async function openPhone() {
+  const p = await call("/api/phone").catch(() => null);
+  if (!p) return toast("Couldn't load the phone settings.", "err");
+  const err = h("p", { class: "err small", hidden: true });
+  const fail = (b: HTMLButtonElement, label: string) => (e: any) => { err.textContent = e.message; err.hidden = false; b.disabled = false; b.textContent = label; };
+
+  if (!p.configured) {
+    const akid = h("input", { class: "field", placeholder: "Access key ID (AKIA…)", autocapitalize: "off", spellcheck: false });
+    const secret = h("input", { class: "field", type: "password", placeholder: "Secret access key", autocomplete: "off", autocapitalize: "off", spellcheck: false });
+    const region = h("input", { class: "field", value: "us-west-2", placeholder: "Region (e.g. us-west-2)", autocapitalize: "off", spellcheck: false });
+    const save = h("button", { class: "btn primary big", on: { click: async () => {
+      if (!akid.value.trim() || !secret.value.trim()) return akid.focus();
+      save.disabled = true; save.textContent = "Checking with AWS…"; err.hidden = true;
+      try { await call("/api/phone/account", { body: { accessKeyId: akid.value, secretAccessKey: secret.value, region: region.value } }); toast("Phone connected"); openPhone(); }
+      catch (e) { fail(save, "Connect")(e); }
+    } } }, "Connect");
+    openSheet("Phone", [
+      h("p", { class: "muted small" }, "An Android phone in your own AWS, for the apps the web can't reach: WhatsApp, Uber, SMS codes, app notifications. Your agent starts it when it needs it and stops it a few minutes after, so it costs about $2–3 a month (just the disk). After 30 unused days it's deleted to cost nothing — you'd redo app logins next time."),
+      h("ol", { class: "steps" },
+        h("li", null, "In AWS, make an IAM user with programmatic access."),
+        h("li", null, "Give it permission to run, start, stop, describe and terminate EC2 instances, manage its key pair and security group (EC2 only)."),
+        h("li", null, "Paste its access key below, and the region you want the phone in.")),
+      akid, secret, region, err, save,
+      h("p", { class: "muted small" }, "The keys are checked with AWS, then kept encrypted on your hub (never in your data or exports, never sent back to this app). Bank and wallet apps often refuse a cloud phone; test your must-have apps first."),
+    ]);
+    setTimeout(() => akid.focus(), 80);
+    return;
+  }
+
+  const s = p.state as string;
+  const label = s === "ready" ? `On${p.publicIp ? " · ready" : ""}` : s === "off" ? "Off · only the disk is costing anything (~$2–3/mo)"
+    : s === "starting" ? (p.step || "Starting…") : s === "stopping" ? "Stopping…" : s === "cleaning" ? "Deleting…" : p.error || s;
+  const busy = s === "starting" || s === "stopping" || s === "cleaning";
+  const btn = (text: string, cls: string, verb: string, note: string) => h("button", { class: `btn small ${cls}`, on: { click: async (e: Event) => {
+    const b = e.currentTarget as HTMLButtonElement; b.disabled = true; err.hidden = true;
+    try { await call(`/api/phone/${verb}`, { body: {} }); if (note) toast(note); openPhone(); } catch (er) { fail(b, text)(er); }
+  } } }, text);
+
+  openSheet("Phone", [
+    h("div", { class: "list" }, h("div", { class: "nowrow static" }, h("span", { class: "grow" }, h("b", null, "Your phone"), h("small", { class: s === "error" ? "err" : "sub" }, label)))),
+    h("div", { class: "btnrow" },
+      s === "ready" ? btn("Stop now", "ghost", "close", "Stopping. Your app logins are kept.") : !busy ? btn("Start", "primary", "open", "Starting your phone. The first time takes a minute or two.") : null),
+    err,
+    h("p", { class: "muted small" }, `It stops itself about ${p.idleStopMin} minutes after the last use, and is deleted after ${p.deleteAfterDays} unused days. Region and billing are in your own AWS account.`),
+    h("div", { class: "wsec" }, "Danger"),
+    h("button", { class: "linkbtn", on: { click: () => confirmSheet("Delete the phone now?", "The AWS instance and its disk are deleted, so every app login is lost. You'd set them up again next time. The service account stays connected.", "Delete", async () => { await call("/api/phone/delete", { body: {} }); toast("Phone deleted"); openPhone(); }) } }, "Delete the phone now"),
+    h("button", { class: "linkbtn", on: { click: () => confirmSheet("Disconnect the AWS account?", "The keys are removed from the hub. Any running phone should be deleted first.", "Disconnect", async () => { await call("/api/phone/account", { method: "DELETE" }); toast("Disconnected"); openPhone(); }) } }, "Disconnect AWS account"),
+  ]);
 }
 
 let computersTimer: ReturnType<typeof setTimeout> | null = null;
