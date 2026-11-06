@@ -645,6 +645,11 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (method === "PATCH" && id) { const r = await hub.renameThread(id, String((await body(req)).channel || "")); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         break;
       }
+      case "routines": {
+        if (method === "GET" && !id) return json(await hub.routineRuns());
+        if (method === "POST" && id && seg[3] === "close") { const r = await hub.closeRoutineRun(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
+        break;
+      }
       case "projects": {
         if (method === "GET" && !id) return json(await hub.listProjects());
         if (method === "GET" && id) { const d = await hub.projectDetail(id); if (!d) break; return json(d); }

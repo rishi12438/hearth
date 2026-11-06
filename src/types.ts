@@ -111,6 +111,13 @@ export type Job = Doc & {
   /** Model spend for this job, when the harness reports it (Claude does; Codex doesn't). */
   costUsd?: number | null;
   approvalIds?: string[];
+  /**
+   * A routine's run (a root job a trigger started): open while it needs you (an answer, an Approve, it's stuck), closed
+   * on its own when it only told you something, or by you. Closed runs are Past routines.
+   */
+  /** This turn ended with [[answer-needed]]: the user has to answer before it goes on. */
+  answerNeeded?: boolean;
+  routine?: { needsAnswer: boolean; closedAt?: string; closedBy?: "you" | "auto" };
   /** A follow-up you asked in a job's thread; the value is the root job id. */
   followsUp?: string;
   /** Came straight to this thread without planning: the teammate may hand it back if it's about something else. */

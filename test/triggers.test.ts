@@ -390,3 +390,23 @@ test("a routine's run is named for its event, never a bare id; sources read as w
   expect(eventHeadline({ variables: { subject: "x".repeat(80) }, payload: null }).length).toBeLessThanOrEqual(48);
   expect(sourceWords("parley-whatsapp-incoming")).toBe("Parley WhatsApp incoming");
 });
+
+test("a routine's run closes itself when it only tells you something; one that needs your answer stays open until you close it", async () => {
+  const now = new Date().toISOString();
+  const run = async (id: string, result: string, status = "done") => {
+    await store.put<any>("messages", { id: `m-${id}`, createdAt: now, role: "user", text: "brief", threadId: "th-r", hidden: true, fromTrigger: { id: "t1", title: "Inbox watch", eventId: `e-${id}` } });
+    const job = await store.put<any>("jobs", { id, createdAt: now, threadId: "th-r", messageId: `m-${id}`, task: "brief", label: `Run ${id}`, teammateId: "hearth", status, result, answerNeeded: result.includes("[[answer-needed]]") });
+    await (hub as any).settleRoutineRun(job);
+  };
+  await run("fyi", "Checked in reminder set.");
+  await run("ask", "Jason asked to meet. Tuesday or Wednesday? [[answer-needed]]");
+  await run("ok", "Drafted a reply.", "waiting");
+  let r = await hub.routineRuns();
+  expect(r.open.map((x) => x.id).sort()).toEqual(["ask", "ok"]);
+  expect(r.open.every((x) => x.needsYou && x.routine === "Inbox watch")).toBe(true);
+  expect(r.past).toMatchObject([{ id: "fyi", closedBy: "auto", label: "Run fyi" }]);
+  expect((await hub.closeRoutineRun("ask")).value!.routine).toMatchObject({ closedBy: "you" });
+  r = await hub.routineRuns();
+  expect(r.open.map((x) => x.id)).toEqual(["ok"]);
+  expect(r.past.map((x) => x.id).sort()).toEqual(["ask", "fyi"]);
+});
