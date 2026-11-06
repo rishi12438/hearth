@@ -60,7 +60,9 @@ const PURGE_MARKER = "[[library-purge]]";
 const IDEAS_MARKER = "[[ideas]]";
 const MAX_OPEN_IDEAS = 4;
 /** What a ramble's faces can turn into (the art is in web/src/looks.ts; keep the two lists the same). */
-const LOOKS = ["plane", "rocket", "car", "boat", "train", "robot", "laptop", "chef", "cat", "dog", "house", "book", "music", "plant", "money", "ball", "heart", "cloud", "brick"];
+const LOOKS = ["plane", "rocket", "car", "boat", "train", "robot", "laptop", "chef", "cat", "dog", "house", "book", "music", "plant", "money", "ball", "heart", "cloud", "brick", "camera", "gamepad", "globe", "briefcase", "pencil"];
+/** While a ramble has work going, Hearth looks again this often at what it's about now and re-dresses the faces. */
+const LOOK_EVERY_MS = 10 * 60_000;
 const INBOX_WATCH = "inbox-watch";
 const LOCATION_KEEP_DAYS = 7;
 /** An Approve nobody answers stops asking after a day (expireApprovals). */
@@ -189,6 +191,7 @@ export class Hub {
   private inflight = 0;                   // orchestrations, splits and retries still running
   private rambleSpend = new Map<string, number>(); // message id -> USD
   private lessonsSweptAt = 0;
+  private looksAt = 0;
   private keywording = false;
   private learning = false;
   private rambleLooks = new Map<string, ReturnType<typeof setTimeout>>(); // thread id -> its pending "anything to set up?" look
@@ -1071,7 +1074,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     if (fresh && short && !thread.id.startsWith("tm-") && fresh.channelBy !== "you" && short !== fresh.channel) await this.renameThread(thread.id, short, false);
     // What the faces turn into here (a plane, a chef…): picked with the name, kept until the topic changes.
     const look = typeof plan.look === "string" ? plan.look.trim().toLowerCase() : "";
-    if (fresh && LOOKS.includes(look) && !thread.id.startsWith("tm-") && look !== fresh.look) await this.touchThread(thread.id, { look });
+    if (fresh && (LOOKS.includes(look) || look === "none") && !thread.id.startsWith("tm-") && look !== fresh.look) await this.touchThread(thread.id, { look, lookAt: this.clock().toISOString() });
     if (plan.title && !thread.id.startsWith("tm-") && fresh?.title === batch[0].text.split(/\s+/).slice(0, 6).join(" ")) await this.touchThread(thread.id, { title: String(plan.title).slice(0, 60) });
     // Hearth's short reply, then one message per task; each task's thread (the teammate working, replies) hangs under it.
     // Keep Hearth's line short when there are task posts under it; they say the rest.
@@ -4111,6 +4114,10 @@ ${JSON.stringify(shown, null, 1)}
       try { await this.fillLessonKeywords(3); } catch (e: any) { console.error("lesson keywords failed", e); }
     }
     try { await this.expireApprovals(); } catch (e: any) { console.error("expiring approvals failed", e); }
+    if (Date.now() - this.looksAt > 60_000) {
+      this.looksAt = Date.now();
+      try { await this.refreshLooks(); } catch (e: any) { console.error("refreshing looks failed", e); }
+    }
     if (Date.now() - this.tidiedAt > 86_400_000) {
       this.tidiedAt = Date.now();
       try {
@@ -4119,6 +4126,36 @@ ${JSON.stringify(shown, null, 1)}
       } catch (e: any) { console.warn(`couldn't tidy workspaces: ${String(e?.message || e).slice(0, 200)}`); }
     }
     try { await this.pipeline.tick(); } catch (e: any) { console.error("event pipeline tick failed", e); }
+  }
+
+  /**
+   * Every 10 minutes while a ramble has work going, Hearth reads its recent messages and what the teammates are doing
+   * now and picks the look that fits the broader theme (the plane chat that moved on to cameras becomes a camera).
+   * Plain admin stuff gets "none": a subtle outfit, not a costume. Only the look changes; the ramble isn't touched.
+   */
+  async refreshLooks() {
+    const now = this.clock();
+    const working = (await this.store.all<Job>("jobs")).filter((j) => j.status === "working" && !j.threadId.startsWith("tm-"));
+    for (const threadId of new Set(working.map((j) => j.threadId))) {
+      const t = await this.store.get<Thread>("threads", threadId);
+      if (!t || t.archivedAt || t.routine || now.getTime() - new Date(t.lookAt || t.createdAt).getTime() < LOOK_EVERY_MS) continue;
+      const said = (await this.store.all<Message>("messages")).filter((m) => m.threadId === threadId && !m.hidden)
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(-8).map((m) => `${m.role === "user" ? "User" : "Teammate"}: ${m.text.slice(0, 300)}`);
+      const doing = working.filter((j) => j.threadId === threadId).map((j) => `Working on: ${j.label} (${(this.steps.get(j.id) || []).slice(-4).map((x) => x.text).join("; ").slice(0, 300)})`);
+      const options = [...LOOKS, "none"];
+      const prompt = ["The teammates' avatars in a chat dress up as what the chat is about right now: a plane for a chat about flying,",
+        "a chef for dinner plans. Pick the ONE look that fits the broader theme of the recent messages and the work going on.",
+        "If it's routine admin or nothing fits well (emails, scheduling, forms), answer none: they stay subtle.",
+        `The current look is ${t.look || "not picked yet"}: keep it unless the theme really moved on.`,
+        `ANSWER WITH: one of: ${options.join(", ")}`, "", `Chat #${channelOf(t)}:`, "<untrusted>", ...said, ...doing, "</untrusted>"].join("\n");
+      let look = "";
+      try { look = (await this.brain.think({ mode: "judge", context: {}, input: prompt }, (await this.brains()).quick)).trim().toLowerCase().replace(/[^a-z]/g, ""); } catch {}
+      const fresh = await this.store.get<Thread>("threads", threadId);
+      if (!fresh) continue;
+      const next = options.includes(look) ? look : fresh.look;
+      await this.store.put<Thread>("threads", { ...fresh, look: next, lookAt: now.toISOString() });
+      if (next !== fresh.look) this.emit("threads");
+    }
   }
 
   /** source.read: what a trigger module sees right now, for a teammate answering a question. */

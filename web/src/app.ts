@@ -1,5 +1,5 @@
 import { h, clear, icon, richText, relTime, shortAgo, clockTime, dayLabel, greeting, toast } from "./dom.ts";
-import { LOOKS, lookArt, lookFor, extraNow } from "./looks.ts";
+import { LOOKS, lookArt, lookFor } from "./looks.ts";
 import { initConnectors, loadTiles, openTile, grid as connectorGrid, rows as connectorRows } from "./connectors.ts";
 import { activeHub, call, hubs, pair, removeHub, setActive, stream, normalizeUrl, ApiError, authHeaders, passkeysWork, registerPasskey, passkeyProof, unlock, requestAccess, waitForApproval, type HubRef } from "./api.ts";
 
@@ -1759,11 +1759,6 @@ function elapsed(since: string) {
   const s = Math.max(0, Math.round((Date.now() - new Date(since).getTime()) / 1000));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
-// Working looks change their little extra every 10 minutes (see looks.ts): swap it on the faces already drawn.
-setInterval(() => {
-  const x = `extra x-${extraNow()}`;
-  for (const el of document.querySelectorAll<HTMLElement>(".face.look.working > .extra")) if (el.className !== x) el.className = x;
-}, 30_000);
 setInterval(() => {
   for (const el of document.querySelectorAll<HTMLElement>("[data-since]")) el.textContent = elapsed(el.dataset.since!);
   // Nothing heard from the teammate yet: say it's still going rather than sitting on "On it".
@@ -2514,8 +2509,7 @@ const moveOf = (e: string) => MOVES.find(([re]) => re.test(e))?.[1] || "wiggle";
 function face(t: any, size = 44, state = "idle", look: string | null = null) {
   const L = look ? LOOKS[look] : null;
   if (L) return h("span", { class: `face look look-${look} mv-${L.move} ${L.smile === false ? "nosmile" : ""} ${S.morphing ? "morph" : ""} ${state}`, style: `--c:${t.color};--s:${size}px;--ex:${L.eyes[0]}%;--ey:${L.eyes[1]}%`, role: "img", "aria-label": `${t.name} as a ${look}, ${state}` },
-    lookArt(look!), h("span", { class: "eyes" }, h("i", { class: "eye" }), h("i", { class: "eye" })),
-    h("span", { class: `extra ${state === "working" ? `x-${extraNow()}` : ""}`, "aria-hidden": "true" }, h("i"), h("i")));
+    lookArt(look!), h("span", { class: "eyes" }, h("i", { class: "eye" }), h("i", { class: "eye" })));
   const badge = size >= 26 ? badgeOf(t) : null;
   return h("span", { class: `face ${shapeOf(t.id)} ${state}`, style: `--c:${t.color};--s:${size}px`, role: "img", "aria-label": `${t.name}, ${state}` },
     h("span", { class: "eyes" }, h("i", { class: "eye" }), h("i", { class: "eye" })),
