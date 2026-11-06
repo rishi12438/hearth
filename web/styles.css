@@ -1383,20 +1383,3 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 @keyframes apspin { to { transform: rotate(360deg); } }
 .face.look.morph { animation: morph .7s cubic-bezier(.3, 1.4, .5, 1) 1; }
 
-/* A working look's little extra, changed every 10 minutes (looks.ts extraNow); sits on the eyes. Nothing when idle. */
-.face.look .extra { position: absolute; left: var(--ex); top: var(--ey); translate: -50% -50%; z-index: 2; display: none;
-  gap: calc(var(--s) * .05); align-items: center; pointer-events: none; }
-.face.look .extra i { display: block; }
-.face.look .extra.x-shades, .face.look .extra.x-goggles, .face.look .extra.x-blush { display: flex; }
-.extra.x-shades i { width: calc(var(--s) * .15); height: calc(var(--s) * .1); border-radius: 30% 30% 50% 50%; background: #2a211a; }
-.extra.x-shades::before { content: ""; position: absolute; left: 30%; right: 30%; top: 30%; height: max(1px, calc(var(--s) * .02)); background: #2a211a; }
-.extra.x-goggles i { width: calc(var(--s) * .14); height: calc(var(--s) * .14); border-radius: 50%; border: max(1.5px, calc(var(--s) * .03)) solid #8a5a34; background: rgba(207, 232, 246, .35); }
-.extra.x-goggles::before { content: ""; position: absolute; left: -35%; right: -35%; top: 45%; height: max(1px, calc(var(--s) * .03)); background: #8a5a34; z-index: -1; }
-.extra.x-blush { gap: calc(var(--s) * .22); translate: -50% calc(var(--s) * .06); }
-.extra.x-blush i { width: calc(var(--s) * .12); height: calc(var(--s) * .07); border-radius: 50%; background: #f08a8a; opacity: .85; }
-.face.look .extra.x-sweat, .face.look .extra.x-sparkle, .face.look .extra.x-stache { display: block; width: calc(var(--s) * .3); height: calc(var(--s) * .2); }
-.extra.x-sweat::before { content: ""; position: absolute; right: -40%; top: -60%; width: calc(var(--s) * .07); height: calc(var(--s) * .1);
-  background: #8cc8f0; border-radius: 50% 0 50% 50%; transform: rotate(-45deg); }
-.extra.x-sparkle::before { content: "\2726"; position: absolute; right: -55%; top: -110%; font-size: calc(var(--s) * .18); line-height: 1; color: #ffc04d; }
-.extra.x-stache::before { content: ""; position: absolute; left: 25%; right: 25%; top: 85%; height: calc(var(--s) * .05);
-  background: #3b2d22; border-radius: 50% 50% 40% 40% / 70% 70% 30% 30%; }

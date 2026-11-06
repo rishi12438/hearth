@@ -139,7 +139,40 @@ export const LOOKS: Record<string, Look> = {
     ["rect", { class: "b", x: 12, y: 28, width: 76, height: 60, rx: 10 }],
     ["ellipse", { class: "hi", cx: 34, cy: 36, rx: 14, ry: 4 }],
   ] },
-  // No topic to go on: still not the same guy every time, a little outfit instead.
+  camera: { eyes: [50, 46], move: "beat", parts: [
+    ["rect", { class: "d", x: 30, y: 20, width: 22, height: 12, rx: 4 }],
+    ["rect", { class: "b", x: 10, y: 28, width: 80, height: 56, rx: 14 }],
+    ["ellipse", { class: "hi", cx: 30, cy: 35, rx: 12, ry: 3.5 }],
+    ["circle", { class: "k", cx: 50, cy: 64, r: 13 }], ["circle", { class: "g", cx: 50, cy: 64, r: 8 }], ["circle", { class: "w", cx: 46, cy: 60, r: 2.5 }],
+    ["circle", { class: "a blinky", cx: 78, cy: 38, r: 4 }],
+  ] },
+  gamepad: { eyes: [50, 46], move: "hop", parts: [
+    ["path", { class: "b", d: "M28 30 L72 30 C88 30 96 50 94 68 C92 82 80 86 72 76 L64 66 L36 66 L28 76 C20 86 8 82 6 68 C4 50 12 30 28 30Z" }],
+    ["ellipse", { class: "hi", cx: 32, cy: 36, rx: 10, ry: 3 }],
+    ["path", { class: "k", d: "M20 52 L24 52 L24 48 L28 48 L28 52 L32 52 L32 56 L28 56 L28 60 L24 60 L24 56 L20 56Z" }],
+    ["circle", { class: "a", cx: 74, cy: 50, r: 3.5 }], ["circle", { class: "y", cx: 81, cy: 57, r: 3.5 }],
+  ] },
+  globe: { eyes: [50, 46], move: "drift", parts: [
+    ["rect", { class: "k", x: 47, y: 84, width: 6, height: 8 }], ["rect", { class: "k", x: 34, y: 90, width: 32, height: 5, rx: 2.5 }],
+    ["circle", { class: "b", cx: 50, cy: 48, r: 36 }],
+    ["path", { class: "l", d: "M26 30 C34 24 44 28 42 36 C40 44 30 42 28 50 C26 56 18 52 16 46 C16 40 20 34 26 30Z M62 58 C70 54 80 58 78 66 C76 74 66 78 60 72 C56 68 56 62 62 58Z" }],
+    ["ellipse", { class: "hi", cx: 36, cy: 24, rx: 10, ry: 4 }],
+  ] },
+  briefcase: { eyes: [50, 58], move: "rock", parts: [
+    ["path", { class: "k", d: "M36 30 L36 22 C36 18 38 16 42 16 L58 16 C62 16 64 18 64 22 L64 30 L58 30 L58 22 L42 22 L42 30Z" }],
+    ["rect", { class: "b", x: 10, y: 28, width: 80, height: 58, rx: 10 }],
+    ["rect", { class: "d", x: 10, y: 46, width: 80, height: 4 }],
+    ["rect", { class: "y", x: 45, y: 43, width: 10, height: 10, rx: 2 }],
+    ["ellipse", { class: "hi", cx: 30, cy: 34, rx: 12, ry: 3 }],
+  ] },
+  pencil: { eyes: [50, 44], move: "sway", parts: [
+    ["rect", { class: "a", x: 32, y: 6, width: 36, height: 12, rx: 6 }],
+    ["rect", { class: "k", x: 32, y: 16, width: 36, height: 6 }],
+    ["rect", { class: "b", x: 32, y: 22, width: 36, height: 50 }],
+    ["rect", { class: "d", x: 46, y: 22, width: 8, height: 50 }],
+    ["path", { class: "t", d: "M32 72 L68 72 L50 94Z" }], ["path", { class: "k", d: "M45 86 L55 86 L50 94Z" }],
+  ] },
+  // No topic to go on, or routine stuff: still not the same guy every time, a subtle outfit instead.
   partyhat: { eyes: [50, 62], move: "hop", parts: [...round(64, 28), ["path", { class: "a", d: "M36 40 L50 6 L64 40Z" }], ["circle", { class: "y", cx: 50, cy: 6, r: 5 }], ["path", { class: "w", d: "M41 28 L59 28 L61 33 L39 33Z" }]] },
   beanie: { eyes: [50, 64], move: "hop", parts: [...round(64, 28), ["path", { class: "a", d: "M20 46 C20 18 80 18 80 46Z" }], ["rect", { class: "d", x: 18, y: 42, width: 64, height: 10, rx: 5 }], ["circle", { class: "w", cx: 50, cy: 18, r: 7 }]] },
   crown: { eyes: [50, 62], move: "hop", parts: [...round(64, 28), ["path", { class: "y", d: "M30 42 L28 18 L40 30 L50 14 L60 30 L72 18 L70 42Z" }], ["circle", { class: "a", cx: 50, cy: 34, r: 3 }]] },
@@ -166,6 +199,9 @@ const WORDS: [RegExp, string][] = [
   [/gym|workout|soccer|football|basketball|tennis|run\b|running|sport|game\b/i, "ball"],
   [/love|date|dating|wedding|girlfriend|boyfriend|partner|anniversary|valentine/i, "heart"],
   [/weather|rain|storm|snow|forecast/i, "cloud"],
+  [/camera|photo|vision|video|film/i, "camera"], [/gaming|videogame|xbox|playstation|nintendo|steam/i, "gamepad"],
+  [/travel|trip|visa|country|world/i, "globe"], [/job|career|interview|resume|hiring|offer/i, "briefcase"],
+  [/write|writing|essay|blog|draft|poem|story/i, "pencil"],
 ];
 const OUTFITS = ["partyhat", "beanie", "crown", "bow"];
 
@@ -173,9 +209,11 @@ const OUTFITS = ["partyhat", "beanie", "crown", "bow"];
 export function lookFor(thread: { id?: string; look?: string; channel?: string; title?: string } | null | undefined): string | null {
   if (!thread?.id || thread.id === "new" || thread.id.startsWith("tm-")) return null;
   if (thread.look && LOOKS[thread.look]) return thread.look;
+  if (thread.look !== "none") {
   const words = `${thread.channel || ""} ${thread.title || ""}`.replace(/-/g, " ");
   const hit = WORDS.find(([re]) => re.test(words));
   if (hit) return hit[1];
+  }
   let n = 0;
   for (const c of thread.id) n = (n * 31 + c.charCodeAt(0)) >>> 0;
   return OUTFITS[n % OUTFITS.length];
@@ -201,8 +239,3 @@ export function lookArt(name: string): SVGSVGElement {
 
 export const LOOK_NAMES = Object.keys(LOOKS).filter((k) => !OUTFITS.includes(k));
 
-// While working, the look picks up a small change every 10 minutes (shades, blush, goggles…), so a long run isn't the
-// same face all along. Back to plain when it stops. The first stretch is plain.
-const EXTRAS = ["", "shades", "blush", "goggles", "sweat", "sparkle", "stache"];
-export const EXTRA_EVERY_MS = 10 * 60_000;
-export const extraNow = (now = Date.now()) => EXTRAS[Math.floor(now / EXTRA_EVERY_MS) % EXTRAS.length];

@@ -1150,3 +1150,27 @@ test("when Hearth answers itself, you get a notification; when it hands out task
   expect(sentPush[0].title).toContain("finished");
   h2.stop(); await h2.idle(5000);
 });
+
+test("looks: while work is going, Hearth picks the ramble's look again every 10 minutes; plain stuff goes subtle", async () => {
+  let at = new Date("2026-11-05T22:00:00Z");
+  hub.clock = () => at;
+  const t = await store.put<Thread>("threads", { id: "thread-look", title: "rc plane sim", channel: "rc-plane-sim", look: "plane", lookAt: at.toISOString(), createdAt: at.toISOString(), updatedAt: at.toISOString() } as Thread);
+  await store.put<Job>("jobs", { id: "job-look", threadId: t.id, messageId: "m", task: "sketch the camera setup", label: "Camera setup", teammateId: "hearth", status: "working", effort: "light", createdAt: at.toISOString() } as Job);
+  // Not 10 minutes yet: left alone.
+  at = new Date(at.getTime() + 5 * 60_000);
+  await hub.refreshLooks();
+  expect((await store.get<Thread>("threads", t.id))!.look).toBe("plane");
+  // 10 minutes in: picked again (the offline brain answers the last option, "none").
+  at = new Date(at.getTime() + 6 * 60_000);
+  await hub.refreshLooks();
+  const after = (await store.get<Thread>("threads", t.id))!;
+  expect(after.look).toBe("none");
+  expect(after.lookAt).toBe(at.toISOString());
+  expect(after.updatedAt).toBe(t.updatedAt); // the ramble itself isn't bumped
+  // Nothing working: no more picking.
+  await store.put<Job>("jobs", { ...(await store.get<Job>("jobs", "job-look"))!, status: "done" });
+  await store.put<Thread>("threads", { ...after, look: "plane" });
+  at = new Date(at.getTime() + 20 * 60_000);
+  await hub.refreshLooks();
+  expect((await store.get<Thread>("threads", t.id))!.look).toBe("plane");
+});
