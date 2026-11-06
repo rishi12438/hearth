@@ -1,0 +1,27 @@
+test/google-agent.test.ts
+  s_a6d84355c24b61::t_4f2d3fe586beb9 7-8
+  s_a6d84355c24b61::t_d4fa0aaf8ac1f4 44-47,306-351
+src/brains/skills.ts
+  s_a6d84355c24b61::t_1355cf61bbee56 439
+src/google.ts
+  s_a6d84355c24b61::t_a8d597a1836027 513-592
+  s_a6d84355c24b61::t_7caa5292406bef 440-460
+src/connectors/google-agent.ts
+  s_a6d84355c24b61::t_e8f35d25152230 62,76,79-107,128,136-144,214-221,262,311,324-325,336-364
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "1132c6a4155eef80e316c78c72210ee0e56191b3",
+  "prompts": {},
+  "sessions": {
+    "s_a6d84355c24b61": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b2554f79-a421-4d79-b801-6dc453701791",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
