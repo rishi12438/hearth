@@ -65,6 +65,27 @@ test("a signed-out brain says so (never as the answer), and the other brain take
   } finally { process.env.PATH = oldPath; }
 });
 
+test("a Claude run cut off mid-way isn't called signed out because a tool's output mentions 401 or login", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "hearth-bh-cut-"));
+  // Killed before its "result" line (like a hub restart): stdout is only events, one of them a note about a 401.
+  writeFileSync(join(dir, "claude"), `#!/bin/sh
+cat >/dev/null
+echo '{"type":"system","subtype":"init"}'
+echo '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"notes: Glama gave 401 Unauthorized token, not logged in there"}]}}'
+exit 143
+`);
+  chmodSync(join(dir, "claude"), 0o755);
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${dir}:${oldPath}`;
+  try {
+    const config = loadConfig({ HEARTH_DATA: mkdtempSync(join(tmpdir(), "hearth-bh-data-")), HEARTH_AGENT: "claude", HEARTH_SKILLS: "off" });
+    const brain = new Brain(config);
+    const err = await brain.think({ mode: "clean", context: {}, input: "hi" }, { harness: "claude", model: "" }).catch((e) => e);
+    expect(err).not.toBeInstanceOf(SignedOut);
+    expect(brain.health.problem("claude")).toBeNull();
+  } finally { process.env.PATH = oldPath; }
+});
+
 test("Codex's events (through its app-server) show as progress while it works, and its last message is the answer", async () => {
   const dir = mkdtempSync(join(tmpdir(), "hearth-cx-"));
   const item = (kind: "started" | "completed", item: object) => ({ method: `item/${kind}`, params: { item } });

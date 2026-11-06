@@ -1331,18 +1331,23 @@ export class Brain {
     let failed = app ? !!app.failure : code !== 0;
     if (app?.failure) codexErrors += `${app.failure}\n`;
     let session: string | undefined;
+    // What the brain itself said back (its answer or error), never the raw event stream: a run cut off before its
+    // "result" line (a hub restart) leaves stdout full of tool output, and a note or page in there that mentions
+    // "401" or "not logged in" would read as the brain being signed out.
+    let said = harness === "claude" ? "" : reply;
     if (harness === "claude") {
       try {
         // stream-json: the last "result" event has the answer and the cost (and the session it ran in).
         const j = JSON.parse(out.trim().split("\n").reverse().find((l) => l.includes('"type":"result"')) || out);
         reply = String(j.result ?? "");
+        said = reply;
         if (j.is_error) failed = true;
         if (typeof j.session_id === "string") session = j.session_id;
         if (meter && typeof j.total_cost_usd === "number") { meter.costUsd += j.total_cost_usd; meter.onUsage?.(); }
         else if (meter) meter.unknown = true;
       } catch { if (meter) meter.unknown = true; }
     } else if (meter) meter.unknown = true;
-    if (app) { reply = codexLast; session = app.threadId ?? undefined; } // stdout is the event stream, never the answer
+    if (app) { reply = codexLast; said = codexLast; session = app.threadId ?? undefined; } // stdout is the event stream, never the answer
     // The saved session is gone (its files were cleared, or it's from another machine): start a new one, once.
     if (thread && resume && failed && harness === "claude" && /no conversation found/i.test(`${reply}\n${err}`)) {
       console.warn(`brain: ${harness} session ${resume} for thread ${thread} is gone; starting a new one`);
@@ -1355,7 +1360,7 @@ export class Brain {
     }
     // Signed out: say so plainly (never hand "Failed to authenticate" back as the answer) and flag it for Home/Connectors.
     if (harness === "claude" || harness === "codex") {
-      const problem = failed ? signInProblem(`${reply}\n${err}\n${codexErrors}`) : null;
+      const problem = failed ? signInProblem(`${said}\n${err}\n${codexErrors}`) : null;
       if (problem) {
         this.health.signedOut(harness, problem);
         throw new SignedOut(`${harness === "claude" ? "Claude Code" : "Codex"} is signed out on this hub (${problem}). Reconnect it in Connectors.`, harness);
