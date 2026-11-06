@@ -5418,7 +5418,7 @@ function artifacts(j: any) {
   const ids = [...new Set((j.did || []).filter((d: any) => d.kind === "app" && d.id).map((d: any) => d.id))] as string[];
   return ids.map((id) => S.apps.find((x) => x.id === id)).filter((a: any) => a?.inline).map((a: any) => {
     const box = h("div", { class: "artframe" }, h("p", { class: "muted small center" }, "Loading…"));
-    appFrame(a.id, a.title, "inline").then((f) => { f.classList.add("autoh"); f.setAttribute("scrolling", "no"); clear(box, f); }).catch(() => clear(box, h("p", { class: "muted small center" }, "Couldn't open this")));
+    appFrame(a.id, a.title, "inline").then((f) => { f.classList.add("autoh"); clear(box, f); }).catch(() => clear(box, h("p", { class: "muted small center" }, "Couldn't open this")));
     return h("div", { class: "artifact" }, box,
       h("div", { class: "artfoot" }, h("b", null, a.title), a.versions ? h("small", null, `v${a.versions + 1}`) : null, h("span", { class: "grow" }),
         h("button", { class: "linkbtn", on: { click: () => { location.hash = `#a/${a.id}`; } } }, "Full screen"),
