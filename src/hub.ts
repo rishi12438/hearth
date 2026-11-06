@@ -3506,13 +3506,25 @@ ${JSON.stringify(shown, null, 1)}
     const replies = await this.lastReplies(all);
     const lastDm = new Map<string, string>();
     for (const [tid, at] of replies) if (tid.startsWith("tm-")) lastDm.set(tid.slice(3), at);
+    // The row opens your DM, so when nothing's live it shows the DM's newest line, not work done in a ramble or a
+    // routine run elsewhere (that read as a message you then couldn't find).
+    const dmLine = new Map<string, { text: string; at: string }>();
+    const keep = (tid: string | undefined, text: string, at: string | undefined) => {
+      if (!tid?.startsWith("tm-") || !text || !at) return;
+      const id = tid.slice(3), cur = dmLine.get(id);
+      if (!cur || cur.at < at) dmLine.set(id, { text, at });
+    };
+    for (const m of await this.store.all<Message>("messages")) if (!m.hidden) keep(m.threadId, first(m.text || ""), m.createdAt);
+    for (const j of jobs) if (j.status === "done" || j.status === "failed")
+      keep(j.threadId, j.status === "failed" ? `Couldn't: ${j.task}` : first(j.result || "") || `Done: ${j.task}`, j.finishedAt || j.updatedAt);
     return team.map((t) => {
       const mine = jobs.filter((j) => j.teammateId === t.id);
       const pick = (...st: Job["status"][]) => mine.filter((j) => st.includes(j.status));
       const working = pick("working"), queued = pick("queued"), waiting = pick("waiting"), blocked = pick("blocked");
       const last = mine.find((j) => j.status === "done" || j.status === "failed");
       const recent = last && now - new Date(last.finishedAt || last.updatedAt || last.createdAt).getTime() < 3 * 60_000;
-      let state = "idle", status = "", at = last?.finishedAt || last?.updatedAt;
+      const dm = dmLine.get(t.id);
+      let state = "idle", status = "", at = dm?.at;
       if (t.id === "hearth" && this.thinking) { state = "thinking"; status = "Sorting out who does what…"; at = this.clock().toISOString(); }
       else if (blocked.length) { state = "blocked"; status = `Stuck: ${blocked[0].blocked?.need || blocked[0].task}`; at = blocked[0].updatedAt; }
       else if (waiting.length) {
@@ -3521,7 +3533,10 @@ ${JSON.stringify(shown, null, 1)}
       }
       else if (working.length) { state = "working"; status = `${working.length > 1 ? `${working.length} things. ` : ""}On it: ${working[0].task}`; at = working[0].startedAt; }
       else if (queued.length) { state = "thinking"; status = `Up next: ${queued[0].task}`; at = queued[0].createdAt; }
-      else if (last) { state = recent ? "done" : "idle"; status = last.status === "failed" ? `Couldn't: ${last.task}` : first(last.result || "") || `Done: ${last.task}`; }
+      else {
+        if (recent) state = "done"; // the face still smiles for a moment after any finish
+        if (dm) status = dm.text;
+      }
       if (!status) {
         const next = hooks.find((h) => h.teammateId === t.id);
         status = next ? `Next: ${next.title}, ${new Date(next.nextAt!).toLocaleString("en-US", { timeZone: prefs.tz, weekday: "short", hour: "numeric", minute: "2-digit" })}` : t.description;
