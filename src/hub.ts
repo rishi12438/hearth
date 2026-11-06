@@ -534,27 +534,31 @@ export class Hub {
     return last;
   }
 
-  /** When you last looked at each chat (by thread id; a DM is tm-<teammate>), on any device. Replies after it are unread. */
+  /** When you last looked at each chat (by thread id; a DM is tm-<teammate>; a task's thread is job-<id>), on any device.
+   *  Replies after it are unread. */
   // since: when the hub started keeping these; anything older counts as read, so nothing old lights up at once.
-  chatSeen(): Promise<{ since: string; seen: Record<string, string> }> {
-    return this.seenChain = this.seenChain.catch(() => {}).then(() => this.readChatSeen()) as Promise<{ since: string; seen: Record<string, string> }>;
+  // jobsSince: the same for task threads, which started being tracked later.
+  chatSeen(): Promise<{ since: string; jobsSince: string; seen: Record<string, string> }> {
+    return this.seenChain = this.seenChain.catch(() => {}).then(() => this.readChatSeen()) as Promise<{ since: string; jobsSince: string; seen: Record<string, string> }>;
   }
   private async readChatSeen() {
-    const cur = await this.store.get<{ id: string; createdAt: string; since: string; seen: Record<string, string> }>("settings", "chatSeen");
-    if (cur) return { since: cur.since || cur.createdAt, seen: cur.seen || {} };
-    const since = this.clock().toISOString();
-    await this.store.put("settings", { id: "chatSeen", createdAt: since, since, seen: {} });
-    return { since, seen: {} };
+    const cur = await this.store.get<{ id: string; createdAt: string; since: string; jobsSince?: string; seen: Record<string, string> }>("settings", "chatSeen");
+    const now = this.clock().toISOString();
+    if (cur?.jobsSince) return { since: cur.since || cur.createdAt, jobsSince: cur.jobsSince, seen: cur.seen || {} };
+    const since = cur ? cur.since || cur.createdAt : now;
+    const seen = cur?.seen || {};
+    await this.store.put("settings", { id: "chatSeen", createdAt: cur?.createdAt || now, since, jobsSince: now, seen });
+    return { since, jobsSince: now, seen };
   }
 
   private seenChain: Promise<unknown> = Promise.resolve();
   /** You're looking at this chat: everything in it so far is read. Only moves forward; every device hears about it. */
   markChatSeen(threadId: string): Promise<string> {
     const next = this.seenChain.catch(() => {}).then(async () => {
-      const { since, seen } = await this.readChatSeen();
+      const { since, jobsSince, seen } = await this.readChatSeen();
       const at = this.clock().toISOString();
       if ((seen[threadId] || "") >= at) return seen[threadId];
-      await this.store.put("settings", { id: "chatSeen", createdAt: since, since, seen: { ...seen, [threadId]: at } });
+      await this.store.put("settings", { id: "chatSeen", createdAt: since, since, jobsSince, seen: { ...seen, [threadId]: at } });
       this.emit("seen", { threadId, at });
       return at;
     });

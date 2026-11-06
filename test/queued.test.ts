@@ -191,6 +191,15 @@ test("chats are read on the hub: a reply after you last looked is unread on ever
   expect((await hub.chatSeen()).seen[thread.id]).toBe(at);
   expect(at >= t.lastReplyAt!).toBe(true);
   expect(await hub.markChatSeen(thread.id) >= at).toBe(true); // only moves forward
+  // A task's own thread is keyed job-<id>; tasks have their own start line, and marking one keeps everything else.
+  const first = await hub.chatSeen();
+  expect(first.jobsSince >= since).toBe(true);
+  const job = (await jobs()).find((j) => j.threadId === thread.id)!;
+  const jat = await hub.markChatSeen(`job-${job.id}`);
+  const after = await hub.chatSeen();
+  expect(after.seen[`job-${job.id}`]).toBe(jat);
+  expect(after.seen[thread.id]).toBe(first.seen[thread.id]);
+  expect(after.jobsSince).toBe(first.jobsSince);
   // DMs are keyed tm-<teammate>, and the roster says when the teammate last wrote.
   await hub.askTeammate("scout", "hi");
   await until(() => settled(2));

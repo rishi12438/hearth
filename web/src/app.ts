@@ -244,7 +244,7 @@ function onEvent(e: { type: string; data?: any }) {
   switch (e.type) {
     case "hello": if (e.data?.build && e.data.build !== __BUILD__) markUpdate(); loadSeen(); return;
     // You read a chat (here or on another device): its dot goes out everywhere.
-    case "seen": if (e.data?.threadId && (seen[e.data.threadId] || "") < e.data.at) seen[e.data.threadId] = e.data.at; drawSide(); if (r.view === "home") drawHome(); else if (r.view === "dms") drawDms(); return;
+    case "seen": if (e.data?.threadId && (seen[e.data.threadId] || "") < e.data.at) seen[e.data.threadId] = e.data.at; if (String(e.data?.threadId).startsWith("job-") && open && S.chat) drawChat(false); drawSide(); if (r.view === "home") drawHome(); else if (r.view === "dms") drawDms(); return;
     // Don't redraw a project page while you're typing in its title or description (its own saves trigger this).
     case "projects": loadProjects(); if (r.view === "project" && !document.activeElement?.closest("#project .ietext")) drawProject(r.id!); return;
     case "notify": {
@@ -1797,7 +1797,7 @@ function taskMessage(m: any) {
   // Started (or carried on) by a workflow: a ⚡ with its name over the post, and the hand-off folded under it.
   const handoff = S.chat.messages.find((x: any) => x.id === latest.messageId && x.fromTrigger);
   const spark = m.fromTrigger || handoff?.fromTrigger;
-  const body: (Node | Node[] | null)[] = [spark ? sparkLine(spark, handoff) : null, h("button", { class: "ttitle", on: { click: open } }, h("span", null, jobLabel(j)), icon("chevron", 16))];
+  const body: (Node | Node[] | null)[] = [spark ? sparkLine(spark, handoff) : null, h("button", { class: "ttitle", on: { click: open } }, h("span", null, jobLabel(j)), jobUnread(j) ? h("i", { class: "udot", title: "New since you last looked" }) : null, icon("chevron", 16))];
   if (st === "working" || st === "queued") {
     body.push(h("button", { class: "typing live", on: { click: open } }, h("i"), h("i"), h("i"),
       h("span", { "data-progress": latest.id }, st === "working" ? S.progress.get(latest.id) || (latest.tier === "heavy" ? "Thinking it through" : "On it") : latest.dependsOn?.length ? "Waiting on another task" : "Up next"),
@@ -1997,6 +1997,7 @@ function threadTabs(chat: any, activeId: string | null, min = 1): HTMLElement | 
 function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
   const j = S.chat.jobs.find((x: any) => x.id === jobId);
   if (!j) { clear(el, h("p", { class: "muted center" }, "Loading…")); return; }
+  if (!document.hidden && jobUnread(j)) markSeen(`job-${j.id}`); // you're reading it: its dot in the channel goes out
   const t = mate(j.teammateId);
   const follow = S.chat.jobs.filter((x: any) => x.followsUp === j.id);
   // One timeline, in the order things happened: every message you sent here (also the ones added to a run that was
@@ -2108,14 +2109,16 @@ function renameRamble(t: any) {
 // reading a ramble on your phone clears its dot on the Mac too. Until the hub answers, nothing counts as unread.
 const seen: Record<string, string> = {};
 let seenSince = "9";
-const seenAt = (tid?: string) => (!tid ? "" : (seen[tid] || "") > seenSince ? seen[tid] : seenSince);
+let jobsSince = "9"; // task threads (job-<id>) started being tracked later: anything before this counts as read
+const seenAt = (tid?: string) => { if (!tid) return ""; const base = tid.startsWith("job-") ? jobsSince : seenSince; return (seen[tid] || "") > base ? seen[tid] : base; };
 const unread = (tid: string, lastReplyAt?: string) => !!lastReplyAt && lastReplyAt > seenAt(tid);
 async function loadSeen() {
   try {
     const r = await call("/api/threads/seen");
     seenSince = r.since || "";
+    jobsSince = r.jobsSince || seenSince;
     for (const [k, v] of Object.entries(r.seen || {})) if ((seen[k] || "") < (v as string)) seen[k] = v as string;
-    drawSide(); if (route().view === "home") drawHome();
+    drawSide(); const v = route().view; if (v === "home") drawHome(); else if (v === "chat" && S.chat) drawChat(false);
   } catch {}
 }
 const seenPost = new Map<string, ReturnType<typeof setTimeout> | null>();
@@ -2126,7 +2129,7 @@ function markSeen(tid: string) {
   if (seenPost.has(tid)) { seenPost.set(tid, null); return; } // one's in flight: send another once it's done
   const send = () => {
     seenPost.set(tid, setTimeout(() => { const again = seenPost.get(tid) === null; seenPost.delete(tid); if (again) markSeen(tid); }, 2000));
-    call(tid.startsWith("tm-") ? `/api/teammates/${tid.slice(3)}/seen` : `/api/threads/${tid}/seen`, { body: {} }).catch(() => {});
+    call(tid.startsWith("tm-") ? `/api/teammates/${tid.slice(3)}/seen` : tid.startsWith("job-") ? `/api/jobs/${tid.slice(4)}/seen` : `/api/threads/${tid}/seen`, { body: {} }).catch(() => {});
   };
   send();
 }
@@ -2139,13 +2142,19 @@ function readIfOpen(tid?: string) {
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
   const r = route();
-  if (r.view === "chat") markSeen(r.id!); else if (r.view === "dm") markSeen(`tm-${r.id}`);
+  if (r.view === "chat") { markSeen(r.id!); if (r.job) markSeen(`job-${r.job}`); } else if (r.view === "dm") markSeen(`tm-${r.id}`);
   drawSide();
 });
 // Seeing a stuck job is enough to clear it from the badges (the hub remembers, on every device); it stays stuck until you act.
 const unseenStuck = (j: any) => j?.status === "blocked" && !(j.seenAt && j.seenAt >= (j.updatedAt || j.createdAt));
 const seeStuck = (path: string) => { call(path, { body: {} }).catch(() => {}); };
 const unreadDm = (t: any) => unread(`tm-${t.id}`, t.lastDmAt);
+/** A task in a ramble has an answer you haven't opened: it (or a follow-up) finished after you last opened its thread. */
+function jobUnread(j: any) {
+  const last = [j, ...(S.chat?.jobs || []).filter((x: any) => x.followsUp === j.id)]
+    .filter((x: any) => (x.status === "done" || x.status === "failed") && !x.stopped).map((x: any) => x.finishedAt || x.updatedAt || "").sort().pop();
+  return unread(`job-${j.id}`, last);
+}
 
 /** A job from another chat that's waiting on you, shown in its teammate's DM: where it is, then its pending cards. */
 function elsewhereRows(j: any, approvals: any[], mateId: string): { at: string; nodes: Node[] }[] {
