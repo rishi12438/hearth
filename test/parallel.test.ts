@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createStore, COLLECTIONS, type Store } from "../src/store/index.ts";
@@ -8,7 +8,7 @@ import { Brain } from "../src/brain.ts";
 import { Scripts } from "../src/scripts.ts";
 import { loadConfig } from "../src/config.ts";
 import { extractTiles } from "../src/tiles.ts";
-import type { Job, Workflow } from "../src/types.ts";
+import type { Job, Thread, Workflow } from "../src/types.ts";
 
 const FIXTURE = join(import.meta.dir, "fixtures/fake-agent.ts");
 let dir: string, store: Store, hub: Hub, log: string;
@@ -498,6 +498,51 @@ test("a new ramble on an earlier one's subject is its own ramble, started in tha
   // Nothing alike: no workspace carried over.
   plan([{ label: "Ramen near me", task: "find a good ramen place nearby", teammate: "Hearth" }]);
   expect((await hub.ramble("find me a good ramen place")).value!.thread.workspace).toBeUndefined();
+});
+
+test("rambles on the same subject end up in one project: a new one named after it, with the folder, or one that fits by name", async () => {
+  await setup();
+  process.env.FAKE_MS = "20";
+  plan([{ label: "Your Robinhood balance", task: "check my Robinhood balance and holdings", teammate: "Hearth", workspace: "robinhood-account" }]);
+  const money = (await hub.ramble("what's my robinhood balance")).value!.thread.id;
+  await until(() => allDone(1));
+  const job = (await jobs())[0];
+  const before = hub.brain.sessions.placeOf(job.id);
+  plan([{ label: "Robinhood this month", task: "how Robinhood did this month", teammate: "Hearth" }]);
+  const next = (await hub.ramble("how is my robinhood doing this month?")).value!.thread;
+  const p = (await hub.listProjects()).find((x) => x.name === "Robinhood account")!;
+  expect(p).toBeTruthy();
+  expect(next.projectId).toBe(p.id);
+  expect((await store.get<Thread>("threads", money))?.projectId).toBe(p.id);
+  if (before) expect(hub.brain.sessions.placeOf(job.id)).toEqual({ project: "robinhood-account", workspace: "robinhood-account" });
+  await until(() => allDone(2));
+  const j2 = (await jobs()).find((j) => j.threadId === next.id)!;
+  expect(await (hub as any).placeFor(j2)).toEqual({ project: "robinhood-account", workspace: "robinhood-account" });
+  // A third one joins the same project, and one that only names an existing project goes into it.
+  plan([{ label: "Robinhood taxes", task: "robinhood tax forms", teammate: "Hearth" }]);
+  expect((await hub.ramble("robinhood tax forms please")).value!.thread.projectId).toBe(p.id);
+  const wed = (await hub.createProject("Wedding")).value!;
+  plan([{ label: "Cake", task: "cake", teammate: "Hearth" }]);
+  expect((await hub.ramble("wedding cake ideas")).value!.thread.projectId).toBe(wed.id);
+  plan([{ label: "Ramen", task: "ramen", teammate: "Hearth" }]);
+  expect((await hub.ramble("find me a good ramen place")).value!.thread.projectId).toBeUndefined();
+  await until(() => allDone(5));
+});
+
+test("a project dragged onto another joins it: rambles, memory and files", async () => {
+  await setup();
+  const a = (await hub.createProject("Stocks")).value!, b = (await hub.createProject("Money", "💰")).value!;
+  const t = (await hub.ramble("loose", undefined, [], a.id)).value!.thread.id;
+  await hub.addFact({ fact: "Uses Robinhood.", notebook: a.notebook, importance: 2 }, "assistant");
+  const dir = hub.brain.sessions.folder("thread-merge-1", { project: "stocks", workspace: "general" })!;
+  writeFileSync(join(dir, "x.txt"), "hi");
+  expect((await hub.mergeProject(a.id, a.id)).error).toBeTruthy();
+  expect((await hub.mergeProject(a.id, b.id)).value?.name).toBe("Money");
+  expect(await store.get("projects", a.id)).toBeNull();
+  expect((await store.get<Thread>("threads", t))?.projectId).toBe(b.id);
+  expect((await hub.projectDetail(b.id))!.memory.map((f) => f.fact)).toEqual(["Uses Robinhood."]);
+  expect(hub.brain.sessions.placeOf("thread-merge-1")).toEqual({ project: "money", workspace: "general" });
+  await until(async () => !hub.thinking);
 });
 
 test("moving a ramble into the earlier one it was started like takes everything along, even a task still running", async () => {

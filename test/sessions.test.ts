@@ -411,3 +411,29 @@ echo '{"type":"result","is_error":false,"result":"done","session_id":"sess-cut01
     expect(cbrain.sessions.get("thread-cutx", "codex")).toMatch(/^thr-/);
   });
 });
+
+test("a workspace's folder moves into a project (or another project) with its threads re-pinned, merging what's there", () => {
+  const dir = mkdtempSync(join(tmpdir(), "hearth-ss-"));
+  const s = new Sessions(join(dir, "brain-sessions.json"), join(dir, "brain"));
+  const a = s.folder("thread-aa", { workspace: "robinhood" })!;
+  s.set("thread-aa", "claude", "sess-aaaa");
+  writeFileSync(join(a, "data.csv"), "1,2");
+  expect(s.move({ workspace: "robinhood" }, { project: "money", workspace: "robinhood" })).toBe(true);
+  expect(existsSync(a)).toBe(false);
+  expect(s.placeOf("thread-aa")).toEqual({ project: "money", workspace: "robinhood" });
+  expect(s.get("thread-aa", "claude")).toBeUndefined(); // sessions are keyed by folder: the next run starts fresh, with the files
+  expect(readFileSync(join(dir, "brain/projects/money/robinhood/data.csv"), "utf8")).toBe("1,2");
+  // Another project's workspace of the same name merges in: both kept.
+  const b = s.folder("thread-bb", { project: "stocks", workspace: "robinhood" })!;
+  writeFileSync(join(b, "data.csv"), "3,4");
+  writeFileSync(join(b, "NOTES.md"), "# robinhood\n\nlogin via app");
+  mkdirSync(join(b, "scripts")); writeFileSync(join(b, "scripts", "pull.ts"), "x");
+  s.moveProject("stocks", "money");
+  const m = join(dir, "brain/projects/money/robinhood");
+  expect(existsSync(join(dir, "brain/projects/stocks"))).toBe(false);
+  expect(readFileSync(join(m, "data.csv"), "utf8")).toBe("1,2");
+  expect(readFileSync(join(m, "data-from-stocks.csv"), "utf8")).toBe("3,4");
+  expect(readFileSync(join(m, "scripts", "pull.ts"), "utf8")).toBe("x");
+  expect(readFileSync(join(m, "NOTES.md"), "utf8")).toContain("## From stocks");
+  expect(s.placeOf("thread-bb")).toEqual({ project: "money", workspace: "robinhood" });
+});

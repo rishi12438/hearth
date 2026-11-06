@@ -1,5 +1,5 @@
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, extname, join } from "node:path";
 
 // Sessions: a job's thread is one conversation with its brain, not a string of throwaway runs (the way Mako does it).
 // The first working run in a thread starts a Claude Code or Codex session; every follow-up in that thread resumes it by
@@ -54,6 +54,23 @@ Rewrite this section whenever you find a better way. Reusable methods go in skil
 function seed(dir: string, name: string) {
   try { if (!existsSync(join(dir, "NOTES.md"))) writeFileSync(join(dir, "NOTES.md"), NOTES_TEMPLATE(name)); } catch {}
   try { mkdirSync(join(dir, "skills"), { recursive: true }); } catch {}
+}
+
+/** Merge folder src into dst (see Sessions.move). The .claude link at the top is the workspace's own, so it isn't moved. */
+function mergeInto(src: string, dst: string, label: string, top = false) {
+  for (const name of readdirSync(src)) {
+    if (top && name === ".claude") continue;
+    const s = join(src, name), d = join(dst, name);
+    let there = true;
+    try { lstatSync(d); } catch { there = false; }
+    if (!there) { renameSync(s, d); continue; }
+    if (top && name === "NOTES.md") { appendFileSync(d, `\n\n## From ${label}\n\n${readFileSync(s, "utf8").trim()}\n`); continue; }
+    if (lstatSync(s).isDirectory() && lstatSync(d).isDirectory()) { mergeInto(s, d, label); continue; }
+    const ext = extname(name), base = ext ? name.slice(0, -ext.length) : name;
+    let n = `${base}-from-${label}${ext}`;
+    for (let i = 2; existsSync(join(dst, n)); i++) n = `${base}-from-${label}-${i}${ext}`;
+    renameSync(s, join(dst, n));
+  }
 }
 
 export class Sessions {
@@ -130,6 +147,40 @@ export class Sessions {
     const rel0 = typeof f === "string" && FOLDER_RE.test(f) ? f : want && FOLDER_RE.test(rel(want)) ? rel(want) : `threads/${thread}`;
     if (!THREAD_RE.test(thread)) return "";
     try { return readFileSync(join(this.workDir, rel0, "NOTES.md"), "utf8").slice(0, max).trim(); } catch { return ""; }
+  }
+
+  /**
+   * Move a workspace's folder (its rambles joined a project, or its project joined another) and re-pin the threads that
+   * worked there. Their saved sessions are dropped: Claude and Codex key them by folder, so the next run starts a new one
+   * in the new place, with all the files. Into a workspace that's already there, it merges: what isn't there moves in,
+   * NOTES.md is added to the end, and a file with the same name keeps both (the moved one as name-from-<old>).
+   */
+  move(from: Place, to: Place): boolean {
+    const a = rel(from), b = rel(to);
+    if (a === b || !FOLDER_RE.test(a) || !FOLDER_RE.test(b)) return false;
+    const src = join(this.workDir, a), dst = join(this.workDir, b);
+    const label = from.project && from.project !== to.project ? from.project : from.workspace;
+    try {
+      if (existsSync(src)) {
+        if (!existsSync(dst)) { mkdirSync(dirname(dst), { recursive: true, mode: 0o700 }); renameSync(src, dst); }
+        else { mergeInto(src, dst, label, true); rmSync(src, { recursive: true, force: true }); }
+      }
+    } catch (e) { console.warn(`sessions: couldn't move ${a} to ${b}: ${(e as Error).message}`); return false; }
+    const all = this.read();
+    let changed = false;
+    for (const [t, e] of Object.entries(all)) if (e.folder === a) { all[t] = { at: e.at, folder: b }; changed = true; }
+    if (changed) this.write(all);
+    return true;
+  }
+
+  /** Every workspace of one project into another (see move); the old project's folder goes. */
+  moveProject(from: string, to: string) {
+    if (from === to || !WORKSPACE_RE.test(from) || !WORKSPACE_RE.test(to)) return;
+    const root = join(this.workDir, "projects", from);
+    let names: string[] = [];
+    try { names = readdirSync(root).filter((n) => WORKSPACE_RE.test(n)); } catch { return; }
+    for (const n of names) this.move({ project: from, workspace: n }, { project: to, workspace: n });
+    try { rmdirSync(root); } catch {}
   }
 
   /**

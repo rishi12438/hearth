@@ -661,6 +661,67 @@ export class Hub {
     return { value: saved };
   }
 
+  /**
+   * A project its words all name ("wedding cake ideas" fits Wedding; "Japan trip" needs both words), the longest name
+   * first. So a new ramble about a project's subject is filed there even when no earlier ramble matches.
+   */
+  private async projectByName(text: string): Promise<Project | null> {
+    const q = subjectWords(text);
+    if (!q.size) return null;
+    let best: Project | null = null, bestN = 0;
+    for (const p of await this.store.all<Project>("projects")) {
+      const name = [...subjectWords(p.name)];
+      if (name.length > bestN && name.every((w) => q.has(w))) { best = p; bestN = name.length; }
+    }
+    return best;
+  }
+
+  /**
+   * A new ramble is on an earlier one's subject (see similarRamble): file them in a project together. The earlier one's,
+   * if it's in one; else a project they fit by name; else a new one named after the subject. Other loose rambles that
+   * worked in the same workspace come along, and so does its folder, so the new ramble's jobs start with those files.
+   */
+  private async groupInProject(from: Thread, ws: string | undefined, why: string[], text: string): Promise<Project | null> {
+    if (from.projectId) return (await this.store.get<Project>("projects", from.projectId)) || null;
+    if (from.routine || from.id.startsWith("tm-") || from.id === "main") return null;
+    let p = await this.projectByName(`${text} ${from.title} ${channelOf(from).replace(/-/g, " ")}`);
+    if (!p) {
+      const subject = ws || (from.channel && !/^ramble(-\d+)?$/.test(from.channel) ? channelWorkspace(from.channel) : undefined) || workspaceName(why.slice(0, 2).join(" "));
+      if (!subject) return null;
+      const name = subject.replace(/-/g, " ").replace(/^./, (c) => c.toUpperCase());
+      p = (await this.createProject(name)).value || (await this.store.all<Project>("projects")).find((x) => x.name.toLowerCase() === name.toLowerCase()) || null;
+      if (!p) return null;
+    }
+    const all = await this.store.all<Thread>("threads");
+    const usedWs = new Set(ws ? (await this.store.all<Job>("jobs")).filter((j) => workspaceName(j.workspace) === ws).map((j) => j.threadId) : []);
+    const along = all.filter((t) => t.id === from.id || (ws && !t.projectId && !t.routine && !t.id.startsWith("tm-") && t.id !== "main"
+      && (usedWs.has(t.id) || workspaceName(t.workspace) === ws || (!!t.channel && channelWorkspace(t.channel) === ws))));
+    for (const t of along) await this.store.put<Thread>("threads", { ...t, projectId: p.id });
+    const proj = workspaceName(p.name);
+    if (ws && proj) this.brain.sessions?.move({ workspace: ws }, { project: proj, workspace: ws });
+    await this.log("project.grouped", `${along.map((t) => `#${channelOf(t)}`).join(", ")} filed in ${p.name} with a new ramble on the same subject`);
+    this.emit("threads"); this.emit("projects");
+    return p;
+  }
+
+  /** One project joins another (dragged onto it): its rambles, its memory and its workspaces' folders move in, and it goes. */
+  async mergeProject(fromId: string, intoId: string) {
+    if (fromId === intoId) return { error: "That's the same project." };
+    const a = await this.store.get<Project>("projects", fromId), b = await this.store.get<Project>("projects", intoId);
+    if (!a || !b) return { error: "No such project." };
+    for (const t of (await this.store.all<Thread>("threads")).filter((t) => t.projectId === a.id)) await this.store.put<Thread>("threads", { ...t, projectId: b.id });
+    for (const f of (await this.store.all<Fact>("memory")).filter((f) => f.notebook === a.notebook)) await this.store.put<Fact>("memory", { ...f, notebook: b.notebook });
+    const wa = workspaceName(a.name), wb = workspaceName(b.name);
+    if (wa && wb) this.brain.sessions?.moveProject(wa, wb);
+    const about = [b.about, a.about].filter(Boolean).join("\n\n").slice(0, 1000);
+    const into = { ...b, ...(about ? { about } : {}), emoji: b.emoji || a.emoji, updatedAt: this.clock().toISOString() };
+    await this.store.put<Project>("projects", into);
+    await this.store.remove("projects", a.id);
+    await this.log("project.merged", `${a.name} joined ${b.name}`);
+    this.emit("projects"); this.emit("threads"); this.emit("memory");
+    return { value: into };
+  }
+
   /** A project's page: its rambles, what's in its memory, and files from its rambles. */
   async projectDetail(id: string) {
     const p = await this.store.get<Project>("projects", id);
@@ -725,7 +786,8 @@ export class Hub {
       const like = !project && !o.fromTrigger && !o.hidden ? await this.similarRamble(clean).catch(() => null) : null;
       const from = like ? await this.store.get<Thread>("threads", like.threadId) : null;
       const ws = from ? await this.workspaceOf(from) : undefined;
-      if (ws && from?.projectId) project = (await this.store.get<Project>("projects", from.projectId)) || null;
+      // Rambles that go together share a project: the earlier one's, one they fit by name, or a new one (see groupInProject).
+      if (!project && !o.fromTrigger && !o.hidden) project = await (from ? this.groupInProject(from, ws, like!.why, clean) : this.projectByName(clean)).catch(() => null);
       thread = await this.store.put<Thread>("threads", { id: randomUUID(), createdAt: now, updatedAt: now, num, title: (o.title || clean.split(/\s+/).slice(0, 6).join(" ")).slice(0, 60),
         ...(project ? { projectId: project.id } : {}), ...(ws ? { workspace: ws, workspaceFrom: from!.id } : {}) });
       if (ws) await this.log("ramble.workspace", `new ramble starts in the "${ws}" workspace of #${like!.channel} (${like!.why.join(", ")})`);
@@ -3840,7 +3902,7 @@ ${JSON.stringify(shown, null, 1)}
    * offer "this goes with #robinhood-money" before anything is planned. Names, titles and task labels count double.
    */
   async similarRamble(text: string) {
-    const words = (s: string) => new Set((s.toLowerCase().match(/[a-z0-9]{3,}/g) || []).map((w) => w.replace(/(?<=\w{3})s$/, "")).filter((w) => !STOP.has(w)));
+    const words = subjectWords;
     const q = words(text);
     if (!q.size) return null;
     const since = this.clock().getTime() - 60 * 86400_000;
@@ -4978,6 +5040,8 @@ const STOP = new Set(("the and for with this that from into your you yours mine 
   + "need please tell show give check look know like think let put take use done going doing day today tomorrow tonight week weekend month year time "
   + "now next last good best new old one two remind reminder plan quick idea there here then than them they their our out all not but yes okay hey hi "
   + "thank thanks hearth again other another way back keep sure same").split(" "));
+/** The words that say what something is about: 3+ letters, a trailing "s" dropped, common words left out. */
+const subjectWords = (s: string) => new Set((s.toLowerCase().match(/[a-z0-9]{3,}/g) || []).map((w) => w.replace(/(?<=\w{3})s$/, "")).filter((w) => !STOP.has(w)));
 const nameFrom = (title: string) => title.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w && !FILLER.has(w)).slice(0, 3).join(" ");
 
 /** The key an "Always allow" is saved under: one chat on one app. */
