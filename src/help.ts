@@ -110,8 +110,8 @@ const blockedSteps: Steps = (s) => {
 
 export const STUCK: StuckKind[] = [
   {
-    id: "blocked", aka: ["bot-detection", "bot", "captcha", "human-check", "403", "access-denied", "scrape", "cant-scrape", "wont-load"],
-    when: "a site blocks you or won't load: a human check, a captcha, Access Denied, a 403 or error page, endless loading, results that ignore what you typed",
+    id: "blocked", aka: ["bot-detection", "bot", "captcha", "human-check", "403", "access-denied", "scrape", "cant-scrape", "wont-load", "fetch", "fetch-failed", "page-error"],
+    when: "a site blocks you or won't load, by WebFetch, curl or the browser: a fetch error, a human check, a captcha, Access Denied, a 403 or error page, endless loading, results that ignore what you typed",
     steps: blockedSteps,
   },
   {
@@ -199,7 +199,7 @@ exec curl -sS -m 60 -H "X-Hearth-Agent: ${key}" \${run[@]+"\${run[@]}"} "\${args
 `;
   return {
     name: "hearth-help", common: true, commands: ["hearth-help"], reads: [] as string[], scripts: { "hearth-help": script },
-    description: "Stuck on anything (a site blocks you, you're signed out, no tool for a service, a command keeps failing, you need the user's input, waiting on an Approve)? hearth-help stuck says what to do, from what's there right now.",
+    description: "Stuck on anything (a site blocks you or a page won't load, you're signed out, no tool for a service, a command keeps failing, you need the user's input, waiting on an Approve)? hearth-help stuck says what to do, from what's there right now.",
     body: `# hearth-help
 
 When you're stuck, don't give the work back to the user: ask the hub.
