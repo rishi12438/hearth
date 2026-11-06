@@ -2053,6 +2053,18 @@ const unseenStuck = (j: any) => j?.status === "blocked" && !(j.seenAt && j.seenA
 const seeStuck = (path: string) => { call(path, { body: {} }).catch(() => {}); };
 const unreadDm = (t: any) => unread(`tm-${t.id}`, t.lastDmAt);
 
+/** A job from another chat that's waiting on you, shown in its teammate's DM: where it is, then its pending cards. */
+function elsewhereRows(j: any, approvals: any[], mateId: string): { at: string; nodes: Node[] }[] {
+  const tid = String(j.threadId || "");
+  const thread = S.threads.find((x: any) => x.id === tid);
+  const where = tid.startsWith("tm-") ? `DM with ${mate(tid.slice(3)).name}` : thread ? `#${channelName(thread)}` : "another chat";
+  const aps = approvals.filter((a: any) => a.jobId === j.id && a.status === "pending");
+  const link = tid.startsWith("tm-") ? `#t/${tid.slice(3)}` : tid ? `#c/${tid}/${j.id}${aps[0] ? `?ap=${aps[0].id}` : ""}` : "";
+  const from = h("small", { class: "muted" }, "Waiting on you in ", link ? h("a", { href: link }, where) : where);
+  const at = aps[0]?.createdAt || j.updatedAt || j.createdAt;
+  return [{ at, nodes: [row(mateWho(mateId, "waiting"), at, [from, ...(aps.length ? aps.map(approvalCard) : [h("div", { class: "mtext" }, String(j.task || "").split("\n")[0].slice(0, 140))])])] }];
+}
+
 async function loadDm(id: string) {
   try { S.dm = await call(`/api/teammates/${id}`); markSeen(`tm-${id}`); drawDm(); }
   catch (e) { if (e instanceof ApiError && e.status === 404) { location.hash = ""; return; } handleError(e); }
@@ -2083,6 +2095,9 @@ function drawDm(stick = true) {
   // Asks in this DM that no waiting answer above shows (one that came with no job lands in Hearth's).
   const shownHere = new Set<string>(d.approvals.filter((a: any) => d.jobs.some((j: any) => j.id === a.jobId && j.status === "waiting" && direct.has(j.messageId))).map((a: any) => a.id));
   for (const x of looseApprovals(d.approvals.filter((a: any) => !d.jobs.some((j: any) => j.id === a.jobId && !direct.has(j.messageId))), shownHere)) items.push({ at: x.at, nodes: [x.node] });
+  // Waiting on you in another chat (say a workflow run that went into a closed ramble): the teammate's badge counts it,
+  // so its card is here too, answerable, with a link to where it lives.
+  for (const j of d.jobs.filter((j: any) => j.status === "waiting" && !direct.has(j.messageId))) items.push(...elsewhereRows(j, d.approvals, t.id));
   S.chat = saved;
   items.sort((a, b) => a.at.localeCompare(b.at));
   clear(el,
