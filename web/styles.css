@@ -1163,17 +1163,32 @@ a.item { color: inherit; text-decoration: none; }
 .ietext:empty::before { content: attr(data-ph); color: var(--muted); opacity: .7; }
 .ptitle { font-family: var(--display); font-size: 28px; font-weight: var(--fw-bold); letter-spacing: -.01em; line-height: 1.25; }
 .pabout { font-size: 15px; color: var(--ink-2); margin-top: 2px; white-space: pre-wrap; }
-.paddrow { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px; margin-top: 4px; border-radius: 8px; color: var(--muted); font-size: 15px; }
+.paddrow { display: flex; align-items: center; gap: 10px; width: 100%; padding: 5px 8px; margin-top: 1px; border-radius: 6px; color: var(--muted); font-size: 15px; }
 .paddrow:hover { background: rgba(30, 25, 20, .05); color: var(--ink-2); }
 .droprow.danger { color: var(--danger); }
 .emojipop { width: 292px; max-width: 292px; }
 .emojigrid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 2px; padding: 4px 2px; }
 .emojicell { height: 32px; border-radius: 7px; font-size: 20px; display: grid; place-items: center; }
 .emojicell:hover, .emojicell.on { background: rgba(30, 25, 20, .07); }
-.psec { margin-top: 26px; }
-.psec-head { display: flex; align-items: center; justify-content: space-between; margin: 0 4px 8px; }
-.psec-head h3 { font-size: 15px; font-weight: var(--fw-semibold); margin: 0; }
+.psec { margin-top: 30px; }
+.psec-head { display: flex; align-items: center; justify-content: space-between; margin: 0 0 4px; padding: 0 2px 6px; border-bottom: 1px solid var(--line); }
+.psec-head h3 { font-size: 14px; font-weight: var(--fw-semibold); color: var(--muted); margin: 0; }
 .shash.big { font-size: 18px; width: 22px; }
+/* Project page lists: flat Notion-style rows. No card, no row borders, just a soft highlight on hover. */
+.plist { display: flex; flex-direction: column; gap: 1px; }
+.prow { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 34px; padding: 5px 8px; border: 0; border-radius: 6px; background: none; text-align: left; font: inherit; font-size: 15px; color: var(--ink); }
+button.prow { cursor: pointer; }
+button.prow:hover { background: rgba(30, 25, 20, .05); }
+.prow > .icon { color: var(--muted); flex: none; }
+.prow .grow { min-width: 0; display: flex; align-items: baseline; gap: 8px; overflow: hidden; }
+.prow b { font-weight: var(--fw-medium); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; max-width: 60%; }
+.prow small { color: var(--muted); font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prow time { margin-left: auto; color: var(--muted); font-size: 13px; flex: none; white-space: nowrap; }
+.prow.fact { align-items: flex-start; line-height: 1.5; color: var(--ink-2); }
+.prow.fact .grow { display: block; white-space: normal; }
+.prow.fact time { padding-top: 1px; }
+.pdot { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); flex: none; margin: 9px 4px 0 6px; }
+.pempty { color: var(--muted); font-size: 14.5px; margin: 6px 8px; }
 .wrow b.plain { font-weight: var(--fw-medium); white-space: normal; }
 
 /* Activity sections: Working now / Needs you / Earlier */

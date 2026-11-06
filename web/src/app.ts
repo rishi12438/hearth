@@ -877,15 +877,15 @@ async function drawProject(id: string) {
         inlineEdit(p.about || "", "Add a description…", "pabout", (v) => saveProject(p, { about: v }), true),
         h("small", null, `${d.rambles.length} ramble${d.rambles.length === 1 ? "" : "s"} · ${d.memory.length} thing${d.memory.length === 1 ? "" : "s"} remembered`)),
       h("button", { class: "pmore", title: "More", "aria-label": "More", on: { click: (e: Event) => projectMore(e.currentTarget as HTMLElement, p) } }, icon("more", 18))),
-    sec("Rambles", null, d.rambles.length ? h("div", { class: "wcard" }, d.rambles.map((t: any) =>
-      h("button", { class: "wrow", on: { click: () => { location.hash = `#c/${t.id}`; } } }, h("span", { class: "shash big" }, "#"),
-        h("span", { class: "grow" }, h("b", null, channelName(t)), h("small", null, `${t.title || ""}${t.archived ? " · archived" : ""}`)))))
+    sec("Rambles", null, d.rambles.length ? h("div", { class: "plist" }, d.rambles.map((t: any) =>
+      h("button", { class: "prow", on: { click: () => { location.hash = `#c/${t.id}`; } } }, h("span", { class: "shash" }, "#"),
+        h("span", { class: "grow" }, h("b", null, channelName(t)), t.title || t.archived ? h("small", null, `${t.title || ""}${t.archived ? `${t.title ? " · " : ""}archived` : ""}`) : null))))
       : null, h("button", { class: "paddrow", on: { click: start } }, icon("plus", 16), d.rambles.length ? "New ramble" : "New ramble, or drag one here from the sidebar")),
-    sec("Memory", null, d.memory.length ? h("div", { class: "wcard" }, d.memory.map((f: any) =>
-      h("div", { class: "wrow" }, h("span", { class: "grow" }, h("b", { class: "plain" }, f.fact), h("small", null, dayLabel(f.createdAt))))))
-      : h("p", { class: "wlede" }, "What teammates learn while working in this project's rambles shows up here, and they use it in every ramble in it.")),
-    d.files.length ? sec("Files", null, h("div", { class: "wcard" }, d.files.map((f: any) =>
-      h("button", { class: "wrow", on: { click: () => downloadFile(f) } }, icon("clip", 18), h("span", { class: "grow" }, h("b", null, f.name), h("small", null, dayLabel(f.createdAt))))))) : null,
+    sec("Memory", null, d.memory.length ? h("div", { class: "plist" }, d.memory.map((f: any) =>
+      h("div", { class: "prow fact" }, h("span", { class: "pdot" }), h("span", { class: "grow" }, f.fact), h("time", null, dayLabel(f.createdAt)))))
+      : h("p", { class: "pempty" }, "What teammates learn while working in this project's rambles shows up here, and they use it in every ramble in it.")),
+    d.files.length ? sec("Files", null, h("div", { class: "plist" }, d.files.map((f: any) =>
+      h("button", { class: "prow", on: { click: () => downloadFile(f) } }, icon("clip", 16), h("span", { class: "grow" }, h("b", null, f.name)), h("time", null, dayLabel(f.createdAt)))))) : null,
   );
 }
 
