@@ -552,6 +552,25 @@ test("Hearth's agent looks at each new ramble once, after its first work, and on
   delete process.env.FAKE_GROUP;
 });
 
+test("deleting a project moves its folders back out; checking an old ramble on demand asks the agent and says why", async () => {
+  await setup();
+  const at = new Date(Date.now() - 86400_000).toISOString();
+  const p = (await hub.createProject("3d simulation")).value!;
+  await store.put<Thread>("threads", { id: "old-fl", createdAt: at, updatedAt: at, title: "Tomorrow's flight number", channel: "phoenix-flight", projectId: p.id, groupedWhy: "x" } as Thread);
+  const dir = hub.brain.sessions.folder("thread-old-fl-1", { project: "3d-simulation", workspace: "3d-simulation" })!;
+  writeFileSync(join(dir, "sim.py"), "x");
+  expect(await hub.removeProject(p.id)).toBe(true);
+  expect(hub.brain.sessions.placeOf("thread-old-fl-1")).toEqual({ workspace: "3d-simulation" });
+  const back = (await store.get<Thread>("threads", "old-fl"))!;
+  expect(back.projectId ?? back.groupedWhy).toBeUndefined();
+  await store.put<Thread>("threads", { id: "old-tr", createdAt: at, updatedAt: at, title: "Phoenix trip hotels", channel: "phoenix-trip" } as Thread);
+  process.env.FAKE_GROUP = JSON.stringify({ action: "new", name: "Phoenix trip", with: ["old-tr"], why: "Both are for the same Phoenix trip." });
+  const r = (await hub.checkRambleProject("old-fl")).value!;
+  expect(r).toMatchObject({ filed: true, project: "Phoenix trip", with: ["#phoenix-trip"], why: "Both are for the same Phoenix trip." });
+  expect((await hub.checkRambleProject("old-fl")).error).toContain("already");
+  delete process.env.FAKE_GROUP;
+});
+
 test("a project dragged onto another joins it: rambles, memory and files", async () => {
   await setup();
   const a = (await hub.createProject("Stocks")).value!, b = (await hub.createProject("Money", "💰")).value!;

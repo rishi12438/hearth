@@ -642,6 +642,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           return json(r.value);
         }
         if (method === "DELETE" && id) return json({ ok: await hub.removeThread(id) });
+        if (method === "POST" && id && seg[3] === "group-check") { const r = await hub.checkRambleProject(id); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "POST" && id && seg[3] === "project") { const r = await hub.fileThread(id, (await body(req)).projectId || null); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "PATCH" && id) { const r = await hub.renameThread(id, String((await body(req)).channel || "")); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         break;
