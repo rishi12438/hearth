@@ -480,3 +480,22 @@ test("a new ramble that's about an earlier one (even a closed one) is matched to
   expect((await hub.similarRamble("can you plan my week please"))).toBeNull(); // only common words: no match
   expect((await hub.similarRamble("weather in tokyo"))).toBeNull();
 });
+
+test("a new ramble on an earlier one's subject is its own ramble, started in that one's workspace", async () => {
+  await setup();
+  process.env.FAKE_MS = "20";
+  plan([{ label: "Your Robinhood balance", task: "check my Robinhood balance and holdings", teammate: "Hearth", workspace: "robinhood-account" }]);
+  const money = (await hub.ramble("what's my robinhood balance")).value!.thread.id;
+  await until(() => allDone(1));
+  plan([{ label: "Robinhood this month", task: "how Robinhood did this month", teammate: "Hearth" }]); // the planner gives no workspace
+  const next = (await hub.ramble("how is my robinhood doing this month?")).value!.thread;
+  expect(next.id).not.toBe(money);
+  expect(next.workspace).toBe("robinhood-account");
+  expect(next.workspaceFrom).toBe(money);
+  await until(() => allDone(2));
+  const job = (await jobs()).find((j) => j.threadId === next.id)!;
+  expect((await (hub as any).placeFor(job))?.workspace).toBe("robinhood-account");
+  // Nothing alike: no workspace carried over.
+  plan([{ label: "Ramen near me", task: "find a good ramen place nearby", teammate: "Hearth" }]);
+  expect((await hub.ramble("find me a good ramen place")).value!.thread.workspace).toBeUndefined();
+});
