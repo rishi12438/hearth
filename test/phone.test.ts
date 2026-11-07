@@ -278,3 +278,16 @@ test("open-app starts the app's launcher screen, and says plainly when there's n
   await expect(phone.control("open-app", { pkg: "com.nope.app" })).rejects.toThrow(/isn't installed/);
   await expect(phone.control("open-app", { pkg: "x; rm -rf /" })).rejects.toThrow(/package name/);
 });
+
+test("any job that used the phone gets the 'Open your phone' button, not only one that ran handover", async () => {
+  const v = vault();
+  configured(null as any, v);
+  v.set("phone-sshkey", "KEY");
+  const ssh = { runner: () => ({ run: async () => ({ code: 0, stderr: "" }) }) } as any;
+  const phone = new Phone({ dataDir: mkdtempSync(join(tmpdir(), "hearth-phone-any-")), vault: v, ssh, isBusy: () => false });
+  (phone as any).save({ state: "ready", instanceId: "i-1", publicIp: "1.2.3.4", lastUseAt: Date.now() });
+  await phone.control("tap", { x: "1", y: "2" }, "job-3");
+  expect(phone.takeHandover("job-3")).toBe(true);
+  await phone.control("tap", { x: "1", y: "2" }); // the owner's own taps: no job, no button
+  expect(phone.takeHandover("job-3")).toBe(false);
+});

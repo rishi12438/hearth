@@ -289,7 +289,11 @@ const myPublicIp = async (): Promise<string | null> => {
 export class Phone {
   onChange: () => void = () => {};
   private busy = false;
-  /** Jobs that handed the phone to the owner to sign in: their reply gets an "Open your phone" button. */
+  /**
+   * Jobs that used the phone: their reply gets an "Open your phone" button, so the owner can always see it and take
+   * over (sign in) from that thread. Every use counts, not only hearth-phone handover: agents resuming an older
+   * conversation didn't know to run it, and the owner never got a way in.
+   */
   private handovers = new Set<string>();
   takeHandover(jobId: string) { return this.handovers.delete(jobId); }
   /** The start in progress: a second open (the agent retrying, the owner's screen) waits for it instead of failing. */
@@ -564,6 +568,7 @@ export class Phone {
 
   /** One control action from the agent (via hearth-phone). Returns JSON the skill prints. */
   async control(action: string, args: Record<string, string>, jobId?: string): Promise<any> {
+    if (jobId) this.handovers.add(jobId);
     if (action === "open") { const r = await this.open(jobId); return "error" in r ? { error: r.error } : { ok: true, ...this.view() }; }
     if (action === "close") { await this.close(); return { ok: true }; }
     if (action === "status") return this.view();
