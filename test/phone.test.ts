@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { Vault } from "../src/vault.ts";
-import { Phone, PHONE_IAM_POLICY, sign, amzDate, ec2List, xmlTag, xmlItems, ec2Error, type AwsCreds, type Ec2 } from "../src/phone.ts";
+import { Phone, PHONE_IAM_POLICY, ENSURE_ANDROID, REDROID_IMAGE, redroidUserData, sign, amzDate, ec2List, xmlTag, xmlItems, ec2Error, type AwsCreds, type Ec2 } from "../src/phone.ts";
 
 const vault = () => new Vault(mkdtempSync(join(tmpdir(), "hearth-phone-")), { masterKey: randomBytes(32) });
 
@@ -158,4 +158,14 @@ test("live view: while a working job uses the phone, its screen goes to the job'
   const seen = frames.length;
   await Bun.sleep(100);
   expect(frames.length).toBe(seen);
+});
+
+test("Android comes back after every stop: a real multi-arch image, restarted by Docker, healed on each open", () => {
+  expect(REDROID_IMAGE).toMatch(/^redroid\/redroid:\d+\.\d+\.\d+-\d{6}$/); // pinned; there is no "-arm64" tag
+  for (const script of [redroidUserData(), ENSURE_ANDROID]) {
+    expect(script).toContain(REDROID_IMAGE);
+    expect(script).toContain("--restart unless-stopped");
+    expect(script).not.toContain("--rm");
+  }
+  expect(ENSURE_ANDROID).toContain("adb connect 127.0.0.1:5555"); // after a reboot nothing else connects adb
 });

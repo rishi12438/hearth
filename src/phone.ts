@@ -156,6 +156,29 @@ export const realEc2: Ec2 = async (creds, action, params) => {
  * logins survive a stop, and adb talking to it. A safety timer shuts the box down (which, with the instance set to
  * stop-on-shutdown, stops it) after 30 minutes with no SSH connection, so a crashed hub can never leave it billing.
  */
+/** Android itself (Redroid), pinned: a multi-arch image (Docker Hub has no plain "-arm64" tag). */
+export const REDROID_IMAGE = "redroid/redroid:13.0.0-240527";
+/**
+ * Start Android's container. --restart unless-stopped (not --rm) so Docker brings it back on every boot: the box is
+ * stopped when idle, and user-data only runs on the very first boot.
+ */
+const REDROID_RUN = `docker run -d --restart unless-stopped --privileged --name redroid -v /opt/redroid-data:/data -p 127.0.0.1:5555:5555 ${REDROID_IMAGE} androidboot.redroid_width=1080 androidboot.redroid_height=2340 androidboot.redroid_dpi=440`;
+/**
+ * Run by the hub on every open, so a box heals itself: waits for first-boot setup, installs what's missing, starts
+ * Android if it isn't running (a box made before this fix, or a failed first boot), and connects adb to it.
+ */
+export const ENSURE_ANDROID = `set -u
+sudo cloud-init status --wait >/dev/null 2>&1 || true
+command -v docker >/dev/null && command -v adb >/dev/null || { sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io android-tools-adb >/dev/null; sudo systemctl enable --now docker; }
+sudo modprobe binder_linux devices=binder,hwbinder,vndbinder 2>/dev/null || true
+sudo mkdir -p /opt/redroid-data
+if ! sudo docker ps --format '{{.Names}}' | grep -qx redroid; then
+  sudo docker rm -f redroid >/dev/null 2>&1 || true
+  sudo ${REDROID_RUN} >/dev/null || { echo "ANDROID_DIDNT_START"; exit 5; }
+fi
+for i in $(seq 1 30); do adb connect 127.0.0.1:5555 2>&1 | grep -q 'connected' && exit 0; sleep 2; done
+echo "ADB_DIDNT_CONNECT"; exit 6`;
+
 export function redroidUserData(idleShutdownMin = 30): string {
   return `#!/bin/bash
 set -eux
@@ -172,12 +195,10 @@ systemctl enable --now docker
 # Redroid holds its /data on the instance disk, so apps and their logins outlive a stop/start.
 mkdir -p /opt/redroid-data
 docker rm -f redroid 2>/dev/null || true
-docker run -d --rm --privileged --name redroid \\
-  -v /opt/redroid-data:/data -p 127.0.0.1:5555:5555 \\
-  redroid/redroid:13.0.0-arm64 androidboot.redroid_width=1080 androidboot.redroid_height=2340 androidboot.redroid_dpi=440
+${REDROID_RUN}
 # adb reaches the container on loopback; the hub runs adb over SSH, nothing is exposed to the internet.
 for i in $(seq 1 30); do adb connect 127.0.0.1:5555 && break; sleep 2; done
-adb wait-for-device || true
+timeout 120 adb wait-for-device || true
 # Safety shutdown: if no one has been connected over SSH for ${idleShutdownMin} min, stop the box (belt-and-braces with the hub's own idle-stop).
 cat > /usr/local/bin/hearth-phone-idle <<'EOS'
 #!/bin/bash
@@ -364,6 +385,9 @@ export class Phone {
       await this.ec2()(creds, "StartInstances", { "InstanceId.1": instanceId }).catch(() => {}); // already running is fine
       const ip = await this.waitRunning(creds, instanceId);
       this.patch({ publicIp: ip, step: "Waiting for Android to finish booting" });
+      this.patch({ step: "Getting Android ready (the first time downloads it, a few minutes)" });
+      await this.ensureAndroid(ip);
+      this.patch({ step: "Waiting for Android to finish booting" });
       await this.waitBooted(ip);
       this.patch({ state: "ready", step: undefined, lastUseAt: this.now(), stoppedAt: undefined });
       return { ok: true };
@@ -399,11 +423,26 @@ export class Phone {
   }
 
   /** SSH in and wait for Redroid to report Android has finished booting. Pins the host key on first contact. */
+  /** Make sure Android's container is running and adb can reach it (see ENSURE_ANDROID). */
+  private async ensureAndroid(ip: string): Promise<void> {
+    let r = { code: 1, out: "", err: "" };
+    // SSH may not be up for a few seconds after the instance says it's running.
+    for (let i = 0; i < 12; i++) {
+      r = await this.run(ip, `bash -c ${shq(ENSURE_ANDROID)}`, { timeoutMs: 900_000 }).catch((e) => ({ code: 255, out: "", err: String(e) }));
+      if (r.code !== 255) break;
+      await sleep(5000);
+    }
+    if (r.code === 0) return;
+    if (/ANDROID_DIDNT_START/.test(r.out)) throw new Error("Android didn't start on the phone's server.");
+    if (/ADB_DIDNT_CONNECT/.test(r.out)) throw new Error("Android started but didn't answer.");
+    throw new Error("Couldn't get the phone's server ready." + (r.err ? ` (${r.err.slice(0, 120)})` : ""));
+  }
+
   private async waitBooted(ip: string, timeoutMs = 240_000): Promise<void> {
     const until = this.now() + timeoutMs;
     let lastErr = "";
     while (this.now() < until) {
-      const r = await this.run(ip, "adb wait-for-device && adb shell getprop sys.boot_completed").catch((e) => ({ code: 1, out: "", err: String(e) }));
+      const r = await this.run(ip, "timeout 15 adb wait-for-device; adb shell getprop sys.boot_completed").catch((e) => ({ code: 1, out: "", err: String(e) }));
       if (r.code === 0 && r.out.trim() === "1") return;
       lastErr = r.err || r.out;
       await sleep(6000);
