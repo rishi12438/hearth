@@ -203,6 +203,7 @@ export const ANDROID_ARGS = [
   "androidboot.use_memfd=true", "sys.use_memfd=true", "androidboot.redroid_gpu_mode=guest",
   "ro.debuggable=0", "ro.build.type=user", "ro.build.tags=release-keys", "ro.system.build.type=user",
   "ro.system.build.tags=release-keys", "ro.vendor.build.type=user", "ro.vendor.build.tags=release-keys",
+  "ro.setupwizard.mode=DISABLED", // no "Hi there" setup: the owner signs in to Google through the Play Store
 ].join(" ");
 /**
  * Start Android's container. --restart unless-stopped (not --rm) so Docker brings it back on every boot: the box is
@@ -259,8 +260,13 @@ if ! sudo cmp -s ~/.android/adbkey.pub /opt/redroid-data/misc/adb/adb_keys; then
   sudo docker exec redroid sh -c 'restorecon /data/misc/adb/adb_keys; setprop ctl.restart adbd' >/dev/null 2>&1 || true
   sleep 3; adb disconnect 127.0.0.1:5555 >/dev/null 2>&1 || true
 fi
-for i in $(seq 1 30); do adb connect 127.0.0.1:5555 2>&1 | grep -q 'connected' && exit 0; sleep 2; done
-echo "ADB_DIDNT_CONNECT"; exit 6`;
+ok=0; for i in $(seq 1 30); do adb connect 127.0.0.1:5555 2>&1 | grep -q 'connected' && { ok=1; break; }; sleep 2; done
+[ $ok = 1 ] || { echo "ADB_DIDNT_CONNECT"; exit 6; }
+# Setup counts as done (Google's setup wizard otherwise covers the screen), and the screen stays on: a release build
+# sleeps it like a real phone, which turned the live view black. The phone itself turns off when idle.
+for i in $(seq 1 30); do [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] && break; sleep 3; done
+adb shell 'settings put global device_provisioned 1; settings put secure user_setup_complete 1; settings put system screen_off_timeout 2147483647; settings put global stay_on_while_plugged_in 7; input keyevent KEYCODE_WAKEUP' >/dev/null 2>&1 || true
+exit 0`;
 
 export function redroidUserData(idleShutdownMin = 30): string {
   return `#!/bin/bash

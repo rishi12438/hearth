@@ -313,6 +313,9 @@ test("Android 15 with Play, set up to pass apps' root checks: release-build sett
   for (const a of ["ro.debuggable=0", "ro.build.type=user", "ro.build.tags=release-keys", "sys.use_memfd=true", "androidboot.redroid_gpu_mode=guest"]) expect(ANDROID_ARGS).toContain(a);
   expect(ENSURE_ANDROID).toContain("sha256sum -c"); // the Play files are checked before they're used
   expect(ENSURE_ANDROID).toContain("rm -f /system/xbin/su");
+  expect(ANDROID_ARGS).toContain("ro.setupwizard.mode=DISABLED");
+  expect(ENSURE_ANDROID).toContain("user_setup_complete 1"); // no setup wizard over the screen
+  expect(ENSURE_ANDROID).toContain("screen_off_timeout"); // the live view never goes black
   expect(ENSURE_ANDROID).toContain("/opt/redroid-data/misc/adb/adb_keys");
   expect(ENSURE_ANDROID.indexOf("misc/adb && break")).toBeLessThan(ENSURE_ANDROID.indexOf("rm -f /system/xbin/su")); // after Android is up
 });
