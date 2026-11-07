@@ -5251,23 +5251,16 @@ async function openPhone() {
   }
 
   const s = p.state as string;
-  const label = s === "ready" ? `On${p.publicIp ? " · ready" : ""}` : s === "off" ? "Off · only the disk is costing anything (~$2–3/mo)"
+  const made = !!p.instanceId; // no box in AWS yet: "Off" with a disk cost would be wrong
+  const label = !made && s === "off" ? "Not made yet · your agent makes it the first time a task needs a phone. Nothing is in your AWS until then, so it costs nothing."
+    : s === "ready" ? `On${p.publicIp ? " · ready" : ""}` : s === "off" ? "Off · your agent starts it when a task needs it. While off, only the disk costs (~$2–3/mo)"
     : s === "starting" ? (p.step || "Starting…") : s === "stopping" ? "Stopping…" : s === "cleaning" ? "Deleting…" : p.error || s;
-  const busy = s === "starting" || s === "stopping" || s === "cleaning";
-  const btn = (text: string, cls: string, verb: string, note: string) => h("button", { class: `btn small ${cls}`, on: { click: async (e: Event) => {
-    const b = e.currentTarget as HTMLButtonElement; b.disabled = true; err.hidden = true;
-    try { await call(`/api/phone/${verb}`, { body: {} }); if (note) toast(note); openPhone(); } catch (er) { fail(b, text)(er); }
-  } } }, text);
 
   openSheet("Phone", [
     h("div", { class: "list" }, h("div", { class: "nowrow static" }, h("span", { class: "grow" }, h("b", null, "Your phone"), h("small", { class: s === "error" ? "err" : "sub" }, label)))),
-    h("div", { class: "btnrow" },
-      s === "ready" ? btn("Stop now", "ghost", "close", "Stopping. Your app logins are kept.") : !busy ? btn("Start", "primary", "open", "Starting your phone. The first time takes a minute or two.") : null),
     err,
-    h("p", { class: "muted small" }, `It stops itself about ${p.idleStopMin} minutes after the last use, and is deleted after ${p.deleteAfterDays} unused days. Region and billing are in your own AWS account.`),
-    h("div", { class: "wsec" }, "Danger"),
-    h("button", { class: "linkbtn", on: { click: () => confirmSheet("Delete the phone now?", "The AWS instance and its disk are deleted, so every app login is lost. You'd set them up again next time. The service account stays connected.", "Delete", async () => { await call("/api/phone/delete", { body: {} }); toast("Phone deleted"); openPhone(); }) } }, "Delete the phone now"),
-    h("button", { class: "linkbtn", on: { click: () => confirmSheet("Disconnect the AWS account?", "The keys are removed from the hub. Any running phone should be deleted first.", "Disconnect", async () => { await call("/api/phone/account", { method: "DELETE" }); toast("Disconnected"); openPhone(); }) } }, "Disconnect AWS account"),
+    h("p", { class: "muted small" }, `Your agent starts it when a task needs it and stops it about ${p.idleStopMin} minutes after. After ${p.deleteAfterDays} unused days it's deleted. Region and billing are in your own AWS account.`),
+    h("button", { class: "linkbtn", on: { click: () => confirmSheet("Disconnect the AWS account?", p.instanceId ? "Your phone in AWS is deleted, with its app logins, and the keys are removed from the hub." : "The keys are removed from the hub, so your agent can't use a phone.", "Disconnect", async () => { await call("/api/phone/account", { method: "DELETE" }); toast("Disconnected"); openPhone(); }) } }, "Disconnect AWS account"),
   ]);
 }
 
