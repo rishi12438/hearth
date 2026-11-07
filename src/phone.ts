@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Vault } from "./vault.ts";
 import { realSsh, shq, type Ssh, type Runner, type SshTarget } from "./machines.ts";
@@ -289,6 +289,9 @@ const myPublicIp = async (): Promise<string | null> => {
 export class Phone {
   onChange: () => void = () => {};
   private busy = false;
+  /** Jobs that handed the phone to the owner to sign in: their reply gets an "Open your phone" button. */
+  private handovers = new Set<string>();
+  takeHandover(jobId: string) { return this.handovers.delete(jobId); }
   /** The start in progress: a second open (the agent retrying, the owner's screen) waits for it instead of failing. */
   private opening: Promise<{ ok: true } | { error: string }> | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -556,13 +559,20 @@ export class Phone {
   }
 
   /** Where screenshots land, for the brain's Read. */
-  static framesDir() { return join(homedir(), ".hearth-phone", "frames"); }
+  // In the temp folder: the hub's service can't write to its home folder (ProtectHome), which broke every screenshot.
+  static framesDir() { return join(tmpdir(), "hearth-phone-frames"); }
 
   /** One control action from the agent (via hearth-phone). Returns JSON the skill prints. */
   async control(action: string, args: Record<string, string>, jobId?: string): Promise<any> {
     if (action === "open") { const r = await this.open(jobId); return "error" in r ? { error: r.error } : { ok: true, ...this.view() }; }
     if (action === "close") { await this.close(); return { ok: true }; }
     if (action === "status") return this.view();
+    if (action === "handover") {
+      if (!jobId) throw new Error("Hand over from a job, so the owner gets the button in its thread.");
+      await this.ready(jobId);
+      this.handovers.add(jobId);
+      return { ok: true, say: "Done: your reply will have an 'Open your phone' button that opens this phone's live screen for the owner. In your reply, say plainly what to sign in to (and that they type it there, not in chat), end it with [[answer-needed]], and stop. When they say done, screenshot and carry on." };
+    }
 
     const ip = await this.ready(jobId);
     if (jobId) this.watch(jobId);
@@ -695,12 +705,13 @@ post() { curl -sS -m 180 -H "X-Hearth-Agent: ${key}" "\${job[@]}" "$@" "${hubUrl
 case "$cmd" in
   open) post -m 1500 --data-urlencode action=open ;; # the first start builds Android: several minutes
   close|status|screenshot|apps|dump|gsf-id) post --data-urlencode "action=$cmd" ;;
+  handover) post --data-urlencode action=handover --data-urlencode "text=$*" ;;
   tap)   post --data-urlencode action=tap --data-urlencode "x=\${1:-0}" --data-urlencode "y=\${2:-0}" ;;
   swipe) post --data-urlencode action=swipe --data-urlencode "x1=\${1:-0}" --data-urlencode "y1=\${2:-0}" --data-urlencode "x2=\${3:-0}" --data-urlencode "y2=\${4:-0}" --data-urlencode "ms=\${5:-300}" ;;
   type)  post --data-urlencode action=type --data-urlencode "text=$*" ;;
   key)   post --data-urlencode action=key --data-urlencode "key=\${1:-KEYCODE_HOME}" ;;
   open-app) post --data-urlencode action=open-app --data-urlencode "pkg=\${1:-}" ;;
-  *) echo '{"error":"usage: hearth-phone open|close|status|screenshot|tap X Y|swipe X1 Y1 X2 Y2 [ms]|type TEXT…|key KEYCODE|open-app PKG|apps|dump|gsf-id"}' >&2; exit 1 ;;
+  *) echo '{"error":"usage: hearth-phone open|close|status|screenshot|tap X Y|swipe X1 Y1 X2 Y2 [ms]|type TEXT…|key KEYCODE|open-app PKG|apps|dump|gsf-id|handover WHAT"}' >&2; exit 1 ;;
 esac
 `;
   return {
@@ -712,7 +723,7 @@ Use this only when the job genuinely needs a phone app — an app with no useful
 
 **Apps come from the Google Play Store on the phone** (\`com.android.vending\`; there is no App Store, it's Android). Open it, search for the app, tap Install, wait, then \`hearth-phone apps\` to confirm. Don't download app files from websites.
 
-**Logins are the owner's to type, never yours.** When an app or the Play Store needs a sign-in (a Google account, a password, a code): open the app and get to its sign-in screen (for Play: \`hearth-phone open-app com.android.vending\` and tap Sign in), then stop and hand over. In your reply, say plainly what to sign in to, put \`[[phone]]\` on its own line (Hearth shows an "Open your phone" button there, which opens the live phone screen for them to tap and type on), and end with ${ANSWER} so they can tell you when they're done. When they say done, take a screenshot and carry on. Never ask them to send a password in chat.
+**Logins are the owner's to type, never yours — hand the phone over.** When an app or the Play Store needs a sign-in (a Google account, a password, a code): open it and get to its sign-in screen (for Play: \`hearth-phone open-app com.android.vending\`, tap Sign in), then run \`hearth-phone handover "Sign in to Google Play"\`. That puts an "Open your phone" button under your reply: it opens this phone's live screen for the owner to tap and type on. Then reply saying what to sign in to, end with ${ANSWER}, and stop. When they say done, take a screenshot and carry on. Never ask for a password in chat, and don't tell them to install the app on their own phone instead: this phone is theirs to sign in to.
 
 If Play says the device isn't Play Protect certified: run \`hearth-phone gsf-id\` and ask the owner to open https://www.google.com/android/uncertified, signed in to the same Google account, and register that id (it can take a few minutes to an hour to work).
 
@@ -730,6 +741,7 @@ The phone starts when you open it: \`hearth-phone open\` waits until it's ready 
 | \`hearth-phone key KEYCODE\` | A key: KEYCODE_HOME, KEYCODE_BACK, KEYCODE_ENTER, KEYCODE_APP_SWITCH. |
 | \`hearth-phone open-app PKG\` | Open an app by package name (find it with apps). |
 | \`hearth-phone apps\` | List installed apps (package names). |
+| \`hearth-phone handover WHAT\` | Hand the phone to the owner to sign in (see below): their reply gets an "Open your phone" button. |
 | \`hearth-phone gsf-id\` | The phone's Google device id, if Play says the device isn't certified (see below). |
 | \`hearth-phone dump\` | The screen's text/buttons as XML, to find things without a screenshot. |
 | \`hearth-phone close\` | Let the phone go now (it also closes on its own). |

@@ -203,6 +203,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
     onFrame: (jobId, f) => { void store.get<any>("jobs", jobId).then((j) => hub.pushFrame(jobId, f, j?.threadId)).catch(() => {}); },
   });
   phone.onChange = () => hub.emit("settings", {});
+  hub.phoneHandover = (jobId) => phone.takeHandover(jobId);
   phone.startTimer();
   {
     const h = config.host, local = !h || h === "0.0.0.0" || h === "::" ? "127.0.0.1" : h.includes(":") ? `[${h}]` : h;
