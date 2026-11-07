@@ -123,6 +123,8 @@ export class Connect {
     return a.length === b.length && timingSafeEqual(a, b);
   }
 
+  /** For other hub-side agent commands (hearth-phone): the same key, valid only straight from this machine. */
+  agentKeyValue() { return this.agentKey; }
   isAgentKey(k: string | null) {
     const a = Buffer.from(String(k || "")), b = Buffer.from(this.agentKey);
     return a.length === b.length && timingSafeEqual(a, b);
