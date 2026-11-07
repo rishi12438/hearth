@@ -1410,9 +1410,13 @@ div.workingoff .linkbtn { margin-top: 0; font-size: 12.5px; flex: none; }
 .srow.closed .snav { opacity: .5; }
 
 /* The owner's phone screen (openPhoneScreen) */
-.phonewrap { display: flex; justify-content: center; }
-.phonescreen { width: min(100%, 340px); aspect-ratio: 1080 / 2340; border-radius: 18px; border: 1px solid var(--line); background: #000; touch-action: none; cursor: pointer; user-select: none; -webkit-user-select: none; }
+.phonewrap { display: flex; justify-content: center; position: relative; }
+.phonescreen { height: min(calc(100dvh - 330px), 680px); min-height: 260px; width: auto; max-width: 100%; aspect-ratio: 1080 / 2340; border-radius: 18px; border: 1px solid var(--line); background: #000; touch-action: none; cursor: pointer; user-select: none; -webkit-user-select: none; }
 .phonestatus { text-align: center; }
 .phonetype { display: flex; gap: 8px; align-items: center; margin: 10px 0 6px; }
 .phonetype .field { flex: 1; margin: 0; }
 .phonebtn { margin-top: 8px; }
+.phonenav { display: flex; justify-content: center; gap: 28px; margin: 6px 0 2px; }
+.phonenav .btn { min-width: 64px; font-size: 16px; }
+.phonetap { position: absolute; width: 36px; height: 36px; margin: -18px 0 0 -18px; border-radius: 50%; background: rgba(255,255,255,.55); box-shadow: 0 0 0 2px rgba(0,0,0,.25); pointer-events: none; animation: phonetap .6s ease-out forwards; }
+@keyframes phonetap { from { transform: scale(.4); opacity: 1; } to { transform: scale(1.4); opacity: 0; } }

@@ -188,6 +188,15 @@ echo '*/5 * * * * root /usr/local/bin/hearth-phone-idle' | ${sudo}tee /etc/cron.
  * built on the box once. Android 16 can't run here: it needs ashmem, which this kernel doesn't have.
  */
 export const PLAY_IMAGE = "hearth/redroid:15-play";
+/**
+ * A Pixel-style home screen (Lawnchair, open source), pinned to a release and checked by sha256 (GitHub's own digest).
+ * Android's bare default launcher looked a decade old; Google's Pixel launcher can't be installed outside a Pixel.
+ */
+const LAUNCHER = {
+  pkg: "app.lawnchair", home: "app.lawnchair/.LawnchairLauncher",
+  url: "https://github.com/LawnchairLauncher/lawnchair/releases/download/v15.0.0-beta3.0/Lawnchair.15.0.0.Beta.3.0.apk",
+  sha256: "d4200d0985169fd79ba1bd225d653f2a2fe7b50aa07cb0d05ca64c7623f86059",
+};
 const GAPPS = {
   url: "https://github.com/MindTheGapps/15.0.0-arm64/releases/download/MindTheGapps-15.0.0-arm64-20260915_032013/MindTheGapps-15.0.0-arm64-20260915_032013.zip",
   sha256: "e979601ef70b03d9214ea24ca7a103cb408ab102718fff38ec170a6ca03e263d",
@@ -266,6 +275,12 @@ ok=0; for i in $(seq 1 30); do adb connect 127.0.0.1:5555 2>&1 | grep -q 'connec
 # sleeps it like a real phone, which turned the live view black. The phone itself turns off when idle.
 for i in $(seq 1 30); do [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] && break; sleep 3; done
 adb shell 'settings put global device_provisioned 1; settings put secure user_setup_complete 1; settings put system screen_off_timeout 2147483647; settings put global stay_on_while_plugged_in 7; input keyevent KEYCODE_WAKEUP' >/dev/null 2>&1 || true
+# The Pixel-style home screen, once (see LAUNCHER). A failed download leaves Android's own launcher; nothing breaks.
+if ! adb shell pm path ${LAUNCHER.pkg} 2>/dev/null | grep -q package:; then
+  l=$(mktemp) && curl -fsSL --max-time 300 -o $l '${LAUNCHER.url}' && echo '${LAUNCHER.sha256}  '$l | sha256sum -c --quiet \
+    && adb install -r $l >/dev/null 2>&1 && adb shell cmd package set-home-activity ${LAUNCHER.home} >/dev/null 2>&1 && adb shell input keyevent KEYCODE_HOME >/dev/null 2>&1
+  rm -f $l
+fi
 exit 0`;
 
 export function redroidUserData(idleShutdownMin = 30): string {

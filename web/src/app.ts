@@ -5231,7 +5231,9 @@ function openPhoneScreen() {
   const status = h("p", { class: "muted small phonestatus" }, "Opening your phone…");
   const field = h("input", { class: "field", placeholder: "Type here, then Send (goes into the box you tapped)", autocapitalize: "off", autocomplete: "off", spellcheck: false }) as HTMLInputElement;
   let open = true, ready = false;
-  const poke = () => { lastPoll = 0; };
+  // Right after you do something, refresh quickly (a few times a second) so the phone feels live; then about once a second.
+  let quickUntil = 0;
+  const poke = () => { lastPoll = 0; quickUntil = Date.now() + 5000; };
   const send = async (action: string, args: Record<string, unknown>) => {
     try { await call("/api/phone/input", { body: { action, ...args } }); } catch (e: any) { toast(e.message || "The phone didn't take that.", "err"); }
     poke();
@@ -5243,24 +5245,42 @@ function openPhoneScreen() {
   img.addEventListener("pointerup", (e) => {
     if (!down) return;
     const up = at(e), d = down; down = null;
-    if (Math.hypot(up.x - d.x, up.y - d.y) < 30) void send("tap", { x: d.x, y: d.y });
+    if (Math.hypot(up.x - d.x, up.y - d.y) < 30) { ripple(e); void send("tap", { x: d.x, y: d.y }); }
     else void send("swipe", { x1: d.x, y1: d.y, x2: up.x, y2: up.y, ms: Math.min(1500, Math.max(150, Date.now() - d.t)) });
   });
+  // A mark where you tapped, at once: the phone's picture takes a moment to catch up.
+  const ripple = (e: PointerEvent) => {
+    const wrap = img.parentElement!, r = wrap.getBoundingClientRect();
+    const dot = h("i", { class: "phonetap", style: `left:${e.clientX - r.left}px;top:${e.clientY - r.top}px` });
+    wrap.appendChild(dot);
+    setTimeout(() => dot.remove(), 600);
+  };
   const typeIt = () => { if (!field.value) return; const t = field.value; field.value = ""; void send("type", { text: t }); };
   field.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); typeIt(); } });
-  const key = (label: string, k: string) => h("button", { class: "btn small ghost", on: { click: () => void send("key", { key: k }) } }, label);
+  const key = (label: string, k: string, title: string, cls = "btn small ghost") => h("button", { class: cls, title, "aria-label": title, on: { click: () => void send("key", { key: k }) } }, label);
+  // The mouse wheel or a trackpad scrolls the phone (a swipe), at most a few times a second.
+  let lastWheel = 0;
+  img.addEventListener("wheel", (e) => {
+    if (!ready) return;
+    e.preventDefault();
+    if (Date.now() - lastWheel < 350 || Math.abs(e.deltaY) < 4) return;
+    lastWheel = Date.now();
+    const up = e.deltaY > 0;
+    void send("swipe", { x1: PHONE_W / 2, y1: up ? 1600 : 800, x2: PHONE_W / 2, y2: up ? 800 : 1600, ms: 250 });
+  }, { passive: false });
   openSheet("Your phone", [
     h("div", { class: "phonewrap" }, img),
+    // The phone's own buttons, right under its screen, so they're always in view.
+    h("div", { class: "phonenav" }, key("◀", "KEYCODE_BACK", "Back"), key("●", "KEYCODE_HOME", "Home"), key("■", "KEYCODE_APP_SWITCH", "Recent apps")),
     status,
-    h("div", { class: "phonetype" }, field, h("button", { class: "btn small primary", on: { click: typeIt } }, "Send")),
-    h("div", { class: "btnrow" }, key("Back", "KEYCODE_BACK"), key("Home", "KEYCODE_HOME"), key("Enter", "KEYCODE_ENTER"), key("⌫", "KEYCODE_DEL"), key("Apps", "KEYCODE_APP_SWITCH")),
-    h("p", { class: "muted small" }, "Tap or swipe on the screen. What you type here goes only to your phone; Hearth doesn't keep it. Close this when you're done and tell your agent."),
+    h("div", { class: "phonetype" }, field, h("button", { class: "btn small primary", on: { click: typeIt } }, "Send"), key("⌫", "KEYCODE_DEL", "Delete"), key("↵", "KEYCODE_ENTER", "Enter")),
+    h("p", { class: "muted small" }, "Click to tap, drag or scroll to swipe. What you type here goes only to your phone; Hearth doesn't keep it. Close this when you're done and tell your agent."),
   ], { onClose: () => { open = false; } });
   // About once a second while it's open; quicker right after a tap.
   let lastPoll = 0, first = true;
   const loop = async () => {
     while (open) {
-      if (Date.now() - lastPoll < 1000) { await new Promise((r) => setTimeout(r, 150)); continue; }
+      if (Date.now() - lastPoll < (Date.now() < quickUntil ? 300 : 1000)) { await new Promise((r) => setTimeout(r, 100)); continue; }
       lastPoll = Date.now();
       try {
         const r = await call<any>(`/api/phone/screen${first ? "?start=1" : ""}`);
