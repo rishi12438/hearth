@@ -131,3 +131,31 @@ test("the IAM policy shown in Settings allows every EC2 call the phone makes, an
   expect(called.size).toBeGreaterThan(5);
   expect([...PHONE_IAM_POLICY.Statement[0].Action].sort()).toEqual([...called].sort());
 });
+
+test("live view: while a working job uses the phone, its screen goes to the job's thread; it stops when the job ends", async () => {
+  const v = vault();
+  configured(null as any, v);
+  v.set("phone-sshkey", "KEY");
+  const jpeg = Buffer.alloc(2000, 7).toString("base64");
+  const cmds: string[] = [];
+  const ssh = { runner: () => ({ run: async (cmd: string, o: { onLine?: (l: string) => void }) => {
+    cmds.push(cmd);
+    if (cmd.includes("screencap")) o.onLine?.(jpeg);
+    return { code: 0, stderr: "" };
+  } }) } as any;
+  let working = true;
+  const frames: { jobId: string; mime: string; n: number }[] = [];
+  const phone = new Phone({ dataDir: mkdtempSync(join(tmpdir(), "hearth-phone-lv-")), vault: v, ssh, isBusy: () => working, frameEveryMs: 20,
+    onFrame: (jobId, f) => frames.push({ jobId, mime: f.mime, n: f.data.length }) });
+  (phone as any).save({ state: "ready", instanceId: "i-1", publicIp: "1.2.3.4", lastUseAt: Date.now() });
+  await phone.control("tap", { x: "10", y: "20" }, "job-7");
+  await Bun.sleep(150);
+  expect(frames.length).toBeGreaterThan(0);
+  expect(frames[0]).toEqual({ jobId: "job-7", mime: "image/jpeg", n: 2000 });
+  expect(cmds.some((c) => c.includes("convert png:- -resize"))).toBe(true); // made small on the box
+  working = false;
+  await Bun.sleep(80);
+  const seen = frames.length;
+  await Bun.sleep(100);
+  expect(frames.length).toBe(seen);
+});
