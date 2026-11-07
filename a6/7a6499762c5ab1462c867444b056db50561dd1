@@ -1,0 +1,21 @@
+src/phone.ts
+  s_cae155d606ea58::t_19939418af1608 507,732-742
+test/phone.test.ts
+  s_cae155d606ea58::t_1152ff6a4a90c4 7,237-244
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "a67a6499762c5ab1462c867444b056db50561dd1",
+  "prompts": {},
+  "sessions": {
+    "s_cae155d606ea58": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ba7c8f00-0a86-4afe-a7ab-2c517931d376",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
