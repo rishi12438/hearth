@@ -2540,6 +2540,9 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     return { state: waiting ? "pending" : "ask" };
   }
 
+  /** Is this job running right now? (The phone stays on, and in live view, while it is.) */
+  isJobRunning(jobId: string) { return this.stops.has(jobId); }
+
   /** A live-view picture for a job (its own browser's, or one from your Mac's background Chrome). */
   pushFrame(jobId: string, f: { mime: string; data: Uint8Array }, threadId?: string) {
     const n = (this.frames.get(jobId)?.n ?? 0) + 1, at = this.clock().toISOString();

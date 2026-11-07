@@ -167,7 +167,7 @@ echo 'options binder_linux devices=binder,hwbinder,vndbinder' > /etc/modprobe.d/
 # Swap: a safety net so Android + a browser job can't trigger the OOM killer.
 if [ ! -f /swapfile ]; then fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile && echo '/swapfile none swap sw 0 0' >> /etc/fstab; fi
 apt-get update -qq
-apt-get install -y -qq docker.io android-tools-adb
+apt-get install -y -qq docker.io android-tools-adb imagemagick
 systemctl enable --now docker
 # Redroid holds its /data on the instance disk, so apps and their logins outlive a stop/start.
 mkdir -p /opt/redroid-data
@@ -205,7 +205,17 @@ type Opts = {
   /** Fetch the hub's own public IP, to lock the box's SSH to this hub only. Overridable in tests. */
   myIp?: () => Promise<string | null>;
   idleStopMin?: number;
+  /** A small picture of the screen for a working job's live view in its thread. */
+  onFrame?: (jobId: string, f: { mime: string; data: Uint8Array }) => void;
+  frameEveryMs?: number;
 };
+
+/** Live view: a frame every few seconds while a job uses the phone; it stops once the job ends or goes quiet. */
+const FRAME_EVERY_MS = 3000;
+const FRAME_QUIET_MS = 3 * 60_000;
+/** Under the hub's websocket limit once base64'd (same cap as the browser's live view). */
+const MAX_FRAME_BYTES = 700_000;
+
 
 const myPublicIp = async (): Promise<string | null> => {
   try {
@@ -220,6 +230,10 @@ export class Phone {
   private busy = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastCleanupDay = "";
+  /** The job being watched in live view, and when it last did something on the phone. */
+  private live: { jobId: string; lastAt: number; timer: ReturnType<typeof setInterval>; busy: boolean } | null = null;
+  /** imagemagick for live view (older boxes predate it in the user-data): checked once per hub run. */
+  private toolsOk = false;
   constructor(private opts: Opts) { mkdirSync(join(opts.dataDir, "keys"), { recursive: true, mode: 0o700 }); }
   private now() { return this.opts.now ? this.opts.now() : Date.now(); }
   private ec2() { return this.opts.ec2 ?? realEc2; }
@@ -361,6 +375,7 @@ export class Phone {
 
   /** Stop the box (its disk, and so every app login, is kept). */
   async close(): Promise<void> {
+    this.unwatch();
     const s = this.state();
     const creds = this.creds();
     if (s.instanceId && creds) {
@@ -428,6 +443,7 @@ export class Phone {
     if (action === "status") return this.view();
 
     const ip = await this.ready(jobId);
+    if (jobId) this.watch(jobId);
     const q = (s: string) => shq(s);
     switch (action) {
       case "screenshot": {
@@ -449,6 +465,40 @@ export class Phone {
       default: throw new Error(`Unknown phone action: ${action}`);
     }
   }
+  /** imagemagick (small live-view frames), on boxes made before they were in the user-data. */
+  private async ensureTools(ip: string) {
+    if (this.toolsOk) return;
+    const r = await this.run(ip, "command -v convert >/dev/null || (sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq imagemagick >/dev/null)", { timeoutMs: 240_000 });
+    this.toolsOk = r.code === 0;
+  }
+
+  /** Start (or keep) sending live-view frames for this job. One job watched at a time: the phone has one screen. */
+  private watch(jobId: string) {
+    if (!this.opts.onFrame) return;
+    if (this.live?.jobId === jobId) { this.live.lastAt = this.now(); return; }
+    this.unwatch();
+    const live = { jobId, lastAt: this.now(), busy: false, timer: setInterval(() => {
+      if (live.busy) return;
+      const s = this.state();
+      if (s.state !== "ready" || !s.publicIp || !this.opts.isBusy(jobId) || this.now() - live.lastAt > FRAME_QUIET_MS) { this.unwatch(); return; }
+      live.busy = true;
+      this.frame(s.publicIp).then((f) => { if (f && this.live === live) this.opts.onFrame!(jobId, f); }).catch(() => {}).finally(() => { live.busy = false; });
+    }, this.opts.frameEveryMs ?? FRAME_EVERY_MS) };
+    this.live = live;
+  }
+  private unwatch() { if (this.live) clearInterval(this.live.timer); this.live = null; }
+
+  /** The screen as a small JPEG (resized on the box), else the PNG if it's small enough. */
+  private async frame(ip: string): Promise<{ mime: string; data: Uint8Array } | null> {
+    await this.ensureTools(ip);
+    const cmd = this.toolsOk ? "adb exec-out screencap -p | convert png:- -resize 540x -quality 60 jpg:- | base64 -w0; echo" : "adb exec-out screencap -p | base64 -w0; echo";
+    const r = await this.run(ip, cmd, { timeoutMs: 20_000 });
+    if (r.code !== 0 || !r.out) return null;
+    const data = new Uint8Array(Buffer.from(r.out.trim(), "base64"));
+    if (data.length < 100 || data.length > MAX_FRAME_BYTES) return null;
+    return { mime: this.toolsOk ? "image/jpeg" : "image/png", data };
+  }
+
   private async adb(ip: string, shellCmd: string) { const r = await this.run(ip, `adb shell ${shellCmd}`); if (r.code !== 0) throw new Error(r.err.slice(0, 150) || "adb failed"); return { ok: true }; }
 
   // ---- timers: idle-stop every minute, 30-day delete once a day ----
@@ -497,7 +547,8 @@ export function phoneSkill(hubUrl: string, key: string): Skill {
 # hearth-phone <command> …: your owner's Android phone (for apps the web can't reach). Prints JSON.
 set -uo pipefail
 cmd="\${1:-}"; shift 2>/dev/null || true
-post() { curl -sS -m 180 -H "X-Hearth-Agent: ${key}" "$@" "${hubUrl}/api/agent/phone"; }
+job=(); if [ -n "\${HEARTH_JOB:-}" ]; then job=(-H "X-Hearth-Job: \${HEARTH_JOB}"); fi
+post() { curl -sS -m 180 -H "X-Hearth-Agent: ${key}" "\${job[@]}" "$@" "${hubUrl}/api/agent/phone"; }
 case "$cmd" in
   open|close|status|screenshot|apps|dump) post --data-urlencode "action=$cmd" ;;
   tap)   post --data-urlencode action=tap --data-urlencode "x=\${1:-0}" --data-urlencode "y=\${2:-0}" ;;
@@ -514,6 +565,10 @@ esac
     body: `# Your owner's phone (Android, in their own cloud)
 
 Use this only when the job genuinely needs a phone app — an app with no useful website or API (WhatsApp, Uber, a bank app), an SMS code, or an app's notification. For anything with a website, use enkidu-browser or WebFetch instead: it's far faster and more reliable.
+
+**There is no app store on this phone yet** (no Play Store, no App Store), so you can't install apps. Check \`hearth-phone apps\` for what's there; if the job needs an app that isn't installed, stop and tell the owner which app, plainly — don't hunt for a store on the screen or download app files from websites.
+
+The owner can watch the screen live in your thread while you use it.
 
 The phone starts when you open it (about a minute the first time) and stops itself a few minutes after you stop using it. You don't manage that.
 

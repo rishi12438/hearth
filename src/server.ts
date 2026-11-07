@@ -196,7 +196,12 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   hub.onNeedsComputer = () => { machines.wake().catch((e) => console.error(e)); };
   // The on-demand Android phone (its own AWS box). Inert until an account is set in Settings → Phone, so it adds nothing
   // to a hub that doesn't use it. The hub starts/stops it; the brain drives it with hearth-phone, which asks this hub.
-  const phone = new Phone({ dataDir: config.dataDir, vault, isBusy: () => false, ssh: drivers.ssh ?? realSsh });
+  const phone = new Phone({
+    dataDir: config.dataDir, vault, ssh: drivers.ssh ?? realSsh,
+    // A working job keeps the phone on, and watches its screen in live view.
+    isBusy: (jobId) => hub.isJobRunning(jobId),
+    onFrame: (jobId, f) => { void store.get<any>("jobs", jobId).then((j) => hub.pushFrame(jobId, f, j?.threadId)).catch(() => {}); },
+  });
   phone.onChange = () => hub.emit("settings", {});
   phone.startTimer();
   {
@@ -538,7 +543,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       const args: Record<string, string> = {};
       for (const k of ["x", "y", "x1", "y1", "x2", "y2", "ms", "text", "key", "pkg"]) { const v = form?.get(k); if (typeof v === "string") args[k] = v.slice(0, 1000); }
       try {
-        const r = await phone.control(action, args);
+        server.timeout(req, 0); // an install can take minutes
+        const r = await phone.control(action, args, req.headers.get("x-hearth-job")?.slice(0, 100) || undefined);
         await hub.log("phone.agent", `hearth-phone ${action}`);
         return new Response(JSON.stringify(r, null, 1), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
       } catch (e: any) { throw new HttpError(400, e.message); }
