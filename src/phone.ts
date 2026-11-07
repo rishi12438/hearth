@@ -591,8 +591,18 @@ export class Phone {
         return id ? { ok: true, gsfId: id, register: "https://www.google.com/android/uncertified" } : { error: "No Google device id yet: open the Play Store once first." };
       }
       case "key": return this.adb(ip, `input keyevent ${q(args.key || "KEYCODE_HOME")}`);
-      case "open-app": return this.adb(ip, `monkey -p ${q(args.pkg || "")} -c android.intent.category.LAUNCHER 1`);
-      case "apps": { const r = await this.run(ip, "adb shell pm list packages -3"); return { ok: r.code === 0, packages: r.out.split("\n").map((l) => l.replace("package:", "").trim()).filter(Boolean) }; }
+      case "open-app": {
+        // Find the app's launcher screen and start it. (monkey opened apps too, but exits with an error on this phone
+        // because it has no hardware keys, so every open looked like a failure.)
+        const pkg = args.pkg || "";
+        if (!/^[A-Za-z][\w]*(\.[A-Za-z_][\w]*)+$/.test(pkg)) throw new Error("Give the app's package name, like com.android.vending (see hearth-phone apps).");
+        const r = await this.run(ip, `a=$(adb shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER ${pkg} | tail -1 | tr -d '\\r'); case "$a" in */*) adb shell am start -n "$a" ;; *) echo "NO_LAUNCHER"; exit 4 ;; esac`);
+        if (/NO_LAUNCHER/.test(r.out)) throw new Error(`${pkg} isn't installed, or has nothing to open (hearth-phone apps lists what's there).`);
+        if (r.code !== 0 || /^Error/m.test(r.out)) throw new Error(`Couldn't open ${pkg}: ${(r.out || r.err).split("\n").pop()?.slice(0, 150)}`);
+        return { ok: true };
+      }
+      // Apps the owner (or the agent) installed, plus the Play Store: -3 alone hides it, as it came with the phone.
+      case "apps": { const r = await this.run(ip, "adb shell pm list packages -3; adb shell pm list packages com.android.vending"); return { ok: r.code === 0, packages: r.out.split("\n").map((l) => l.replace("package:", "").trim()).filter(Boolean) }; }
       case "dump": { const r = await this.run(ip, "adb exec-out uiautomator dump /dev/tty; echo", { timeoutMs: 20_000 }); return { ok: r.code === 0, ui: r.out.slice(0, 20_000) }; }
       default: throw new Error(`Unknown phone action: ${action}`);
     }
