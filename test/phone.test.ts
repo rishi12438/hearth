@@ -242,3 +242,23 @@ test("after a stop the box comes back on a new IP: its pinned key still matches,
   expect(pinnedFor(undefined, "1.2.3.4")).toBeUndefined(); // first contact: pin it then
   expect(pinnedFor("garbage", "1.2.3.4")).toBeUndefined();
 });
+
+test("open-app starts the app's launcher screen, and says plainly when there's nothing to open", async () => {
+  const v = vault();
+  configured(null as any, v);
+  v.set("phone-sshkey", "KEY");
+  let launcher = "com.android.vending/.AssetBrowserActivity";
+  const cmds: string[] = [];
+  const ssh = { runner: () => ({ run: async (cmd: string, o: { onLine?: (l: string) => void }) => {
+    cmds.push(cmd);
+    if (cmd.includes("resolve-activity")) { if (!launcher) { o.onLine?.("NO_LAUNCHER"); return { code: 4, stderr: "" }; } o.onLine?.("Starting: Intent { cmp=" + launcher + " }"); }
+    return { code: 0, stderr: "" };
+  } }) } as any;
+  const phone = new Phone({ dataDir: mkdtempSync(join(tmpdir(), "hearth-phone-oa-")), vault: v, ssh, isBusy: () => false });
+  (phone as any).save({ state: "ready", instanceId: "i-1", publicIp: "1.2.3.4", lastUseAt: Date.now() });
+  expect(await phone.control("open-app", { pkg: "com.android.vending" })).toEqual({ ok: true });
+  expect(cmds.at(-1)).toContain("am start -n");
+  launcher = "";
+  await expect(phone.control("open-app", { pkg: "com.nope.app" })).rejects.toThrow(/isn't installed/);
+  await expect(phone.control("open-app", { pkg: "x; rm -rf /" })).rejects.toThrow(/package name/);
+});
