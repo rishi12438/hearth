@@ -47,6 +47,23 @@ const DISK_GB = 30;
 const DEFAULT_IDLE_STOP_MIN = 15;
 const DELETE_AFTER_DAYS = 30;
 const SG_NAME = "hearth-phone";
+/**
+ * The IAM policy the phone's AWS account needs: exactly the EC2 calls this file makes (CreateTags for the Name tag
+ * RunInstances sets). Shown in Settings → Phone to copy into AWS; a test keeps it in step with the calls below.
+ */
+export const PHONE_IAM_POLICY = {
+  Version: "2012-10-17",
+  Statement: [{
+    Sid: "HearthPhone",
+    Effect: "Allow",
+    Action: [
+      "ec2:DescribeRegions", "ec2:DescribeImages", "ec2:DescribeInstances", "ec2:DescribeSecurityGroups",
+      "ec2:RunInstances", "ec2:StartInstances", "ec2:StopInstances", "ec2:TerminateInstances", "ec2:CreateTags",
+      "ec2:CreateKeyPair", "ec2:DeleteKeyPair", "ec2:CreateSecurityGroup", "ec2:AuthorizeSecurityGroupIngress",
+    ],
+    Resource: "*",
+  }],
+};
 const ACCESS_KEY_RE = /^(AKIA|ASIA)[A-Z0-9]{16}$/;
 const REGION_RE = /^[a-z]{2}-[a-z]+-\d$/;
 
@@ -242,7 +259,7 @@ export class Phone {
   /** For the app: state without any secret, plus whether an account is set. */
   view() {
     const { knownHosts, ...rest } = this.state();
-    return { ...rest, configured: this.configured(), idleStopMin: this.idleStopMin(), deleteAfterDays: DELETE_AFTER_DAYS };
+    return { ...rest, configured: this.configured(), idleStopMin: this.idleStopMin(), deleteAfterDays: DELETE_AFTER_DAYS, policy: JSON.stringify(PHONE_IAM_POLICY, null, 2) };
   }
 
   // ---- making the box (first open only) ----
