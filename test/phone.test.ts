@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { Vault } from "../src/vault.ts";
-import { Phone, PHONE_IAM_POLICY, ENSURE_ANDROID, REDROID_IMAGE, redroidUserData, sign, amzDate, ec2List, xmlTag, xmlItems, ec2Error, type AwsCreds, type Ec2 } from "../src/phone.ts";
+import { Phone, pinnedFor, PHONE_IAM_POLICY, ENSURE_ANDROID, REDROID_IMAGE, redroidUserData, sign, amzDate, ec2List, xmlTag, xmlItems, ec2Error, type AwsCreds, type Ec2 } from "../src/phone.ts";
 
 const vault = () => new Vault(mkdtempSync(join(tmpdir(), "hearth-phone-")), { masterKey: randomBytes(32) });
 
@@ -233,4 +233,12 @@ test("open waits out a phone that's still stopping, then starts it; a second ope
   expect(phone.view().state).toBe("ready");
   expect(cmds.every((c) => c.startsWith("touch /tmp/hearth-phone-lastseen"))).toBe(true); // keeps the safety shutdown away
   expect(cmds.some((c) => c.includes("hearth-phone-idle"))).toBe(true); // the old safety script is replaced on open
+});
+
+test("after a stop the box comes back on a new IP: its pinned key still matches, under the new address", () => {
+  const pin = "|1|v/erqMEOedxuatCpUbawKZzeE8Y=|JDv1GCHgeZLDYHH0U3eXQkPYQHc= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH6Yzh";
+  expect(pinnedFor(pin, "34.215.179.171")).toBe("34.215.179.171 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH6Yzh");
+  expect(pinnedFor("52.12.4.91 ssh-ed25519 KEY1\n52.12.4.91 ecdsa-sha2-nistp256 KEY2", "1.2.3.4")).toBe("1.2.3.4 ssh-ed25519 KEY1\n1.2.3.4 ecdsa-sha2-nistp256 KEY2");
+  expect(pinnedFor(undefined, "1.2.3.4")).toBeUndefined(); // first contact: pin it then
+  expect(pinnedFor("garbage", "1.2.3.4")).toBeUndefined();
 });

@@ -504,7 +504,7 @@ export class Phone {
 
   // ---- control: adb on the box over SSH ----
 
-  private sshTarget(ip: string): SshTarget { return { host: ip, port: 22, user: "ubuntu", privateKey: this.sshKey(), knownHosts: this.state().knownHosts }; }
+  private sshTarget(ip: string): SshTarget { return { host: ip, port: 22, user: "ubuntu", privateKey: this.sshKey(), knownHosts: pinnedFor(this.state().knownHosts, ip) }; }
 
   /** Run a shell command on the box, pinning its host key the first time. */
   private async run(ip: string, cmd: string, opts: { timeoutMs?: number } = {}): Promise<{ code: number; out: string; err: string }> {
@@ -727,6 +727,17 @@ How to work: \`open\`, then loop — \`screenshot\` (or \`dump\`), decide, \`tap
 - Signing in to an app sticks: once the owner logs in, it stays logged in for next time.
 - Bank and wallet apps often refuse to run on a cloud phone (they check the hardware). If one won't open or says the device isn't supported, say so — it's not something you can tap past.`,
   };
+}
+
+/**
+ * The box's pinned host key, for the address it has now. AWS gives a stopped instance a new public IP when it starts
+ * again, and the pin was saved under the first one, so SSH refused every start after the first stop. What's checked
+ * is the key (the box's identity), not the address.
+ */
+export function pinnedFor(knownHosts: string | undefined, ip: string): string | undefined {
+  if (!knownHosts) return undefined;
+  const lines = knownHosts.split("\n").map((l) => l.trim().split(/\s+/)).filter((p) => p.length >= 3 && !p[0].startsWith("#"));
+  return lines.length ? lines.map((p) => [ip, ...p.slice(1)].join(" ")).join("\n") : undefined;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
