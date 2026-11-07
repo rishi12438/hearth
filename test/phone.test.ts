@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { Vault } from "../src/vault.ts";
-import { Phone, sign, amzDate, ec2List, xmlTag, xmlItems, ec2Error, type AwsCreds, type Ec2 } from "../src/phone.ts";
+import { Phone, PHONE_IAM_POLICY, sign, amzDate, ec2List, xmlTag, xmlItems, ec2Error, type AwsCreds, type Ec2 } from "../src/phone.ts";
 
 const vault = () => new Vault(mkdtempSync(join(tmpdir(), "hearth-phone-")), { masterKey: randomBytes(32) });
 
@@ -122,4 +122,12 @@ test("after 30 idle days the phone is deleted (terminate + drop the key)", async
 test("open refuses when no account is configured", async () => {
   const phone = new Phone({ dataDir: mkdtempSync(join(tmpdir(), "hearth-phone-no-")), vault: vault(), isBusy: () => false });
   expect(await phone.open()).toEqual({ error: expect.stringContaining("Settings") });
+});
+
+test("the IAM policy shown in Settings allows every EC2 call the phone makes, and nothing else", async () => {
+  const src = await Bun.file(new URL("../src/phone.ts", import.meta.url)).text();
+  const called = new Set([...src.matchAll(/ec2\(\)\(creds, "(\w+)"/g)].map((m) => `ec2:${m[1]}`));
+  if (src.includes('"TagSpecification"')) called.add("ec2:CreateTags");
+  expect(called.size).toBeGreaterThan(5);
+  expect([...PHONE_IAM_POLICY.Statement[0].Action].sort()).toEqual([...called].sort());
 });

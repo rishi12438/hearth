@@ -5211,6 +5211,12 @@ function openAddMachine(cloud: any, kind: "e2b" | "ssh" = "e2b") {
   openSheet("Add a cloud computer", [tabs, ...warnings, ...body]);
 }
 
+/** The phone's IAM policy, ready to paste into AWS, with a Copy button. */
+function policyBox(text: string) {
+  const copy = h("button", { class: "btn small ghost", on: { click: () => navigator.clipboard?.writeText(text).then(() => toast("Policy copied"), () => toast("Couldn't copy", "err")) } }, icon("clip", 14), "Copy policy");
+  return h("div", { class: "policybox" }, h("pre", { class: "code" }, text), copy);
+}
+
 /** The on-demand Android phone (its own AWS box): set the service account, then open/close/delete it. */
 async function openPhone() {
   const p = await call("/api/phone").catch(() => null);
@@ -5231,9 +5237,12 @@ async function openPhone() {
     openSheet("Phone", [
       h("p", { class: "muted small" }, "An Android phone in your own AWS, for the apps the web can't reach: WhatsApp, Uber, SMS codes, app notifications. Your agent starts it when it needs it and stops it a few minutes after, so it costs about $2–3 a month (just the disk). After 30 unused days it's deleted to cost nothing — you'd redo app logins next time."),
       h("ol", { class: "steps" },
-        h("li", null, "In AWS, make an IAM user with programmatic access."),
-        h("li", null, "Give it permission to run, start, stop, describe and terminate EC2 instances, manage its key pair and security group (EC2 only)."),
-        h("li", null, "Paste its access key below, and the region you want the phone in.")),
+        h("li", null, "In the AWS console, open IAM → Policies → Create policy, switch to the JSON tab, and paste this (EC2 only):"),
+        policyBox(p.policy),
+        h("li", null, "Name the policy HearthPhone and create it."),
+        h("li", null, "IAM → Users → Create user, name it hearth-phone. Choose Attach policies directly and tick HearthPhone."),
+        h("li", null, "Open the user → Security credentials → Create access key → Application running outside AWS. Copy both keys."),
+        h("li", null, "Paste them below, with the region you want the phone in.")),
       akid, secret, region, err, save,
       h("p", { class: "muted small" }, "The keys are checked with AWS, then kept encrypted on your hub (never in your data or exports, never sent back to this app). Bank and wallet apps often refuse a cloud phone; test your must-have apps first."),
     ]);
