@@ -158,6 +158,26 @@ export const realEc2: Ec2 = async (creds, action, params) => {
  */
 /** Android itself (Redroid), pinned: a multi-arch image (Docker Hub has no plain "-arm64" tag). */
 export const REDROID_IMAGE = "redroid/redroid:13.0.0-240527";
+/**
+ * Safety shutdown, belt-and-braces with the hub's own idle stop: if the hub hasn't touched the box for this long, it
+ * powers off (and, set to stop-on-shutdown, stops billing), so a crashed hub can't leave it running. The hub touches
+ * the mark on every command it runs; checking only for an open SSH session at each 5-minute tick missed the hub's
+ * short connections and once powered the box off while it was starting.
+ */
+const IDLE_MARK = "/tmp/hearth-phone-lastseen";
+function installIdleShutdown(min: number, sudo: string) {
+  return `${sudo}tee /usr/local/bin/hearth-phone-idle >/dev/null <<'EOS'
+#!/bin/bash
+mark=${IDLE_MARK}
+[ -f "$mark" ] || install -m 666 /dev/null "$mark"
+chmod 666 "$mark"
+if ss -tnH state established '( sport = :22 )' | grep -q .; then touch "$mark"; exit 0; fi
+if [ $(( $(date +%s) - $(stat -c %Y "$mark") )) -gt $(( ${min} * 60 )) ]; then /sbin/shutdown -h now; fi
+EOS
+${sudo}chmod +x /usr/local/bin/hearth-phone-idle
+echo '*/5 * * * * root /usr/local/bin/hearth-phone-idle' | ${sudo}tee /etc/cron.d/hearth-phone-idle >/dev/null`;
+}
+
 /** Android with Google Play (MindTheGapps), built on the box once from REDROID_IMAGE by redroid-script (pinned). */
 export const PLAY_IMAGE = "hearth/redroid:13-play";
 const REDROID_SCRIPT = { repo: "https://github.com/ayasa520/redroid-script", commit: "a4951b782fc8e06c845d9553bf07bb643fd8c158" };
@@ -174,6 +194,7 @@ const REDROID_RUN = redroidRun(REDROID_IMAGE);
  */
 export const ENSURE_ANDROID = `set -u
 sudo cloud-init status --wait >/dev/null 2>&1 || true
+${installIdleShutdown(30, "sudo ")}
 command -v docker >/dev/null && command -v adb >/dev/null || { sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io android-tools-adb >/dev/null; sudo systemctl enable --now docker; }
 sudo modprobe binder_linux devices=binder,hwbinder,vndbinder 2>/dev/null || true
 sudo mkdir -p /opt/redroid-data
@@ -221,17 +242,7 @@ ${REDROID_RUN}
 # adb reaches the container on loopback; the hub runs adb over SSH, nothing is exposed to the internet.
 for i in $(seq 1 30); do adb connect 127.0.0.1:5555 && break; sleep 2; done
 timeout 120 adb wait-for-device || true
-# Safety shutdown: if no one has been connected over SSH for ${idleShutdownMin} min, stop the box (belt-and-braces with the hub's own idle-stop).
-cat > /usr/local/bin/hearth-phone-idle <<'EOS'
-#!/bin/bash
-mark=/run/hearth-phone-lastseen
-if ss -tnH state established '( sport = :22 )' | grep -q .; then date +%s > "$mark"; exit 0; fi
-last=$(cat "$mark" 2>/dev/null || echo 0)
-if [ "$last" = 0 ]; then date +%s > "$mark"; exit 0; fi
-if [ $(( $(date +%s) - last )) -gt $(( ${idleShutdownMin} * 60 )) ]; then /sbin/shutdown -h now; fi
-EOS
-chmod +x /usr/local/bin/hearth-phone-idle
-echo '*/5 * * * * root /usr/local/bin/hearth-phone-idle' > /etc/cron.d/hearth-phone-idle
+${installIdleShutdown(idleShutdownMin, "")}
 `;
 }
 
@@ -248,6 +259,8 @@ type Opts = {
   /** Fetch the hub's own public IP, to lock the box's SSH to this hub only. Overridable in tests. */
   myIp?: () => Promise<string | null>;
   idleStopMin?: number;
+  /** How long to wait between AWS checks while starting (tests make it quick). */
+  pollMs?: number;
   /** A small picture of the screen for a working job's live view in its thread. */
   onFrame?: (jobId: string, f: { mime: string; data: Uint8Array }) => void;
   frameEveryMs?: number;
@@ -271,6 +284,8 @@ const myPublicIp = async (): Promise<string | null> => {
 export class Phone {
   onChange: () => void = () => {};
   private busy = false;
+  /** The start in progress: a second open (the agent retrying, the owner's screen) waits for it instead of failing. */
+  private opening: Promise<{ ok: true } | { error: string }> | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastCleanupDay = "";
   /** The job being watched in live view, and when it last did something on the phone. */
@@ -397,14 +412,18 @@ export class Phone {
   /** Start the phone and wait until Android is up. Auto-makes the box the first time. */
   async open(jobId?: string): Promise<{ ok: true } | { error: string }> {
     if (!this.configured()) return { error: "Add an AWS service account in Settings → Phone first." };
-    if (this.busy) return { error: "The phone is already starting." };
+    if (this.opening) return this.opening;
+    this.opening = this.openNow(jobId).finally(() => { this.opening = null; });
+    return this.opening;
+  }
+
+  private async openNow(jobId?: string): Promise<{ ok: true } | { error: string }> {
     const creds = this.creds()!;
     if (this.state().state === "ready") { this.patch({ ownerJob: jobId ?? this.state().ownerJob ?? null, lastUseAt: this.now() }); return { ok: true }; }
     this.busy = true;
     try {
       this.patch({ state: "starting", step: "Starting your phone", error: undefined, ownerJob: jobId ?? null });
       const instanceId = await this.ensureInstance(creds);
-      await this.ec2()(creds, "StartInstances", { "InstanceId.1": instanceId }).catch(() => {}); // already running is fine
       const ip = await this.waitRunning(creds, instanceId);
       this.patch({ publicIp: ip, step: "Waiting for Android to finish booting" });
       this.patch({ step: "Getting Android ready (the first time it downloads Android and Google Play: about 5 minutes)" });
@@ -431,15 +450,26 @@ export class Phone {
     this.patch({ state: "off", publicIp: undefined, ownerJob: null, step: undefined, stoppedAt: this.now() });
   }
 
-  private async waitRunning(creds: AwsCreds, instanceId: string, timeoutMs = 180_000): Promise<string> {
+  /**
+   * Get the instance running and return its address. AWS refuses to start an instance that's still stopping (right
+   * after a close, or after it shut itself down), so wait that out and start it once it's stopped.
+   */
+  private async waitRunning(creds: AwsCreds, instanceId: string, timeoutMs = 360_000): Promise<string> {
     const until = this.now() + timeoutMs;
+    let startedAt = -Infinity;
     while (this.now() < until) {
       const xml = await this.ec2()(creds, "DescribeInstances", { "InstanceId.1": instanceId });
       const state = xmlTag(xml, "name"); // instanceState > name
       const ip = xmlTag(xml, "ipAddress");
       if (state === "running" && ip) return ip;
       if (state === "terminated" || state === "shutting-down") throw new Error("The phone instance was terminated.");
-      await sleep(5000);
+      if (state === "stopping") this.patch({ step: "Waiting for the phone to finish stopping, then starting it" });
+      if (state === "stopped" && this.now() - startedAt > 20_000) {
+        startedAt = this.now();
+        this.patch({ step: "Starting your phone" });
+        await this.ec2()(creds, "StartInstances", { "InstanceId.1": instanceId }).catch(() => {}); // retried if AWS wasn't ready
+      }
+      await sleep(this.opts.pollMs ?? 5000);
     }
     throw new Error("The phone took too long to start.");
   }
@@ -480,7 +510,8 @@ export class Phone {
   private async run(ip: string, cmd: string, opts: { timeoutMs?: number } = {}): Promise<{ code: number; out: string; err: string }> {
     let out = "";
     const runner = this.ssh().runner(this.sshTarget(ip), (k) => { if (!this.state().knownHosts) this.patch({ knownHosts: k }); });
-    const r = await runner.run(cmd, { timeoutMs: opts.timeoutMs ?? 30_000, onLine: (l) => { out += l + "\n"; } });
+    // Every command marks the box as in use, so its safety shutdown never fires while the hub is working it.
+    const r = await runner.run(`touch ${IDLE_MARK} 2>/dev/null; ${cmd}`, { timeoutMs: opts.timeoutMs ?? 30_000, onLine: (l) => { out += l + "\n"; } });
     return { code: r.code, out: out.trimEnd(), err: r.stderr };
   }
 
@@ -647,7 +678,8 @@ cmd="\${1:-}"; shift 2>/dev/null || true
 job=(); if [ -n "\${HEARTH_JOB:-}" ]; then job=(-H "X-Hearth-Job: \${HEARTH_JOB}"); fi
 post() { curl -sS -m 180 -H "X-Hearth-Agent: ${key}" "\${job[@]}" "$@" "${hubUrl}/api/agent/phone"; }
 case "$cmd" in
-  open|close|status|screenshot|apps|dump|gsf-id) post --data-urlencode "action=$cmd" ;;
+  open) post -m 1500 --data-urlencode action=open ;; # the first start builds Android: several minutes
+  close|status|screenshot|apps|dump|gsf-id) post --data-urlencode "action=$cmd" ;;
   tap)   post --data-urlencode action=tap --data-urlencode "x=\${1:-0}" --data-urlencode "y=\${2:-0}" ;;
   swipe) post --data-urlencode action=swipe --data-urlencode "x1=\${1:-0}" --data-urlencode "y1=\${2:-0}" --data-urlencode "x2=\${3:-0}" --data-urlencode "y2=\${4:-0}" --data-urlencode "ms=\${5:-300}" ;;
   type)  post --data-urlencode action=type --data-urlencode "text=$*" ;;
@@ -671,7 +703,7 @@ If Play says the device isn't Play Protect certified: run \`hearth-phone gsf-id\
 
 The owner can watch the screen live in your thread while you use it.
 
-The phone starts when you open it (about a minute the first time) and stops itself a few minutes after you stop using it. You don't manage that.
+The phone starts when you open it: \`hearth-phone open\` waits until it's ready (a minute or two; up to ~10 the very first time), so run it once and wait. Don't close and reopen it to "fix" a slow start and stops itself a few minutes after you stop using it. You don't manage that.
 
 | Command | What it does |
 |---|---|

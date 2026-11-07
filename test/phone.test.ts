@@ -190,7 +190,7 @@ test("owner screen: a picture once ready, the step while starting; owner input i
   expect(cmds.some((c) => c.includes("-resize 720x"))).toBe(true);
   await phone.ownerInput("type", { text: "p@ss w'rd&1" });
   // Quoted for the box's shell and again for Android's, so the password arrives as typed.
-  expect(cmds.at(-1)).toBe(`adb shell 'input text '"'"'p@ss%sw'"'"'"'"'"'"'"'"'rd&1'"'"''`);
+  expect(cmds.at(-1)).toBe(`touch /tmp/hearth-phone-lastseen 2>/dev/null; adb shell 'input text '"'"'p@ss%sw'"'"'"'"'"'"'"'"'rd&1'"'"''`);
   await expect(phone.ownerInput("open-app", { pkg: "com.x" })).rejects.toThrow();
   await expect(phone.ownerInput("close", {})).rejects.toThrow();
 });
@@ -202,4 +202,35 @@ test("the phone skill hands sign-ins to the owner with [[phone]] and never types
   expect(body).toContain("[[answer-needed]]");
   expect(body).toContain("com.android.vending");
   expect(body).toMatch(/Never ask them to send a password in chat/);
+});
+
+test("open waits out a phone that's still stopping, then starts it; a second open shares the same start", async () => {
+  const v = vault();
+  configured(null as any, v);
+  v.set("phone-sshkey", "KEY");
+  const states = ["stopping", "stopping", "stopped", "pending", "running"];
+  let i = 0, starts = 0;
+  const ec2: Ec2 = async (_c, action) => {
+    if (action === "StartInstances") { starts++; return "<ok/>"; }
+    if (action === "DescribeInstances") {
+      const st = states[Math.min(i++, states.length - 1)];
+      return `<instanceState><name>${st}</name></instanceState>${st === "running" ? "<ipAddress>1.2.3.4</ipAddress>" : ""}`;
+    }
+    return "<ok/>";
+  };
+  const cmds: string[] = [];
+  const ssh = { runner: () => ({ run: async (cmd: string, o: { onLine?: (l: string) => void }) => {
+    cmds.push(cmd);
+    if (cmd.includes("sys.boot_completed")) o.onLine?.("1");
+    return { code: 0, stderr: "" };
+  } }) } as any;
+  const phone = new Phone({ dataDir: mkdtempSync(join(tmpdir(), "hearth-phone-st-")), vault: v, ssh, ec2, isBusy: () => false, pollMs: 1 });
+  (phone as any).save({ state: "off", instanceId: "i-1", keyName: "k", sgId: "sg-1" });
+  const [a, b] = await Promise.all([phone.open("job-1"), phone.open("job-1")]);
+  expect(a).toEqual({ ok: true });
+  expect(b).toEqual({ ok: true });
+  expect(starts).toBe(1); // only once it had stopped, and only one start for both opens
+  expect(phone.view().state).toBe("ready");
+  expect(cmds.every((c) => c.startsWith("touch /tmp/hearth-phone-lastseen"))).toBe(true); // keeps the safety shutdown away
+  expect(cmds.some((c) => c.includes("hearth-phone-idle"))).toBe(true); // the old safety script is replaced on open
 });
