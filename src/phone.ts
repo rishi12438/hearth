@@ -157,7 +157,7 @@ export const realEc2: Ec2 = async (creds, action, params) => {
  * stop-on-shutdown, stops it) after 30 minutes with no SSH connection, so a crashed hub can never leave it billing.
  */
 /** Android itself (Redroid), pinned: a multi-arch image (Docker Hub has no plain "-arm64" tag). */
-export const REDROID_IMAGE = "redroid/redroid:13.0.0-240527";
+export const REDROID_IMAGE = "redroid/redroid:15.0.0-250627";
 /**
  * Safety shutdown, belt-and-braces with the hub's own idle stop: if the hub hasn't touched the box for this long, it
  * powers off (and, set to stop-on-shutdown, stops billing), so a crashed hub can't leave it running. The hub touches
@@ -183,45 +183,81 @@ ${sudo}chmod +x /usr/local/bin/hearth-phone-idle
 echo '*/5 * * * * root /usr/local/bin/hearth-phone-idle' | ${sudo}tee /etc/cron.d/hearth-phone-idle >/dev/null`;
 }
 
-/** Android with Google Play (MindTheGapps), built on the box once from REDROID_IMAGE by redroid-script (pinned). */
-export const PLAY_IMAGE = "hearth/redroid:13-play";
-const REDROID_SCRIPT = { repo: "https://github.com/ayasa520/redroid-script", commit: "a4951b782fc8e06c845d9553bf07bb643fd8c158" };
+/**
+ * Android 15 with Google Play: MindTheGapps' system files (a pinned release, checked by sha256) on top of REDROID_IMAGE,
+ * built on the box once. Android 16 can't run here: it needs ashmem, which this kernel doesn't have.
+ */
+export const PLAY_IMAGE = "hearth/redroid:15-play";
+const GAPPS = {
+  url: "https://github.com/MindTheGapps/15.0.0-arm64/releases/download/MindTheGapps-15.0.0-arm64-20260915_032013/MindTheGapps-15.0.0-arm64-20260915_032013.zip",
+  sha256: "e979601ef70b03d9214ea24ca7a103cb408ab102718fff38ec170a6ca03e263d",
+};
+/**
+ * Android's boot options. memfd and software graphics: this kernel has no ashmem and the box has no GPU. Then a
+ * release build's settings: the image is a debug build (userdebug, test-keys, debuggable), which apps' root checks
+ * flag ("The device has been rooted"). The su binary is removed on every start too (ENSURE_ANDROID). Release builds
+ * want adb approved, so the hub's adb key is written into Android's approved keys instead of tapping Allow.
+ */
+export const ANDROID_ARGS = [
+  "androidboot.redroid_width=1080", "androidboot.redroid_height=2340", "androidboot.redroid_dpi=440",
+  "androidboot.use_memfd=true", "sys.use_memfd=true", "androidboot.redroid_gpu_mode=guest",
+  "ro.debuggable=0", "ro.build.type=user", "ro.build.tags=release-keys", "ro.system.build.type=user",
+  "ro.system.build.tags=release-keys", "ro.vendor.build.type=user", "ro.vendor.build.tags=release-keys",
+].join(" ");
 /**
  * Start Android's container. --restart unless-stopped (not --rm) so Docker brings it back on every boot: the box is
  * stopped when idle, and user-data only runs on the very first boot.
  */
-const redroidRun = (image: string) => `docker run -d --restart unless-stopped --privileged --name redroid -v /opt/redroid-data:/data -p 127.0.0.1:5555:5555 ${image} androidboot.redroid_width=1080 androidboot.redroid_height=2340 androidboot.redroid_dpi=440`;
+const redroidRun = (image: string) => `docker run -d --restart unless-stopped --privileged --name redroid -v /opt/redroid-data:/data -p 127.0.0.1:5555:5555 ${image} ${ANDROID_ARGS}`;
 const REDROID_RUN = redroidRun(REDROID_IMAGE);
 /**
  * Run by the hub on every open, so a box heals itself: waits for first-boot setup, installs what's missing, builds the
- * Google Play image once (a few minutes; plain Android if that fails), (re)starts Android on the right image, and
- * connects adb. Android's data belongs to the image that made it, so on a switch the old data is kept aside, not mixed.
+ * Google Play image once (a few minutes; plain Android if that fails), (re)starts Android on the right image, removes
+ * su, approves the hub's adb key, and connects adb. Android's data belongs to the image that made it, so on a switch
+ * the old data is set aside (only the latest copy is kept: the disk is 30 GB) and old images are removed.
  */
 export const ENSURE_ANDROID = `set -u
 sudo cloud-init status --wait >/dev/null 2>&1 || true
 ${installIdleShutdown(30, "sudo ")}
 command -v docker >/dev/null && command -v adb >/dev/null || { sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io android-tools-adb >/dev/null; sudo systemctl enable --now docker; }
+command -v unzip >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unzip >/dev/null
 sudo modprobe binder_linux devices=binder,hwbinder,vndbinder 2>/dev/null || true
 sudo mkdir -p /opt/redroid-data
 want=${PLAY_IMAGE}
 if ! sudo docker image inspect ${PLAY_IMAGE} >/dev/null 2>&1; then
-  if [ -f /var/lib/hearth-play-failed ]; then want=${REDROID_IMAGE}
-  elif ! ( sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq lzip git python3-venv >/dev/null \\
-      && rm -rf /tmp/rs /tmp/rsv && git clone -q ${REDROID_SCRIPT.repo} /tmp/rs && cd /tmp/rs && git checkout -q ${REDROID_SCRIPT.commit} \\
-      && python3 -m venv /tmp/rsv && /tmp/rsv/bin/pip install -q -r requirements.txt \\
-      && sudo /tmp/rsv/bin/python redroid.py -a 13.0.0 -mtg >/dev/null 2>&1 \\
-      && sudo docker tag redroid/redroid:13.0.0_mindthegapps ${PLAY_IMAGE} ); then
-    sudo touch /var/lib/hearth-play-failed; want=${REDROID_IMAGE}; echo "PLAY_BUILD_FAILED"
+  b=$(mktemp -d)
+  if [ -f /var/lib/hearth-play15-failed ]; then want=${REDROID_IMAGE}
+  elif ! ( sudo docker pull -q ${REDROID_IMAGE} >/dev/null \\
+      && curl -fsSL --max-time 900 -o $b/g.zip '${GAPPS.url}' \\
+      && echo '${GAPPS.sha256}  '$b/g.zip | sha256sum -c --quiet \\
+      && unzip -q $b/g.zip 'system/*' -d $b/ctx \\
+      && printf 'FROM ${REDROID_IMAGE}\\nCOPY system /system\\n' > $b/ctx/Dockerfile \\
+      && sudo docker build -q -t ${PLAY_IMAGE} $b/ctx >/dev/null 2>&1 ); then
+    sudo touch /var/lib/hearth-play15-failed; want=${REDROID_IMAGE}; echo "PLAY_BUILD_FAILED"
   fi
+  rm -rf $b
 fi
+sudo docker pull -q ${REDROID_IMAGE} >/dev/null 2>&1 || true
 cur=$(sudo docker inspect -f '{{.Config.Image}}' redroid 2>/dev/null || echo none)
 up=$(sudo docker inspect -f '{{.State.Running}}' redroid 2>/dev/null || echo false)
 if [ "$cur" != "$want" ] || [ "$up" != true ]; then
   sudo docker rm -f redroid >/dev/null 2>&1 || true
   mark=$(sudo cat /opt/redroid-data/.hearth-image 2>/dev/null || echo none)
-  if [ "$mark" != "$want" ] && [ -n "$(sudo ls -A /opt/redroid-data)" ]; then sudo mv /opt/redroid-data /opt/redroid-data.old-$(date +%s); sudo mkdir -p /opt/redroid-data; fi
-  sudo docker run -d --restart unless-stopped --privileged --name redroid -v /opt/redroid-data:/data -p 127.0.0.1:5555:5555 "$want" androidboot.redroid_width=1080 androidboot.redroid_height=2340 androidboot.redroid_dpi=440 >/dev/null || { echo "ANDROID_DIDNT_START"; exit 5; }
+  if [ "$mark" != "$want" ] && [ -n "$(sudo ls -A /opt/redroid-data)" ]; then sudo rm -rf /opt/redroid-data.old-*; sudo mv /opt/redroid-data /opt/redroid-data.old-$(date +%s); sudo mkdir -p /opt/redroid-data; fi
+  sudo ${redroidRun('"$want"')} >/dev/null || { echo "ANDROID_DIDNT_START"; exit 5; }
   echo "$want" | sudo tee /opt/redroid-data/.hearth-image >/dev/null
+  sudo docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^(hearth/redroid|redroid/redroid):' | grep -vxF -e ${PLAY_IMAGE} -e ${REDROID_IMAGE} | xargs -r sudo docker rmi -f >/dev/null 2>&1 || true
+fi
+# Approve the hub's adb key, as tapping Allow would: once Android has made /data/misc/adb on first boot.
+[ -f ~/.android/adbkey.pub ] || adb start-server >/dev/null 2>&1
+for i in $(seq 1 60); do sudo test -d /opt/redroid-data/misc/adb && break; sleep 2; done
+# No su: apps' root checks look for it. Removed in the container's own layer once Android is up (right after the
+# container starts it didn't stick), checked, and again whenever the container is re-made.
+for i in $(seq 1 10); do sudo docker exec redroid rm -f /system/xbin/su >/dev/null 2>&1; sudo docker exec redroid test -e /system/xbin/su || break; sleep 3; done
+if ! sudo cmp -s ~/.android/adbkey.pub /opt/redroid-data/misc/adb/adb_keys; then
+  sudo cp ~/.android/adbkey.pub /opt/redroid-data/misc/adb/adb_keys && sudo chown 1000:2000 /opt/redroid-data/misc/adb/adb_keys && sudo chmod 640 /opt/redroid-data/misc/adb/adb_keys
+  sudo docker exec redroid sh -c 'restorecon /data/misc/adb/adb_keys; setprop ctl.restart adbd' >/dev/null 2>&1 || true
+  sleep 3; adb disconnect 127.0.0.1:5555 >/dev/null 2>&1 || true
 fi
 for i in $(seq 1 30); do adb connect 127.0.0.1:5555 2>&1 | grep -q 'connected' && exit 0; sleep 2; done
 echo "ADB_DIDNT_CONNECT"; exit 6`;
@@ -438,7 +474,7 @@ export class Phone {
       const instanceId = await this.ensureInstance(creds);
       const ip = await this.waitRunning(creds, instanceId);
       this.patch({ publicIp: ip, step: "Waiting for Android to finish booting" });
-      this.patch({ step: "Getting Android ready (the first time it downloads Android and Google Play: about 5 minutes)" });
+      this.patch({ step: "Getting Android ready (the first time it downloads Android 15 and Google Play: about 5 minutes)" });
       await this.ensureAndroid(ip);
       this.patch({ step: "Waiting for Android to finish booting" });
       await this.waitBooted(ip);

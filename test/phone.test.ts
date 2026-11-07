@@ -305,3 +305,14 @@ test("by default the phone turns off after 10 idle minutes", async () => {
   t += 2 * 60_000; await phone.tick();
   expect(calls.some((c) => c.action === "StopInstances")).toBe(true);
 });
+
+test("Android 15 with Play, set up to pass apps' root checks: release-build settings, no su, adb key approved", async () => {
+  const { ANDROID_ARGS, PLAY_IMAGE, REDROID_IMAGE, ENSURE_ANDROID } = await import("../src/phone.ts");
+  expect(REDROID_IMAGE).toStartWith("redroid/redroid:15.");
+  expect(PLAY_IMAGE).toBe("hearth/redroid:15-play");
+  for (const a of ["ro.debuggable=0", "ro.build.type=user", "ro.build.tags=release-keys", "sys.use_memfd=true", "androidboot.redroid_gpu_mode=guest"]) expect(ANDROID_ARGS).toContain(a);
+  expect(ENSURE_ANDROID).toContain("sha256sum -c"); // the Play files are checked before they're used
+  expect(ENSURE_ANDROID).toContain("rm -f /system/xbin/su");
+  expect(ENSURE_ANDROID).toContain("/opt/redroid-data/misc/adb/adb_keys");
+  expect(ENSURE_ANDROID.indexOf("misc/adb && break")).toBeLessThan(ENSURE_ANDROID.indexOf("rm -f /system/xbin/su")); // after Android is up
+});
