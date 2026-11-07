@@ -195,13 +195,29 @@ test("owner screen: a picture once ready, the step while starting; owner input i
   await expect(phone.ownerInput("close", {})).rejects.toThrow();
 });
 
-test("the phone skill hands sign-ins to the owner with [[phone]] and never types their passwords", async () => {
+test("the phone skill hands sign-ins to the owner with hearth-phone handover and never types their passwords", async () => {
   const { phoneSkill } = await import("../src/phone.ts");
-  const body = phoneSkill("http://127.0.0.1:1", "k").body;
-  expect(body).toContain("[[phone]]");
-  expect(body).toContain("[[answer-needed]]");
-  expect(body).toContain("com.android.vending");
-  expect(body).toMatch(/Never ask them to send a password in chat/);
+  const sk = phoneSkill("http://127.0.0.1:1", "k");
+  expect(sk.body).toContain('hearth-phone handover "Sign in to Google Play"');
+  expect(sk.body).toContain("[[answer-needed]]");
+  expect(sk.body).toContain("com.android.vending");
+  expect(sk.body).toMatch(/Never ask for a password in chat/);
+  expect(sk.scripts!["hearth-phone"]).toContain("action=handover");
+});
+
+test("handover: the job that ran it gets the 'Open your phone' button once; it needs a job", async () => {
+  const v = vault();
+  configured(null as any, v);
+  v.set("phone-sshkey", "KEY");
+  const ssh = { runner: () => ({ run: async () => ({ code: 0, stderr: "" }) }) } as any;
+  const phone = new Phone({ dataDir: mkdtempSync(join(tmpdir(), "hearth-phone-ho-")), vault: v, ssh, isBusy: () => false });
+  (phone as any).save({ state: "ready", instanceId: "i-1", publicIp: "1.2.3.4", lastUseAt: Date.now() });
+  await expect(phone.control("handover", { text: "Sign in to Google Play" })).rejects.toThrow(/job/);
+  expect((await phone.control("handover", { text: "Sign in to Google Play" }, "job-9")).ok).toBe(true);
+  expect(phone.takeHandover("job-8")).toBe(false);
+  expect(phone.takeHandover("job-9")).toBe(true);
+  expect(phone.takeHandover("job-9")).toBe(false);
+  expect(Phone.framesDir().startsWith(tmpdir())).toBe(true); // the hub's service can't write its home folder
 });
 
 test("open waits out a phone that's still stopping, then starts it; a second open shares the same start", async () => {

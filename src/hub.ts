@@ -1442,6 +1442,9 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     let cur: Job = await this.saveJob({ ...job, status: "working", startedAt: this.clock().toISOString() });
     const finish = async (patch: Partial<Job>) => {
       narrator?.stop();
+      // The agent handed the phone to the owner (hearth-phone handover): the reply gets its "Open your phone" button,
+      // whatever the write-up kept. The tool owns this, not the wording.
+      if (this.phoneHandover?.(job.id) && typeof patch.result === "string" && !patch.result.includes("[[phone]]")) patch = { ...patch, result: `${patch.result.trim()}\n\n[[phone]]` };
       const stepsSoFar = (this.steps.get(job.id) || []).map((x) => x.text);
       this.stops.delete(job.id); this.steps.delete(job.id); this.frames.delete(job.id); this.running.delete(job.id);
       if (stop.signal.aborted && this.cancelled.delete(job.id)) {
@@ -1837,6 +1840,8 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
 
   /** Set by the server: wake a cloud computer when a job is waiting for one. */
   onNeedsComputer: (() => void) | null = null;
+  /** Did this job hand the phone to the owner (to sign in)? Takes it: true once. Set by the server (phone.ts). */
+  phoneHandover: ((jobId: string) => boolean) | null = null;
 
   private brainsTimer: ReturnType<typeof setTimeout> | null = null;
   /** Every brain was full: try the parked jobs again when the first plan resets (and at least every 30 min). */
