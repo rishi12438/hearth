@@ -158,23 +158,44 @@ export const realEc2: Ec2 = async (creds, action, params) => {
  */
 /** Android itself (Redroid), pinned: a multi-arch image (Docker Hub has no plain "-arm64" tag). */
 export const REDROID_IMAGE = "redroid/redroid:13.0.0-240527";
+/** Android with Google Play (MindTheGapps), built on the box once from REDROID_IMAGE by redroid-script (pinned). */
+export const PLAY_IMAGE = "hearth/redroid:13-play";
+const REDROID_SCRIPT = { repo: "https://github.com/ayasa520/redroid-script", commit: "a4951b782fc8e06c845d9553bf07bb643fd8c158" };
 /**
  * Start Android's container. --restart unless-stopped (not --rm) so Docker brings it back on every boot: the box is
  * stopped when idle, and user-data only runs on the very first boot.
  */
-const REDROID_RUN = `docker run -d --restart unless-stopped --privileged --name redroid -v /opt/redroid-data:/data -p 127.0.0.1:5555:5555 ${REDROID_IMAGE} androidboot.redroid_width=1080 androidboot.redroid_height=2340 androidboot.redroid_dpi=440`;
+const redroidRun = (image: string) => `docker run -d --restart unless-stopped --privileged --name redroid -v /opt/redroid-data:/data -p 127.0.0.1:5555:5555 ${image} androidboot.redroid_width=1080 androidboot.redroid_height=2340 androidboot.redroid_dpi=440`;
+const REDROID_RUN = redroidRun(REDROID_IMAGE);
 /**
- * Run by the hub on every open, so a box heals itself: waits for first-boot setup, installs what's missing, starts
- * Android if it isn't running (a box made before this fix, or a failed first boot), and connects adb to it.
+ * Run by the hub on every open, so a box heals itself: waits for first-boot setup, installs what's missing, builds the
+ * Google Play image once (a few minutes; plain Android if that fails), (re)starts Android on the right image, and
+ * connects adb. Android's data belongs to the image that made it, so on a switch the old data is kept aside, not mixed.
  */
 export const ENSURE_ANDROID = `set -u
 sudo cloud-init status --wait >/dev/null 2>&1 || true
 command -v docker >/dev/null && command -v adb >/dev/null || { sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io android-tools-adb >/dev/null; sudo systemctl enable --now docker; }
 sudo modprobe binder_linux devices=binder,hwbinder,vndbinder 2>/dev/null || true
 sudo mkdir -p /opt/redroid-data
-if ! sudo docker ps --format '{{.Names}}' | grep -qx redroid; then
+want=${PLAY_IMAGE}
+if ! sudo docker image inspect ${PLAY_IMAGE} >/dev/null 2>&1; then
+  if [ -f /var/lib/hearth-play-failed ]; then want=${REDROID_IMAGE}
+  elif ! ( sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq lzip git python3-venv >/dev/null \\
+      && rm -rf /tmp/rs /tmp/rsv && git clone -q ${REDROID_SCRIPT.repo} /tmp/rs && cd /tmp/rs && git checkout -q ${REDROID_SCRIPT.commit} \\
+      && python3 -m venv /tmp/rsv && /tmp/rsv/bin/pip install -q -r requirements.txt \\
+      && sudo /tmp/rsv/bin/python redroid.py -a 13.0.0 -mtg >/dev/null 2>&1 \\
+      && sudo docker tag redroid/redroid:13.0.0_mindthegapps ${PLAY_IMAGE} ); then
+    sudo touch /var/lib/hearth-play-failed; want=${REDROID_IMAGE}; echo "PLAY_BUILD_FAILED"
+  fi
+fi
+cur=$(sudo docker inspect -f '{{.Config.Image}}' redroid 2>/dev/null || echo none)
+up=$(sudo docker inspect -f '{{.State.Running}}' redroid 2>/dev/null || echo false)
+if [ "$cur" != "$want" ] || [ "$up" != true ]; then
   sudo docker rm -f redroid >/dev/null 2>&1 || true
-  sudo ${REDROID_RUN} >/dev/null || { echo "ANDROID_DIDNT_START"; exit 5; }
+  mark=$(sudo cat /opt/redroid-data/.hearth-image 2>/dev/null || echo none)
+  if [ "$mark" != "$want" ] && [ -n "$(sudo ls -A /opt/redroid-data)" ]; then sudo mv /opt/redroid-data /opt/redroid-data.old-$(date +%s); sudo mkdir -p /opt/redroid-data; fi
+  sudo docker run -d --restart unless-stopped --privileged --name redroid -v /opt/redroid-data:/data -p 127.0.0.1:5555:5555 "$want" androidboot.redroid_width=1080 androidboot.redroid_height=2340 androidboot.redroid_dpi=440 >/dev/null || { echo "ANDROID_DIDNT_START"; exit 5; }
+  echo "$want" | sudo tee /opt/redroid-data/.hearth-image >/dev/null
 fi
 for i in $(seq 1 30); do adb connect 127.0.0.1:5555 2>&1 | grep -q 'connected' && exit 0; sleep 2; done
 echo "ADB_DIDNT_CONNECT"; exit 6`;
@@ -194,6 +215,7 @@ apt-get install -y -qq docker.io android-tools-adb imagemagick
 systemctl enable --now docker
 # Redroid holds its /data on the instance disk, so apps and their logins outlive a stop/start.
 mkdir -p /opt/redroid-data
+echo ${REDROID_IMAGE} > /opt/redroid-data/.hearth-image
 docker rm -f redroid 2>/dev/null || true
 ${REDROID_RUN}
 # adb reaches the container on loopback; the hub runs adb over SSH, nothing is exposed to the internet.
@@ -385,7 +407,7 @@ export class Phone {
       await this.ec2()(creds, "StartInstances", { "InstanceId.1": instanceId }).catch(() => {}); // already running is fine
       const ip = await this.waitRunning(creds, instanceId);
       this.patch({ publicIp: ip, step: "Waiting for Android to finish booting" });
-      this.patch({ step: "Getting Android ready (the first time downloads it, a few minutes)" });
+      this.patch({ step: "Getting Android ready (the first time it downloads Android and Google Play: about 5 minutes)" });
       await this.ensureAndroid(ip);
       this.patch({ step: "Waiting for Android to finish booting" });
       await this.waitBooted(ip);
@@ -472,6 +494,31 @@ export class Phone {
     return this.state().publicIp!;
   }
 
+  /**
+   * For the owner's own phone screen in the app: the screen as a picture once it's ready, else where it's at.
+   * start: turn it on if it's off (the first call when the screen opens; never on every poll, so a failed start
+   * isn't retried every second).
+   */
+  async ownerScreen(start = false): Promise<{ state: string; step?: string; error?: string; src?: string }> {
+    if (!this.configured()) return { state: "unconfigured" };
+    const s = this.state();
+    if (s.state !== "ready" || !s.publicIp) {
+      if (start && !this.busy && s.state !== "starting") void this.open();
+      const n = this.state();
+      return { state: n.state, step: n.step, error: n.error };
+    }
+    // Watching counts as using: the idle stop waits. Saved at most twice a minute (each save tells every device).
+    if (this.now() - (s.lastUseAt || 0) > 30_000) this.patch({ lastUseAt: this.now() });
+    const f = await this.frame(s.publicIp, 720).catch(() => null);
+    return { state: "ready", src: f ? `data:${f.mime};base64,${Buffer.from(f.data).toString("base64")}` : undefined };
+  }
+
+  /** The owner's own taps and typing on the phone screen in the app. */
+  async ownerInput(action: string, args: Record<string, string>) {
+    if (!["tap", "swipe", "type", "key"].includes(action)) throw new Error("Not something you can do from here.");
+    return this.control(action, args);
+  }
+
   /** Where screenshots land, for the brain's Read. */
   static framesDir() { return join(homedir(), ".hearth-phone", "frames"); }
 
@@ -496,7 +543,17 @@ export class Phone {
       }
       case "tap": return this.adb(ip, `input tap ${num(args.x)} ${num(args.y)}`);
       case "swipe": return this.adb(ip, `input swipe ${num(args.x1)} ${num(args.y1)} ${num(args.x2)} ${num(args.y2)} ${num(args.ms) || 300}`);
-      case "type": return this.adb(ip, `input text ${q((args.text || "").replace(/ /g, "%s"))}`);
+      // Quoted twice: once for the box's shell, once for Android's (adb shell joins its words and re-parses them), so
+      // a password with & ; ' $ arrives as typed.
+      case "type": return this.adb(ip, q(`input text ${q((args.text || "").replace(/ /g, "%s"))}`));
+      case "gsf-id": {
+        // The id Google asks for at google.com/android/uncertified when Play says this device isn't certified.
+        // Read from Android's data on the box's disk: Android won't let the adb shell read Google's settings provider.
+        const py = `import sqlite3; c=sqlite3.connect('file:/opt/redroid-data/data/com.google.android.gsf/databases/gservices.db?mode=ro', uri=True); print(c.execute("select value from main where name='android_id'").fetchone()[0])`;
+        const r = await this.run(ip, `sudo python3 -c ${q(py)} 2>/dev/null`);
+        const id = r.out.trim().match(/^(\d{5,})$/)?.[1];
+        return id ? { ok: true, gsfId: id, register: "https://www.google.com/android/uncertified" } : { error: "No Google device id yet: open the Play Store once first." };
+      }
       case "key": return this.adb(ip, `input keyevent ${q(args.key || "KEYCODE_HOME")}`);
       case "open-app": return this.adb(ip, `monkey -p ${q(args.pkg || "")} -c android.intent.category.LAUNCHER 1`);
       case "apps": { const r = await this.run(ip, "adb shell pm list packages -3"); return { ok: r.code === 0, packages: r.out.split("\n").map((l) => l.replace("package:", "").trim()).filter(Boolean) }; }
@@ -528,9 +585,9 @@ export class Phone {
   private unwatch() { if (this.live) clearInterval(this.live.timer); this.live = null; }
 
   /** The screen as a small JPEG (resized on the box), else the PNG if it's small enough. */
-  private async frame(ip: string): Promise<{ mime: string; data: Uint8Array } | null> {
+  private async frame(ip: string, width = 540): Promise<{ mime: string; data: Uint8Array } | null> {
     await this.ensureTools(ip);
-    const cmd = this.toolsOk ? "adb exec-out screencap -p | convert png:- -resize 540x -quality 60 jpg:- | base64 -w0; echo" : "adb exec-out screencap -p | base64 -w0; echo";
+    const cmd = this.toolsOk ? `adb exec-out screencap -p | convert png:- -resize ${Math.round(width)}x -quality 60 jpg:- | base64 -w0; echo` : "adb exec-out screencap -p | base64 -w0; echo";
     const r = await this.run(ip, cmd, { timeoutMs: 20_000 });
     if (r.code !== 0 || !r.out) return null;
     const data = new Uint8Array(Buffer.from(r.out.trim(), "base64"));
@@ -582,6 +639,7 @@ export class Phone {
 
 /** Ships `hearth-phone` to the brain and tells it when and how to drive the phone. Only present when a phone is set up. */
 export function phoneSkill(hubUrl: string, key: string): Skill {
+  const ANSWER = "[[answer-needed]]";
   const script = `#!/usr/bin/env bash
 # hearth-phone <command> …: your owner's Android phone (for apps the web can't reach). Prints JSON.
 set -uo pipefail
@@ -589,13 +647,13 @@ cmd="\${1:-}"; shift 2>/dev/null || true
 job=(); if [ -n "\${HEARTH_JOB:-}" ]; then job=(-H "X-Hearth-Job: \${HEARTH_JOB}"); fi
 post() { curl -sS -m 180 -H "X-Hearth-Agent: ${key}" "\${job[@]}" "$@" "${hubUrl}/api/agent/phone"; }
 case "$cmd" in
-  open|close|status|screenshot|apps|dump) post --data-urlencode "action=$cmd" ;;
+  open|close|status|screenshot|apps|dump|gsf-id) post --data-urlencode "action=$cmd" ;;
   tap)   post --data-urlencode action=tap --data-urlencode "x=\${1:-0}" --data-urlencode "y=\${2:-0}" ;;
   swipe) post --data-urlencode action=swipe --data-urlencode "x1=\${1:-0}" --data-urlencode "y1=\${2:-0}" --data-urlencode "x2=\${3:-0}" --data-urlencode "y2=\${4:-0}" --data-urlencode "ms=\${5:-300}" ;;
   type)  post --data-urlencode action=type --data-urlencode "text=$*" ;;
   key)   post --data-urlencode action=key --data-urlencode "key=\${1:-KEYCODE_HOME}" ;;
   open-app) post --data-urlencode action=open-app --data-urlencode "pkg=\${1:-}" ;;
-  *) echo '{"error":"usage: hearth-phone open|close|status|screenshot|tap X Y|swipe X1 Y1 X2 Y2 [ms]|type TEXT…|key KEYCODE|open-app PKG|apps|dump"}' >&2; exit 1 ;;
+  *) echo '{"error":"usage: hearth-phone open|close|status|screenshot|tap X Y|swipe X1 Y1 X2 Y2 [ms]|type TEXT…|key KEYCODE|open-app PKG|apps|dump|gsf-id"}' >&2; exit 1 ;;
 esac
 `;
   return {
@@ -605,7 +663,11 @@ esac
 
 Use this only when the job genuinely needs a phone app — an app with no useful website or API (WhatsApp, Uber, a bank app), an SMS code, or an app's notification. For anything with a website, use enkidu-browser or WebFetch instead: it's far faster and more reliable.
 
-**There is no app store on this phone yet** (no Play Store, no App Store), so you can't install apps. Check \`hearth-phone apps\` for what's there; if the job needs an app that isn't installed, stop and tell the owner which app, plainly — don't hunt for a store on the screen or download app files from websites.
+**Apps come from the Google Play Store on the phone** (\`com.android.vending\`; there is no App Store, it's Android). Open it, search for the app, tap Install, wait, then \`hearth-phone apps\` to confirm. Don't download app files from websites.
+
+**Logins are the owner's to type, never yours.** When an app or the Play Store needs a sign-in (a Google account, a password, a code): open the app and get to its sign-in screen (for Play: \`hearth-phone open-app com.android.vending\` and tap Sign in), then stop and hand over. In your reply, say plainly what to sign in to, put \`[[phone]]\` on its own line (Hearth shows an "Open your phone" button there, which opens the live phone screen for them to tap and type on), and end with ${ANSWER} so they can tell you when they're done. When they say done, take a screenshot and carry on. Never ask them to send a password in chat.
+
+If Play says the device isn't Play Protect certified: run \`hearth-phone gsf-id\` and ask the owner to open https://www.google.com/android/uncertified, signed in to the same Google account, and register that id (it can take a few minutes to an hour to work).
 
 The owner can watch the screen live in your thread while you use it.
 
@@ -621,6 +683,7 @@ The phone starts when you open it (about a minute the first time) and stops itse
 | \`hearth-phone key KEYCODE\` | A key: KEYCODE_HOME, KEYCODE_BACK, KEYCODE_ENTER, KEYCODE_APP_SWITCH. |
 | \`hearth-phone open-app PKG\` | Open an app by package name (find it with apps). |
 | \`hearth-phone apps\` | List installed apps (package names). |
+| \`hearth-phone gsf-id\` | The phone's Google device id, if Play says the device isn't certified (see below). |
 | \`hearth-phone dump\` | The screen's text/buttons as XML, to find things without a screenshot. |
 | \`hearth-phone close\` | Let the phone go now (it also closes on its own). |
 

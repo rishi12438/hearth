@@ -169,3 +169,37 @@ test("Android comes back after every stop: a real multi-arch image, restarted by
   }
   expect(ENSURE_ANDROID).toContain("adb connect 127.0.0.1:5555"); // after a reboot nothing else connects adb
 });
+
+test("owner screen: a picture once ready, the step while starting; owner input is limited to taps, swipes, typing, keys", async () => {
+  const v = vault();
+  configured(null as any, v);
+  v.set("phone-sshkey", "KEY");
+  const cmds: string[] = [];
+  const ssh = { runner: () => ({ run: async (cmd: string, o: { onLine?: (l: string) => void }) => {
+    cmds.push(cmd);
+    if (cmd.includes("screencap")) o.onLine?.(Buffer.alloc(3000, 1).toString("base64"));
+    return { code: 0, stderr: "" };
+  } }) } as any;
+  const phone = new Phone({ dataDir: mkdtempSync(join(tmpdir(), "hearth-phone-own-")), vault: v, ssh, isBusy: () => false });
+  (phone as any).save({ state: "starting", step: "Waiting for Android to finish booting", instanceId: "i-1" });
+  expect(await phone.ownerScreen()).toEqual({ state: "starting", step: "Waiting for Android to finish booting", error: undefined });
+  (phone as any).save({ state: "ready", instanceId: "i-1", publicIp: "1.2.3.4", lastUseAt: Date.now() });
+  const r = await phone.ownerScreen();
+  expect(r.state).toBe("ready");
+  expect(r.src).toStartWith("data:image/jpeg;base64,");
+  expect(cmds.some((c) => c.includes("-resize 720x"))).toBe(true);
+  await phone.ownerInput("type", { text: "p@ss w'rd&1" });
+  // Quoted for the box's shell and again for Android's, so the password arrives as typed.
+  expect(cmds.at(-1)).toBe(`adb shell 'input text '"'"'p@ss%sw'"'"'"'"'"'"'"'"'rd&1'"'"''`);
+  await expect(phone.ownerInput("open-app", { pkg: "com.x" })).rejects.toThrow();
+  await expect(phone.ownerInput("close", {})).rejects.toThrow();
+});
+
+test("the phone skill hands sign-ins to the owner with [[phone]] and never types their passwords", async () => {
+  const { phoneSkill } = await import("../src/phone.ts");
+  const body = phoneSkill("http://127.0.0.1:1", "k").body;
+  expect(body).toContain("[[phone]]");
+  expect(body).toContain("[[answer-needed]]");
+  expect(body).toContain("com.android.vending");
+  expect(body).toMatch(/Never ask them to send a password in chat/);
+});

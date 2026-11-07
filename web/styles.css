@@ -1408,3 +1408,11 @@ details.advanced summary { font-size: 14px; font-weight: var(--fw-semibold); col
 div.workingoff { gap: 8px; max-width: 560px; text-align: left; }
 div.workingoff .linkbtn { margin-top: 0; font-size: 12.5px; flex: none; }
 .srow.closed .snav { opacity: .5; }
+
+/* The owner's phone screen (openPhoneScreen) */
+.phonewrap { display: flex; justify-content: center; }
+.phonescreen { width: min(100%, 340px); aspect-ratio: 1080 / 2340; border-radius: 18px; border: 1px solid var(--line); background: #000; touch-action: none; cursor: pointer; user-select: none; -webkit-user-select: none; }
+.phonestatus { text-align: center; }
+.phonetype { display: flex; gap: 8px; align-items: center; margin: 10px 0 6px; }
+.phonetype .field { flex: 1; margin: 0; }
+.phonebtn { margin-top: 8px; }

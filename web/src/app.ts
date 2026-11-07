@@ -134,6 +134,10 @@ async function boot() {
   connect();
   if (localStorage.getItem("hearth.autoLocation") === "1") shareLocation(true);
   window.addEventListener("hashchange", show);
+  // #phone: the owner's phone screen.
+  const openLinkedPhone = () => { if (location.hash !== "#phone") return; history.replaceState(null, "", "#"); openPhoneScreen(); };
+  openLinkedPhone();
+  window.addEventListener("hashchange", openLinkedPhone);
   // #connector/<id> (e.g. a Plaid alert's link): open that connector's screen, where its details load live.
   const openLinkedConnector = async () => {
     const m = location.hash.match(/^#connector\/([\w-]+)$/);
@@ -1717,7 +1721,7 @@ function plainMessage(m: any, grouped = false) {
   // A trigger handing what happened to Hearth: shown as the trigger (it's not you talking). The event data stays folded.
   if (m.role === "user") return userRow(m, goes, grouped);
   const from = m.fromThreadId ? S.threads.find((t) => t.id === m.fromThreadId) : null;
-  const body: (Node | null)[] = [m.proactive ? h("div", { class: "proline" }, icon("bell", 13), m.proactive.title) : null, richText(m.text),
+  const body: (Node | null)[] = [m.proactive ? h("div", { class: "proline" }, icon("bell", 13), m.proactive.title) : null, ...withPhoneButton(String(m.text || "")),
     from ? h("button", { class: "fromchip", on: { click: () => { location.hash = `#c/${from.id}`; } } }, `From #${channelName(from)}`, icon("chevron", 13)) : null, ...goes,
     m.movedTo ? h("button", { class: "fromchip", on: { click: () => { location.hash = `#c/${m.movedTo}`; } } }, `Go to ${(() => { const t = S.threads.find((x: any) => x.id === m.movedTo); return t ? `#${channelName(t)}` : "the new ramble"; })()}`, icon("chevron", 13)) : null];
   if (m.proactive) {
@@ -2043,7 +2047,7 @@ function answer(j: any) {
     j.status === "working" ? h("ol", { class: "steplog", "data-steplog": j.id }, (S.stepLog.get(j.id) || []).slice().reverse().map(stepRow)) : null]);
   if (j.status === "waiting") {
     const aps = (S.chat.approvals || []).filter((a: any) => a.jobId === j.id);
-    return row(who, at, [j.result ? richText(j.result) : null, aps.map(approvalCard)]);
+    return row(who, at, [...(j.result ? withPhoneButton(j.result) : []), aps.map(approvalCard)]);
   }
   if (j.status === "blocked") return row(who, at, [h("div", { class: "block" }, h("div", { class: "blockhead" }, h("b", null, j.blocked?.need)), j.blocked?.why ? h("p", null, j.blocked.why) : null,
     h("p", null, j.blocked?.unblock), h("div", { class: "blockbtns" }, h("button", { class: "sbtn primary", on: { click: () => retry(j.id) } }, "Try again"),
@@ -2052,7 +2056,7 @@ function answer(j: any) {
   const tiles = j.status === "done" ? (j.tiles || []) : [];
   const did = (j.did || []).filter((d: any) => ["hook", "memory", "skill", "place"].includes(d.kind)).map((d: any) => d.label);
   return row({ ...who, badge: h("small", { class: "jobmeta" }, metaLine(j)) }, at, [
-    tiles.length && (j.how === "skill" || j.how === "workflow") ? null : richText(j.stopped ? "Stopped by you." : j.status === "failed" ? `Couldn't do it: ${j.result || "it failed"}` : j.result || "Done."),
+    ...(tiles.length && (j.how === "skill" || j.how === "workflow") ? [] : withPhoneButton(j.stopped ? "Stopped by you." : j.status === "failed" ? `Couldn't do it: ${j.result || "it failed"}` : j.result || "Done.")),
     tiles.map(tile),
     artifacts(j),
     appCards(j),
@@ -5217,6 +5221,69 @@ function policyBox(text: string) {
   return h("div", { class: "policybox" }, h("pre", { class: "code" }, text), copy);
 }
 
+/**
+ * The owner's own phone screen, like screen sharing: the live picture, and taps, swipes and typing go to the phone.
+ * Opened from Settings → Phone, #phone, or a reply's "Open your phone" (the agent hands over a sign-in with [[phone]]).
+ */
+const PHONE_W = 1080, PHONE_H = 2340;
+function openPhoneScreen() {
+  const img = h("img", { class: "phonescreen", alt: "Your phone's screen", draggable: "false" }) as HTMLImageElement;
+  const status = h("p", { class: "muted small phonestatus" }, "Opening your phone…");
+  const field = h("input", { class: "field", placeholder: "Type here, then Send (goes into the box you tapped)", autocapitalize: "off", autocomplete: "off", spellcheck: false }) as HTMLInputElement;
+  let open = true, ready = false;
+  const poke = () => { lastPoll = 0; };
+  const send = async (action: string, args: Record<string, unknown>) => {
+    try { await call("/api/phone/input", { body: { action, ...args } }); } catch (e: any) { toast(e.message || "The phone didn't take that.", "err"); }
+    poke();
+  };
+  // A tap, or a swipe when the finger moved: in phone pixels, from where on the picture it happened.
+  let down: { x: number; y: number; t: number } | null = null;
+  const at = (e: PointerEvent) => { const r = img.getBoundingClientRect(); return { x: Math.round(((e.clientX - r.left) / r.width) * PHONE_W), y: Math.round(((e.clientY - r.top) / r.height) * PHONE_H) }; };
+  img.addEventListener("pointerdown", (e) => { if (!ready) return; e.preventDefault(); down = { ...at(e), t: Date.now() }; });
+  img.addEventListener("pointerup", (e) => {
+    if (!down) return;
+    const up = at(e), d = down; down = null;
+    if (Math.hypot(up.x - d.x, up.y - d.y) < 30) void send("tap", { x: d.x, y: d.y });
+    else void send("swipe", { x1: d.x, y1: d.y, x2: up.x, y2: up.y, ms: Math.min(1500, Math.max(150, Date.now() - d.t)) });
+  });
+  const typeIt = () => { if (!field.value) return; const t = field.value; field.value = ""; void send("type", { text: t }); };
+  field.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); typeIt(); } });
+  const key = (label: string, k: string) => h("button", { class: "btn small ghost", on: { click: () => void send("key", { key: k }) } }, label);
+  openSheet("Your phone", [
+    h("div", { class: "phonewrap" }, img),
+    status,
+    h("div", { class: "phonetype" }, field, h("button", { class: "btn small primary", on: { click: typeIt } }, "Send")),
+    h("div", { class: "btnrow" }, key("Back", "KEYCODE_BACK"), key("Home", "KEYCODE_HOME"), key("Enter", "KEYCODE_ENTER"), key("⌫", "KEYCODE_DEL"), key("Apps", "KEYCODE_APP_SWITCH")),
+    h("p", { class: "muted small" }, "Tap or swipe on the screen. What you type here goes only to your phone; Hearth doesn't keep it. Close this when you're done and tell your agent."),
+  ], { onClose: () => { open = false; } });
+  // About once a second while it's open; quicker right after a tap.
+  let lastPoll = 0, first = true;
+  const loop = async () => {
+    while (open) {
+      if (Date.now() - lastPoll < 1000) { await new Promise((r) => setTimeout(r, 150)); continue; }
+      lastPoll = Date.now();
+      try {
+        const r = await call<any>(`/api/phone/screen${first ? "?start=1" : ""}`);
+        first = false;
+        if (r.state === "unconfigured") { status.textContent = "Connect an AWS account in Settings → Phone first."; return; }
+        ready = r.state === "ready";
+        if (r.src) { img.src = r.src; img.hidden = false; }
+        status.textContent = ready ? "" : r.state === "error" ? `It didn't start: ${r.error || "unknown error"}` : r.step || "Starting your phone…";
+        status.hidden = ready;
+      } catch {}
+      if (!document.body.contains(img)) open = false;
+    }
+  };
+  img.hidden = true;
+  void loop();
+}
+
+/** A reply that hands the phone over ([[phone]]): the text, then a button that opens the phone screen. */
+function withPhoneButton(text: string): Node[] {
+  if (!text.includes("[[phone]]")) return [richText(text)];
+  return [richText(text.replace(/\s*\[\[phone\]\]\s*/g, "\n\n").trim()), h("button", { class: "btn small primary phonebtn", on: { click: () => openPhoneScreen() } }, "Open your phone")];
+}
+
 /** The on-demand Android phone (its own AWS box): set the service account, then open/close/delete it. */
 async function openPhone() {
   const p = await call("/api/phone").catch(() => null);
@@ -5257,6 +5324,7 @@ async function openPhone() {
     : s === "starting" ? (p.step || "Starting…") : s === "stopping" ? "Stopping…" : s === "cleaning" ? "Deleting…" : p.error || s;
 
   openSheet("Phone", [
+    h("div", { class: "list" }, h("button", { class: "nowrow", on: { click: () => openPhoneScreen() } }, h("span", { class: "grow" }, h("b", null, "Use the phone yourself"), h("small", { class: "sub" }, "See its screen and tap or type on it, e.g. to sign in to an app")), icon("chevron", 14))),
     h("div", { class: "list" }, h("div", { class: "nowrow static" }, h("span", { class: "grow" }, h("b", null, "Your phone"), h("small", { class: s === "error" ? "err" : "sub" }, label)))),
     err,
     h("p", { class: "muted small" }, `Your agent starts it when a task needs it and stops it about ${p.idleStopMin} minutes after. After ${p.deleteAfterDays} unused days it's deleted. Region and billing are in your own AWS account.`),

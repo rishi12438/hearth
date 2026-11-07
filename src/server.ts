@@ -1472,6 +1472,14 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (id === "account" && method === "POST") { const bad = await phone.setAccount(await body(req)); if (bad) throw new HttpError(400, bad); await hub.log("phone.account", "Phone AWS account connected"); return json(phone.view()); }
         // Disconnecting deletes the phone first: without the keys the hub could never stop or delete it, and its disk would bill on.
         if (id === "account" && method === "DELETE") { if (phone.view().instanceId) { await phone.destroy(); await hub.log("phone.delete", "Phone deleted (AWS account disconnected)"); } phone.forgetAccount(); return json(phone.view()); }
+        // The owner's own phone screen (Settings → Phone, or a reply's "Open your phone"): see it, tap and type on it.
+        if (id === "screen" && method === "GET") return json(await phone.ownerScreen(url.searchParams.get("start") === "1"));
+        if (id === "input" && method === "POST") {
+          const b = await body(req);
+          const args: Record<string, string> = {};
+          for (const k of ["x", "y", "x1", "y1", "x2", "y2", "ms", "text", "key"]) if (b?.[k] != null) args[k] = String(b[k]).slice(0, 1000);
+          try { return json(await phone.ownerInput(String(b?.action || ""), args)); } catch (e: any) { throw new HttpError(400, e.message); }
+        }
         if (id === "open" && method === "POST") { const r = await phone.open(); if ("error" in r) throw new HttpError(400, r.error); return json(phone.view()); }
         if (id === "close" && method === "POST") { await phone.close(); return json(phone.view()); }
         if (id === "delete" && method === "POST") { await phone.destroy(); await hub.log("phone.delete", "Phone deleted"); return json(phone.view()); }
