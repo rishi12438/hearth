@@ -44,7 +44,7 @@ const CANONICAL = "099720109477";
 const AMI_NAME = "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*";
 const INSTANCE_TYPE = "t4g.large"; // 8 GB: room for a heavy app (WhatsApp, Uber) next to Android itself
 const DISK_GB = 30;
-const DEFAULT_IDLE_STOP_MIN = 15;
+const DEFAULT_IDLE_STOP_MIN = 10; // the owner's choice: off after 10 idle minutes (watching its screen counts as use)
 const DELETE_AFTER_DAYS = 30;
 const SG_NAME = "hearth-phone";
 /**
