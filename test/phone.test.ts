@@ -190,7 +190,7 @@ test("owner screen: a picture once ready, the step while starting; owner input i
   expect(cmds.some((c) => c.includes("-resize 720x"))).toBe(true);
   await phone.ownerInput("type", { text: "p@ss w'rd&1" });
   // Quoted for the box's shell and again for Android's, so the password arrives as typed.
-  expect(cmds.at(-1)).toBe(`touch /tmp/hearth-phone-lastseen 2>/dev/null; adb shell 'input text '"'"'p@ss%sw'"'"'"'"'"'"'"'"'rd&1'"'"''`);
+  expect(cmds.at(-1)).toBe(`touch /tmp/hearth-phone-lastseen 2>/dev/null; export ANDROID_SERIAL=127.0.0.1:5555; adb shell 'input text '"'"'p@ss%sw'"'"'"'"'"'"'"'"'rd&1'"'"''`);
   await expect(phone.ownerInput("open-app", { pkg: "com.x" })).rejects.toThrow();
   await expect(phone.ownerInput("close", {})).rejects.toThrow();
 });
@@ -231,7 +231,7 @@ test("open waits out a phone that's still stopping, then starts it; a second ope
   expect(b).toEqual({ ok: true });
   expect(starts).toBe(1); // only once it had stopped, and only one start for both opens
   expect(phone.view().state).toBe("ready");
-  expect(cmds.every((c) => c.startsWith("touch /tmp/hearth-phone-lastseen"))).toBe(true); // keeps the safety shutdown away
+  expect(cmds.every((c) => c.startsWith("touch /tmp/hearth-phone-lastseen 2>/dev/null; export ANDROID_SERIAL=127.0.0.1:5555;"))).toBe(true); // keeps the safety shutdown away; one adb device
   expect(cmds.some((c) => c.includes("hearth-phone-idle"))).toBe(true); // the old safety script is replaced on open
 });
 

@@ -165,6 +165,11 @@ export const REDROID_IMAGE = "redroid/redroid:13.0.0-240527";
  * short connections and once powered the box off while it was starting.
  */
 const IDLE_MARK = "/tmp/hearth-phone-lastseen";
+/**
+ * Android's address for adb. Every command names it (ANDROID_SERIAL): adb also finds the same Android on its own as
+ * "emulator-5554" (it scans port 5555), and with two it refuses every command ("more than one device/emulator").
+ */
+const ADB_SERIAL = "127.0.0.1:5555";
 function installIdleShutdown(min: number, sudo: string) {
   return `${sudo}tee /usr/local/bin/hearth-phone-idle >/dev/null <<'EOS'
 #!/bin/bash
@@ -511,7 +516,7 @@ export class Phone {
     let out = "";
     const runner = this.ssh().runner(this.sshTarget(ip), (k) => { if (!this.state().knownHosts) this.patch({ knownHosts: k }); });
     // Every command marks the box as in use, so its safety shutdown never fires while the hub is working it.
-    const r = await runner.run(`touch ${IDLE_MARK} 2>/dev/null; ${cmd}`, { timeoutMs: opts.timeoutMs ?? 30_000, onLine: (l) => { out += l + "\n"; } });
+    const r = await runner.run(`touch ${IDLE_MARK} 2>/dev/null; export ANDROID_SERIAL=${ADB_SERIAL}; ${cmd}`, { timeoutMs: opts.timeoutMs ?? 30_000, onLine: (l) => { out += l + "\n"; } });
     return { code: r.code, out: out.trimEnd(), err: r.stderr };
   }
 
