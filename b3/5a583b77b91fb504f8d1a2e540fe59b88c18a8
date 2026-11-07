@@ -1,0 +1,31 @@
+src/server.ts
+  s_cae155d606ea58::t_b686267b1eaf34 1475-1482
+test/phone.test.ts
+  s_cae155d606ea58::t_8f4bb41b42dced 172-205
+src/phone.ts
+  s_cae155d606ea58::t_9765711f9bcacc 551-554
+  s_cae155d606ea58::t_1420eaa5239627 161-163,168-169,171-173,180-193,195-198,410,497-521,546-550,555-556,588,642,650,656,666-667,669-670,686
+  s_cae155d606ea58::t_9f7b0f25d1cd35 590
+  s_cae155d606ea58::t_ec3c453beebb41 668
+  s_cae155d606ea58::t_b686267b1eaf34 218
+web/src/app.ts
+  s_cae155d606ea58::t_b686267b1eaf34 137-140,1724,2050,2059,5224-5286,5327
+web/styles.css
+  s_cae155d606ea58::t_b686267b1eaf34 1411-1418
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "b35a583b77b91fb504f8d1a2e540fe59b88c18a8",
+  "prompts": {},
+  "sessions": {
+    "s_cae155d606ea58": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ba7c8f00-0a86-4afe-a7ab-2c517931d376",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
