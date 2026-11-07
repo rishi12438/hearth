@@ -291,3 +291,17 @@ test("any job that used the phone gets the 'Open your phone' button, not only on
   await phone.control("tap", { x: "1", y: "2" }); // the owner's own taps: no job, no button
   expect(phone.takeHandover("job-3")).toBe(false);
 });
+
+test("by default the phone turns off after 10 idle minutes", async () => {
+  const v = vault();
+  let t = 1_000_000;
+  const { ec2, calls } = fakeEc2();
+  const phone = new Phone({ dataDir: mkdtempSync(join(tmpdir(), "hearth-phone-10-")), vault: v, isBusy: () => false, ec2, now: () => t });
+  configured(phone, v);
+  (phone as any).save({ state: "ready", instanceId: "i-1", publicIp: "1.2.3.4", lastUseAt: t });
+  expect(phone.view().idleStopMin).toBe(10);
+  t += 9 * 60_000; await phone.tick();
+  expect(calls.some((c) => c.action === "StopInstances")).toBe(false);
+  t += 2 * 60_000; await phone.tick();
+  expect(calls.some((c) => c.action === "StopInstances")).toBe(true);
+});
