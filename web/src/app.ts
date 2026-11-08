@@ -5228,7 +5228,6 @@ function policyBox(text: string) {
 const PHONE_W = 1080, PHONE_H = 2340;
 function openPhoneScreen() {
   const img = h("img", { class: "phonescreen", alt: "Your phone's screen", draggable: "false" }) as HTMLImageElement;
-  const status = h("p", { class: "muted small phonestatus" }, "Opening your phone…");
   const field = h("input", { class: "field", placeholder: "Type here, then Send (goes into the box you tapped)", autocapitalize: "off", autocomplete: "off", spellcheck: false }) as HTMLInputElement;
   let open = true, ready = false;
   // Right after you do something, refresh quickly (a few times a second) so the phone feels live; then about once a second.
@@ -5241,7 +5240,10 @@ function openPhoneScreen() {
   // A tap, or a swipe when the finger moved: in phone pixels, from where on the picture it happened.
   let down: { x: number; y: number; t: number } | null = null;
   const at = (e: PointerEvent) => { const r = img.getBoundingClientRect(); return { x: Math.round(((e.clientX - r.left) / r.width) * PHONE_W), y: Math.round(((e.clientY - r.top) / r.height) * PHONE_H) }; };
-  img.addEventListener("pointerdown", (e) => { if (!ready) return; e.preventDefault(); down = { ...at(e), t: Date.now() }; });
+  img.addEventListener("pointerdown", (e) => { if (!ready) return; e.preventDefault(); e.stopPropagation(); try { img.setPointerCapture(e.pointerId); } catch {} down = { ...at(e), t: Date.now() }; });
+  // Keep the drag ours: the sheet would otherwise take it, and a release outside the picture would be lost.
+  img.addEventListener("pointermove", (e) => { if (down) { e.preventDefault(); e.stopPropagation(); } });
+  img.addEventListener("pointercancel", () => { down = null; });
   img.addEventListener("pointerup", (e) => {
     if (!down) return;
     const up = at(e), d = down; down = null;
@@ -5263,19 +5265,39 @@ function openPhoneScreen() {
   img.addEventListener("wheel", (e) => {
     if (!ready) return;
     e.preventDefault();
-    if (Date.now() - lastWheel < 350 || Math.abs(e.deltaY) < 4) return;
+    const side = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+    if (Date.now() - lastWheel < 350 || Math.max(Math.abs(e.deltaX), Math.abs(e.deltaY)) < 4) return;
     lastWheel = Date.now();
+    // Two fingers sideways on a trackpad flips pages left or right; up/down scrolls.
+    if (side) { const left = e.deltaX > 0; void send("swipe", { x1: left ? 900 : 180, y1: PHONE_H / 2, x2: left ? 180 : 900, y2: PHONE_H / 2, ms: 250 }); return; }
     const up = e.deltaY > 0;
     void send("swipe", { x1: PHONE_W / 2, y1: up ? 1600 : 800, x2: PHONE_W / 2, y2: up ? 800 : 1600, ms: 250 });
   }, { passive: false });
-  openSheet("Your phone", [
-    h("div", { class: "phonewrap" }, img),
+  // While it starts: a phone-shaped card with a spinner, which of three steps it's on, and how long it's been.
+  const stages = ["Turning on", "Starting Android", "Almost ready"];
+  const stageOf = (step = "") => /booting/i.test(step) ? 2 : /android/i.test(step) ? 1 : 0;
+  const loadTitle = h("b", null, "Opening your phone…");
+  const loadSteps = h("ol", { class: "phonesteps" }, ...stages.map((s) => h("li", null, s)));
+  const loadTime = h("small", { class: "muted" }, "");
+  const retry = h("button", { class: "btn small primary", hidden: true, on: { click: () => { retry.hidden = true; spin.hidden = false; first = true; started = Date.now(); lastPoll = 0; if (!open) { open = true; void loop(); } } } }, "Try again");
+  const spin = h("i", { class: "phonespin" });
+  const loading = h("div", { class: "phoneload" }, spin, loadTitle, loadSteps, loadTime, retry);
+  let started = Date.now();
+  const showLoading = (title: string, stage: number, err = false) => {
+    loadTitle.textContent = title;
+    [...loadSteps.children].forEach((li, i) => { li.className = i < stage ? "done" : i === stage && !err ? "now" : ""; });
+    spin.hidden = err; retry.hidden = !err; loadSteps.hidden = err;
+    const sec = Math.round((Date.now() - started) / 1000);
+    loadTime.textContent = err ? "" : `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")} · usually about a minute`;
+  };
+  const controls = [
     // The phone's own buttons, right under its screen, so they're always in view.
     h("div", { class: "phonenav" }, key("◀", "KEYCODE_BACK", "Back"), key("●", "KEYCODE_HOME", "Home"), key("■", "KEYCODE_APP_SWITCH", "Recent apps")),
-    status,
     h("div", { class: "phonetype" }, field, h("button", { class: "btn small primary", on: { click: typeIt } }, "Send"), key("⌫", "KEYCODE_DEL", "Delete"), key("↵", "KEYCODE_ENTER", "Enter")),
     h("p", { class: "muted small" }, "Click to tap, drag or scroll to swipe. What you type here goes only to your phone; Hearth doesn't keep it. Close this when you're done and tell your agent."),
-  ], { onClose: () => { open = false; } });
+  ] as HTMLElement[];
+  const showReady = (on: boolean) => { loading.hidden = on; img.hidden = !on; controls.forEach((c) => (c.hidden = !on)); };
+  openSheet("Your phone", [h("div", { class: "phonewrap" }, img, loading), ...controls], { onClose: () => { open = false; } });
   // About once a second while it's open; quicker right after a tap.
   let lastPoll = 0, first = true;
   const loop = async () => {
@@ -5285,16 +5307,18 @@ function openPhoneScreen() {
       try {
         const r = await call<any>(`/api/phone/screen${first ? "?start=1" : ""}`);
         first = false;
-        if (r.state === "unconfigured") { status.textContent = "Connect an AWS account in Settings → Phone first."; return; }
-        ready = r.state === "ready";
-        if (r.src) { img.src = r.src; img.hidden = false; }
-        status.textContent = ready ? "" : r.state === "error" ? `It didn't start: ${r.error || "unknown error"}` : r.step || "Starting your phone…";
-        status.hidden = ready;
+        if (r.state === "unconfigured") { showLoading("Connect an AWS account in Settings → Phone first.", 0, true); retry.hidden = true; open = false; return; }
+        if (r.state === "error") { showLoading(`It didn't start: ${r.error || "unknown error"}`, 0, true); open = false; return; }
+        ready = r.state === "ready" && !!r.src;
+        if (r.src) img.src = r.src;
+        if (!ready) showLoading(r.state === "ready" ? "Almost ready" : r.step || "Opening your phone…", r.state === "ready" ? 2 : stageOf(r.step));
+        showReady(ready);
       } catch {}
       if (!document.body.contains(img)) open = false;
     }
   };
-  img.hidden = true;
+  showReady(false);
+  showLoading("Opening your phone…", 0);
   void loop();
 }
 

@@ -495,7 +495,7 @@ export class Phone {
       const instanceId = await this.ensureInstance(creds);
       const ip = await this.waitRunning(creds, instanceId);
       this.patch({ publicIp: ip, step: "Waiting for Android to finish booting" });
-      this.patch({ step: "Getting Android ready (the first time it downloads Android 15 and Google Play: about 5 minutes)" });
+      this.patch({ step: "Getting Android ready" });
       await this.ensureAndroid(ip);
       this.patch({ step: "Waiting for Android to finish booting" });
       await this.waitBooted(ip);

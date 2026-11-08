@@ -1413,6 +1413,23 @@ div.workingoff .linkbtn { margin-top: 0; font-size: 12.5px; flex: none; }
 .phonewrap { display: flex; justify-content: center; position: relative; }
 .phonescreen { height: min(calc(100dvh - 330px), 680px); min-height: 260px; width: auto; max-width: 100%; aspect-ratio: 1080 / 2340; border-radius: 18px; border: 1px solid var(--line); background: #000; touch-action: none; cursor: pointer; user-select: none; -webkit-user-select: none; }
 .phonestatus { text-align: center; }
+.phoneload { height: min(calc(100dvh - 200px), 680px); min-height: 300px; aspect-ratio: 1080 / 2340; max-width: 100%; border-radius: 18px; border: 1px solid var(--line); background: linear-gradient(160deg, #23262b, #0f1012); color: #f2f2f2; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 20px; text-align: center; box-sizing: border-box; }
+.phoneload[hidden] { display: none; }
+.phoneload b { font-size: 15px; font-weight: 600; line-height: 1.35; }
+.phoneload small { color: #a7a9ad; font-variant-numeric: tabular-nums; }
+.phonespin { width: 34px; height: 34px; border-radius: 50%; border: 3px solid rgba(255,255,255,.18); border-top-color: #fff; animation: phonespin .9s linear infinite; }
+.phonespin[hidden] { display: none; }
+@keyframes phonespin { to { transform: rotate(360deg); } }
+.phonesteps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; font-size: 13px; text-align: left; }
+.phonesteps[hidden] { display: none; }
+.phonesteps li { color: #6f7277; display: flex; align-items: center; gap: 8px; }
+.phonesteps li::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #45484d; flex: none; }
+.phonesteps li.now { color: #fff; }
+.phonesteps li.now::before { background: #fff; animation: phonepulse 1.2s ease-in-out infinite; }
+.phonesteps li.done { color: #a7a9ad; }
+.phonesteps li.done::before { background: #7fbf8f; }
+@keyframes phonepulse { 50% { opacity: .35; } }
+.phonescreen[hidden], .phonenav[hidden], .phonetype[hidden] { display: none; }
 .phonetype { display: flex; gap: 8px; align-items: center; margin: 10px 0 6px; }
 .phonetype .field { flex: 1; margin: 0; }
 .phonebtn { margin-top: 8px; }
