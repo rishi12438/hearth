@@ -688,6 +688,9 @@ function redraw(el: HTMLElement, ...nodes: any[]) {
   const s = scrollEl();
   const at = anchor && anchor.el.parentElement === el ? [...el.children].indexOf(anchor.el) : -1;
   clear(el, ...nodes);
+  // One "Open your phone" per conversation, like an Approve card: only the newest reply keeps it (every job that used
+  // the phone gets one, so a run of phone tasks stacked a button under each answer).
+  el.querySelectorAll(".phonebtn").forEach((b, i, all) => { if (i < all.length - 1) b.remove(); });
   if (!s || pinned || at < 0 || !anchor) return;
   const next = el.children[Math.min(at, el.children.length - 1)];
   if (next) { anchor.el = next; holdAnchor(s); }
@@ -5335,7 +5338,7 @@ function openPhoneScreen() {
   void loop();
 }
 
-/** A reply that hands the phone over ([[phone]]): the text, then a button that opens the phone screen. */
+/** A reply that hands the phone over ([[phone]]): the text, then a button that opens the phone screen (redraw keeps only the newest). */
 function withPhoneButton(text: string): Node[] {
   if (!text.includes("[[phone]]")) return [richText(text)];
   return [richText(text.replace(/\s*\[\[phone\]\]\s*/g, "\n\n").trim()), h("button", { class: "btn small primary phonebtn", on: { click: () => openPhoneScreen() } }, "Open your phone")];
