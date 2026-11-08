@@ -1430,6 +1430,8 @@ div.workingoff .linkbtn { margin-top: 0; font-size: 12.5px; flex: none; }
 .phonesteps li.done::before { background: #7fbf8f; }
 @keyframes phonepulse { 50% { opacity: .35; } }
 .phonescreen[hidden], .phonenav[hidden], .phonetype[hidden] { display: none; }
+.phonevideo { outline: none; cursor: default; }
+.phonevideo:focus-visible { box-shadow: 0 0 0 2px var(--accent, #6b8afd); }
 .phonetype { display: flex; gap: 8px; align-items: center; margin: 10px 0 6px; }
 .phonetype .field { flex: 1; margin: 0; }
 .phonebtn { margin-top: 8px; }
