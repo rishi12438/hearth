@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,7 +32,8 @@ export type E2b = {
   kill(apiKey: string, sandboxId: string): Promise<void>;
   setTimeout(apiKey: string, sandboxId: string, timeoutMs: number): Promise<void>;
 };
-export type SshTarget = { host: string; port: number; user: string; privateKey: string; knownHosts?: string };
+/** reuse: keep one connection open for a couple of minutes and send later commands down it (no new handshake each time). */
+export type SshTarget = { host: string; port: number; user: string; privateKey: string; knownHosts?: string; reuse?: boolean };
 export type Ssh = { runner(t: SshTarget, pin: (knownHosts: string) => void): Runner };
 
 const NAME_RE = /[^A-Za-z0-9 ._()-]/g;
@@ -350,6 +351,40 @@ function sshError(stderr: string) {
 // ---- the real drivers ----
 
 /** ssh with the key and known_hosts in a private temp folder that lives only for the call. Host key pinned after first use. */
+/** Where shared SSH connections live: a folder only this user can open. */
+function muxDir() {
+  const d = join(tmpdir(), "hearth-ssh-mux");
+  mkdirSync(d, { recursive: true, mode: 0o700 });
+  return d;
+}
+
+const opening = new Map<string, Promise<string | null>>();
+/**
+ * One SSH connection kept open (2 minutes after last use) for a host, so each command skips the handshake. Started
+ * by a no-op command (with ControlPersist the connection stays after it; -N would refuse later commands), on its own with its output detached (a backgrounded master that held our pipes would hang every read). Any
+ * failure just means commands connect directly, as before.
+ */
+async function sharedConnection(t: SshTarget, key: string, known: string): Promise<string | null> {
+  const path = join(muxDir(), createHash("sha1").update(`${t.user}@${t.host}:${t.port}`).digest("hex").slice(0, 20));
+  const alive = () => Bun.spawn(["ssh", "-o", `ControlPath=${path}`, "-O", "check", `${t.user}@${t.host}`], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }).exited.then((c) => c === 0);
+  if (existsSync(path) && await alive()) return path;
+  let p = opening.get(path);
+  if (!p) {
+    p = (async () => {
+      try { rmSync(path, { force: true }); } catch {}
+      const proc = Bun.spawn(["ssh", "-i", key, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
+        "-o", `UserKnownHostsFile=${known}`, "-o", "GlobalKnownHostsFile=/dev/null", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=10",
+        "-o", "ControlMaster=yes", "-o", `ControlPath=${path}`, "-o", "ControlPersist=120", "-o", "ServerAliveInterval=15",
+        "-p", String(t.port), `${t.user}@${t.host}`, "true"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+      const timer = setTimeout(() => proc.kill(), 15_000);
+      const code = await proc.exited; clearTimeout(timer);
+      return code === 0 && existsSync(path) ? path : null;
+    })().finally(() => opening.delete(path));
+    opening.set(path, p);
+  }
+  return p;
+}
+
 export const realSsh: Ssh = {
   runner(t, pin) {
     return {
@@ -359,9 +394,12 @@ export const realSsh: Ssh = {
           const key = join(dir, "key"), known = join(dir, "known_hosts");
           writeFileSync(key, t.privateKey.endsWith("\n") ? t.privateKey : `${t.privateKey}\n`, { mode: 0o600 });
           writeFileSync(known, t.knownHosts ? `${t.knownHosts}\n` : "", { mode: 0o600 });
+          // Only once the host key is pinned: the shared connection is checked against it when it opens.
+          const mux = t.reuse && t.knownHosts ? await sharedConnection(t, key, known) : null;
           const proc = Bun.spawn(["ssh", "-i", key, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
             "-o", `UserKnownHostsFile=${known}`, "-o", "GlobalKnownHostsFile=/dev/null",
             "-o", `StrictHostKeyChecking=${t.knownHosts ? "yes" : "accept-new"}`, "-o", "ConnectTimeout=10",
+            ...(mux ? ["-o", "ControlMaster=no", "-o", `ControlPath=${mux}`] : []),
             "-p", String(t.port), `${t.user}@${t.host}`, cmd],
             { stdin: opts.stdin !== undefined ? new TextEncoder().encode(opts.stdin) : "ignore", stdout: "pipe", stderr: "pipe" });
           const timer = setTimeout(() => proc.kill(), opts.timeoutMs);
