@@ -1435,5 +1435,9 @@ div.workingoff .linkbtn { margin-top: 0; font-size: 12.5px; flex: none; }
 .phonebtn { margin-top: 8px; }
 .phonenav { display: flex; justify-content: center; gap: 28px; margin: 6px 0 2px; }
 .phonenav .btn { min-width: 64px; font-size: 16px; }
+.phonemove { gap: 10px; margin-top: 0; }
+.phonemove .btn { min-width: 48px; }
+.scrim { overscroll-behavior: contain; }
+html:has(.phonescreen) { overscroll-behavior-x: none; }
 .phonetap { position: absolute; width: 36px; height: 36px; margin: -18px 0 0 -18px; border-radius: 50%; background: rgba(255,255,255,.55); box-shadow: 0 0 0 2px rgba(0,0,0,.25); pointer-events: none; animation: phonetap .6s ease-out forwards; }
 @keyframes phonetap { from { transform: scale(.4); opacity: 1; } to { transform: scale(1.4); opacity: 0; } }

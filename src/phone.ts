@@ -573,7 +573,7 @@ export class Phone {
 
   // ---- control: adb on the box over SSH ----
 
-  private sshTarget(ip: string): SshTarget { return { host: ip, port: 22, user: "ubuntu", privateKey: this.sshKey(), knownHosts: pinnedFor(this.state().knownHosts, ip) }; }
+  private sshTarget(ip: string): SshTarget { return { host: ip, port: 22, user: "ubuntu", privateKey: this.sshKey(), knownHosts: pinnedFor(this.state().knownHosts, ip), reuse: true }; }
 
   /** Run a shell command on the box, pinning its host key the first time. */
   private async run(ip: string, cmd: string, opts: { timeoutMs?: number } = {}): Promise<{ code: number; out: string; err: string }> {

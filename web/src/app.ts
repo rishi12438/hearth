@@ -4658,7 +4658,13 @@ function openSheet(title: string, body: Node | any[], opts: { onClose?: () => vo
     h("div", { class: "sheethead" }, h("h2", null, title), h("button", { class: "iconbtn", "aria-label": "Close", on: { click: closeSheet } }, icon("x"))),
     h("div", { class: "sheetbody" }, body),
   );
-  const scrim = h("div", { class: "scrim", id: "scrim", on: { click: (e: Event) => { if (e.target === scrim) closeSheet(); } } }, sheet);
+  // Close on a click on the dark area, but only if the press started there too: a drag that starts inside the sheet
+  // (e.g. a swipe on the phone screen) and ends outside it also counts as a click on the dark area.
+  let pressedOut = false;
+  const scrim = h("div", { class: "scrim", id: "scrim", on: {
+    pointerdown: (e: Event) => { pressedOut = e.target === scrim; },
+    click: (e: Event) => { if (e.target === scrim && pressedOut) closeSheet(); pressedOut = false; },
+  } }, sheet);
   (scrim as any)._onClose = opts.onClose;
   document.body.appendChild(scrim);
   requestAnimationFrame(() => scrim.classList.add("open"));
@@ -5259,17 +5265,17 @@ function openPhoneScreen() {
   };
   const typeIt = () => { if (!field.value) return; const t = field.value; field.value = ""; void send("type", { text: t }); };
   field.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); typeIt(); } });
+  const move = (label: string, title: string, x1: number, y1: number, x2: number, y2: number) =>
+    h("button", { class: "btn small ghost", title, "aria-label": title, on: { click: () => void send("swipe", { x1, y1, x2, y2, ms: 220 }) } }, label);
   const key = (label: string, k: string, title: string, cls = "btn small ghost") => h("button", { class: cls, title, "aria-label": title, on: { click: () => void send("key", { key: k }) } }, label);
   // The mouse wheel or a trackpad scrolls the phone (a swipe), at most a few times a second.
   let lastWheel = 0;
   img.addEventListener("wheel", (e) => {
     if (!ready) return;
     e.preventDefault();
-    const side = Math.abs(e.deltaX) > Math.abs(e.deltaY);
-    if (Date.now() - lastWheel < 350 || Math.max(Math.abs(e.deltaX), Math.abs(e.deltaY)) < 4) return;
+    // Sideways on a trackpad is the browser's "back" gesture on a Mac, so it's ignored here: use the ‹ › buttons.
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY) || Date.now() - lastWheel < 350 || Math.abs(e.deltaY) < 4) return;
     lastWheel = Date.now();
-    // Two fingers sideways on a trackpad flips pages left or right; up/down scrolls.
-    if (side) { const left = e.deltaX > 0; void send("swipe", { x1: left ? 900 : 180, y1: PHONE_H / 2, x2: left ? 180 : 900, y2: PHONE_H / 2, ms: 250 }); return; }
     const up = e.deltaY > 0;
     void send("swipe", { x1: PHONE_W / 2, y1: up ? 1600 : 800, x2: PHONE_W / 2, y2: up ? 800 : 1600, ms: 250 });
   }, { passive: false });
@@ -5293,8 +5299,15 @@ function openPhoneScreen() {
   const controls = [
     // The phone's own buttons, right under its screen, so they're always in view.
     h("div", { class: "phonenav" }, key("◀", "KEYCODE_BACK", "Back"), key("●", "KEYCODE_HOME", "Home"), key("■", "KEYCODE_APP_SWITCH", "Recent apps")),
+    // Swipes as buttons: steadier than dragging with a mouse.
+    h("div", { class: "phonenav phonemove" },
+      move("‹", "Swipe right (previous page)", 180, PHONE_H / 2, 900, PHONE_H / 2),
+      move("▲", "Scroll up", PHONE_W / 2, 800, PHONE_W / 2, 1600),
+      move("▼", "Scroll down", PHONE_W / 2, 1600, PHONE_W / 2, 800),
+      move("›", "Swipe left (next page)", 900, PHONE_H / 2, 180, PHONE_H / 2),
+      move("⋯", "All apps", PHONE_W / 2, 1900, PHONE_W / 2, 700)),
     h("div", { class: "phonetype" }, field, h("button", { class: "btn small primary", on: { click: typeIt } }, "Send"), key("⌫", "KEYCODE_DEL", "Delete"), key("↵", "KEYCODE_ENTER", "Enter")),
-    h("p", { class: "muted small" }, "Click to tap, drag or scroll to swipe. What you type here goes only to your phone; Hearth doesn't keep it. Close this when you're done and tell your agent."),
+    h("p", { class: "muted small" }, "Click to tap. Use the arrows to swipe or scroll (or drag). What you type here goes only to your phone; Hearth doesn't keep it. Close this when you're done and tell your agent."),
   ] as HTMLElement[];
   const showReady = (on: boolean) => { loading.hidden = on; img.hidden = !on; controls.forEach((c) => (c.hidden = !on)); };
   openSheet("Your phone", [h("div", { class: "phonewrap" }, img, loading), ...controls], { onClose: () => { open = false; } });
