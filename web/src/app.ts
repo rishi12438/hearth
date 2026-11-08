@@ -1,3 +1,4 @@
+import { phoneVideo } from "./phone-video.ts";
 import { h, clear, icon, richText, relTime, shortAgo, clockTime, dayLabel, greeting, toast } from "./dom.ts";
 import { LOOKS, lookArt, lookFor } from "./looks.ts";
 import { initConnectors, loadTiles, openTile, grid as connectorGrid, rows as connectorRows } from "./connectors.ts";
@@ -5234,6 +5235,14 @@ function policyBox(text: string) {
  * The owner's own phone screen, like screen sharing: the live picture, and taps, swipes and typing go to the phone.
  * Opened from Settings → Phone, #phone, or a reply's "Open your phone" (the agent hands over a sign-in with [[phone]]).
  */
+/** The phone's live video socket: a one-time ticket, then the WebSocket (see phone-video.ts). */
+async function phoneSocket() {
+  const hub = activeHub();
+  if (!hub) throw new Error("No hub.");
+  const { ticket } = await call<any>("/api/phone/live", { body: {} });
+  return new WebSocket(`${hub.url.replace(/^http/, "ws")}/phone-live?ticket=${encodeURIComponent(ticket)}`);
+}
+
 const PHONE_W = 1080, PHONE_H = 2340;
 function openPhoneScreen() {
   const img = h("img", { class: "phonescreen", alt: "Your phone's screen", draggable: "false" }) as HTMLImageElement;
@@ -5266,11 +5275,69 @@ function openPhoneScreen() {
     wrap.appendChild(dot);
     setTimeout(() => dot.remove(), 600);
   };
-  const typeIt = () => { if (!field.value) return; const t = field.value; field.value = ""; void send("type", { text: t }); };
+  // Live video once the phone is on (smooth, with real touches); pictures until then or if video can't run here.
+  const canvas = h("canvas", { class: "phonescreen phonevideo", tabindex: "0", "aria-label": "Your phone's screen (live)", hidden: true }) as HTMLCanvasElement;
+  let live: ReturnType<typeof phoneVideo> = null, liveOn = false, liveTries = 0;
+  const startLive = () => {
+    if (live || !open || liveTries >= 3) return;
+    liveTries++;
+    live = phoneVideo(canvas, phoneSocket, {
+      first: () => { liveOn = true; liveTries = 0; canvas.hidden = false; img.hidden = true; },
+      end: () => { live = null; liveOn = false; canvas.hidden = true; if (open) { img.hidden = !ready; lastPoll = 0; setTimeout(startLive, 3000); } },
+    });
+    if (!live) liveTries = 3; // this browser can't decode video: pictures it is
+  };
+  const vat = (e: { clientX: number; clientY: number }) => {
+    const r = canvas.getBoundingClientRect(), w = live!.size.w || canvas.width, hh = live!.size.h || canvas.height;
+    return { x: Math.max(0, Math.min(w - 1, Math.round(((e.clientX - r.left) / r.width) * w))), y: Math.max(0, Math.min(hh - 1, Math.round(((e.clientY - r.top) / r.height) * hh))), w, h: hh };
+  };
+  // A real finger: down, every move (once per frame), up.
+  let touching = false, pendingMove: PointerEvent | null = null;
+  canvas.addEventListener("pointerdown", (e) => {
+    if (!live) return;
+    e.preventDefault(); e.stopPropagation(); canvas.focus({ preventScroll: true });
+    try { canvas.setPointerCapture(e.pointerId); } catch {}
+    touching = true; live.send({ t: "touch", a: 0, ...vat(e) });
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (!touching || !live) return;
+    e.preventDefault(); e.stopPropagation();
+    if (!pendingMove) requestAnimationFrame(() => { if (pendingMove && touching && live) live.send({ t: "touch", a: 2, ...vat(pendingMove) }); pendingMove = null; });
+    pendingMove = e;
+  });
+  const lift = (e: PointerEvent) => { if (!touching) return; touching = false; pendingMove = null; live?.send({ t: "touch", a: 1, ...vat(e) }); };
+  canvas.addEventListener("pointerup", lift);
+  canvas.addEventListener("pointercancel", lift);
+  // Mouse wheel / two-finger scroll: real scrolling, gathered once per frame.
+  let wheel = { dx: 0, dy: 0, e: null as WheelEvent | null };
+  canvas.addEventListener("wheel", (e) => {
+    if (!live) return;
+    e.preventDefault();
+    if (!wheel.e) requestAnimationFrame(() => {
+      const w = wheel; wheel = { dx: 0, dy: 0, e: null };
+      const k = (v: number) => Math.max(-16, Math.min(16, -v / 30));
+      if (live && w.e) live.send({ t: "scroll", ...vat(w.e), dx: k(w.dx), dy: k(w.dy) });
+    });
+    wheel.dx += e.deltaX; wheel.dy += e.deltaY; wheel.e = e;
+  }, { passive: false });
+  // Click the screen, then just type on your keyboard.
+  const KEYMAP: Record<string, string> = { Backspace: "KEYCODE_DEL", Delete: "KEYCODE_FORWARD_DEL", Enter: "KEYCODE_ENTER", Tab: "KEYCODE_TAB", Escape: "KEYCODE_BACK", ArrowUp: "KEYCODE_DPAD_UP", ArrowDown: "KEYCODE_DPAD_DOWN", ArrowLeft: "KEYCODE_DPAD_LEFT", ArrowRight: "KEYCODE_DPAD_RIGHT" };
+  canvas.addEventListener("keydown", (e) => {
+    if (!live || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (KEYMAP[e.key]) { e.preventDefault(); live.send({ t: "key", k: KEYMAP[e.key] }); }
+    else if (e.key.length === 1) { e.preventDefault(); live.send({ t: "text", s: e.key }); }
+  });
+  canvas.addEventListener("paste", (e) => { const t = e.clipboardData?.getData("text"); if (t && live) { e.preventDefault(); live.send({ t: "text", s: t }); } });
+
+  const typeIt = () => {
+    if (!field.value) return;
+    const t = field.value; field.value = "";
+    if (liveOn && live) live.send({ t: "text", s: t }); else void send("type", { text: t });
+  };
   field.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); typeIt(); } });
   const move = (label: string, title: string, x1: number, y1: number, x2: number, y2: number) =>
     h("button", { class: "btn small ghost", title, "aria-label": title, on: { click: () => void send("swipe", { x1, y1, x2, y2, ms: 220 }) } }, label);
-  const key = (label: string, k: string, title: string, cls = "btn small ghost") => h("button", { class: cls, title, "aria-label": title, on: { click: () => void send("key", { key: k }) } }, label);
+  const key = (label: string, k: string, title: string, cls = "btn small ghost") => h("button", { class: cls, title, "aria-label": title, on: { click: () => { if (liveOn && live) live.send({ t: "key", k }); else void send("key", { key: k }); } } }, label);
   // The mouse wheel or a trackpad scrolls the phone (a swipe), at most a few times a second.
   let lastWheel = 0;
   img.addEventListener("wheel", (e) => {
@@ -5310,15 +5377,16 @@ function openPhoneScreen() {
       move("›", "Swipe left (next page)", 900, PHONE_H / 2, 180, PHONE_H / 2),
       move("⋯", "All apps", PHONE_W / 2, 1900, PHONE_W / 2, 700)),
     h("div", { class: "phonetype" }, field, h("button", { class: "btn small primary", on: { click: typeIt } }, "Send"), key("⌫", "KEYCODE_DEL", "Delete"), key("↵", "KEYCODE_ENTER", "Enter")),
-    h("p", { class: "muted small" }, "Click to tap. Use the arrows to swipe or scroll (or drag). What you type here goes only to your phone; Hearth doesn't keep it. Close this when you're done and tell your agent."),
+    h("p", { class: "muted small" }, "Click to tap, drag to swipe, scroll to scroll; click the screen and type on your keyboard, or use the box. What you type goes only to your phone; Hearth doesn't keep it. Close this when you're done and tell your agent."),
   ] as HTMLElement[];
-  const showReady = (on: boolean) => { loading.hidden = on; img.hidden = !on; controls.forEach((c) => (c.hidden = !on)); };
-  openSheet("Your phone", [h("div", { class: "phonewrap" }, img, loading), ...controls], { onClose: () => { open = false; } });
+  const showReady = (on: boolean) => { loading.hidden = on; img.hidden = !on || liveOn; canvas.hidden = !liveOn; controls.forEach((c) => (c.hidden = !on)); if (on) startLive(); };
+  openSheet("Your phone", [h("div", { class: "phonewrap" }, img, canvas, loading), ...controls], { onClose: () => { open = false; live?.close(); } });
   // About once a second while it's open; quicker right after a tap.
   let lastPoll = 0, first = true;
   const loop = async () => {
     while (open) {
-      if (Date.now() - lastPoll < (Date.now() < quickUntil ? 300 : 1000)) { await new Promise((r) => setTimeout(r, 100)); continue; }
+      // Live video showing: no pictures needed.
+      if (liveOn || Date.now() - lastPoll < (Date.now() < quickUntil ? 300 : 1000)) { await new Promise((r) => setTimeout(r, 100)); if (!document.body.contains(img)) { open = false; live?.close(); } continue; }
       lastPoll = Date.now();
       try {
         const r = await call<any>(`/api/phone/screen${first ? "?start=1" : ""}`);
@@ -5330,7 +5398,7 @@ function openPhoneScreen() {
         if (!ready) showLoading(r.state === "ready" ? "Almost ready" : r.step || "Opening your phone…", r.state === "ready" ? 2 : stageOf(r.step));
         showReady(ready);
       } catch {}
-      if (!document.body.contains(img)) open = false;
+      if (!document.body.contains(img)) { open = false; live?.close(); }
     }
   };
   showReady(false);

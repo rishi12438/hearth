@@ -3,7 +3,8 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Vault } from "./vault.ts";
-import { realSsh, shq, type Ssh, type Runner, type SshTarget } from "./machines.ts";
+import { realSsh, shq, type Ssh, type Runner, type SshTarget, type Pipe } from "./machines.ts";
+import { encodeInput, streamCommand } from "./phone-stream.ts";
 import type { Skill } from "./brains/skills.ts";
 
 // An on-demand Android phone the agent can open and close, for the apps the web can't reach (WhatsApp, Uber, SMS codes,
@@ -510,6 +511,7 @@ export class Phone {
   /** Stop the box (its disk, and so every app login, is kept). */
   async close(): Promise<void> {
     this.unwatch();
+    this.stopStream();
     const s = this.state();
     const creds = this.creds();
     if (s.instanceId && creds) {
@@ -612,6 +614,41 @@ export class Phone {
     const f = await this.frame(s.publicIp, 720).catch(() => null);
     return { state: "ready", src: f ? `data:${f.mime};base64,${Buffer.from(f.data).toString("base64")}` : undefined };
   }
+
+  /**
+   * Live video of the screen for the owner's phone screen in the app, with real touches back (see phone-stream.ts).
+   * One at a time: a new one ends the old. Watching counts as using, so the idle stop waits while it's open.
+   */
+  private stream: { pipe: Pipe; timer: ReturnType<typeof setInterval> } | null = null;
+  async startStream(sink: { data(b: Uint8Array): void; end(reason: string): void }): Promise<{ input(m: unknown): void; stop(): void }> {
+    const s = this.state();
+    if (!this.configured() || s.state !== "ready" || !s.publicIp) throw new Error("The phone isn't on.");
+    const pipeOf = this.ssh().pipe;
+    if (!pipeOf) throw new Error("Live video isn't available here.");
+    this.stopStream();
+    const pipe = await pipeOf.call(this.ssh(), this.sshTarget(s.publicIp), streamCommand(ADB_SERIAL, IDLE_MARK));
+    const timer = setInterval(() => this.patch({ lastUseAt: this.now() }), 30_000);
+    const mine = { pipe, timer };
+    this.stream = mine;
+    this.patch({ lastUseAt: this.now() });
+    let ended = false;
+    const end = (why: string) => {
+      if (ended) return; ended = true;
+      clearInterval(timer); pipe.kill();
+      if (this.stream === mine) this.stream = null;
+      sink.end(why);
+    };
+    (async () => {
+      try { for await (const chunk of pipe.stdout as unknown as AsyncIterable<Uint8Array>) sink.data(chunk); } catch {}
+      end("ended");
+    })();
+    void pipe.exited.then(() => end("ended"));
+    return {
+      input: (m) => { if (!ended) pipe.write(encodeInput(m)); },
+      stop: () => end("stopped"),
+    };
+  }
+  private stopStream() { if (this.stream) { clearInterval(this.stream.timer); this.stream.pipe.kill(); this.stream = null; } }
 
   /** The owner's own taps and typing on the phone screen in the app. */
   async ownerInput(action: string, args: Record<string, string>) {

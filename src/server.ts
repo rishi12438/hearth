@@ -120,6 +120,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   const voiceLimiter = new RateLimiter(5, 10 * 60_000);
   const plaidLimiter = new RateLimiter(20, 60_000);
   const liveTickets = new Map<string, number>();
+  const phoneTickets = new Map<string, number>();
   const tileKey = randomBytes(12).toString("base64url");
   const tileLimiter = new RateLimiter(600, 60_000);
   const imgLimiter = new RateLimiter(120, 60_000);
@@ -1475,6 +1476,14 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (id === "account" && method === "DELETE") { if (phone.view().instanceId) { await phone.destroy(); await hub.log("phone.delete", "Phone deleted (AWS account disconnected)"); } phone.forgetAccount(); return json(phone.view()); }
         // The owner's own phone screen (Settings → Phone, or a reply's "Open your phone"): see it, tap and type on it.
         if (id === "screen" && method === "GET") return json(await phone.ownerScreen(url.searchParams.get("start") === "1"));
+        // A one-time ticket for the phone's live video socket (browsers can't put the device token on a WebSocket).
+        if (id === "live" && method === "POST") {
+          if (phone.view().state !== "ready") throw new HttpError(409, "The phone isn't on yet.");
+          const t = randomBytes(18).toString("base64url");
+          for (const [k, v] of phoneTickets) if (v < Date.now()) phoneTickets.delete(k);
+          phoneTickets.set(t, Date.now() + 60_000);
+          return json({ ticket: t });
+        }
         if (id === "input" && method === "POST") {
           const b = await body(req);
           const args: Record<string, string> = {};
@@ -1510,7 +1519,8 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
 
   type LiveData = { kind: "voice"; rate: number; relay?: ReturnType<typeof deepgramLive> };
   type ComputerData = { kind: "computer"; deviceId: string; name: string; want: NonNullable<Device["copy"]>; cloud: boolean };
-  const server = Bun.serve<LiveData | ComputerData, never>({
+  type PhoneData = { kind: "phone"; live?: { input(m: unknown): void; stop(): void }; closed?: boolean };
+  const server = Bun.serve<LiveData | ComputerData | PhoneData, never>({
     hostname: config.host,
     port: config.port,
     idleTimeout: 60,
@@ -1518,16 +1528,25 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       maxPayloadLength: 1024 * 1024,
       open(ws) {
         if (ws.data.kind === "computer") { computers.attach(ws.data.deviceId, ws.data.name, ws, ws.data.want, ws.data.cloud); return; }
+        if (ws.data.kind === "phone") {
+          const d = ws.data;
+          phone.startStream({ data: (b) => { if (d.closed) return; if (ws.getBufferedAmount() > 8_000_000) { d.live?.stop(); return; } ws.send(b); }, end: (why) => { if (!d.closed) ws.close(1000, why); } })
+            .then((live) => { if (d.closed) live.stop(); else d.live = live; })
+            .catch((e) => ws.close(1011, String(e?.message || e).slice(0, 100)));
+          return;
+        }
         const key = voice?.deepgramKey();
         if (!key) { ws.close(1011, "voice off"); return; }
         ws.data.relay = deepgramLive(key, ws.data.rate, { send: (d) => ws.send(d), close: () => ws.close() });
       },
       message(ws, msg) {
         if (ws.data.kind === "computer") { computers.message(ws.data.deviceId, String(msg)); return; }
+        if (ws.data.kind === "phone") { try { ws.data.live?.input(JSON.parse(String(msg))); } catch {} return; }
         if (typeof msg === "string") { if (msg === "stop") ws.data.relay?.stop(); return; }
         ws.data.relay?.audio(msg);
       },
       close(ws) {
+        if (ws.data.kind === "phone") { ws.data.closed = true; ws.data.live?.stop(); return; }
         if (ws.data.kind === "computer") {
           const { deviceId } = ws.data;
           computers.detach(deviceId, ws);
@@ -1552,6 +1571,16 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (origin && !sameOrigin && !config.allowedOrigins.includes(origin)) return new Response("Origin not allowed", { status: 403 });
         if (!(rate >= 8000 && rate <= 96000)) return new Response("Bad sample rate", { status: 400 });
         if (server.upgrade(req, { data: { kind: "voice", rate: Math.round(rate) } })) return undefined as unknown as Response;
+        return new Response("Expected a WebSocket", { status: 426 });
+      }
+      // The phone's live video for the owner's screen: one-time ticket from POST /api/phone/live, same origin only.
+      if (url.pathname === "/phone-live") {
+        const t = url.searchParams.get("ticket") || "";
+        const exp = phoneTickets.get(t);
+        phoneTickets.delete(t);
+        if (!exp || exp < Date.now()) return new Response("Ticket expired", { status: 401 });
+        if (origin && !sameOrigin && !config.allowedOrigins.includes(origin)) return new Response("Origin not allowed", { status: 403 });
+        if (server.upgrade(req, { data: { kind: "phone" } })) return undefined as unknown as Response;
         return new Response("Expected a WebSocket", { status: 426 });
       }
       // A linked computer dials in here and keeps the line open; work comes down it. Its key goes in a header.

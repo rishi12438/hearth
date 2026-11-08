@@ -34,7 +34,9 @@ export type E2b = {
 };
 /** reuse: keep one connection open for a couple of minutes and send later commands down it (no new handshake each time). */
 export type SshTarget = { host: string; port: number; user: string; privateKey: string; knownHosts?: string; reuse?: boolean };
-export type Ssh = { runner(t: SshTarget, pin: (knownHosts: string) => void): Runner };
+/** A long-running command with its stdin and stdout kept open both ways (e.g. a video stream and its controls). */
+export type Pipe = { stdout: ReadableStream<Uint8Array>; write(b: Uint8Array): void; kill(): void; exited: Promise<number> };
+export type Ssh = { runner(t: SshTarget, pin: (knownHosts: string) => void): Runner; pipe?(t: SshTarget, cmd: string): Promise<Pipe> };
 
 const NAME_RE = /[^A-Za-z0-9 ._()-]/g;
 const HOST_RE = /^[A-Za-z0-9.:-]{1,253}$/;
@@ -386,6 +388,26 @@ async function sharedConnection(t: SshTarget, key: string, known: string): Promi
 }
 
 export const realSsh: Ssh = {
+  // Only to a host whose key is already pinned (never accept-new here).
+  async pipe(t, cmd) {
+    if (!t.knownHosts) throw new Error("Host key not pinned yet.");
+    const dir = mkdtempSync(join(tmpdir(), "hearth-ssh-"));
+    const key = join(dir, "key"), known = join(dir, "known_hosts");
+    writeFileSync(key, t.privateKey.endsWith("\n") ? t.privateKey : `${t.privateKey}\n`, { mode: 0o600 });
+    writeFileSync(known, `${t.knownHosts}\n`, { mode: 0o600 });
+    const mux = t.reuse ? await sharedConnection(t, key, known) : null;
+    const proc = Bun.spawn(["ssh", "-i", key, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
+      "-o", `UserKnownHostsFile=${known}`, "-o", "GlobalKnownHostsFile=/dev/null", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=10",
+      "-o", "ServerAliveInterval=15", ...(mux ? ["-o", "ControlMaster=no", "-o", `ControlPath=${mux}`] : []),
+      "-p", String(t.port), `${t.user}@${t.host}`, cmd], { stdin: "pipe", stdout: "pipe", stderr: "ignore" });
+    const exited = proc.exited.finally(() => rmSync(dir, { recursive: true, force: true }));
+    return {
+      stdout: proc.stdout as ReadableStream<Uint8Array>,
+      write(b) { try { proc.stdin.write(b); proc.stdin.flush(); } catch {} },
+      kill() { try { proc.kill(); } catch {} },
+      exited,
+    };
+  },
   runner(t, pin) {
     return {
       async run(cmd, opts) {
