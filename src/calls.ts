@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { Mp3Encoder } from "@breezystack/lamejs";
 import type { Vault } from "./vault.ts";
 
 // Voice calls. Arca owns the phone line (our Vonage account and the shared number) and dials; this hub owns everything
@@ -24,6 +25,8 @@ export type VoicePrefs = {
   intro?: string;
   /** How it should come across ("warm and brief"). */
   style?: string;
+  /** false: don't record calls. A hub setting (Settings → Voice calls); an agent can't change it for one call. */
+  record?: boolean;
 };
 export type CallLine = { who: "them" | "bot" | "you" | "note"; text: string; at: string };
 export type CallQuestion = { id: string; text: string; at: string; answer?: string; by?: "agent" | "you"; late?: boolean; stage: 0 | 1 | 2 };
@@ -36,6 +39,18 @@ export type Call = {
   /** The owner's mic is on the call (the bot is quiet). */
   joined?: boolean;
   answeredAt?: string; endedAt?: string; outcome?: string; error?: string;
+  /** Who set it going: the agent (teammate) and its task, and when you approved it. */
+  startedBy?: { agent?: string; task?: string; approvedAt?: string };
+  /** The longest Arca lets this call run (free plan: 120 s); Vonage hangs up there. */
+  maxSeconds?: number;
+  /** Talk time in seconds (Vonage's count when Arca sends it, else answered → ended). */
+  seconds?: number;
+  /** Who ended it. "them" also covers the line dropping. */
+  endedBy?: "them" | "bot" | "you" | "agent" | "hub" | "limit";
+  /** The call's audio as an MP3 on the hub (stereo: left is them, right is the bot and you). */
+  recording?: { bytes: number; seconds: number };
+  /** Arca keeps its own copy (Vonage's recording, in Arca's bucket). */
+  arcaRecording?: { bytes: number };
 };
 
 export const OPENAI_VOICES = ["marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"];
@@ -90,12 +105,24 @@ function pickNewest(ids: string[]): string | undefined {
 
 // ---------- Arca: the phone line ----------
 
+/** The hub's own Arca account: anonymous (no email) until its owner upgrades it. The phone plan is this account's. */
+export type ArcaAccount = { deviceId: string; secret: string; token: string; userId: string };
+/** The phone key Arca minted for this hub (under its account), and the shared number. */
 export type ArcaLine = { key: string; number: string };
+export type ArcaPlan = "free" | "paid";
 export interface ArcaApi {
-  register(hub: { name: string; url: string }): Promise<ArcaLine>;
-  place(key: string, b: { to: string; audioUrl: string; eventUrl: string; maxSeconds: number }): Promise<{ id: string; from: string }>;
+  /** Make (or, with the same device id and secret, get back) the hub's anonymous Arca account. */
+  account(a: { deviceId: string; secret: string; name: string }): Promise<{ token: string; userId: string }>;
+  register(accountToken: string, hub: { name: string; url: string }): Promise<ArcaLine & { plan: ArcaPlan; maxCallSeconds: number }>;
+  /** maxSeconds back is what Arca allows this call (free plan: 2 minutes); Vonage hangs up there. */
+  place(key: string, b: { to: string; audioUrl: string; eventUrl: string; maxSeconds: number; record: boolean }): Promise<{ id: string; from: string; maxSeconds: number; plan: ArcaPlan; recorded: boolean }>;
   hangup(key: string, id: string): Promise<void>;
-  status(key: string): Promise<{ number: string; today: { calls: number; seconds: number }; limits: { calls: number; seconds: number } }>;
+  status(key: string): Promise<{ number: string; plan: ArcaPlan; today: { calls: number; seconds: number }; limits: { calls: number; seconds: number; callSeconds: number };
+    /** Free plan: the account's whole allowance (2 minutes, all calls, all hubs) and how much is spent. */
+    allowance?: { seconds: number; used: number } }>;
+  /** Arca's copy of a call's recording (in its bucket), or null if it has none. */
+  recording(key: string, id: string): Promise<Uint8Array | null>;
+  deleteRecording(key: string, id: string): Promise<void>;
 }
 
 export function arcaApi(base = process.env.HEARTH_ARCA_URL || "https://sync.tryarca.ai", fetcher: typeof fetch = fetch): ArcaApi {
@@ -112,10 +139,27 @@ export function arcaApi(base = process.env.HEARTH_ARCA_URL || "https://sync.trya
     if (!r.ok) throw new Error(j?.error ? `Arca: ${j.error}` : `Arca answered ${r.status}.`);
     return j;
   };
+  const plan = (p: unknown): ArcaPlan => (p === "paid" ? "paid" : "free");
   return {
-    async register(hub) { const j = await req("/v1/phone/register", { body: { hub } }); return { key: String(j.key), number: String(j.number) }; },
-    async place(key, b) { const j = await req("/v1/phone/calls", { key, body: b }); return { id: String(j.id), from: String(j.from) }; },
+    async account(a) {
+      const j = await req("/v1/account/bootstrap", { body: { deviceId: a.deviceId, bootstrapSecret: a.secret, displayName: a.name.slice(0, 120) } });
+      if (!j.token) throw new Error("Arca: that hub account already exists and didn't hand back its token.");
+      return { token: String(j.token), userId: String(j.userId) };
+    },
+    async register(token, hub) {
+      const j = await req("/v1/phone/register", { key: token, body: { hub } });
+      return { key: String(j.key), number: String(j.number), plan: plan(j.plan), maxCallSeconds: Number(j.maxCallSeconds) || 120 };
+    },
+    async place(key, b) {
+      const j = await req("/v1/phone/calls", { key, body: b });
+      return { id: String(j.id), from: String(j.from), maxSeconds: Number(j.maxSeconds) || b.maxSeconds, plan: plan(j.plan), recorded: j.recorded !== false };
+    },
     async hangup(key, id) { await req(`/v1/phone/calls/${encodeURIComponent(id)}/hangup`, { key, method: "POST", body: {} }); },
+    async recording(key, id) {
+      const r = await fetcher(`${base.replace(/\/$/, "")}/v1/phone/calls/${encodeURIComponent(id)}/recording`, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(60_000) }).catch(() => null);
+      return r?.ok ? new Uint8Array(await r.arrayBuffer()) : null;
+    },
+    async deleteRecording(key, id) { await req(`/v1/phone/calls/${encodeURIComponent(id)}/recording`, { key, method: "DELETE" }).catch(() => {}); },
     async status(key) { return req("/v1/phone/status", { key }); },
   };
 }
@@ -180,11 +224,13 @@ const TOOLS = [
 ];
 
 /** What the talker is told: who it is, what the call is for, and the rules. */
-export function talkerInstructions(brief: string, v: VoicePrefs) {
+export function talkerInstructions(brief: string, v: VoicePrefs, maxSeconds?: number) {
   const name = v.name?.trim() || "Hearth", owner = v.owner?.trim() || "the person I work for";
   return [
     `You are ${name}, a voice assistant on a phone call on behalf of ${owner}. You placed this call.`,
     v.intro?.trim() ? `Open with: "${v.intro.trim()}"` : `Open by saying who you are and who you're calling for, then why you're calling.`,
+    ...(v.record === false ? [] : [`This call is recorded. Say so in your first turn, briefly ("just so you know, this call is recorded"). If they don't want that, say ${owner} will follow up another way, then end_call.`]),
+    ...(maxSeconds && maxSeconds < 600 ? [`The line cuts off after ${maxSeconds >= 120 && maxSeconds % 60 === 0 ? `${maxSeconds / 60} minutes` : `${maxSeconds} seconds`}, so get to the point quickly. When you're told time is nearly up, wrap up straight away.`] : []),
     `Speak ${v.language?.trim() || "English"}${v.style?.trim() ? `. Come across as: ${v.style.trim()}` : ""}.`,
     `What this call is for, and everything you know for it:\n${brief}`,
     `Rules:
@@ -302,7 +348,11 @@ export class CallSettings {
     try { const j = JSON.parse(this.vault?.get("calls-arca") || "null"); return j?.key ? j : null; } catch { return null; }
   }
   setModel(m: { provider: CallProvider; key: string; model: string }) { this.vault!.set("calls", JSON.stringify(m)); }
-  setLine(l: ArcaLine) { this.vault!.set("calls-arca", JSON.stringify(l)); }
+  setLine(l: ArcaLine) { this.vault!.set("calls-arca", JSON.stringify({ key: l.key, number: l.number })); }
+  account(): ArcaAccount | null {
+    try { const j = JSON.parse(this.vault?.get("arca-account") || "null"); return j?.token ? j : null; } catch { return null; }
+  }
+  setAccount(a: ArcaAccount) { this.vault!.set("arca-account", JSON.stringify(a)); }
   forget() { this.vault?.delete("calls"); }
   private file() { return join(this.dataDir, "calls.json"); }
   voice(): VoicePrefs { try { return existsSync(this.file()) ? JSON.parse(readFileSync(this.file(), "utf8")) : {}; } catch { return {}; } }
@@ -318,6 +368,8 @@ export function cleanVoice(v: any, provider: CallProvider): VoicePrefs {
   const sp = Number(v?.speed);
   if (provider === "openai" && Number.isFinite(sp) && v?.speed !== "" && v?.speed != null) out.speed = Math.min(1.5, Math.max(0.25, Math.round(sp * 100) / 100));
   for (const [k, n] of [["language", 40], ["name", 40], ["owner", 60], ["intro", 300], ["style", 300]] as const) { const x = s(v?.[k], n); if (x) (out as any)[k] = x; }
+  // Recording is on unless turned off.
+  if (v?.record === false || v?.record === "off") out.record = false;
   return out;
 }
 
@@ -333,6 +385,7 @@ type Live = {
   told: Set<string>;
   timers: ReturnType<typeof setTimeout>[]; asked: Map<string, string>;
   ending: boolean; greetTimer?: ReturnType<typeof setTimeout>;
+  rec: CallRecorder | null;
 };
 
 export type CallsDeps = {
@@ -387,8 +440,16 @@ export class Calls {
     const ok = await checkVoiceKey(provider, key, this.d.fetcher);
     if ("error" in ok) return ok.error;
     if (!this.settings.line()) {
-      try { this.settings.setLine(await this.arca.register({ name: this.d.hubName(), url: pub })); }
-      catch (e: any) { return `Your key is fine, but the phone line didn't set up: ${e.message}`; }
+      try {
+        // The hub's own Arca account (anonymous; the plan lives on it), then a phone key under it.
+        let acct = this.settings.account();
+        if (!acct) {
+          const deviceId = `hearth-${randomBytes(12).toString("base64url")}`, secret = randomBytes(32).toString("base64url");
+          acct = { deviceId, secret, ...(await this.arca.account({ deviceId, secret, name: this.d.hubName() })) };
+          this.settings.setAccount(acct);
+        }
+        this.settings.setLine(await this.arca.register(acct.token, { name: this.d.hubName(), url: pub }));
+      } catch (e: any) { return `Your key is fine, but the phone line didn't set up: ${e.message}`; }
     }
     const was = this.settings.model()?.provider;
     this.settings.setModel({ provider, key, model: ok.model });
@@ -402,7 +463,7 @@ export class Calls {
 
   // ---- placing a call (after the owner's Approve) ----
 
-  async start(a: { to: string; brief: string; voice?: VoicePrefs; threadId: string; jobId?: string }): Promise<Call> {
+  async start(a: { to: string; brief: string; voice?: VoicePrefs; threadId: string; jobId?: string; startedBy?: Call["startedBy"] }): Promise<Call> {
     const m = this.settings.model(), l = this.settings.line(), pub = this.d.publicUrl();
     if (!m || !l) throw new Error("Voice calls aren't turned on (Settings → Connectors → Voice calls).");
     if (!pub) throw new Error("This hub has no public address (HEARTH_PUBLIC_URL).");
@@ -411,19 +472,21 @@ export class Calls {
     const now = this.clock().toISOString();
     const call: Call = {
       id: `c_${randomBytes(9).toString("base64url")}`, createdAt: now, threadId: a.threadId, jobId: a.jobId, to, brief: a.brief.slice(0, 6000),
-      provider: m.provider, voice: cleanVoice({ ...this.settings.voice(), ...(a.voice || {}) }, m.provider),
-      status: "dialing", lines: [], questions: [],
+      provider: m.provider, voice: cleanVoice({ ...this.settings.voice(), ...(a.voice || {}), record: this.settings.voice().record }, m.provider),
+      status: "dialing", lines: [], questions: [], ...(a.startedBy ? { startedBy: a.startedBy } : {}),
     };
     const lv: Live = { call, secret: randomBytes(24).toString("base64url"), talker: null, vonage: null, out: [], pump: null, listeners: new Set(), joiner: null, mic: [],
-      waiters: new Set(), seen: 0, told: new Set(), timers: [], asked: new Map(), ending: false };
+      waiters: new Set(), seen: 0, told: new Set(), timers: [], asked: new Map(), ending: false, rec: null };
     this.live.set(call.id, lv);
     await this.save(lv);
     const base = pub.replace(/\/$/, "");
     try {
-      const r = await this.arca.place(l.key, { to, audioUrl: `${base.replace(/^http/, "ws")}/call-audio/${call.id}?t=${lv.secret}`, eventUrl: `${base}/api/calls/events/${call.id}`, maxSeconds: 900 });
-      call.arcaId = r.id; call.from = r.from; call.status = "ringing";
+      const r = await this.arca.place(l.key, { to, audioUrl: `${base.replace(/^http/, "ws")}/call-audio/${call.id}?t=${lv.secret}`, eventUrl: `${base}/api/calls/events/${call.id}`, maxSeconds: 900, record: call.voice.record !== false });
+      call.arcaId = r.id; call.from = r.from; call.maxSeconds = r.maxSeconds; call.status = "ringing";
+      // Free calls are always recorded (Arca decides): then the hub records too, and the bot says so.
+      if (r.recorded) call.voice = { ...call.voice, record: undefined };
       await this.save(lv);
-    } catch (e: any) { await this.finish(lv, "failed", e.message); throw e; }
+    } catch (e: any) { await this.finish(lv, "failed", e.message, "hub"); throw e; }
     return call;
   }
 
@@ -432,13 +495,33 @@ export class Calls {
   /** Arca forwarded a call event. Unsigned or for a call we don't have: false. */
   async event(id: string, raw: string, sig: string | null): Promise<boolean> {
     const lv = this.live.get(id), l = this.settings.line();
-    if (!lv || !l || !goodSignature(l.key, raw, sig)) return false;
+    if (!l || !goodSignature(l.key, raw, sig)) return false;
     let e: any; try { e = JSON.parse(raw); } catch { return false; }
     const s = String(e?.status || "");
+    // Arca has stored Vonage's recording. It comes after the call ends, often after the hub has let go of it.
+    if (s === "recorded") {
+      const c = lv?.call ?? (await this.d.load(id));
+      if (!c) return false;
+      c.arcaRecording = { bytes: Math.max(0, Number(e?.recordingBytes) || 0) };
+      if (lv) await this.save(lv); else { c.updatedAt = this.clock().toISOString(); await this.d.save(c); this.d.emit(c); }
+      return true;
+    }
+    if (!lv) return false;
+    const dur = Number(e?.duration);
+    if (s === "completed" && Number.isFinite(dur) && dur >= 0) lv.call.seconds = Math.round(dur);
+    if (s === "completed" && e?.endedBy === "limit") lv.call.endedBy = "limit";
+    // Arca runs the call's clock: shortly before it cuts the line, the bot wraps up.
+    if (s === "warning") {
+      if (lv.call.status === "live" && !lv.ending) {
+        lv.talker?.inject(`[Supervisor] About ${Number(e?.secondsLeft) || 20} seconds left before the line cuts off. Wrap up now: sum up what was agreed, say we'll follow up on anything open, say goodbye, then end_call.`, true);
+        await this.line(lv, "note", "Near the time limit: the bot is wrapping up");
+      }
+      return true;
+    }
     if (s === "answered" && lv.call.status === "ringing") { lv.call.status = "live"; lv.call.answeredAt = this.clock().toISOString(); await this.save(lv); }
     const ended: Record<string, string> = { busy: "They were busy.", cancelled: "The call was cancelled.", failed: "The call failed.", rejected: "They declined the call.", timeout: "Nobody picked up.", unanswered: "Nobody picked up.", machine: "" };
-    if (s === "completed") await this.finish(lv, "ended", lv.call.outcome || (lv.call.answeredAt ? "The call ended." : "Nobody picked up."));
-    else if (s in ended && s !== "machine") await this.finish(lv, lv.call.answeredAt ? "ended" : "failed", ended[s]);
+    if (s === "completed") await this.finish(lv, "ended", lv.call.outcome || (lv.call.answeredAt ? "The call ended." : "Nobody picked up."), "them");
+    else if (s in ended && s !== "machine") await this.finish(lv, lv.call.answeredAt ? "ended" : "failed", ended[s], "them");
     return true;
   }
 
@@ -455,9 +538,13 @@ export class Calls {
     const lv = this.live.get(id), m = this.settings.model();
     if (!lv || !m) { sock.close(1011, "no call"); return; }
     lv.vonage = sock;
+    if (lv.call.voice.record !== false && !lv.rec) {
+      try { lv.rec = new CallRecorder(recordingPath(this.d.dataDir, lv.call.id)); lv.call.recording = { bytes: 0, seconds: 0 }; }
+      catch (e: any) { void this.line(lv, "note", `Not recording: ${e.message}`); }
+    }
     if (lv.call.status !== "live") { lv.call.status = "live"; lv.call.answeredAt ??= this.clock().toISOString(); void this.save(lv); }
     const factory = this.d.talker ?? (m.provider === "openai" ? openaiTalker : geminiTalker);
-    lv.talker = factory({ provider: m.provider, key: m.key, model: m.model, instructions: talkerInstructions(lv.call.brief, lv.call.voice), voice: lv.call.voice }, {
+    lv.talker = factory({ provider: m.provider, key: m.key, model: m.model, instructions: talkerInstructions(lv.call.brief, lv.call.voice, lv.call.maxSeconds), voice: lv.call.voice }, {
       onAudio: (pcm) => { if (lv.joiner) return; for (let i = 0; i < pcm.length; i += FRAME) lv.out.push(pcm.subarray(i, i + FRAME)); },
       onLine: (who, text) => { void this.line(lv, lv.joiner && who === "them" ? "them" : who, text); },
       onInterrupt: () => { lv.out.length = 0; },
@@ -475,6 +562,7 @@ export class Calls {
       if (!f) return;
       const frame = f.length === FRAME ? f : (() => { const p = new Int16Array(FRAME); p.set(f.subarray(0, FRAME)); return p; })();
       try { lv.vonage?.send(new Uint8Array(frame.buffer, frame.byteOffset, frame.byteLength)); } catch {}
+      lv.rec?.ours(frame);
       if (!mic) for (const s of lv.listeners) { try { s.send(listenerFrame(2, frame)); } catch {} }
     }, 20);
   }
@@ -487,12 +575,13 @@ export class Calls {
     // While you're on, the model hears you too (mixed in), so it knows what you said when you hand back.
     const mine = lv.joiner ? lv.mic[0] : undefined;
     lv.talker?.audio(mine ? mix(pcm, mine) : pcm);
+    try { lv.rec?.theirs(pcm); } catch {}
     for (const s of lv.listeners) { try { s.send(listenerFrame(1, pcm)); } catch {} }
   }
 
   audioClosed(id: string) {
     const lv = this.live.get(id);
-    if (lv && !lv.ending) void this.finish(lv, lv.call.answeredAt ? "ended" : "failed", lv.call.outcome || "The call ended.");
+    if (lv && !lv.ending) void this.finish(lv, lv.call.answeredAt ? "ended" : "failed", lv.call.outcome || "The call ended.", "them");
   }
 
   private async line(lv: Live, who: CallLine["who"], text: string) {
@@ -506,6 +595,7 @@ export class Calls {
     if (name === "end_call") {
       lv.talker?.toolResult(callId, "ok", false);
       lv.call.outcome = String(args?.outcome || "").slice(0, 500) || lv.call.outcome;
+      lv.call.endedBy ??= "bot";
       return this.hangupSoon(lv);
     }
     if (name !== "ask_supervisor") { lv.talker?.toolResult(callId, "No such tool."); return; }
@@ -533,7 +623,7 @@ export class Calls {
     if (lv.ending) return;
     // Let the goodbye play out, then hang up (or after 8 s at most).
     const started = Date.now();
-    const t = setInterval(() => { if (lv.out.length === 0 || Date.now() - started > 8000) { clearInterval(t); setTimeout(() => void this.hangup(lv.call.id), 600); } }, 100);
+    const t = setInterval(() => { if (lv.out.length === 0 || Date.now() - started > 8000) { clearInterval(t); setTimeout(() => void this.hangup(lv.call.id, "bot"), 600); } }, 100);
   }
 
   // ---- the supervisor (the agent, through hearth-call) and the owner (the app) ----
@@ -568,15 +658,16 @@ export class Calls {
     await this.line(lv, "note", `Supervisor: ${text.slice(0, 300)}`);
   }
 
-  async hangup(id: string) {
+  async hangup(id: string, by: "you" | "agent" | "bot" = "agent") {
     const lv = this.live.get(id);
     if (!lv) return;
+    lv.call.endedBy ??= by;
     const l = this.settings.line();
     if (l && lv.call.arcaId) await this.arca.hangup(l.key, lv.call.arcaId).catch(() => {});
-    await this.finish(lv, lv.call.answeredAt ? "ended" : "failed", lv.call.outcome || (lv.call.answeredAt ? "Hung up." : "Hung up before they answered."));
+    await this.finish(lv, lv.call.answeredAt ? "ended" : "failed", lv.call.outcome || (lv.call.answeredAt ? "Hung up." : "Hung up before they answered."), by);
   }
 
-  private async finish(lv: Live, status: "ended" | "failed", why: string) {
+  private async finish(lv: Live, status: "ended" | "failed", why: string, by?: Call["endedBy"]) {
     if (lv.ending) return;
     lv.ending = true;
     for (const t of lv.timers) clearTimeout(t);
@@ -586,6 +677,9 @@ export class Calls {
     try { lv.vonage?.close(1000, "done"); } catch {}
     for (const s of lv.listeners) { try { s.send(JSON.stringify({ t: "ended" })); s.close(1000, "ended"); } catch {} }
     lv.call.status = status; lv.call.endedAt = this.clock().toISOString(); lv.call.joined = false;
+    if (by) lv.call.endedBy ??= by;
+    if (lv.call.answeredAt && lv.call.seconds == null) lv.call.seconds = Math.max(0, Math.round((Date.parse(lv.call.endedAt) - Date.parse(lv.call.answeredAt)) / 1000));
+    if (lv.rec) { try { lv.call.recording = lv.rec.close(); } catch (e: any) { lv.call.lines.push({ who: "note", text: `The recording didn't save: ${e.message}`, at: lv.call.endedAt }); } lv.rec = null; }
     if (status === "failed") lv.call.error ??= why; else lv.call.outcome ||= why;
     await this.save(lv);
     // Keep it a minute so a last hearth-call wait still sees how it ended.
@@ -620,7 +714,8 @@ export class Calls {
       new: c.lines.slice(since).map((l) => `${l.who === "them" ? "Them" : l.who === "bot" ? "Bot" : l.who === "you" ? "Owner" : "Note"}: ${l.text}`),
       ...(open.length ? { question: { id: open[0].id, text: open[0].text, howTo: `hearth-call answer ${c.id} "<answer>" (within ~${this.waits.giveUp}s, or the bot promises to get back to them)` } } : {}),
       ...(c.status === "ended" || c.status === "failed" ? {
-        ended: { outcome: c.outcome || null, error: c.error || null,
+        ended: { outcome: c.outcome || null, error: c.error || null, seconds: c.seconds ?? 0, endedBy: c.endedBy || null,
+          recording: c.recording?.bytes ? recordingPath(this.d.dataDir, c.id) : null,
           followUp: unanswered.map((q) => ({ question: q.text, answer: q.answer || null })) },
         transcript: c.lines.filter((l) => l.who !== "note").map((l) => `${l.who === "them" ? "Them" : l.who === "bot" ? "Bot" : "Owner"}: ${l.text}`),
       } : {}),
@@ -663,10 +758,78 @@ export class Calls {
     void this.line(lv, "note", "You handed the call back");
   }
 
+  /** Arca's copy of a call's recording. */
+  async arcaRecording(c: Call) { const l = this.settings.line(); return l && c.arcaId ? this.arca.recording(l.key, c.arcaId) : null; }
+  /** Remove Arca's copy (best effort: the hub's copy is gone either way). */
+  async deleteRecording(c: Call) { const l = this.settings.line(); if (l && c.arcaId && c.arcaRecording?.bytes) await this.arca.deleteRecording(l.key, c.arcaId); }
+
   isLive(id: string) { const s = this.live.get(id)?.call.status; return s === "ringing" || s === "live" || s === "dialing"; }
   /** A hub restart drops every live call: mark the ones the store still thinks are going as ended. */
-  static stale(c: Call): Call | null {
-    return c.status === "ended" || c.status === "failed" ? null : { ...c, status: c.answeredAt ? "ended" : "failed", endedAt: new Date().toISOString(), outcome: c.outcome || "The hub restarted, so the call dropped.", error: c.answeredAt ? undefined : "The hub restarted before it connected." };
+  static stale(c: Call, recordedBytes = 0): Call | null {
+    if (c.status === "ended" || c.status === "failed") return null;
+    const endedAt = new Date().toISOString();
+    return { ...c, status: c.answeredAt ? "ended" : "failed", endedAt, endedBy: c.endedBy || "hub", outcome: c.outcome || "The hub restarted, so the call dropped.", error: c.answeredAt ? undefined : "The hub restarted before it connected.",
+      // The MP3 is written as the call goes, so what was said before the restart is still there.
+      ...(c.recording ? { recording: { bytes: recordedBytes, seconds: Math.round((recordedBytes * 8) / (REC_KBPS * 1000)) } } : {}),
+      ...(c.answeredAt && c.seconds == null ? { seconds: Math.max(0, Math.round((Date.parse(c.updatedAt || endedAt) - Date.parse(c.answeredAt)) / 1000)) } : {}) };
+  }
+}
+
+// ---------- recording ----------
+
+const REC_RATE = 16000, REC_KBPS = 32, MP3_FRAME = 1152;
+export const recordingPath = (dataDir: string, id: string) => join(dataDir, "calls", `${id.replace(/[^\w-]/g, "")}.mp3`);
+
+/** Records a call to a stereo MP3 as it happens (so a hub restart still leaves a playable file). Left: them. Right:
+ *  what we sent (the bot, or you while you've joined). Vonage's frames from them arrive every 20 ms for the whole call
+ *  and set the clock; what we sent since lines up beside each one, silence when we sent nothing. */
+export class CallRecorder {
+  private enc = new Mp3Encoder(2, REC_RATE, REC_KBPS);
+  private us: Int16Array[] = [];
+  private usLen = 0;
+  private l = new Int16Array(MP3_FRAME);
+  private r = new Int16Array(MP3_FRAME);
+  private n = 0;
+  private pending: Uint8Array[] = [];
+  private samples = 0;
+  private bytes = 0;
+  constructor(readonly path: string) { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, new Uint8Array(0)); }
+  /** A frame we sent to the call. */
+  ours(pcm: Int16Array) {
+    this.us.push(pcm); this.usLen += pcm.length;
+    while (this.usLen > REC_RATE && this.us.length) this.usLen -= this.us.shift()!.length; // never more than 1 s ahead
+  }
+  /** A frame from them: it and the same length of ours go in. */
+  theirs(pcm: Int16Array) {
+    const ours = this.take(pcm.length);
+    for (let i = 0; i < pcm.length; i++) {
+      this.l[this.n] = pcm[i]; this.r[this.n] = ours[i];
+      if (++this.n === MP3_FRAME) { this.add(this.enc.encodeBuffer(this.l, this.r)); this.samples += this.n; this.n = 0; if (this.pending.length >= 40) this.flush(); }
+    }
+  }
+  close(): { bytes: number; seconds: number } {
+    if (this.n) { this.add(this.enc.encodeBuffer(this.l.subarray(0, this.n), this.r.subarray(0, this.n))); this.samples += this.n; this.n = 0; }
+    this.add(this.enc.flush());
+    this.flush();
+    return { bytes: this.bytes, seconds: Math.round(this.samples / REC_RATE) };
+  }
+  private take(k: number) {
+    const out = new Int16Array(k);
+    let o = 0;
+    while (o < k && this.us.length) {
+      const f = this.us[0], m = Math.min(k - o, f.length);
+      out.set(f.subarray(0, m), o); o += m; this.usLen -= m;
+      if (m === f.length) this.us.shift(); else this.us[0] = f.subarray(m);
+    }
+    return out;
+  }
+  private add(b: Int8Array | Uint8Array) { if (b.length) this.pending.push(new Uint8Array(b.buffer, b.byteOffset, b.length).slice()); }
+  private flush() {
+    if (!this.pending.length) return;
+    const all = Buffer.concat(this.pending);
+    this.pending = [];
+    appendFileSync(this.path, all);
+    this.bytes += all.length;
   }
 }
 
@@ -703,14 +866,14 @@ esac
 \`hearth-call start <+number> "<brief>"\` places a call from Hearth's line. A voice bot does the talking; **you supervise**. The owner approves each call first, and can listen in or join from the thread.
 
 ## The brief is all the bot knows
-Write it like notes for a person making the call: who you're calling and why, the goal, what's fine to agree to (times, prices, limits), names and details it may give, and what to do on voicemail. Anything it shouldn't decide alone, say so. Never put card numbers or passwords in a brief unless the owner gave them for this call.
+Write it like notes for a person making the call: who you're calling and why, the goal, what's fine to agree to (times, prices, limits), names and details it may give, and what to do on voicemail. Anything it shouldn't decide alone, say so. Never put card numbers or passwords in a brief unless the owner gave them for this call. On the free plan a call is cut off after 2 minutes (the bot is warned 20 s before), so keep each call to one clear goal.
 
 ## Running a call
 1. \`hearth-call start +14155550199 "<brief>"\` (number with its country code; \`--voice NAME\` / \`--language LANG\` only if the owner asked). It waits for the owner's Approve: say so in your reply and stop. When they approve you get a turn with the call id.
 2. Then supervise in a loop: \`hearth-call wait <id>\`. Each wait returns what was said since the last one, and returns at once when the bot asks something.
 3. A \`question\`: answer fast with \`hearth-call answer <id> "<answer>"\` (the bot is waiting on the line: ~5 s it says it's checking, ~10 s it promises to get back to them and wraps up). Answer from the brief, memory and what you can look up in a second or two. Never invent. If you don't know, don't answer: the owner is asked too and may answer from the thread.
 4. Steer when needed: \`hearth-call say <id> "<private note to the bot>"\` (never spoken as is). \`hearth-call hangup <id>\` to end it.
-5. When \`ended\` comes back: report the outcome in a line or two (the transcript is already in the thread). For each \`followUp\` question: if it has an answer, call or text them back with it; if not, ask the owner in your reply (end it with [[answer-needed]]), then call back once they answer.
+5. When \`ended\` comes back: report the outcome in a line or two (the transcript and a recording are already in the thread). \`endedBy: "limit"\` means the time ran out: call back for whatever was left. For each \`followUp\` question: if it has an answer, call or text them back with it; if not, ask the owner in your reply (end it with [[answer-needed]]), then call back once they answer.
 
 Don't call anyone the owner didn't ask you to, don't call the same number again and again, and never more than one call at a time.`,
   };

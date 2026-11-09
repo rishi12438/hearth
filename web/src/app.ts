@@ -2073,11 +2073,54 @@ function callCard(c: any) {
     c.status === "live" ? h("button", { class: `sbtn${mine && callAudio?.joined ? " primary" : ""}`, title: "Your mic goes on the call and the bot goes quiet. Use headphones.", on: { click: () => (mine && callAudio?.joined ? handBackCall() : joinCall(c.id)) } }, icon("mic", 14), mine && callAudio?.joined ? "Hand back" : "Join") : null,
     h("button", { class: "sbtn", on: { click: async () => { try { await call(`/api/calls/${c.id}/hangup`, { body: {} }); } catch (e) { handleError(e); } } } }, "Hang up")) : null;
   const result = !live ? h("p", { class: "small" }, c.status === "failed" ? c.error || "It didn't connect." : c.outcome || "") : null;
+  const facts = !live ? callFacts(c) : null, rec = !live ? callRecording(c) : null;
   return h("div", { class: `block callcard ${c.status}` },
     h("div", { class: "blockhead" }, icon("call", 15), h("b", null, `Call with ${c.to}`), h("small", { class: "muted" }, ` · ${CALL_STATE[c.status] || c.status}${c.joined ? " · you're on" : ""}`),
       c.status === "live" && c.answeredAt ? h("time", { "data-since": c.answeredAt, class: "muted small" }, elapsed(c.answeredAt)) : null),
     lines.length ? h("ol", { class: "calllines" }, lines) : live ? h("p", { class: "muted small" }, c.status === "live" ? "Connected. Words show here as they're said." : "Waiting for them to pick up.") : null,
-    askBox, result, btns);
+    askBox, result, facts, rec, btns);
+}
+
+const callLength = (s?: number) => (s == null ? "" : s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`);
+const ENDED_BY: Record<string, string> = { them: "they hung up", bot: "the bot hung up", you: "you hung up", agent: "the agent hung up", hub: "the hub restarted", limit: "cut off at the time limit" };
+/** When, how long, who started and ended it, from which number. */
+function callFacts(c: any): Node {
+  const bits = [
+    `${dayLabel(c.createdAt)} ${clockTime(c.createdAt)}`,
+    c.answeredAt ? callLength(c.seconds ?? 0) : c.status === "failed" ? "didn't connect" : null,
+    c.startedBy?.agent ? `started by ${c.startedBy.agent}${c.startedBy.task ? ` (${c.startedBy.task})` : ""}` : null,
+    c.startedBy?.approvedAt ? `you approved at ${clockTime(c.startedBy.approvedAt)}` : null,
+    c.status === "ended" && c.endedBy ? ENDED_BY[c.endedBy] : null,
+    c.from ? `from ${c.from}` : null,
+  ].filter(Boolean);
+  return h("p", { class: "muted small callfacts" }, bits.join(" · "));
+}
+
+/** The call's MP3 (fetched with the device token, so it can't be a plain link): play, save, or delete. */
+const recUrls = new Map<string, string>();
+async function recordingBlob(id: string) {
+  const hub = activeHub()!;
+  const res = await fetch(`${hub.url}/api/calls/${id}/recording`, { headers: authHeaders(hub) });
+  if (!res.ok) throw new Error(res.status === 404 ? "That recording is gone." : "Couldn't fetch the recording");
+  return new Blob([await res.arrayBuffer()], { type: "audio/mpeg" });
+}
+function callRecording(c: any): Node | null {
+  if (!c.recording?.bytes && !c.arcaRecording?.bytes) return null;
+  const box = h("div", { class: "callrec" });
+  const name = `call-${String(c.to).replace(/\D/g, "")}-${String(c.createdAt).slice(0, 16).replace(/[:T]/g, "-")}.mp3`;
+  const player = (url: string, auto: boolean) => { const a = h("audio", { controls: "", preload: "metadata", src: url }) as HTMLAudioElement; if (auto) void a.play().catch(() => {}); return a; };
+  const play = h("button", { class: "sbtn", on: { click: async () => {
+    play.disabled = true;
+    try { let u = recUrls.get(c.id); if (!u) { u = URL.createObjectURL(await recordingBlob(c.id)); recUrls.set(c.id, u); } play.replaceWith(player(u, true)); }
+    catch (e) { play.disabled = false; handleError(e); }
+  } } }, icon("play", 14), `Play recording${c.recording?.seconds ? ` (${callLength(c.recording.seconds)})` : ""}`) as HTMLButtonElement;
+  const save = h("button", { class: "sbtn", on: { click: async () => { try { await saveBlob(await recordingBlob(c.id), name); } catch (e) { handleError(e); } } } }, "Save MP3");
+  const del = h("button", { class: "sbtn ghost", on: { click: () => confirmSheet("Delete this recording?", "The MP3 is removed from your hub. The transcript stays.", "Delete", async () => {
+    await call(`/api/calls/${c.id}/recording`, { method: "DELETE" }); const u = recUrls.get(c.id); if (u) URL.revokeObjectURL(u); recUrls.delete(c.id); toast("Recording deleted");
+  }) } }, "Delete");
+  const u = recUrls.get(c.id);
+  box.append(u ? player(u, false) : play, h("div", { class: "blockbtns" }, save, del));
+  return box;
 }
 
 /** The call you're listening to: its socket, playback, and your mic while you've joined. */
@@ -3007,6 +3050,7 @@ initConnectors({
   handleError: (e) => handleError(e), back: () => void openConnections(), openVoice: () => void openVoice(), openGoogle: () => void openGoogleSetup(),
   openCookies: (id) => { const c = CONNECTORS.find((x) => x.via === id); if (c) void openCookieSetup(c); },
   askMac: (type, args, ms) => askMac(type, args, ms),
+  callFacts: (c) => callFacts(c), callRecording: (c) => callRecording(c),
   logo: (id, size) => { const c = CONNECTORS.find((x) => x.via === id && x.id === id) || (id === "google" ? CONNECTORS[0] : null); return c ? connectorTile(c, size) : null; },
 });
 

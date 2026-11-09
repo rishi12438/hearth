@@ -1448,6 +1448,9 @@ html:has(.phonescreen) { overscroll-behavior-x: none; }
 .callcard .calllines { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow-y: auto; }
 .callcard .callline { font-size: 14px; line-height: 1.4; }
 .callcard .callline b { font-weight: var(--fw-semibold); margin-right: 2px; }
+.callcard .callfacts { margin: 6px 0 0; }
+.callcard .callrec { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.callcard .callrec audio { width: 100%; height: 36px; }
 .callcard .callline.bot b { color: var(--ok); }
 .callcard .callnote { font-style: italic; }
 .callcard .callask { margin-top: 10px; padding: 10px; border-radius: 10px; background: var(--surface-2); }

@@ -27,6 +27,9 @@ export type Deps = {
   openCookies(id: string): void;
   /** Ask the Mac app (it reads Chrome on this Mac). Rejects outside the app. */
   askMac(type: string, args: Record<string, unknown>, timeoutMs?: number): Promise<any>;
+  /** A finished call's facts line and its recording controls (app.ts draws the same in a thread). */
+  callFacts(c: any): Node;
+  callRecording(c: any): Node | null;
   /** app.ts's own logo for ids it draws (LinkedIn, Instagram, Gmail…), or null. */
   logo(id: string, size: number): HTMLElement | null;
 };
@@ -292,17 +295,24 @@ function callsSheet(t: Tile) {
     const name = text(vp.name, "Hearth"), owner = text(vp.owner, "Your name"), language = text(vp.language, "English");
     const intro = h("textarea", { class: "field", rows: "2", maxlength: "300", placeholder: "Hi, this is Sam, Rishi's assistant, calling about…" }, vp.intro || "") as HTMLTextAreaElement;
     const style = h("textarea", { class: "field", rows: "2", maxlength: "300", placeholder: "Warm, brief, a little informal" }, vp.style || "") as HTMLTextAreaElement;
+    const freePlan = v.line?.plan !== "paid";
+    const record = h("input", { type: "checkbox", checked: freePlan || vp.record !== false, disabled: freePlan }) as HTMLInputElement;
     const save = h("button", { class: "btn primary big", on: { click: async () => {
       save.disabled = true;
       try {
         await call("/api/calls/settings", { method: "PUT", body: { voice: voice.value, ...(v.provider === "openai" ? { speed: Number(speed.value) === 1 ? "" : Number(speed.value) } : {}),
-          name: name.value, owner: owner.value, language: language.value, intro: intro.value, style: style.value } });
+          name: name.value, owner: owner.value, language: language.value, intro: intro.value, style: style.value, ...(freePlan ? {} : { record: record.checked }) } });
         toast("Saved");
       } catch (e) { D.handleError(e); } finally { save.disabled = false; }
     } } }, "Save");
+    const log = h("div", { class: "stack" });
+    const secs = (n: number) => (n >= 60 ? `${Math.floor(n / 60)}m${n % 60 ? ` ${n % 60}s` : ""}` : `${n}s`);
     const used = v.line ? `${v.line.today.calls} of ${v.line.limits.calls} calls, ${Math.round(v.line.today.seconds / 60)} of ${Math.round(v.line.limits.seconds / 60)} minutes today` : null;
     clear(box,
       h("p", { class: "small" }, h("b", null, "Line: "), v.number || "—", " · shared number, no callbacks", used ? h("br") : null, used ? h("span", { class: "muted" }, used) : null),
+      v.line ? h("p", { class: "small" }, h("b", null, "Plan: "), v.line.plan === "paid" ? "Paid · calls up to 15 minutes" : "Free",
+        v.line.allowance ? ` · ${secs(Math.max(0, v.line.allowance.seconds - v.line.allowance.used))} of ${secs(v.line.allowance.seconds)} left, for all your calls together` : null,
+        v.line.plan === "paid" ? null : h("span", { class: "muted" }, " (the bot wraps up before the line cuts off)")) : null,
       h("p", { class: "small" }, h("b", null, "Voice model: "), v.provider === "openai" ? "OpenAI Realtime" : "Gemini Live", v.model ? ` (${v.model})` : "", " · ", v.hint || ""),
       field("Voice", voice),
       v.provider === "openai" ? field("Speed", h("div", { class: "row2" }, speed, speedLabel)) : null,
@@ -310,8 +320,20 @@ function callsSheet(t: Tile) {
       field("Language", language),
       field("Opening line", intro, "Leave empty and it says who it is, who for, and why it's calling."),
       field("How it comes across", style),
+      h("label", { class: "fieldrow" }, h("span", { class: "row2" }, record, h("b", { class: "small" }, "Record calls")),
+        h("small", { class: "muted" }, freePlan
+          ? "Free calls are always recorded (on your hub and on Arca). The bot tells them up front that the call is recorded."
+          : "Saves each call as an MP3 on your hub and on Arca, and the bot tells them up front that the call is recorded (some places need everyone's OK).")),
       h("p", { class: "muted small" }, "An agent can pick another voice or language for one call when you ask it to."),
-      save);
+      save, log);
+    void call<any>("/api/calls").then((r) => {
+      const list = r.calls || [];
+      clear(log, h("h3", null, "Recent calls"), list.length ? list.slice(0, 50).map((c: any) => h("div", { class: "block callcard " + c.status },
+        h("div", { class: "blockhead" }, h("b", null, c.to), h("small", { class: "muted" }, c.status === "failed" ? " · didn't connect" : c.status === "ended" ? "" : " · on now"),
+          h("a", { class: "small", href: `#c/${c.threadId}`, on: { click: () => D.closeSheet() } }, "Open thread")),
+        D.callFacts(c), c.outcome || c.error ? h("p", { class: "small" }, c.status === "failed" ? c.error : c.outcome) : null, D.callRecording(c)))
+        : h("p", { class: "muted small" }, "No calls yet."));
+    }).catch(() => clear(log));
   }).catch((e) => clear(box, h("p", { class: "err small" }, e.message)));
 }
 

@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store, Collection } from "./store/index.ts";
@@ -585,6 +585,13 @@ export class Hub {
   async removeThread(id: string) {
     for (const m of (await this.store.all<Message>("messages")).filter((m) => m.threadId === id)) await this.store.remove("messages", m.id);
     for (const j of (await this.store.all<Job>("jobs")).filter((j) => j.threadId === id)) await this.store.remove("jobs", j.id);
+    // Its calls go too, recordings and all.
+    const { recordingPath } = await import("./calls.ts");
+    for (const c of (await this.store.all<import("./calls.ts").Call>("calls")).filter((c) => c.threadId === id)) {
+      rmSync(recordingPath(this.config.dataDir, c.id), { force: true });
+      await this.calls?.deleteRecording(c).catch(() => {}); // Arca's copy too
+      await this.store.remove("calls", c.id);
+    }
     const ok = await this.store.remove("threads", id);
     this.emit("threads");
     return ok;
@@ -2717,7 +2724,10 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
   private async runCall(act: { to: string; brief: string; voice?: import("./calls.ts").VoicePrefs }, ap: Approval) {
     if (!this.calls) return { ok: false, output: "Voice calls aren't set up on this hub." };
     try {
-      const c = await this.calls.start({ to: act.to, brief: act.brief, voice: act.voice, threadId: ap.threadId || ORPHAN_THREAD, jobId: ap.jobId });
+      const job = ap.jobId ? await this.store.get<Job>("jobs", ap.jobId) : null;
+      const mate = job ? await this.teammate(job.teammateId) : null;
+      const startedBy = { ...(mate?.name ? { agent: mate.name } : {}), ...(job ? { task: (job.label || job.task).slice(0, 120) } : {}), approvedAt: this.clock().toISOString() };
+      const c = await this.calls.start({ to: act.to, brief: act.brief, voice: act.voice, threadId: ap.threadId || ORPHAN_THREAD, jobId: ap.jobId, startedBy });
       await this.log("call.placed", `Calling ${c.to} (${c.id})`);
       return { ok: true, output: `Calling ${c.to} now. Call id ${c.id}. Supervise it: run \`hearth-call wait ${c.id}\` in a loop until it ends, answering any question with \`hearth-call answer ${c.id} "…"\`.` };
     } catch (e: any) { return { ok: false, output: `The call wasn't placed: ${String(e?.message || e)}` }; }
@@ -5033,6 +5043,9 @@ ${JSON.stringify(shown, null, 1)}
     this.pipeline.clearEvents(); // events carry message text; sources, triggers and timers are setup, like scripts
     for (const f of await this.store.all<StoredFile>("files")) await this.files.remove(f.id);
     for (const col of ["threads", "messages", "jobs", "approvals", "memory", "notebooks", "places", "locations", "activity", "apps", "appState", "ideas", "days", "people"] as const) await this.store.clear(col);
+    for (const c of await this.store.all<import("./calls.ts").Call>("calls")) await this.calls?.deleteRecording(c).catch(() => {}); // Arca's copies
+    await this.store.clear("calls");
+    rmSync(join(this.config.dataDir, "calls"), { recursive: true, force: true }); // call recordings
     await this.setPrefs({ about: undefined, aboutUpdatedAt: undefined });
     // Plans go too: every reminder and trigger you or the team made (the hub's own jobs stay).
     const p = this.pipeline;

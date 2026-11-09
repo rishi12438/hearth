@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve, extname, dirname } from "node:path";
 type Server = Bun.Server<unknown>;
 import { rotateToken, sha256, deviceForToken, newPairingCode, redeemPairingCode, RateLimiter, addDevice, owners, personalDevices, isOwner, newChallenge, verifyPasskeyRegistration, verifyPasskeyAssertion, Sessions, AccessRequests } from "./auth.ts";
@@ -11,7 +11,7 @@ import { Computers, COPY_ITEMS, isCopyItem } from "./computers.ts";
 import { Machines, realE2b, realSsh, type E2b, type Ssh } from "./machines.ts";
 import { OtherBrowser } from "./other-browser.ts";
 import { Phone, phoneSkill } from "./phone.ts";
-import { Calls, callSkill, type Call, type CallsDeps } from "./calls.ts";
+import { Calls, callSkill, recordingPath, type Call, type CallsDeps } from "./calls.ts";
 import { registerSkills } from "./brains/skills.ts";
 import { Vault } from "./vault.ts";
 import { Connect } from "./connectors/index.ts";
@@ -231,7 +231,10 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   });
   hub.calls = calls;
   // A restart drops live calls: anything the store still has as going is over.
-  for (const c of await store.all<Call>("calls")) { const s = Calls.stale(c); if (s) await store.put<Call>("calls", s); }
+  for (const c of await store.all<Call>("calls")) {
+    let bytes = 0; try { bytes = statSync(recordingPath(config.dataDir, c.id)).size; } catch {}
+    const s = Calls.stale(c, bytes); if (s) await store.put<Call>("calls", s);
+  }
   {
     const h = config.host, local = !h || h === "0.0.0.0" || h === "::" ? "127.0.0.1" : h.includes(":") ? `[${h}]` : h;
     registerSkills(() => (calls.configured() ? [callSkill(`http://${local}:${config.port}`, connect.agentKeyValue())] : []));
@@ -1528,7 +1531,35 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (id === "settings" && method === "PUT") { const m = calls.settings.model(); if (!m) throw new HttpError(409, "Turn voice calls on first."); calls.settings.setVoice(await body(req)); hub.emit("settings", {}); return json(calls.view()); }
         const callId = id || "";
         if (seg[3] === "answer" && method === "POST") { const b = await body(req); try { return json({ result: await calls.answer(callId, String(b?.text || "").trim(), "you", b?.question ? String(b.question) : undefined) }); } catch (e: any) { throw new HttpError(400, e.message); } }
-        if (seg[3] === "hangup" && method === "POST") { await calls.hangup(callId); return json({ ok: true }); }
+        if (seg[3] === "hangup" && method === "POST") { await calls.hangup(callId, "you"); return json({ ok: true }); }
+        // The call log: newest first, without the transcripts (a thread shows those).
+        if (!id && method === "GET") {
+          const all = (await store.all<Call>("calls")).sort((x, y) => y.createdAt.localeCompare(x.createdAt)).slice(0, 200);
+          return json({ calls: all.map(({ lines, brief, questions, ...c }) => ({ ...c, brief: brief.slice(0, 200), lines: lines.length, questions: questions.length })) });
+        }
+        // The call's MP3. ?download=1 saves it under a name that says who and when.
+        // The hub's own copy, else Arca's (it keeps every call's recording in its bucket). Delete removes both.
+        if (seg[3] === "recording") {
+          const c = await store.get<Call>("calls", callId);
+          const f = c ? recordingPath(config.dataDir, c.id) : "";
+          const here = !!c && existsSync(f);
+          if (!c || (!here && !c.arcaRecording?.bytes)) throw new HttpError(404, "No recording for that call.");
+          if (method === "DELETE") {
+            rmSync(f, { force: true });
+            await calls.deleteRecording(c);
+            const next = { ...c, recording: undefined, arcaRecording: undefined };
+            await store.put<Call>("calls", next); hub.emit("call", next);
+            return json({ ok: true });
+          }
+          if (method === "GET") {
+            const name = `call-${c.to.replace(/\D/g, "")}-${c.createdAt.slice(0, 16).replace(/[:T]/g, "-")}.mp3`;
+            const theirs = here ? null : await calls.arcaRecording(c);
+            if (!here && !theirs) throw new HttpError(404, "No recording for that call.");
+            const body = here ? Bun.file(f) : new Blob([theirs as Uint8Array<ArrayBuffer>], { type: "audio/mpeg" });
+            return new Response(body, { headers: { "Content-Type": "audio/mpeg", "Cache-Control": "private, no-store",
+              ...(url.searchParams.get("download") === "1" ? { "Content-Disposition": `attachment; filename="${name}"` } : {}) } });
+          }
+        }
         // A one-time ticket for the call's Listen/Join socket (browsers can't put the device token on a WebSocket).
         if (seg[3] === "live" && method === "POST") {
           if (!calls.isLive(callId)) throw new HttpError(409, "That call isn't on any more.");

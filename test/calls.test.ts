@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Vault } from "../src/vault.ts";
@@ -9,7 +9,7 @@ import { Brain } from "../src/brain.ts";
 import { Scripts } from "../src/scripts.ts";
 import { loadConfig } from "../src/config.ts";
 import {
-  Calls, arcaSignature, cleanVoice, providerOfKey, resample, talkerInstructions, toE164, checkVoiceKey, arcaApi,
+  Calls, CallRecorder, recordingPath, arcaSignature, cleanVoice, providerOfKey, resample, talkerInstructions, toE164, checkVoiceKey, arcaApi,
   type ArcaApi, type Call, type Talker, type TalkerEvents, type TalkerSpec,
 } from "../src/calls.ts";
 import type { Approval } from "../src/types.ts";
@@ -19,14 +19,19 @@ import type { Approval } from "../src/types.ts";
 
 const OPENAI_KEY = "sk-proj-abcdefghijklmnopqrstuvwxyz0123";
 const ARCA_KEY = "arcaph_testkeytestkeytestkeytestkeytestkey1";
-let dir: string, vault: Vault, saved: Map<string, Call>, buzzed: string[], placed: any[], hungUp: string[];
+const arcaBucket = new Map<string, Uint8Array>();
+let paid = false;
+let dir: string, vault: Vault, saved: Map<string, Call>, buzzed: string[], placed: any[], hungUp: string[], accounts: any[], maxSeconds: number;
 let talker: { spec: TalkerSpec; ev: TalkerEvents; heard: number; injected: { text: string; respond: boolean }[]; results: { id: string; out: string }[]; greeted: number; closed: boolean } | null;
 
 const fakeArca = (): ArcaApi => ({
-  async register(h) { expect(h.url).toBe("https://hub.example.com"); return { key: ARCA_KEY, number: "+14155550123" }; },
-  async place(key, b) { expect(key).toBe(ARCA_KEY); placed.push(b); return { id: `arca-${placed.length}`, from: "+14155550123" }; },
+  async account(a) { accounts.push(a); return { token: "tok-hub-account", userId: "user-1" }; },
+  async register(token, h) { expect(token).toBe("tok-hub-account"); expect(h.url).toBe("https://hub.example.com"); return { key: ARCA_KEY, number: "+14155550123", plan: "free", maxCallSeconds: 120 }; },
+  async place(key, b) { expect(key).toBe(ARCA_KEY); placed.push(b); return { id: `arca-${placed.length}`, from: "+14155550123", maxSeconds: Math.min(b.maxSeconds, maxSeconds), plan: paid ? "paid" : "free", recorded: !paid || b.record }; },
   async hangup(_k, id) { hungUp.push(id); },
-  async status() { return { number: "+14155550123", today: { calls: 1, seconds: 30 }, limits: { calls: 20, seconds: 1800 } }; },
+  async recording(_k, id) { return arcaBucket.get(id) ?? null; },
+  async deleteRecording(_k, id) { arcaBucket.delete(id); },
+  async status() { return { number: "+14155550123", plan: "free", today: { calls: 1, seconds: 30 }, limits: { calls: 20, seconds: 1800, callSeconds: 120 } }; },
 });
 const fakeTalker = (spec: TalkerSpec, ev: TalkerEvents): Talker => {
   talker = { spec, ev, heard: 0, injected: [], results: [], greeted: 0, closed: false };
@@ -61,7 +66,7 @@ const signed = (calls: Calls, id: string, body: object) => { const raw = JSON.st
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "hearth-calls-"));
   vault = new Vault(dir);
-  saved = new Map(); buzzed = []; placed = []; hungUp = []; talker = null;
+  arcaBucket.clear(); paid = false; saved = new Map(); buzzed = []; placed = []; hungUp = []; accounts = []; maxSeconds = 900; talker = null;
 });
 afterEach(() => { vault.close(); rmSync(dir, { recursive: true, force: true }); });
 
@@ -91,10 +96,14 @@ test("turning calls on checks the key, gets the hub its own Arca key once, and k
   expect(calls.configured()).toBe(true);
   expect(calls.view()).toMatchObject({ connected: true, provider: "openai", model: "gpt-realtime-2.1", number: "+14155550123", hint: "••••0123" });
   expect(JSON.parse(vault.get("calls-arca")!).key).toBe(ARCA_KEY);
+  // The hub made itself an anonymous Arca account first; the phone key is under it (the plan is the account's).
+  expect(accounts.length).toBe(1);
+  expect(accounts[0].deviceId).toMatch(/^hearth-/);
+  expect(JSON.parse(vault.get("arca-account")!)).toMatchObject({ token: "tok-hub-account", userId: "user-1", deviceId: accounts[0].deviceId });
   // Off and on again keeps the same line (no second registration).
   calls.disconnect();
   expect(calls.configured()).toBe(false);
-  const again = new Calls({ ...(calls as any).d, arca: { ...fakeArca(), register: async () => { throw new Error("registered twice"); } } });
+  const again = new Calls({ ...(calls as any).d, arca: { ...fakeArca(), account: async () => { throw new Error("made twice"); }, register: async () => { throw new Error("registered twice"); } } });
   expect(await again.connect(OPENAI_KEY)).toBeNull();
   // No public https address: the call's audio couldn't reach the hub.
   const local = new Calls({ ...(calls as any).d, publicUrl: () => "http://localhost:7777" });
@@ -237,6 +246,102 @@ test("Join: your mic goes on the call and the bot goes quiet; hand back and it c
   expect(saved.get(c.id)!.lines.filter((l) => l.who === "note").map((l) => l.text)).toEqual(["You joined the call", "You handed the call back"]);
 });
 
+// An MP3 frame header: 11 sync bits, then MPEG-2 (16 kHz) layer III.
+const isMp3 = (b: Uint8Array) => b.length > 4 && b[0] === 0xff && (b[1] & 0xe0) === 0xe0;
+
+test("tracking: who started it, how long, who ended it, and the whole call as a stereo MP3", async () => {
+  const calls = make();
+  await calls.connect(OPENAI_KEY);
+  const c = await calls.start({ to: "+14155550199", brief: "Ask if they're open Sunday.", threadId: "t1", jobId: "j1",
+    startedBy: { agent: "Sam", task: "Sunday opening", approvedAt: "2026-11-09T10:00:00.000Z" } });
+  await signed(calls, c.id, { id: "arca-1", status: "answered" });
+  calls.audioOpen(c.id, sock());
+  // The bot is told to say the call is recorded.
+  expect(talker!.spec.instructions).toContain("This call is recorded");
+  // 2 s of them (Vonage sends a frame every 20 ms, silence included) while the bot talks for a bit.
+  talker!.ev.onAudio(new Int16Array(8000).map((_, i) => Math.round(Math.sin(i / 5) * 6000)));
+  for (let i = 0; i < 100; i++) {
+    calls.audioIn(c.id, new Uint8Array(new Int16Array(320).map((_, j) => Math.round(Math.sin((i * 320 + j) / 9) * 6000)).buffer));
+    if (i % 5 === 0) await sleep(20);
+  }
+  await sleep(60);
+  // Vonage's count of the talk time wins; they hung up.
+  await signed(calls, c.id, { id: "arca-1", status: "completed", duration: 42 });
+  const done = saved.get(c.id)!;
+  expect(done).toMatchObject({ status: "ended", seconds: 42, endedBy: "them", startedBy: { agent: "Sam", task: "Sunday opening" } });
+  const f = recordingPath(dir, c.id);
+  const mp3 = readFileSync(f);
+  expect(isMp3(mp3)).toBe(true);
+  expect(done.recording!.bytes).toBe(mp3.length);
+  expect(done.recording!.seconds).toBe(2);
+  const end: any = await calls.wait(c.id, 0);
+  expect(end.ended).toMatchObject({ seconds: 42, endedBy: "them", recording: f });
+
+  // Free plan: the owner's "off" doesn't apply; Arca records, so the hub does too and the bot says so.
+  calls.settings.setVoice({ record: false });
+  const c1 = await calls.start({ to: "+14155550199", brief: "Hi.", threadId: "t1" });
+  expect(placed.at(-1).record).toBe(false);
+  calls.audioOpen(c1.id, sock());
+  expect(talker!.spec.instructions).toContain("This call is recorded");
+  calls.audioIn(c1.id, new Uint8Array(640));
+  await calls.hangup(c1.id, "you");
+  expect(saved.get(c1.id)!.recording!.bytes).toBeGreaterThan(0);
+
+  // Paid, recording off: nothing saved, and the bot doesn't say it is.
+  paid = true;
+  expect(calls.settings.voice().record).toBe(false);
+  const c2 = await calls.start({ to: "+14155550199", brief: "Hi.", threadId: "t1", voice: { record: true } as any });
+  expect(placed.at(-1).record).toBe(false); // Arca doesn't record it either
+  calls.audioOpen(c2.id, sock());
+  expect(talker!.spec.instructions).not.toContain("recorded");
+  calls.audioIn(c2.id, new Uint8Array(640));
+  await calls.hangup(c2.id, "you");
+  expect(saved.get(c2.id)).toMatchObject({ endedBy: "you" });
+  expect(saved.get(c2.id)!.recording).toBeUndefined();
+  expect(existsSync(recordingPath(dir, c2.id))).toBe(false);
+});
+
+test("free plan: Arca caps the call at 2 minutes; the bot knows, is told to wrap up 20 s before, and the cut shows as the limit", async () => {
+  maxSeconds = 120;
+  const calls = make();
+  await calls.connect(OPENAI_KEY);
+  const c = await calls.start({ to: "+14155550199", brief: "Ask if they're open Sunday.", threadId: "t1" });
+  expect(c.maxSeconds).toBe(120);
+  await signed(calls, c.id, { id: "arca-1", status: "answered" });
+  calls.audioOpen(c.id, sock());
+  expect(talker!.spec.instructions).toContain("The line cuts off after 2 minutes");
+  expect(placed[0].record).toBe(true);
+  // Arca runs the clock: its warning, 20 s before it cuts the line, makes the bot wrap up.
+  expect(talker!.injected.some((i) => i.text.includes("seconds left"))).toBe(false);
+  await signed(calls, c.id, { id: "arca-1", status: "warning", secondsLeft: 20 });
+  expect(talker!.injected.some((i) => i.text.includes("About 20 seconds left") && i.respond)).toBe(true);
+  await signed(calls, c.id, { id: "arca-1", status: "completed", duration: 120, endedBy: "limit" });
+  expect(saved.get(c.id)).toMatchObject({ status: "ended", seconds: 120, endedBy: "limit", maxSeconds: 120 });
+  expect(saved.get(c.id)!.lines.map((l) => l.text)).toContain("Near the time limit: the bot is wrapping up");
+  // Arca's copy of the recording lands later, after the hub has let go of the call.
+  (calls as any).live.delete(c.id);
+  expect(await signed(calls, c.id, { id: "arca-1", status: "recorded", recordingBytes: 4321 })).toBe(true);
+  expect(saved.get(c.id)!.arcaRecording).toEqual({ bytes: 4321 });
+  expect(await calls.event(c.id, JSON.stringify({ status: "recorded" }), "forged")).toBe(false);
+});
+
+test("the recorder lines our side up with theirs, and a hub restart keeps what was recorded", async () => {
+  const f = join(dir, "calls", "x.mp3");
+  const r = new CallRecorder(f);
+  // We sent nothing for a while: silence on our side, never a pile-up when we send in a burst.
+  for (let i = 0; i < 25; i++) r.theirs(new Int16Array(320).fill(1000));
+  for (let i = 0; i < 200; i++) r.ours(new Int16Array(320).fill(2000)); // 4 s at once: only the last 1 s is kept
+  for (let i = 0; i < 100; i++) r.theirs(new Int16Array(320));
+  const out = r.close();
+  expect(out.seconds).toBe(3); // (25 + 100) frames × 20 ms = 2.5 s, rounded
+  expect(statSync(f).size).toBe(out.bytes);
+  // A call the store still thinks is live when the hub starts: ended, by the restart, with its partial recording.
+  const live: Call = { id: "c_x", createdAt: "2026-11-09T10:00:00.000Z", updatedAt: "2026-11-09T10:01:30.000Z", answeredAt: "2026-11-09T10:00:10.000Z",
+    threadId: "t", to: "+1", brief: "", provider: "openai", voice: {}, status: "live", lines: [], questions: [], recording: { bytes: 0, seconds: 0 } };
+  const s = Calls.stale(live, 40_000)!;
+  expect(s).toMatchObject({ status: "ended", endedBy: "hub", seconds: 80, recording: { bytes: 40_000, seconds: 10 } });
+});
+
 test("nobody picks up: Arca's event ends it as not answered", async () => {
   const calls = make();
   await calls.connect(OPENAI_KEY);
@@ -249,15 +354,19 @@ test("nobody picks up: Arca's event ends it as not answered", async () => {
 test("the Arca client speaks the contract (docs/calls-arca.md)", async () => {
   const seen: any[] = [];
   const f = (async (url: any, init: any) => { seen.push({ url: String(url), method: init.method, auth: init.headers.Authorization, body: init.body && JSON.parse(init.body) });
-    if (String(url).endsWith("/register")) return new Response(JSON.stringify({ key: ARCA_KEY, number: "+1415" }), { status: 201 });
+    if (String(url).endsWith("/bootstrap")) return new Response(JSON.stringify({ token: "tok-1", userId: "u-1", anonymous: true }));
+    if (String(url).endsWith("/register")) return new Response(JSON.stringify({ key: ARCA_KEY, number: "+1415", plan: "free", maxCallSeconds: 120 }), { status: 201 });
     if (String(url).endsWith("/calls")) return new Response(JSON.stringify({ error: "Over today's limit." }), { status: 429 });
     return new Response(JSON.stringify({ ok: true })); }) as any;
   const a = arcaApi("https://arca.example/", f);
-  expect(await a.register({ name: "h", url: "https://x" })).toEqual({ key: ARCA_KEY, number: "+1415" });
-  await expect(a.place(ARCA_KEY, { to: "+1", audioUrl: "wss://x", eventUrl: "https://x", maxSeconds: 900 })).rejects.toThrow("Arca: Over today's limit.");
+  expect(await a.account({ deviceId: "hearth-abc", secret: "s".repeat(40), name: "h" })).toEqual({ token: "tok-1", userId: "u-1" });
+  expect(seen[0].body).toEqual({ deviceId: "hearth-abc", bootstrapSecret: "s".repeat(40), displayName: "h" });
+  expect(await a.register("tok-1", { name: "h", url: "https://x" })).toEqual({ key: ARCA_KEY, number: "+1415", plan: "free", maxCallSeconds: 120 });
+  await expect(a.place(ARCA_KEY, { to: "+1", audioUrl: "wss://x", eventUrl: "https://x", maxSeconds: 900, record: true })).rejects.toThrow("Arca: Over today's limit.");
   await a.hangup(ARCA_KEY, "abc");
   expect(seen.map((s) => `${s.method} ${s.url} ${s.auth ?? "-"}`)).toEqual([
-    "POST https://arca.example/v1/phone/register -",
+    "POST https://arca.example/v1/account/bootstrap -",
+    "POST https://arca.example/v1/phone/register Bearer tok-1",
     `POST https://arca.example/v1/phone/calls Bearer ${ARCA_KEY}`,
     `POST https://arca.example/v1/phone/calls/abc/hangup Bearer ${ARCA_KEY}`,
   ]);
@@ -338,7 +447,30 @@ test("through the server: hearth-call asks, Approve dials, Vonage's socket carri
     expect(w.new).toEqual(["Them: Hello?"]);
     expect((await (await agent({ action: "hangup", id: c.id })).json()).result).toBe("Hung up.");
     expect(hungUp).toEqual(["arca-1"]);
-    expect((await store.get<Call>("calls", c.id))!.status).toBe("ended");
+    const ended = (await store.get<Call>("calls", c.id))!;
+    expect(ended).toMatchObject({ status: "ended", endedBy: "agent", startedBy: { approvedAt: expect.any(String) } });
+    expect(ended.recording!.bytes).toBeGreaterThan(0);
     ws.close();
+
+    // The owner's call log and the MP3 (device token only).
+    const { addDevice } = await import("../src/auth.ts");
+    const { token } = await addDevice(store, "Phone", "owner");
+    const dev = (path: string, init: RequestInit = {}) => fetch(`${base}${path}`, { ...init, headers: { Authorization: `Bearer ${token}` } });
+    expect((await fetch(`${base}/api/calls/${c.id}/recording`)).status).toBe(401);
+    const log = await (await dev("/api/calls")).json();
+    expect(log.calls[0]).toMatchObject({ id: c.id, to: "+14155550199", lines: 1, endedBy: "agent" });
+    const rec = await dev(`/api/calls/${c.id}/recording?download=1`);
+    expect(rec.headers.get("content-type")).toBe("audio/mpeg");
+    expect(rec.headers.get("content-disposition")).toContain("call-14155550199-");
+    expect(isMp3(new Uint8Array(await rec.arrayBuffer()))).toBe(true);
+    // Not on the hub any more: it plays Arca's copy.
+    rmSync(recordingPath(dir, c.id));
+    arcaBucket.set("arca-1", new Uint8Array([0xff, 0xf3, 1, 2, 3]));
+    await store.put<Call>("calls", { ...(await store.get<Call>("calls", c.id))!, arcaRecording: { bytes: 5 } });
+    expect(new Uint8Array(await (await dev(`/api/calls/${c.id}/recording`)).arrayBuffer())).toEqual(new Uint8Array([0xff, 0xf3, 1, 2, 3]));
+    expect((await dev(`/api/calls/${c.id}/recording`, { method: "DELETE" })).status).toBe(200);
+    expect(arcaBucket.has("arca-1")).toBe(false); // deleted on Arca too
+    expect((await dev(`/api/calls/${c.id}/recording`)).status).toBe(404);
+    expect((await store.get<Call>("calls", c.id))!.recording).toBeUndefined();
   } finally { delete process.env.HEARTH_PUBLIC_URL; server.stop(true); await store.close(); }
 });
