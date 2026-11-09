@@ -410,7 +410,7 @@ test("a refused message.send goes back to the agent, whose next reply replaces t
   };
   await hub.ramble("message kashyab on linkedin");
   await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "waiting" || j.status === "done"));
-  expect(told[0]).toContain("conversation's name");
+  expect(told[0]).toContain("name exactly as listed");
   const [job] = await store.all<Job>("jobs");
   expect(job.result).toBe("Fixed: waiting for your Approve.");
   expect(job.did!.some((d) => d.label.startsWith("Couldn't draft"))).toBe(false);

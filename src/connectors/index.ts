@@ -1,6 +1,7 @@
 import { portsSkill } from "../events/ports.ts";
 import { sendInPage } from "../browser.ts";
 import { webSender } from "./web-senders.ts";
+import { LinkedInApi, linkedinAgent, linkedinSkill } from "./linkedin-api.ts";
 import type { Hub } from "../hub.ts";
 import type { Vault } from "../vault.ts";
 import type { VoiceSettings } from "../voice.ts";
@@ -56,8 +57,11 @@ export class Connect {
     hub.senders.whatsapp = { connected: () => this.whatsapp.connected(), send: (to, text) => this.whatsapp.send(to, text) };
     hub.senders.slack = { connected: () => this.slack.connected(), send: (to, text) => this.slack.send(to, text) };
     hub.senders.gmail = { connected: () => hub.google.canSend(), send: (to, text, x) => hub.google.sendMail(to, x?.subject || "(no subject)", text, x?.threadId, x?.from) };
+    // LinkedIn through its own API first (linkedin-api.ts), typing only as the fallback.
+    this.linkedin = new LinkedInApi(() => hub.connections.cookies("linkedin.com"), (url, o, fn) => hub.siteAs(url, o, fn));
     for (const ch of ["instagram", "linkedin", "x"] as const)
-      hub.senders[ch] = webSender(ch, (d) => hub.connections.cookies(d), (url, text, o) => sendInPage(url, text, { fingerprint: hub.connections.fingerprintFor(url), ...o }));
+      hub.senders[ch] = webSender(ch, (d) => hub.connections.cookies(d), (url, text, o) => sendInPage(url, text, { fingerprint: hub.connections.fingerprintFor(url), ...o }),
+        ch === "linkedin" && hub.openSite ? this.linkedin : null);
     hub.connections.extra = { whatsapp: () => this.whatsapp.connected() || this.whatsapp.linked(), slack: () => this.slack.connected(), plaid: () => this.plaid.connected() };
     // `needs: plaid`: a key that opens only the read-only bank questions (/api/agent/plaid), for scripts that act on
     // a Plaid ping. Made fresh each start, like the agent's key.
@@ -79,6 +83,8 @@ export class Connect {
     registerSkills(() => (this.plaid.connected() ? [plaidSkill(`http://${local}:${hub.config.port}`, this.agentKey)] : []));
     // Gmail, Drive and Calendar for the agent, while Google is connected, with the same key (google-agent.ts).
     registerSkills(() => (hub.google.connected ? googleSkills(`http://${local}:${hub.config.port}`, this.agentKey) : []));
+    // LinkedIn messages for the agent (hearth-linkedin), while LinkedIn is connected, with the same key.
+    registerSkills(() => (this.linkedin.connected() ? [linkedinSkill(`http://${local}:${hub.config.port}`, this.agentKey)] : []));
     // The lead on hand mid-job (brains/lead.ts): always there, with the same key.
     registerSkills(() => [leadSkill(`http://${local}:${hub.config.port}`, this.agentKey)]);
     // MCP servers, signed in once here, for every brain (mcp.ts): each working run gets them through this hub's proxy,
@@ -110,6 +116,11 @@ export class Connect {
     registerSkills(() => [helpSkill(base, this.agentKey)]);
     hub.brain.mcpServers = (jobId) => this.mcp.forRun(base, this.agentKey, jobId);
   }
+
+  /** LinkedIn's own API with your login (linkedin-api.ts). */
+  readonly linkedin: LinkedInApi;
+  /** The hearth-linkedin command. */
+  linkedinAgent(argv: string[]) { return linkedinAgent(this.linkedin, argv); }
 
   /** MCP servers and their logins (mcp.ts). */
   readonly mcp: Mcp;

@@ -37,7 +37,8 @@ test("Instagram and X take a link to an existing conversation; LinkedIn its link
   expect(badChatLink("x", "https://evil.example/messages/1")).toContain("conversation's link");
   expect(badChatLink("linkedin", "Kashyab Ambarani")).toBeNull();
   // The inbox page itself isn't a conversation (that's what the read used to hand out for every row).
-  expect(badChatLink("linkedin", "https://www.linkedin.com/messaging/")).toContain("conversation's name");
+  expect(badChatLink("linkedin", "https://www.linkedin.com/messaging/")).toContain("name exactly as listed");
+  expect(badChatLink("linkedin", "https://www.linkedin.com/in/jane-doe/")).toBeNull();
   const sent: { url: string; text: string; open?: any }[] = [];
   const s = webSender("linkedin", () => [{ name: "li_at", value: "v", domain: ".linkedin.com" }], async (url, text, o) => { sent.push({ url, text, open: o.open }); });
   expect(s.connected()).toBe(true);
