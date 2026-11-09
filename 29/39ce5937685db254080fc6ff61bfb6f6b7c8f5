@@ -1,0 +1,23 @@
+test/linkedin-api.test.ts
+  s_235aa92759bb89::t_68a74b5822eaf0 7,38-39,47,53,69,92,96-108
+src/connectors/linkedin-api.ts
+  s_235aa92759bb89::t_9a885762f3b3db 18-36,38-39,41,53-54,119,135,144,183-187,191-196,202-206
+src/browser.ts
+  s_235aa92759bb89::t_9a885762f3b3db 203-205,216-217,224-225,247-251
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "2939ce5937685db254080fc6ff61bfb6f6b7c8f5",
+  "prompts": {},
+  "sessions": {
+    "s_235aa92759bb89": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1921d236-0f27-458f-bbf1-d842e6e51204",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
