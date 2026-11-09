@@ -792,6 +792,24 @@ export class EventPipeline {
     return { value: this.findTrigger(id)! };
   }
 
+  /**
+   * Bring one of the hub's own triggers up to date with what this version of the hub asks and does (nobody else can
+   * change them). Corrections to its judge are kept: the question is reworded, not a different one.
+   */
+  refreshSystemTrigger(name: string, input: { judge?: any; action?: any }): Result<EventTrigger> {
+    const t = this.findTrigger(name);
+    if (!t || t.createdBy !== "system") return { error: `No hub trigger called "${name}".` };
+    const s = this.findSource(t.sourceId)!;
+    const judge = input.judge === undefined ? t.judge : this.cleanJudgeFor(input.judge, s);
+    if (typeof judge === "string") return { error: judge };
+    const action = input.action === undefined ? t.action : this.cleanAction(input.action, true);
+    if (typeof action === "string") return { error: action };
+    if (j(judge) === j(t.judge) && j(action) === j(t.action)) return { value: t };
+    this.db.query("UPDATE triggers SET judge = ?, action = ?, updated_at = ? WHERE id = ?").run(judge ? j(judge) : null, j(action), this.now(), t.id);
+    this.onChange("triggers");
+    return { value: this.findTrigger(t.id)! };
+  }
+
   async updateTrigger(idOrName: string, input: any): Promise<Result<EventTrigger>> {
     const t = this.findTrigger(idOrName);
     if (!t) return { error: `No trigger called "${idOrName}".` };

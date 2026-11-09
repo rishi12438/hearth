@@ -191,6 +191,13 @@ test("inbox watch: the hub's own once Google is connected; only email the judge 
   expect(t).toMatchObject({ createdBy: "system", status: "active", judge: { output: { type: "yesno" } }, action: { type: "message", agent: true } });
   expect(hub.pipeline.triggers().filter((x) => x.name === "inbox-watch").length).toBe(1);
   expect((await hub.pipeline.updateTrigger("inbox-watch", { formula: "false" })).error).toBeTruthy(); // pause only
+  // An older hub's wording is brought up to date at start; message notices (LinkedIn, Slack) are a yes, read at the source.
+  (hub.pipeline as any).db.query("UPDATE triggers SET judge = json_set(judge, '$.prompt', 'old question') WHERE id = ?").run(t.id);
+  await hub.ensureInboxWatch();
+  const fresh = hub.pipeline.findTrigger("inbox-watch")!;
+  expect(fresh.judge!.prompt).toContain("LinkedIn");
+  expect((fresh.action as any).message).toContain("read the real conversation there first");
+  expect(fresh.id).toBe(t.id);
   await lookNow("inbox-watch");
   inbox.unshift({ id: "m2", from: "Sam <sam@example.com>", subject: "Urgent: can you confirm Friday?", body: "Need an answer asap" });
   inbox.unshift({ id: "m3", from: "news@weekly.example.com", subject: "This week in shoes", body: "Our picks." });
