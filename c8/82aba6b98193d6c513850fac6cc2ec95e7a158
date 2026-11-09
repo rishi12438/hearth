@@ -1,0 +1,51 @@
+test/linkedin-api.test.ts
+  s_235aa92759bb89::t_3b889c50caf4f2 1-27,29-222
+  s_235aa92759bb89::t_b8226d82bebdef 28
+src/sources/index.ts
+  s_235aa92759bb89::t_335ce018bfd7f2 2,29-31
+src/server.ts
+  s_235aa92759bb89::t_9f5a7fd458ec05 392
+  s_235aa92759bb89::t_e5713462cdfafe 150,382-391,393-394
+src/sources/pages.ts
+  s_235aa92759bb89::t_f4e876b2cfd168 2,9
+src/browser.ts
+  s_235aa92759bb89::t_fb4ec4290c757b 198-245
+  s_235aa92759bb89::t_f4e876b2cfd168 276-278,342-358,366-369,375,378,401
+src/connectors/index.ts
+  s_235aa92759bb89::t_8f4ea0d7e48947 4,60-61,63-64,86-87,120-124
+src/sources/linkedin.ts
+  s_235aa92759bb89::t_335ce018bfd7f2 1-3,8-9,12,28-52,61-62,67-68,70,73-92
+src/computer.ts
+  s_235aa92759bb89::t_e5713462cdfafe 13,253,255,346
+src/hub.ts
+  s_235aa92759bb89::t_8f4ea0d7e48947 14,137-144,154,4453-4457
+src/connectors/web-senders.ts
+  s_235aa92759bb89::t_c307467a8b1e8e 107-108
+  s_235aa92759bb89::t_89e913e9e7d432 1-2,11-14,19-20,37-38,61,63-65,70-100,110-112
+src/brain.ts
+  s_235aa92759bb89::t_9f5a7fd458ec05 325-327
+test/hub.test.ts
+  s_235aa92759bb89::t_d6c8a50df902d5 413
+src/computers.ts
+  s_235aa92759bb89::t_e5713462cdfafe 92
+test/web-send.test.ts
+  s_235aa92759bb89::t_4be4ac0771fcba 40-41
+src/connectors/linkedin-api.ts
+  s_235aa92759bb89::t_b2fd05b124adf4 1-263
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "c882aba6b98193d6c513850fac6cc2ec95e7a158",
+  "prompts": {},
+  "sessions": {
+    "s_235aa92759bb89": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1921d236-0f27-458f-bbf1-d842e6e51204",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
