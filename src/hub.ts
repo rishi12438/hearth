@@ -11,7 +11,7 @@ import { parseReply } from "./reply.ts";
 import { look, lineDiff } from "./watch.ts";
 import { Google } from "./google.ts";
 import { Connections } from "./connections.ts";
-import { readPage } from "./browser.ts";
+import { readPage, withSite, type OpenSite } from "./browser.ts";
 import { SignedOut } from "./sources/pages.ts";
 import type { Vault } from "./vault.ts";
 import { SOURCES, sourceById, formatItems, needOf, type Item } from "./sources/index.ts";
@@ -134,6 +134,14 @@ export class Hub {
   }
   /** Headless Chrome for logged-in sites. Swapped in tests. */
   readPage = readPage;
+  /** A logged-in site's own API from inside one of its pages (LinkedIn's Voyager). Off under `bun test`, where reads
+   *  are faked through readPage; a test that wants it sets it. */
+  openSite: OpenSite | null = process.env.NODE_ENV === "test" ? null : withSite;
+  /** openSite as this login's browser (see Fingerprint), for the senders and the hearth-linkedin command. */
+  siteAs: OpenSite = (url, o, fn) => {
+    if (!this.openSite) throw new Error("Not available here.");
+    return this.openSite(url, { fingerprint: this.connections.fingerprintFor(url), ...o }, fn);
+  };
   /** Linked computers (your Mac), set by the server. A Mac can copy browser logins up and be re-asked when one dies. */
   computers: { refreshCookies(site?: string): unknown; canCopyCookies(): boolean; freshLogin?(site: string, ms?: number): Promise<FreshLogin> } | null = null;
   /** How long a job waits for your Mac to answer "do you have this login?" (shorter in tests). */
@@ -143,6 +151,7 @@ export class Hub {
   /** Every logged-in read goes out as the browser its login came from (see Fingerprint), unless the caller set one. */
   private sourceCtx = async () => ({ google: this.google, cookies: (domain: string) => this.connections.cookies(domain),
     readPage: ((url, o = {}) => this.readPage(url, { fingerprint: this.connections.fingerprintFor(url), ...o })) as typeof readPage,
+    openSite: this.openSite ? this.siteAs : null,
     now: this.clock(), tz: (await this.prefs()).tz });
   private _pipeline: EventPipeline | null = null;
   /**
@@ -4441,7 +4450,11 @@ ${JSON.stringify(shown, null, 1)}
           return { items: [], error: String(e.message).slice(0, 200) };
         }
         const known = new Set<string>(seen?.ids || []);
-        const fresh = seen ? items.filter((i) => !known.has(i.id)) : [];
+        // Ids carry their kind ("li:…" from LinkedIn's API, a bare hash from reading the page). When the read changed
+        // how it makes them, nothing would match what was seen, so that look only remembers, like a first one.
+        const kind = (id: string) => id.match(/^([a-z]+):/)?.[1] ?? "";
+        const sameKind = !items.length || !known.size || [...known].some((k) => kind(k) === kind(items[0].id));
+        const fresh = seen && sameKind ? items.filter((i) => !known.has(i.id)) : [];
         // Remember what we've seen, newest first, capped so the list doesn't grow forever.
         const ids = [...new Set([...items.map((i) => i.id), ...known])].slice(0, 1000);
         return { seen: { ids, at: this.clock().toISOString() }, items: fresh.map((i) => ({ app: c.app, id: i.id, title: i.title, text: i.text, url: i.url ?? null, at: i.at ?? null, when: i.when ?? null, unread: i.unread ?? null })) };

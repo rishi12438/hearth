@@ -10,6 +10,7 @@ import type { Config } from "./config.ts";
 import { TOKEN_RE } from "./tokenmint.ts";
 import { checkTools, type ToolStatus } from "./brains/tools.ts";
 import { registerSkills } from "./brains/skills.ts";
+import { linkedinSkill } from "./connectors/linkedin-api.ts";
 import { chromeHere } from "./mac-chrome.ts";
 import { googleSkills } from "./connectors/google-agent.ts";
 
@@ -249,8 +250,9 @@ export function connect(opts: Opts) {
   const send = (m: unknown) => { try { ws?.send(JSON.stringify(m)); } catch {} };
   const url = link.hub.replace(/^http/, "ws") + "/computer";
   // The hub's agent skills for jobs run here (Gmail, Drive, Calendar), pointed back at the hub with this connection's key.
-  let agentSkills: { key: string; google: boolean } | null = null;
+  let agentSkills: { key: string; google: boolean; linkedin: boolean } | null = null;
   registerSkills(() => (agentSkills?.google ? googleSkills(link.hub, agentSkills.key) : []));
+  registerSkills(() => (agentSkills?.linkedin ? [linkedinSkill(link.hub, agentSkills.key)] : []));
 
   // Copy up only what changed since the hub last got it.
   const copyUp = () => {
@@ -341,7 +343,7 @@ export function connect(opts: Opts) {
           .then((r) => send({ t: "browsed", id: m.id, ...r }), (e) => send({ t: "browsed", id: m.id, ok: false, out: String(e?.message || e) }));
       }
       else if (m.t === "want") { want = { items: (m.items || []).filter(isCopyItem), have: m.have || {} }; copyUp(); }
-      else if (m.t === "skills" && typeof m.key === "string") { agentSkills = { key: m.key, google: m.google === true }; brain.refreshSkills?.(); }
+      else if (m.t === "skills" && typeof m.key === "string") { agentSkills = { key: m.key, google: m.google === true, linkedin: m.linkedin === true }; brain.refreshSkills?.(); }
       else if (m.t === "wantCookies") { cookieWant = { sites: (m.sites || []).filter(isValidDomain), have: m.have || {}, fresh: isValidDomain(m.fresh) ? m.fresh : undefined }; copyCookiesUp(); }
       else if (m.t === "logins" && link.cloud && m.items && typeof m.items === "object") {
         const wrote = writeLogins(opts.home || homedir(), m.items);

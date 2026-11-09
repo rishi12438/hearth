@@ -1,5 +1,5 @@
 import type { Google } from "../google.ts";
-import type { Cookie, readPage } from "../browser.ts";
+import type { Cookie, OpenSite, readPage } from "../browser.ts";
 // (connection ids are plain strings now: a preset id, a domain, or "google")
 import { gmail } from "./gmail.ts";
 import { calendar } from "./calendar.ts";
@@ -26,7 +26,9 @@ export type Item = {
   unread?: boolean;
 };
 
-export type SourceCtx = { google: Google; cookies: (domain: string) => Cookie[]; readPage: typeof readPage; now: Date; tz: string };
+export type SourceCtx = { google: Google; cookies: (domain: string) => Cookie[]; readPage: typeof readPage; now: Date; tz: string;
+  /** A logged-in site's own API from inside one of its pages (LinkedIn's Voyager); absent, sources read the page. */
+  openSite?: OpenSite | null };
 
 export interface Source<C = Record<string, unknown>> {
   id: string;

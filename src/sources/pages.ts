@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
-import type { Cookie } from "../browser.ts";
+import { SignedOut, type Cookie } from "../browser.ts";
 import type { Item, SourceCtx } from "./index.ts";
 
 // Shared by modules that read a site you're logged into (LinkedIn, X): open the page in headless Chrome with your
 // cookies, pick out the list items by selector, and give each an id that ignores "5m ago" style times, so an item only
 // counts as new when its words change (a new message in a conversation, a new notification).
 
-export class SignedOut extends Error {}
+export { SignedOut };
 
 export type Page = {
   url: string;

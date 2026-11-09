@@ -195,6 +195,54 @@ async function scrollForMore(send: Cdp, m: { items: string[]; until: number }, d
   }
 }
 
+/** The site signed Hearth out (its login page, or a stale cookie bouncing until Chrome gives up). */
+export class SignedOut extends Error {}
+
+/** One HTTP call made by the page itself (fetch() inside it), so it carries the page's cookies and browser headers. */
+export type SiteCall = (req: { method?: "GET" | "POST"; url: string; headers?: Record<string, string>; body?: string }) => Promise<{ status: number; body: string }>;
+export type SiteHandle = { call: SiteCall; cookie(name: string): Promise<string> };
+export type SiteOpts = { cookies: Cookie[]; signedOut: RegExp; chrome?: string | null; fingerprint?: Fingerprint | null; timeoutMs?: number };
+export type OpenSite = <T>(url: string, o: SiteOpts, fn: (site: SiteHandle) => Promise<T>) => Promise<T>;
+
+/**
+ * Opens one page of a site you're logged into and lets `fn` make calls to that site's own API from inside it, the way
+ * its web app does (LinkedIn's Voyager): no clicking or typing, and each call goes out as this same browser.
+ */
+export const withSite: OpenSite = (url, o, fn) =>
+  withPage(url, { cookies: o.cookies, chrome: o.chrome, fingerprint: o.fingerprint, timeoutMs: o.timeoutMs ?? 60_000 }, async (send, deadline) => {
+    const host = new URL(url).hostname;
+    let href = "";
+    for (const until = Math.min(Date.now() + 20_000, deadline - 5000); Date.now() < until;) {
+      await Bun.sleep(400);
+      href = String(await evalIn(send, "location.href") || "");
+      if (o.signedOut.test(href)) throw new SignedOut("The site signed Hearth out.");
+      if (href.startsWith("chrome-error:")) {
+        const text = String(await evalIn(send, "document.body ? document.body.innerText : ''") || "");
+        if (/TOO_MANY_REDIRECTS/.test(text)) throw new SignedOut("The site signed Hearth out.");
+        throw new Error(`The site didn't load (${text.match(/ERR_[A-Z_]+/)?.[0] || "network error"}).`);
+      }
+      if (href.includes(host) && (await evalIn(send, "document.readyState")) !== "loading") break;
+    }
+    if (!href.includes(host)) throw new Error("The site didn't load.");
+    const call: SiteCall = async (req) => {
+      const left = Math.max(2000, Math.min(30_000, deadline - Date.now() - 1000));
+      const r = await send("Runtime.evaluate", {
+        expression: `(async () => { const c = new AbortController(); setTimeout(() => c.abort(), ${left});
+          const r = await fetch(${JSON.stringify(req.url)}, { method: ${JSON.stringify(req.method || "GET")}, headers: ${JSON.stringify(req.headers || {})},
+            credentials: "include", signal: c.signal${req.body !== undefined ? `, body: ${JSON.stringify(req.body)}` : ""} });
+          return { status: r.status, body: await r.text() }; })()`,
+        awaitPromise: true, returnByValue: true,
+      });
+      if (r?.exceptionDetails || !r?.result?.value) throw new Error(`The call didn't finish (${String(r?.exceptionDetails?.exception?.description || "no answer").split("\n")[0].slice(0, 120)}).`);
+      return r.result.value;
+    };
+    const cookie = async (name: string) => {
+      const all: any[] = (await send("Network.getCookies", { urls: [url] }).catch(() => null))?.cookies || [];
+      return String(all.find((c) => c.name === name)?.value || "");
+    };
+    return fn({ call, cookie });
+  });
+
 /** Opens a page in headless Chrome and returns its final URL, visible text, and what "extract" pulled out. */
 export async function readPage(url: string, opts: ReadOpts = {}): Promise<{ url: string; text: string; data?: unknown }> {
   return withPage(url, opts, async (send, deadline) => {
@@ -225,6 +273,9 @@ export type SendIn = {
   /** The page is the inbox, not the chat: search for the conversation named `name`, open it, and check it's the one
    *  that opened (its header shows that name) before typing. For sites whose list has no link per conversation. */
   open?: OpenByName;
+  /** Click the first of these (a profile's "Message" button) to open a new conversation's box, then type only into a
+   *  box that appeared after the click (a chat left open from before is never the one typed into). */
+  click?: string[];
 };
 
 export type OpenByName = {
@@ -288,6 +339,23 @@ async function openByName(send: Cdp, o: OpenByName, signedOut: RegExp, deadline:
   throw new Error(`Opened a conversation but it shows "${shown || "no name"}", not "${o.name}". Nothing was sent.`);
 }
 
+/** Wait for the page's button (a profile's "Message"), mark the message boxes already open, and click it. */
+async function clickToOpen(send: Cdp, click: string[], box: string, signedOut: RegExp, deadline: number) {
+  const find = `(() => { const seen = (e) => e && e.offsetParent !== null && !e.disabled;
+    for (const s of ${JSON.stringify(click)}) { const e = [...document.querySelectorAll(s)].find(seen); if (e) return e; }
+    return [...document.querySelectorAll("main button, main a")].find((e) => seen(e) && /^message$/i.test((e.innerText || "").trim())) || null; })()`;
+  let ok = false;
+  while (!ok && Date.now() < deadline - 15_000) {
+    await Bun.sleep(600);
+    if (signedOut.test(String(await evalIn(send, "location.href")))) throw new Error("The site signed Hearth out. Reconnect it in Connectors.");
+    ok = (await evalIn(send, `(() => { const b = ${find}; if (!b) return false;
+      document.querySelectorAll(${box}).forEach((e) => e.setAttribute("data-hearth-old", "1"));
+      b.scrollIntoView(); b.click(); return true; })()`)) === true;
+  }
+  if (!ok) throw new Error("Couldn't find a Message button on their profile (you may not be able to message them, or the site changed). Nothing was sent.");
+  await Bun.sleep(1500);
+}
+
 /**
  * Types `text` into a conversation you're logged into and sends it, like you would: open the chat, click the message
  * box, type, press Send. Then checks the words show up in the chat. Only called after you tapped Approve.
@@ -295,16 +363,19 @@ async function openByName(send: Cdp, o: OpenByName, signedOut: RegExp, deadline:
 export async function sendInPage(url: string, text: string, o: SendIn): Promise<void> {
   await withPage(url, { cookies: o.cookies, chrome: o.chrome, fingerprint: o.fingerprint, timeoutMs: o.timeoutMs ?? 60_000 }, async (send, deadline) => {
     if (o.open) await openByName(send, o.open, o.signedOut, deadline);
-    const box = JSON.stringify(o.composer.join(", "));
+    // The message box: the first match, or (after a click) the first that wasn't on the page before it.
+    const sel = JSON.stringify(o.composer.join(", "));
+    const pick = `[...document.querySelectorAll(${sel})].find((e) => !e.hasAttribute("data-hearth-old"))`;
+    if (o.click?.length) await clickToOpen(send, o.click, sel, o.signedOut, deadline);
     let found = false;
     while (!found && Date.now() < deadline - 8000) {
       await Bun.sleep(500);
       const href = String(await evalIn(send, "location.href"));
       if (o.signedOut.test(href)) throw new Error("The site signed Hearth out. Reconnect it in Connectors.");
-      found = (await evalIn(send, `!!document.querySelector(${box})`)) === true;
+      found = (await evalIn(send, `!!(${pick})`)) === true;
     }
     if (!found) throw new Error("Couldn't find the message box on that page (the chat link may be wrong, or the site changed). Nothing was sent.");
-    await evalIn(send, `(() => { const e = document.querySelector(${box}); e.scrollIntoView(); e.focus(); e.click && e.click(); return true; })()`);
+    await evalIn(send, `(() => { const e = ${pick}; e.scrollIntoView(); e.focus(); e.click && e.click(); return true; })()`);
     await Bun.sleep(300);
     // One line at a time, with Shift+Enter between lines, so a multi-line message doesn't send early.
     const lines = text.replace(/\r/g, "").split("\n");
@@ -327,7 +398,7 @@ export async function sendInPage(url: string, text: string, o: SendIn): Promise<
     const until = Math.min(Date.now() + 10_000, deadline);
     while (Date.now() < until) {
       await Bun.sleep(600);
-      const ok = await evalIn(send, `(() => { const e = document.querySelector(${box}); const left = e ? (e.innerText || e.value || "").trim() : ""; return !left && document.body.innerText.includes(${probe}); })()`);
+      const ok = await evalIn(send, `(() => { const e = ${pick}; const left = e ? (e.innerText || e.value || "").trim() : ""; return !left && document.body.innerText.includes(${probe}); })()`);
       if (ok === true) return;
     }
     throw new Error("Typed the message but couldn't confirm it went out. Check the chat before trying again, so it isn't sent twice.");

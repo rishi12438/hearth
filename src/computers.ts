@@ -89,7 +89,7 @@ export class Computers implements Remote {
     /** Which browser logins (cookie sites) the hub wants Macs to copy up, the hash it already has, and where they go. */
     cookieSites?: () => string[]; cookieHave?: (site: string) => string | undefined; onCookies?: (site: string, data: string) => void;
     /** Which of the hub's agent skills a computer's jobs get (Google while it's connected). */
-    agentSkills?: () => { google: boolean } }) {}
+    agentSkills?: () => { google: boolean; linkedin?: boolean } }) {}
   private now() { return this.opts.now ? this.opts.now() : Date.now(); }
 
   start() { this.timer ??= setInterval(() => this.tick(), 5000); }

@@ -147,7 +147,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
     cookieHave: (site) => hub.connections.cookieHave(site),
     onCookies: (site, data) => { hub.connections.receiveFromMac(site, data); hub.emit("connections"); hub.audit("mac-copy", site, "your Mac", { ok: true }).catch(() => {}); },
     // Jobs that run on a linked computer get the Google commands too, while Google is connected (connectors/google-agent.ts).
-    agentSkills: () => ({ google: hub.google.connected }) });
+    agentSkills: () => ({ google: hub.google.connected, linkedin: connect.linkedin.connected() }) });
   // A connection came or went (Google signed in or out…): the skills that depend on it follow, here and on computers.
   hub.on((e) => { if (e.type === "connections") { computers.skillsChanged(); hub.brain.refreshSkills?.(); } });
   const linkedComputers = async () => (await store.all<Device>("devices")).filter((d) => d.role === "computer");
@@ -378,6 +378,19 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         await hub.log("plaid.agent", `hearth-plaid ${argv.join(" ").slice(0, 120)}`);
         return new Response(JSON.stringify(r, null, 1), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
       } catch (e: any) { throw new HttpError(400, e.message); }
+    }
+    // The agent's hearth-linkedin (connectors/linkedin-api.ts): read your LinkedIn conversations through LinkedIn's API.
+    // Read-only; sending is a message.send action. Same keys as hearth-lead (a job on your Mac asks here too).
+    if (path === "/api/agent/linkedin" && method === "POST") {
+      const key = req.headers.get("x-hearth-agent");
+      const from = fromThisMachine(req, server) && connect.isAgentKey(key) ? "hub" : computers.agentKeyOwner(key);
+      if (!from) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not the agent's key."); }
+      let argv: string[] = [];
+      try { argv = (await req.formData()).getAll("a").slice(0, 10).map((a) => String(a).slice(0, 500)); } catch { throw new HttpError(400, "Send the command's words as a fields."); }
+      server.timeout(req, 120);
+      const out = await connect.linkedinAgent(argv);
+      await hub.audit("read", "linkedin.com", from === "hub" ? "an agent" : `an agent on ${from}`, { ok: !(out as any)?.error, detail: `hearth-linkedin ${argv.slice(0, 2).join(" ").slice(0, 80)}` }).catch(() => {});
+      return new Response(JSON.stringify(out, null, 1) + "\n", { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
     }
     // The agent's hearth-lead: a job asks the lead (the heavy model) for advice mid-run (brains/lead.ts). Same keys as Google's.
     if (path === "/api/agent/lead" && method === "POST") {
