@@ -14,6 +14,7 @@ import { serper, serperKey } from "./serper.ts";
 import { otherBrowserSkill } from "../other-browser.ts";
 import { helpSkill } from "../help.ts";
 import { deepgram } from "./deepgram.ts";
+import { calls } from "./calls.ts";
 import { instagram, linkedin } from "./cookies.ts";
 import { google } from "./google.ts";
 import { googleSkills } from "./google-agent.ts";
@@ -30,7 +31,7 @@ import { isBrainId, removeLogin } from "../brains/logins.ts";
 // (types.ts); this file only lists them, in the order the grid shows them, and runs the shared parts: the ban-risk
 // gate, the log line, and telling the app something changed. To add a connector: write its module, add it here.
 
-export const CONNECTORS: Connector[] = [claude, codex, serper, deepgram, whatsapp, slack, instagram, linkedin, google, plaid];
+export const CONNECTORS: Connector[] = [claude, codex, serper, deepgram, calls, whatsapp, slack, instagram, linkedin, google, plaid];
 export const connectorById = (id: string) => CONNECTORS.find((c) => c.def.id === id) ?? null;
 export type { Tile } from "./types.ts";
 

@@ -44,6 +44,7 @@ const LOGOS: Record<string, { bg: string; shapes: Shape[] }> = {
   claude: { bg: "#D97757", shapes: [["path", { d: CLAUDE_MARK, fill: "#fff" }]] },
   codex: { bg: "#000", shapes: [["path", { d: OPENAI_MARK, fill: "#fff" }]] },
   serper: { bg: "#1A73E8", shapes: [["circle", { cx: 10.5, cy: 10.5, r: 5, fill: "none", stroke: "#fff", "stroke-width": 2.2 }], ["path", { d: "M14.5 14.5 19 19", stroke: "#fff", "stroke-width": 2.4, "stroke-linecap": "round" }]] },
+  calls: { bg: "#0B8F5B", shapes: [["path", { d: "M8.2 4.5 6.4 4.4c-1 0-2 .9-1.9 2 .5 6.6 5.6 11.8 12.2 12.3 1.1.1 2-.9 2-1.9l-.1-1.8c0-.5-.4-.9-.9-1l-2.6-.6c-.4-.1-.8.1-1 .4l-.8 1.2a10 10 0 0 1-4.3-4.3l1.2-.8c.3-.2.5-.6.4-1L10 5.4c-.1-.5-.5-.9-1-.9Z", fill: "#fff" }]] },
   deepgram: { bg: "#101012", shapes: [["path", { d: "M6 10v4M9 7v10M12 9v6M15 5v14M18 10v4", stroke: "#13EF93", "stroke-width": 2, "stroke-linecap": "round" }]] },
   whatsapp: { bg: "#25D366", shapes: [["path", { d: "M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z", fill: "#fff" }]] },
   plaid: { bg: "#0B1F33", shapes: [["path", { d: "M4.5 9.5 12 5l7.5 4.5M6 10.5v6M10 10.5v6M14 10.5v6M18 10.5v6M4.5 19h15", fill: "none", stroke: "#fff", "stroke-width": 1.8, "stroke-linecap": "round", "stroke-linejoin": "round" }]] },
@@ -123,6 +124,7 @@ export function openTile(t: Tile) {
     case "whatsapp": return whatsappSheet();
     case "slack": return slackSheet(t);
     case "plaid": return plaidSheet(t);
+    case "calls": return callsSheet(t);
     default: return keySheet(t);
   }
 }
@@ -251,6 +253,66 @@ function keySheet(t: Tile) {
       : keyForm(t),
     h("p", { class: "muted small" }, "Kept encrypted in your hub's vault. It never goes to the model, this app or your exports."),
   ]);
+}
+
+// ---------- Voice calls: an OpenAI or Gemini key, then how the bot sounds ----------
+
+function callsSheet(t: Tile) {
+  const head = [h("button", { class: "btn ghost", on: { click: D.back } }, icon("back", 16), "All connectors"),
+    h("div", { class: "phero" }, logo(t.id, 52), h("b", null, t.state === "connected" ? "Voice calls are on" : "Turn on voice calls"), h("small", null, t.state === "connected" ? t.detail || "" : t.blurb))];
+  if (t.state !== "connected") {
+    const input = h("input", { class: "field", type: "password", placeholder: "OpenAI key (sk-…) or Gemini key (AIza…)", autocomplete: "off", autocapitalize: "off", spellcheck: false }) as HTMLInputElement;
+    const err = h("p", { class: "err small", hidden: true });
+    const save = h("button", { class: "btn primary big", on: { click: async () => {
+      if (!input.value.trim()) return input.focus();
+      save.disabled = true; save.textContent = "Checking the key and setting up the line…"; err.hidden = true;
+      try { await call("/api/connectors/calls", { method: "PUT", body: { key: input.value.trim() } }); toast("Voice calls are on"); D.back(); }
+      catch (e: any) { err.textContent = e.message; err.hidden = false; save.disabled = false; save.textContent = "Turn on"; }
+    } } }, "Turn on");
+    return D.openSheet(t.label, [...head,
+      h("ol", { class: "steps" },
+        h("li", null, "Get a key for the bot's voice: ", h("a", { href: "https://platform.openai.com/api-keys", target: "_blank", rel: "noopener noreferrer" }, "OpenAI"), " (Realtime) or ", h("a", { href: "https://aistudio.google.com/apikey", target: "_blank", rel: "noopener noreferrer" }, "Gemini"), " (Live). Calls are billed to that key."),
+        h("li", null, "Paste it here. Hearth checks it and sets up its phone line (a shared number, through Arca)."),
+        h("li", null, "Agents can then call people for you. Every call waits for your Approve, and you can listen in or join from the thread.")),
+      input, err, save,
+      h("p", { class: "muted small" }, "Free line: a shared number with no callbacks (anyone who calls it back hears that it doesn't take calls). The key is kept encrypted on your hub.")]);
+  }
+  const box = h("div", { class: "stack" }, h("p", { class: "muted small" }, "Loading…"));
+  D.openSheet(t.label, [...head, box,
+    h("button", { class: "btn danger-ghost", on: { click: () => D.confirmSheet("Turn off voice calls?", "The voice key is removed from the hub. Your phone line stays, so turning them on again is quick.", "Turn off", async () => { await call("/api/connectors/calls", { method: "DELETE" }); toast("Voice calls are off"); D.back(); }) } }, "Turn off voice calls")]);
+  call<any>("/api/calls/settings").then((v) => {
+    const vp = v.voice || {};
+    const field = (label: string, el: HTMLElement, hint?: string) => h("label", { class: "fieldrow" }, h("b", { class: "small" }, label), el, hint ? h("small", { class: "muted" }, hint) : null);
+    const text = (val: string | undefined, ph: string, max = 60) => h("input", { class: "field", value: val || "", placeholder: ph, maxlength: String(max) }) as HTMLInputElement;
+    const voice = h("select", { class: "field" }, h("option", { value: "" }, v.provider === "openai" ? "Default (marin)" : "Default (Puck)"),
+      (v.voices || []).map((x: string) => h("option", { value: x, selected: vp.voice === x }, x))) as HTMLSelectElement;
+    const speed = h("input", { type: "range", min: "0.7", max: "1.3", step: "0.05", value: String(vp.speed ?? 1) }) as HTMLInputElement;
+    const speedLabel = h("small", { class: "muted" }, `${Number(speed.value).toFixed(2)}×`);
+    speed.addEventListener("input", () => { speedLabel.textContent = `${Number(speed.value).toFixed(2)}×`; });
+    const name = text(vp.name, "Hearth"), owner = text(vp.owner, "Your name"), language = text(vp.language, "English");
+    const intro = h("textarea", { class: "field", rows: "2", maxlength: "300", placeholder: "Hi, this is Sam, Rishi's assistant, calling about…" }, vp.intro || "") as HTMLTextAreaElement;
+    const style = h("textarea", { class: "field", rows: "2", maxlength: "300", placeholder: "Warm, brief, a little informal" }, vp.style || "") as HTMLTextAreaElement;
+    const save = h("button", { class: "btn primary big", on: { click: async () => {
+      save.disabled = true;
+      try {
+        await call("/api/calls/settings", { method: "PUT", body: { voice: voice.value, ...(v.provider === "openai" ? { speed: Number(speed.value) === 1 ? "" : Number(speed.value) } : {}),
+          name: name.value, owner: owner.value, language: language.value, intro: intro.value, style: style.value } });
+        toast("Saved");
+      } catch (e) { D.handleError(e); } finally { save.disabled = false; }
+    } } }, "Save");
+    const used = v.line ? `${v.line.today.calls} of ${v.line.limits.calls} calls, ${Math.round(v.line.today.seconds / 60)} of ${Math.round(v.line.limits.seconds / 60)} minutes today` : null;
+    clear(box,
+      h("p", { class: "small" }, h("b", null, "Line: "), v.number || "—", " · shared number, no callbacks", used ? h("br") : null, used ? h("span", { class: "muted" }, used) : null),
+      h("p", { class: "small" }, h("b", null, "Voice model: "), v.provider === "openai" ? "OpenAI Realtime" : "Gemini Live", v.model ? ` (${v.model})` : "", " · ", v.hint || ""),
+      field("Voice", voice),
+      v.provider === "openai" ? field("Speed", h("div", { class: "row2" }, speed, speedLabel)) : null,
+      field("Its name", name), field("Calls for", owner, "Who it says it's calling for."),
+      field("Language", language),
+      field("Opening line", intro, "Leave empty and it says who it is, who for, and why it's calling."),
+      field("How it comes across", style),
+      h("p", { class: "muted small" }, "An agent can pick another voice or language for one call when you ask it to."),
+      save);
+  }).catch((e) => clear(box, h("p", { class: "err small" }, e.message)));
 }
 
 // ---------- Slack: your Chrome login, or a Slack app's token ----------

@@ -1443,3 +1443,16 @@ div.workingoff .linkbtn { margin-top: 0; font-size: 12.5px; flex: none; }
 html:has(.phonescreen) { overscroll-behavior-x: none; }
 .phonetap { position: absolute; width: 36px; height: 36px; margin: -18px 0 0 -18px; border-radius: 50%; background: rgba(255,255,255,.55); box-shadow: 0 0 0 2px rgba(0,0,0,.25); pointer-events: none; animation: phonetap .6s ease-out forwards; }
 @keyframes phonetap { from { transform: scale(.4); opacity: 1; } to { transform: scale(1.4); opacity: 0; } }
+
+/* Phone calls (src/calls.ts): the card in a task's thread. */
+.callcard .calllines { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow-y: auto; }
+.callcard .callline { font-size: 14px; line-height: 1.4; }
+.callcard .callline b { font-weight: var(--fw-semibold); margin-right: 2px; }
+.callcard .callline.bot b { color: var(--ok); }
+.callcard .callnote { font-style: italic; }
+.callcard .callask { margin-top: 10px; padding: 10px; border-radius: 10px; background: var(--surface-2); }
+.callcard .callask p { margin: 0 0 8px; }
+.callcard .callask .row2 { display: flex; gap: 8px; }
+.callcard .callask .field { flex: 1; min-width: 0; }
+.callcard .blockhead time { margin-left: auto; }
+.callcard .sbtn .icon { margin-right: 4px; vertical-align: -2px; }
