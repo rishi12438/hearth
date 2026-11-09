@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { chromePath, sendInPage, withSite, SignedOut, type OpenSite } from "../src/browser.ts";
-import { LinkedInApi, linkedinAgent, linkedinSkill, parseConversation, profileOf, threadLink, threadOf } from "../src/connectors/linkedin-api.ts";
+import { encUrn, LinkedInApi, learnQueryIds, QUERY_IDS, linkedinAgent, linkedinSkill, parseConversation, profileOf, threadLink, threadOf } from "../src/connectors/linkedin-api.ts";
 import { sendByApi, webSender } from "../src/connectors/web-senders.ts";
 import { linkedin } from "../src/sources/linkedin.ts";
 import { createStore, COLLECTIONS, type Store } from "../src/store/index.ts";
@@ -35,6 +35,8 @@ let convs: any[] = [];
 let sendStatus = 201;
 let listStatus = 200;
 let opened: string[] = [];
+let staleIds = false;
+const FRESH = "ffffffffffffffffffffffffffffffff";
 
 /** A fake LinkedIn page: answers Voyager calls the way the real one does. */
 const fakeSite: OpenSite = async (url, o, fn) => {
@@ -42,11 +44,13 @@ const fakeSite: OpenSite = async (url, o, fn) => {
   if (!o.cookies.length) throw new SignedOut("no cookies");
   return fn({
     cookie: async (n) => (n === "JSESSIONID" ? "\"ajax:123\"" : ""),
+    fetched: async () => (url.includes("/messaging/") ? [`https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql?queryId=messengerConversations.${FRESH}&variables=(mailboxUrn:${encUrn(ME)})`] : []),
     call: async (req) => {
       calls.push({ method: req.method || "GET", url: req.url, headers: req.headers || {}, body: req.body });
       if (req.url.endsWith("/voyager/api/me")) return { status: 200, body: JSON.stringify({ data: { "*miniProfile": "urn:li:fs_miniProfile:ACoAAME000" } }) };
       if (req.url.includes("memberIdentity=sam-lee")) return { status: 200, body: JSON.stringify({ data: { "*elements": ["urn:li:fsd_profile:SAM111111"] } }) };
       if (req.url.includes("memberIdentity=new-person")) return { status: 200, body: JSON.stringify({ data: { "*elements": ["urn:li:fsd_profile:NEW999999"] } }) };
+      if (req.url.includes("messengerConversations") && staleIds && !req.url.includes(FRESH)) return { status: 400, body: "{}" };
       if (req.url.includes("messengerConversations")) return { status: listStatus, body: JSON.stringify({ data: { messengerConversationsBySyncToken: { elements: convs } } }) };
       if (req.url.includes("messengerMessages")) return { status: 200, body: JSON.stringify({ data: { messengerMessagesBySyncToken: { elements: [
         { entityUrn: "m2", body: { text: "Thursday works" }, deliveredAt: 1_790_000_100_000, sender: { hostIdentityUrn: "urn:li:fsd_profile:SAM111111", participantType: { member: { firstName: { text: "Sam" }, lastName: { text: "Lee" } } } } },
@@ -62,7 +66,7 @@ const cookies = [{ name: "li_at", value: "v", domain: ".linkedin.com" }];
 const api = () => new LinkedInApi(() => cookies, fakeSite);
 
 beforeEach(() => {
-  calls = []; opened = []; sendStatus = 201; listStatus = 200;
+  calls = []; opened = []; sendStatus = 201; listStatus = 200; staleIds = false;
   convs = [conv("2-sam==", "Sam Lee", "urn:li:fsd_profile:SAM111111", "Thursday works", { unread: 1 }), conv("2-dev", "Dev Patel", "urn:li:fsd_profile:DEV222222", "see you", { mine: true }),
     conv("2-alex1", "Alex Kim", "urn:li:fsd_profile:ALEX1", "a"), conv("2-alex2", "Alex Kim", "urn:li:fsd_profile:ALEX2", "b")];
 });
@@ -85,11 +89,23 @@ test("reads go to the API with the page's CSRF token, and every row has its conv
   expect(items[1].text).toBe("You: see you");
   expect(items.every((i) => i.id.startsWith("li:"))).toBe(true);
   expect(calls[0].headers["csrf-token"]).toBe("ajax:123");
-  expect(calls.find((c) => c.url.includes("messengerConversations"))!.url).toContain(`mailboxUrn:${encodeURIComponent(ME)}`);
+  expect(calls.find((c) => c.url.includes("messengerConversations"))!.url).toContain(`mailboxUrn:${encUrn(ME)}`);
   // One whole conversation, newest first.
   const msgs = await linkedin.items(linkedin.validate({ what: "messages", thread: items[0].url }) as any, { cookies: () => cookies, openSite: fakeSite } as any);
   expect(msgs.map((m) => `${m.title}: ${m.text}`)).toEqual(["Sam Lee: Thursday works", "You: Free this week?"]);
-  expect(calls.at(-1)!.url).toContain(encodeURIComponent(`urn:li:msg_conversation:(${ME},2-sam==)`));
+  expect(calls.at(-1)!.url).toContain("variables=(conversationUrn:urn%3Ali%3Amsg_conversation%3A%28urn%3Ali%3Afsd_profile%3AACoAAME000%2C2-sam%3D%3D%29)");
+});
+
+test("a stale query id: reads the current one off the messaging page and tries again", async () => {
+  const before = { ...QUERY_IDS };
+  staleIds = true;
+  const list: any = await linkedinAgent(api(), ["conversations"]);
+  expect(list.conversations.length).toBe(4);
+  expect(opened).toEqual(["https://www.linkedin.com/feed/", "https://www.linkedin.com/messaging/"]);
+  expect(QUERY_IDS.conversations).toBe(`messengerConversations.${FRESH}`);
+  // Only the list that takes just the mailbox counts (the paged one takes a category and a cursor).
+  expect(learnQueryIds(["https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql?queryId=messengerConversations.cee0648f17e09c88a360194008a806c5&variables=(query:(x),count:20,mailboxUrn:urn%3Ali%3Afsd_profile%3AX)"])).toBe(false);
+  Object.assign(QUERY_IDS, before);
 });
 
 test("when the API refuses, the inbox page is read as before", async () => {

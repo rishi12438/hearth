@@ -15,12 +15,30 @@ export const LINKEDIN_HOME = "https://www.linkedin.com/feed/";
 export const SIGNED_OUT = /linkedin\.com\/(login|authwall|checkpoint|uas\/login|signup)/;
 const API = "https://www.linkedin.com/voyager/api";
 const GRAPHQL = `${API}/voyagerMessagingGraphQL/graphql`;
-const CONVERSATIONS_QUERY = "messengerConversations.0d5e6781bbee71c3e51c8843c6519f48";
-const MESSAGES_QUERY = "messengerMessages.5846eeb71c981f11e0134cb6626cc314";
+export const MESSAGING = "https://www.linkedin.com/messaging/";
+/** The GraphQL query ids LinkedIn's messaging page uses (seen on it 2026-11-09). They change when LinkedIn ships a new
+ *  build; a query refused as unknown makes the next try read the current ones off the messaging page (learnQueryIds). */
+export const QUERY_IDS = { conversations: "messengerConversations.05bbed349f58585b3270fc478e2fc81c", messages: "messengerMessages.b88ffdf26effae7a346a4df9ee0e764c" };
 
-/** A Voyager call that didn't work. `sent` is "maybe" only for a send whose fate isn't known (don't send it again). */
+/** The query ids in the addresses LinkedIn's own page fetched; true if it found any. The conversation list is the
+ *  query that takes only the mailbox (another takes a category and a cursor). */
+export function learnQueryIds(urls: string[]) {
+  let found = false;
+  for (const u of urls) {
+    let d = u;
+    try { d = decodeURIComponent(u); } catch {}
+    const c = d.match(/queryId=(messengerConversations\.[0-9a-f]{20,})&variables=\(mailboxUrn:[^,)]+\)/)?.[1];
+    const m = d.match(/queryId=(messengerMessages\.[0-9a-f]{20,})&variables=\(conversationUrn:/)?.[1];
+    if (c) { QUERY_IDS.conversations = c; found = true; }
+    if (m) { QUERY_IDS.messages = m; found = true; }
+  }
+  return found;
+}
+
+/** A Voyager call that didn't work. `sent` is "maybe" only for a send whose fate isn't known (don't send it again).
+ *  `stale`: a GraphQL query LinkedIn no longer knows (its id changed), before anything was sent. */
 export class VoyagerError extends Error {
-  constructor(message: string, readonly status = 0, readonly sent: "no" | "maybe" = "no") { super(message); }
+  constructor(message: string, readonly status = 0, readonly sent: "no" | "maybe" = "no", readonly stale = false) { super(message); }
 }
 
 export type Person = { name: string; urn: string; profile: string };
@@ -32,6 +50,8 @@ export type Message = { urn: string; from: string; mine: boolean; text: string; 
 
 const text = (v: any) => (typeof v === "string" ? v : typeof v?.text === "string" ? v.text : "");
 const iso = (ms: unknown) => (typeof ms === "number" && ms > 0 ? new Date(ms).toISOString() : null);
+/** A URN inside GraphQL variables, encoded the way LinkedIn's app does it: parentheses too (%28 %29), or it's a 400. */
+export const encUrn = (urn: string) => encodeURIComponent(urn).replace(/[()!'*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 const norm = (s: string) => s.replace(/^●\s*/, "").replace(/\s+/g, " ").trim().toLowerCase();
 
 /** "urn:li:msg_conversation:(urn:li:fsd_profile:ME,2-abc==)" -> "2-abc==". */
@@ -96,7 +116,7 @@ export class Voyager {
   private async get(url: string, accept = "application/vnd.linkedin.normalized+json+2.1") {
     const r = await this.call({ url, headers: this.headers(accept) });
     if (r.status === 401) throw new SignedOut("LinkedIn signed Hearth out.");
-    if (r.status < 200 || r.status >= 300) throw new VoyagerError(`LinkedIn's API answered ${r.status}.`, r.status);
+    if (r.status < 200 || r.status >= 300) throw new VoyagerError(`LinkedIn's API answered ${r.status}.`, r.status, "no", url.startsWith(GRAPHQL) && (r.status === 400 || r.status === 404));
     try { return JSON.parse(r.body); } catch { throw new VoyagerError("LinkedIn's API answered something that isn't JSON.", r.status); }
   }
 
@@ -112,7 +132,7 @@ export class Voyager {
   /** Your most recent conversations (about 20), newest first. */
   async conversations(): Promise<Conversation[]> {
     const me = await this.mailbox();
-    const j = await this.get(`${GRAPHQL}?queryId=${CONVERSATIONS_QUERY}&variables=(mailboxUrn:${encodeURIComponent(me)})`, "application/graphql");
+    const j = await this.get(`${GRAPHQL}?queryId=${QUERY_IDS.conversations}&variables=(mailboxUrn:${encUrn(me)})`, "application/graphql");
     const els = j?.data?.messengerConversationsBySyncToken?.elements;
     if (!Array.isArray(els)) throw new VoyagerError("LinkedIn's conversation list came back in a shape Hearth doesn't know.");
     return els.map((c) => parseConversation(c, me)).filter((c): c is Conversation => !!c);
@@ -121,7 +141,7 @@ export class Voyager {
   /** One conversation's messages, oldest first. */
   async messages(conversationUrn: string): Promise<Message[]> {
     const me = await this.mailbox();
-    const j = await this.get(`${GRAPHQL}?queryId=${MESSAGES_QUERY}&variables=(conversationUrn:${encodeURIComponent(conversationUrn)})`, "application/graphql");
+    const j = await this.get(`${GRAPHQL}?queryId=${QUERY_IDS.messages}&variables=(conversationUrn:${encUrn(conversationUrn)})`, "application/graphql");
     const els = j?.data?.messengerMessagesBySyncToken?.elements;
     if (!Array.isArray(els)) throw new VoyagerError("LinkedIn's messages came back in a shape Hearth doesn't know.");
     return els.map((m) => parseMessage(m, me)).filter((m): m is Message => !!m).sort((a, b) => String(a.at).localeCompare(String(b.at)));
@@ -160,15 +180,30 @@ export class LinkedInApi {
 
   connected() { return this.cookies().length > 0; }
 
+  /**
+   * Runs `fn` against Voyager from a LinkedIn page (the feed, which marks nothing as read). When a query's id has gone
+   * stale, it opens the messaging page once instead, takes the ids LinkedIn's own app just used there, and runs `fn`
+   * again (nothing was sent the first time: a stale query fails before any send).
+   */
   async use<T>(fn: (v: Voyager) => Promise<T>, timeoutMs = 60_000): Promise<T> {
     const cookies = this.cookies();
     if (!cookies.length) throw new SignedOut("LinkedIn isn't connected.");
-    return this.open(LINKEDIN_HOME, { cookies, signedOut: SIGNED_OUT, timeoutMs }, async (site) => {
+    const run = (url: string, learn: boolean) => this.open(url, { cookies, signedOut: SIGNED_OUT, timeoutMs: timeoutMs + (learn ? 20_000 : 0) }, async (site) => {
+      if (learn) {
+        let found = false;
+        for (let i = 0; i < 15 && !found; i++) { await Bun.sleep(1000); found = learnQueryIds(await site.fetched()); }
+        if (!found) throw new VoyagerError("Couldn't find LinkedIn's current messaging queries.");
+      }
       // The CSRF token is the JSESSIONID cookie; LinkedIn sets a fresh one on the page if the login didn't bring one.
       const csrf = (await site.cookie("JSESSIONID")).replace(/^"|"$/g, "") || (cookies.find((c) => c.name === "JSESSIONID")?.value || "").replace(/^"|"$/g, "");
       if (!csrf) throw new VoyagerError("LinkedIn didn't give the page a session token.");
       return fn(new Voyager(site.call, csrf));
     });
+    try { return await run(LINKEDIN_HOME, false); }
+    catch (e) {
+      if (!(e instanceof VoyagerError && e.stale)) throw e;
+      return run(MESSAGING, true);
+    }
   }
 }
 

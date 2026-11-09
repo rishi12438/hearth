@@ -200,7 +200,9 @@ export class SignedOut extends Error {}
 
 /** One HTTP call made by the page itself (fetch() inside it), so it carries the page's cookies and browser headers. */
 export type SiteCall = (req: { method?: "GET" | "POST"; url: string; headers?: Record<string, string>; body?: string }) => Promise<{ status: number; body: string }>;
-export type SiteHandle = { call: SiteCall; cookie(name: string): Promise<string> };
+export type SiteHandle = { call: SiteCall; cookie(name: string): Promise<string>;
+  /** The addresses the page itself has fetched so far (its own API calls among them). */
+  fetched(): Promise<string[]> };
 export type SiteOpts = { cookies: Cookie[]; signedOut: RegExp; chrome?: string | null; fingerprint?: Fingerprint | null; timeoutMs?: number };
 export type OpenSite = <T>(url: string, o: SiteOpts, fn: (site: SiteHandle) => Promise<T>) => Promise<T>;
 
@@ -211,14 +213,16 @@ export type OpenSite = <T>(url: string, o: SiteOpts, fn: (site: SiteHandle) => P
 export const withSite: OpenSite = (url, o, fn) =>
   withPage(url, { cookies: o.cookies, chrome: o.chrome, fingerprint: o.fingerprint, timeoutMs: o.timeoutMs ?? 60_000 }, async (send, deadline) => {
     const host = new URL(url).hostname;
-    let href = "";
-    for (const until = Math.min(Date.now() + 20_000, deadline - 5000); Date.now() < until;) {
+    let href = "", retries = 0;
+    for (const until = Math.min(Date.now() + 25_000, deadline - 5000); Date.now() < until;) {
       await Bun.sleep(400);
       href = String(await evalIn(send, "location.href") || "");
       if (o.signedOut.test(href)) throw new SignedOut("The site signed Hearth out.");
       if (href.startsWith("chrome-error:")) {
         const text = String(await evalIn(send, "document.body ? document.body.innerText : ''") || "");
         if (/TOO_MANY_REDIRECTS/.test(text)) throw new SignedOut("The site signed Hearth out.");
+        // A fresh Chrome sometimes fails its first load while its network settles; load it again.
+        if (/ERR_(CERT_VERIFIER_CHANGED|NETWORK_CHANGED|CONNECTION_RESET)/.test(text) && retries++ < 2) { await Bun.sleep(800); await send("Page.navigate", { url }); continue; }
         throw new Error(`The site didn't load (${text.match(/ERR_[A-Z_]+/)?.[0] || "network error"}).`);
       }
       if (href.includes(host) && (await evalIn(send, "document.readyState")) !== "loading") break;
@@ -240,7 +244,11 @@ export const withSite: OpenSite = (url, o, fn) =>
       const all: any[] = (await send("Network.getCookies", { urls: [url] }).catch(() => null))?.cookies || [];
       return String(all.find((c) => c.name === name)?.value || "");
     };
-    return fn({ call, cookie });
+    const fetched = async () => {
+      const v = await evalIn(send, `performance.getEntriesByType("resource").map((e) => e.name).slice(-500)`);
+      return Array.isArray(v) ? v.map(String) : [];
+    };
+    return fn({ call, cookie, fetched });
   });
 
 /** Opens a page in headless Chrome and returns its final URL, visible text, and what "extract" pulled out. */
