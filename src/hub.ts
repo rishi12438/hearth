@@ -4222,7 +4222,32 @@ ${JSON.stringify(shown, null, 1)}
   async ensureInboxWatch() {
     if (!this.connections.connected("google")) return;
     const p = this.pipeline;
-    if (p.findTrigger(INBOX_WATCH)) return;
+    const judge = {
+      prompt: "Does this email need anything from the user, or give the assistant something to prepare or remember? Yes for: a booking or " +
+        "itinerary (flight, hotel, tickets, reservation), a meeting or invite, a deadline, a bill or payment due, a delivery, a person " +
+        "asking them something or waiting on them. Also yes when it says a real person messaged or replied to them somewhere else " +
+        "(\"X just messaged you\" from LinkedIn, Slack, WhatsApp, X, Instagram and the like, even from a no-reply address): the message " +
+        "itself is there, and it may need an answer. No for: newsletters, marketing, receipts with nothing to do, FYIs, and automatic " +
+        "notifications with no person behind them (likes, views, connection suggestions, digests of posts, security alerts).",
+      output: { type: "yesno" }, pass: 'judge == "yes"',
+    };
+    // One task for one agent (not planned, so it isn't split into parts): what the email means, and the useful part done.
+    const action = { message: "A new email came in (it's attached). Work out what it means for me and do the useful part now, as one task. " +
+      "A booking (flight, hotel, tickets, a reservation): remember the trip and set reminders for check-in, when to leave, and the day " +
+      "before with the weather there and what to pack; if there's more to keep an eye on, suggest a workflow for it with idea.add. " +
+      "A meeting or an invite: check my calendar for clashes and get me what I'd want before it. Someone asking me something or " +
+      "waiting on me: write the reply. A bill, payment or deadline: a reminder before it's due. " +
+      "A notice that someone messaged me elsewhere (LinkedIn, Slack and the like): the email only says that they did, so read the " +
+      "real conversation there first (source.read on that app, by their name) and decide from what they actually wrote; if it " +
+      "needs an answer, write the reply there, and if it needs nothing, say so. If you can't get into that app, say what's blocking it. " +
+      "Anything else: what I need to know or do. " +
+      "Then tell me what you did in one or two lines, without repeating the email back.", agent: true };
+    // Already set up: keep it current with this version's question and brief (it can't be edited otherwise).
+    if (p.findTrigger(INBOX_WATCH)) {
+      const r = p.refreshSystemTrigger(INBOX_WATCH, { judge, action });
+      if (!r.value) console.warn(`couldn't update ${INBOX_WATCH}: ${r.error}`);
+      return;
+    }
     if (!p.findWatcher(INBOX_WATCH)) {
       const w = await p.addWatcher({ name: INBOX_WATCH, kind: "app", app: "gmail", everyMin: 10,
         config: { query: "in:inbox -from:me -category:promotions -category:social -category:forums" },
@@ -4232,19 +4257,7 @@ ${JSON.stringify(shown, null, 1)}
     const t = await p.addTrigger({
       name: INBOX_WATCH, title: "Inbox watch", source: INBOX_WATCH, formula: "true",
       why: "Every new email gets a quick look; the ones that need something go to the team, who handle them.",
-      judge: {
-        prompt: "Does this email need anything from the user, or give the assistant something to prepare or remember? Yes for: a booking or " +
-          "itinerary (flight, hotel, tickets, reservation), a meeting or invite, a deadline, a bill or payment due, a delivery, a person " +
-          "asking them something or waiting on them. No for: newsletters, marketing, receipts with nothing to do, automatic notifications, FYIs.",
-        output: { type: "yesno" }, pass: 'judge == "yes"',
-      },
-      // One task for one agent (not planned, so it isn't split into parts): what the email means, and the useful part done.
-      action: { message: "A new email came in (it's attached). Work out what it means for me and do the useful part now, as one task. " +
-        "A booking (flight, hotel, tickets, a reservation): remember the trip and set reminders for check-in, when to leave, and the day " +
-        "before with the weather there and what to pack; if there's more to keep an eye on, suggest a workflow for it with idea.add. " +
-        "A meeting or an invite: check my calendar for clashes and get me what I'd want before it. Someone asking me something or " +
-        "waiting on me: write the reply. A bill, payment or deadline: a reminder before it's due. Anything else: what I need to know or do. " +
-        "Then tell me what you did in one or two lines, without repeating the email back.", agent: true },
+      judge, action,
       route: { who: "self", where: "ramble", ramble: "inbox" },
     }, "system", { system: true });
     if (!t.value) console.warn(`couldn't set up ${INBOX_WATCH}: ${t.error}`);
