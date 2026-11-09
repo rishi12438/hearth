@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store, Collection } from "./store/index.ts";
@@ -594,6 +594,13 @@ export class Hub {
   async removeThread(id: string) {
     for (const m of (await this.store.all<Message>("messages")).filter((m) => m.threadId === id)) await this.store.remove("messages", m.id);
     for (const j of (await this.store.all<Job>("jobs")).filter((j) => j.threadId === id)) await this.store.remove("jobs", j.id);
+    // Its calls go too, recordings and all.
+    const { recordingPath } = await import("./calls.ts");
+    for (const c of (await this.store.all<import("./calls.ts").Call>("calls")).filter((c) => c.threadId === id)) {
+      rmSync(recordingPath(this.config.dataDir, c.id), { force: true });
+      await this.calls?.deleteRecording(c).catch(() => {}); // Arca's copy too
+      await this.store.remove("calls", c.id);
+    }
     const ok = await this.store.remove("threads", id);
     this.emit("threads");
     return ok;
@@ -2688,6 +2695,53 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     return told;
   }
 
+  /**
+   * An agent wants to place a phone call (hearth-call start): an Approve card in its thread. Nothing dials until you tap;
+   * Approve places exactly this call, with this brief, and the agent gets a turn to supervise it.
+   */
+  async requestCall(c: { to: string; brief: string; voice?: import("./calls.ts").VoicePrefs }, jobId?: string): Promise<string> {
+    if (!this.calls?.configured()) return "Voice calls aren't turned on. Tell the user to turn them on in Menu → Connectors → Voice calls (it needs an OpenAI or Gemini key).";
+    const { toE164 } = await import("./calls.ts");
+    const to = toE164(c.to);
+    if (!to) return `${c.to} isn't a full phone number. Give it with the country code, like +14155550199.`;
+    if (!c.brief.trim()) return "Give the bot a brief: who it's calling, why, and what it may agree to.";
+    let job = jobId ? await this.store.get<Job>("jobs", jobId) : null;
+    if (!job) {
+      const working = (await this.store.all<Job>("jobs")).filter((j) => j.status === "working");
+      if (working.length === 1) job = working[0];
+    }
+    const told = `This call hasn't been placed: calling ${to} waits for the user's Approve in Hearth. Don't ask again or try another way. Say in your reply that it's waiting for their Approve; when they tap it, the call is placed and you get a turn with its id to supervise it.`;
+    const same = (await this.store.all<Approval>("approvals")).find((a) => a.status === "pending" && a.action.type === "call" && a.action.to === to && a.action.brief === c.brief && a.jobId === job?.id);
+    if (same) return told;
+    const voice = c.voice && Object.keys(c.voice).length ? c.voice : undefined;
+    const ap = await this.store.put<Approval>("approvals", {
+      ...this.doc({}), threadId: job?.threadId || ORPHAN_THREAD, jobId: job?.id,
+      summary: `Call ${to}`,
+      details: `${c.brief.slice(0, 1400)}${voice ? `\n\nVoice: ${[voice.voice, voice.language].filter(Boolean).join(", ")}` : ""}\n\nFrom Hearth's shared number. You can listen in or join from this thread.`,
+      action: { type: "call", to, brief: c.brief.slice(0, 6000), ...(voice ? { voice } : {}) },
+      status: "pending",
+    } as Approval);
+    if (job) await this.saveJob({ ...job, approvalIds: [...(job.approvalIds || []), ap.id] });
+    await this.log("approval.requested", ap.summary);
+    await this.replaceOlder(ap);
+    this.emit("approval", ap);
+    await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: await this.approvalLink(ap) });
+    return told;
+  }
+
+  /** Approve on a call card: dial it. The agent's turn after this says how to supervise it. */
+  private async runCall(act: { to: string; brief: string; voice?: import("./calls.ts").VoicePrefs }, ap: Approval) {
+    if (!this.calls) return { ok: false, output: "Voice calls aren't set up on this hub." };
+    try {
+      const job = ap.jobId ? await this.store.get<Job>("jobs", ap.jobId) : null;
+      const mate = job ? await this.teammate(job.teammateId) : null;
+      const startedBy = { ...(mate?.name ? { agent: mate.name } : {}), ...(job ? { task: (job.label || job.task).slice(0, 120) } : {}), approvedAt: this.clock().toISOString() };
+      const c = await this.calls.start({ to: act.to, brief: act.brief, voice: act.voice, threadId: ap.threadId || ORPHAN_THREAD, jobId: ap.jobId, startedBy });
+      await this.log("call.placed", `Calling ${c.to} (${c.id})`);
+      return { ok: true, output: `Calling ${c.to} now. Call id ${c.id}. Supervise it: run \`hearth-call wait ${c.id}\` in a loop until it ends, answering any question with \`hearth-call answer ${c.id} "…"\`.` };
+    } catch (e: any) { return { ok: false, output: `The call wasn't placed: ${String(e?.message || e)}` }; }
+  }
+
   /** Cards whose Approve is being handled right now. */
   private deciding = new Set<string>();
 
@@ -2794,6 +2848,8 @@ ${JSON.stringify(shown, null, 1)}
 
   /** Every connector (set by the server). */
   connect: import("./connectors/index.ts").Connect | null = null;
+  /** Voice calls (calls.ts), set by the server. */
+  calls: import("./calls.ts").Calls | null = null;
   /** Senders for message.send, set at start (WhatsApp, Slack). */
   senders: Partial<Record<Channel, { connected(): boolean; send(to: string, text: string, extra?: { subject?: string; threadId?: string; from?: string }): Promise<string> }>> = {};
 
@@ -3004,6 +3060,7 @@ ${JSON.stringify(shown, null, 1)}
         ? await (this.senders[act.channel]?.send(act.to, act.text, { subject: act.subject, threadId: act.threadId, from: act.from }).then(() => ({ ok: true, output: "Sent." }), (e: any) => ({ ok: false, output: String(e?.message || e) }))
           ?? { ok: false, output: `${act.channel} isn't connected.` })
         : act.type === "script" ? await this.runApprovedScript(act)
+        : act.type === "call" ? await this.runCall(act, ap)
         : { ok: false, output: "Nothing to run." };
       next = { ...next, status: out.ok ? "done" : "failed", result: out.output.slice(0, 2000) };
       await this.store.put("approvals", next);
@@ -5012,6 +5069,9 @@ ${JSON.stringify(shown, null, 1)}
     this.pipeline.clearEvents(); // events carry message text; sources, triggers and timers are setup, like scripts
     for (const f of await this.store.all<StoredFile>("files")) await this.files.remove(f.id);
     for (const col of ["threads", "messages", "jobs", "approvals", "memory", "notebooks", "places", "locations", "activity", "apps", "appState", "ideas", "days", "people"] as const) await this.store.clear(col);
+    for (const c of await this.store.all<import("./calls.ts").Call>("calls")) await this.calls?.deleteRecording(c).catch(() => {}); // Arca's copies
+    await this.store.clear("calls");
+    rmSync(join(this.config.dataDir, "calls"), { recursive: true, force: true }); // call recordings
     await this.setPrefs({ about: undefined, aboutUpdatedAt: undefined });
     // Plans go too: every reminder and trigger you or the team made (the hub's own jobs stay).
     const p = this.pipeline;
@@ -5087,6 +5147,7 @@ export function approvalKey(a: Approval["action"]): string | null {
     case "skill": return `skill:${a.name}`;
     case "mcp-server": return `mcp-server:${a.server}`;
     case "browser": return `browser:${a.threadId}`;
+    case "call": return `call:${a.to}`;
     default: return null;
   }
 }

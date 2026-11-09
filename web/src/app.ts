@@ -320,6 +320,11 @@ function onEvent(e: { type: string; data?: any }) {
       }
       soon();
       return;
+    // A phone call changed (status, a new transcript line, a question): its card in the thread redraws.
+    case "call":
+      if (S.chat && e.data?.threadId === S.chat.thread?.id) { upsert(S.chat.calls || (S.chat.calls = []), e.data); if (open) drawChat(false); }
+      if (callAudio?.id === e.data?.id && (e.data.status === "ended" || e.data.status === "failed")) stopCallAudio();
+      return;
     case "approval":
       if (S.chat) upsert(S.chat.approvals || (S.chat.approvals = []), e.data);
       if (S.dm) upsert(S.dm.approvals, e.data);
@@ -2029,11 +2034,171 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
     ...items.map((x) => x.node()),
     ...looseApprovals((S.chat.approvals || []).filter((a: any) => [j, ...follow].some((x: any) => x.id === a.jobId)),
       new Set((S.chat.approvals || []).filter((a: any) => [j, ...follow].some((x: any) => x.id === a.jobId && x.status === "waiting")).map((a: any) => a.id))).map((x) => x.node),
+    // Its phone calls: live (Listen, Join, answer its question) or done, with the transcript.
+    ...(S.chat.calls || []).filter((c: any) => [j, ...follow].some((x: any) => x.id === c.jobId)).map((c: any) => row(mateWho(j.teammateId, c.status === "live" || c.status === "ringing" ? "working" : "idle"), c.createdAt, [callCard(c)])),
     ...queuedRows(mine.filter((m: any) => m.queued), [j, ...follow]),
   ];
   redraw(el, nodes);
   if (stick) stickBottom();
   revealApproval();
+}
+
+// ---------- phone calls (src/calls.ts): the card, and listening in / joining ----------
+
+const CALL_STATE: Record<string, string> = { dialing: "Dialing…", ringing: "Ringing…", live: "On the call", ended: "Call ended", failed: "Didn't connect" };
+const callWho = (w: string) => (w === "them" ? "Them" : w === "bot" ? "Bot" : w === "you" ? "You" : "");
+/** One call: who and how it's going, the transcript as it happens, its question for you, and the buttons. */
+function callCard(c: any) {
+  const live = c.status === "live" || c.status === "ringing" || c.status === "dialing";
+  const mine = callAudio?.id === c.id;
+  const lines = (c.lines || []).map((l: any) => l.who === "note"
+    ? h("li", { class: "callnote muted small" }, l.text)
+    : h("li", { class: `callline ${l.who}` }, h("b", null, callWho(l.who)), " ", l.text));
+  const open = (c.questions || []).find((q: any) => !q.answer && q.stage < 2 && live);
+  const unanswered = !live ? (c.questions || []).filter((q: any) => q.stage === 2 && !q.answer) : [];
+  const ask = open || unanswered[0];
+  let askBox: Node | null = null;
+  if (ask) {
+    const input = h("input", { class: "field", placeholder: live ? "Answer for the bot (it's waiting on the line)" : "Answer, for when it calls back", autocomplete: "off" }) as HTMLInputElement;
+    const send = async () => {
+      if (!input.value.trim()) return input.focus();
+      try { const r = await call<any>(`/api/calls/${c.id}/answer`, { body: { text: input.value.trim(), question: ask.id } }); toast(r.result || "Sent"); input.value = ""; }
+      catch (e) { handleError(e); }
+    };
+    input.addEventListener("keydown", (e) => { if ((e as KeyboardEvent).key === "Enter") void send(); });
+    askBox = h("div", { class: "callask" }, h("p", null, h("b", null, live ? "They're asking: " : "Still to answer: "), ask.text), h("div", { class: "row2" }, input, h("button", { class: "sbtn primary", on: { click: send } }, "Answer")));
+  }
+  const btns = live ? h("div", { class: "blockbtns" },
+    c.status === "live" ? h("button", { class: `sbtn${mine ? " on" : ""}`, on: { click: () => (mine ? stopCallAudio() : listenToCall(c.id)) } }, icon(mine ? "pause" : "play", 14), mine ? "Stop listening" : "Listen") : null,
+    c.status === "live" ? h("button", { class: `sbtn${mine && callAudio?.joined ? " primary" : ""}`, title: "Your mic goes on the call and the bot goes quiet. Use headphones.", on: { click: () => (mine && callAudio?.joined ? handBackCall() : joinCall(c.id)) } }, icon("mic", 14), mine && callAudio?.joined ? "Hand back" : "Join") : null,
+    h("button", { class: "sbtn", on: { click: async () => { try { await call(`/api/calls/${c.id}/hangup`, { body: {} }); } catch (e) { handleError(e); } } } }, "Hang up")) : null;
+  const result = !live ? h("p", { class: "small" }, c.status === "failed" ? c.error || "It didn't connect." : c.outcome || "") : null;
+  const facts = !live ? callFacts(c) : null, rec = !live ? callRecording(c) : null;
+  return h("div", { class: `block callcard ${c.status}` },
+    h("div", { class: "blockhead" }, icon("call", 15), h("b", null, `Call with ${c.to}`), h("small", { class: "muted" }, ` · ${CALL_STATE[c.status] || c.status}${c.joined ? " · you're on" : ""}`),
+      c.status === "live" && c.answeredAt ? h("time", { "data-since": c.answeredAt, class: "muted small" }, elapsed(c.answeredAt)) : null),
+    lines.length ? h("ol", { class: "calllines" }, lines) : live ? h("p", { class: "muted small" }, c.status === "live" ? "Connected. Words show here as they're said." : "Waiting for them to pick up.") : null,
+    askBox, result, facts, rec, btns);
+}
+
+const callLength = (s?: number) => (s == null ? "" : s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`);
+const ENDED_BY: Record<string, string> = { them: "they hung up", bot: "the bot hung up", you: "you hung up", agent: "the agent hung up", hub: "the hub restarted", limit: "cut off at the time limit" };
+/** When, how long, who started and ended it, from which number. */
+function callFacts(c: any): Node {
+  const bits = [
+    `${dayLabel(c.createdAt)} ${clockTime(c.createdAt)}`,
+    c.answeredAt ? callLength(c.seconds ?? 0) : c.status === "failed" ? "didn't connect" : null,
+    c.startedBy?.agent ? `started by ${c.startedBy.agent}${c.startedBy.task ? ` (${c.startedBy.task})` : ""}` : null,
+    c.startedBy?.approvedAt ? `you approved at ${clockTime(c.startedBy.approvedAt)}` : null,
+    c.status === "ended" && c.endedBy ? ENDED_BY[c.endedBy] : null,
+    c.from ? `from ${c.from}` : null,
+  ].filter(Boolean);
+  return h("p", { class: "muted small callfacts" }, bits.join(" · "));
+}
+
+/** The call's MP3 (fetched with the device token, so it can't be a plain link): play, save, or delete. */
+const recUrls = new Map<string, string>();
+async function recordingBlob(id: string) {
+  const hub = activeHub()!;
+  const res = await fetch(`${hub.url}/api/calls/${id}/recording`, { headers: authHeaders(hub) });
+  if (!res.ok) throw new Error(res.status === 404 ? "That recording is gone." : "Couldn't fetch the recording");
+  return new Blob([await res.arrayBuffer()], { type: "audio/mpeg" });
+}
+function callRecording(c: any): Node | null {
+  if (!c.recording?.bytes && !c.arcaRecording?.bytes) return null;
+  const box = h("div", { class: "callrec" });
+  const name = `call-${String(c.to).replace(/\D/g, "")}-${String(c.createdAt).slice(0, 16).replace(/[:T]/g, "-")}.mp3`;
+  const player = (url: string, auto: boolean) => { const a = h("audio", { controls: "", preload: "metadata", src: url }) as HTMLAudioElement; if (auto) void a.play().catch(() => {}); return a; };
+  const play = h("button", { class: "sbtn", on: { click: async () => {
+    play.disabled = true;
+    try { let u = recUrls.get(c.id); if (!u) { u = URL.createObjectURL(await recordingBlob(c.id)); recUrls.set(c.id, u); } play.replaceWith(player(u, true)); }
+    catch (e) { play.disabled = false; handleError(e); }
+  } } }, icon("play", 14), `Play recording${c.recording?.seconds ? ` (${callLength(c.recording.seconds)})` : ""}`) as HTMLButtonElement;
+  const save = h("button", { class: "sbtn", on: { click: async () => { try { await saveBlob(await recordingBlob(c.id), name); } catch (e) { handleError(e); } } } }, "Save MP3");
+  const del = h("button", { class: "sbtn ghost", on: { click: () => confirmSheet("Delete this recording?", "The MP3 is removed from your hub. The transcript stays.", "Delete", async () => {
+    await call(`/api/calls/${c.id}/recording`, { method: "DELETE" }); const u = recUrls.get(c.id); if (u) URL.revokeObjectURL(u); recUrls.delete(c.id); toast("Recording deleted");
+  }) } }, "Delete");
+  const u = recUrls.get(c.id);
+  box.append(u ? player(u, false) : play, h("div", { class: "blockbtns" }, save, del));
+  return box;
+}
+
+/** The call you're listening to: its socket, playback, and your mic while you've joined. */
+let callAudio: { id: string; ws: WebSocket; ctx: AudioContext; at: Record<number, number>; joined: boolean; mic?: { stream: MediaStream; ctx: AudioContext } } | null = null;
+
+async function listenToCall(id: string): Promise<boolean> {
+  stopCallAudio();
+  const hub = activeHub();
+  if (!hub) return false;
+  try {
+    const { ticket } = await call<any>(`/api/calls/${id}/live`, { body: {} });
+    const ctx = new AudioContext({ sampleRate: 16000 });
+    const ws = new WebSocket(`${hub.url.replace(/^http/, "ws")}/call-live?ticket=${encodeURIComponent(ticket)}`);
+    ws.binaryType = "arraybuffer";
+    const a = { id, ws, ctx, at: {} as Record<number, number>, joined: false };
+    callAudio = a;
+    ws.onmessage = (e) => {
+      if (typeof e.data === "string") { if (e.data.includes("ended")) stopCallAudio(); return; }
+      const u = new Uint8Array(e.data as ArrayBuffer);
+      const tag = u[0], pcm = new Int16Array(u.buffer.slice(1));
+      const buf = ctx.createBuffer(1, pcm.length, 16000), ch = buf.getChannelData(0);
+      for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+      const src = ctx.createBufferSource();
+      src.buffer = buf; src.connect(ctx.destination);
+      // Each side (them, the bot) keeps its own timeline, a little behind live so it doesn't stutter.
+      const t = Math.max(ctx.currentTime + 0.08, a.at[tag] || 0);
+      src.start(t); a.at[tag] = t + buf.duration;
+    };
+    ws.onclose = () => { if (callAudio === a) stopCallAudio(); };
+    void ctx.resume();
+    drawChat(false);
+    return await new Promise<boolean>((res) => { ws.onopen = () => res(true); ws.onerror = () => res(false); });
+  } catch (e) { handleError(e); return false; }
+}
+
+async function joinCall(id: string) {
+  if (callAudio?.id !== id && !(await listenToCall(id))) return;
+  const a = callAudio!;
+  let stream: MediaStream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); }
+  catch { toast("Microphone permission is off", "err"); return; }
+  // The mic at the device's own rate, brought down to the call's 16 kHz here.
+  const mctx = new AudioContext();
+  const src = mctx.createMediaStreamSource(stream);
+  const proc = mctx.createScriptProcessor(2048, 1, 1);
+  const mute = mctx.createGain(); mute.gain.value = 0;
+  src.connect(proc); proc.connect(mute); mute.connect(mctx.destination);
+  const ratio = mctx.sampleRate / 16000;
+  proc.onaudioprocess = (e) => {
+    if (!a.joined || a.ws.readyState !== WebSocket.OPEN) return;
+    const f = e.inputBuffer.getChannelData(0), n = Math.floor(f.length / ratio), pcm = new Int16Array(n);
+    for (let i = 0; i < n; i++) pcm[i] = Math.max(-1, Math.min(1, f[Math.floor(i * ratio)])) * 0x7fff;
+    a.ws.send(pcm.buffer);
+  };
+  a.mic = { stream, ctx: mctx };
+  a.joined = true;
+  a.ws.send("join");
+  toast("You're on the call. The bot is quiet until you hand back.");
+  drawChat(false);
+}
+
+function handBackCall() {
+  const a = callAudio;
+  if (!a) return;
+  a.joined = false;
+  try { a.ws.send("leave"); } catch {}
+  a.mic?.stream.getTracks().forEach((t) => t.stop()); void a.mic?.ctx.close(); a.mic = undefined;
+  drawChat(false);
+}
+
+function stopCallAudio() {
+  const a = callAudio;
+  if (!a) return;
+  callAudio = null;
+  a.mic?.stream.getTracks().forEach((t) => t.stop()); void a.mic?.ctx.close();
+  try { a.ws.close(); } catch {}
+  void a.ctx.close();
+  if (S.chat) drawChat(false);
 }
 
 /** One teammate answer inside a thread (or "working…", or the Approve / stuck block). */
@@ -2885,6 +3050,7 @@ initConnectors({
   handleError: (e) => handleError(e), back: () => void openConnections(), openVoice: () => void openVoice(), openGoogle: () => void openGoogleSetup(),
   openCookies: (id) => { const c = CONNECTORS.find((x) => x.via === id); if (c) void openCookieSetup(c); },
   askMac: (type, args, ms) => askMac(type, args, ms),
+  callFacts: (c) => callFacts(c), callRecording: (c) => callRecording(c),
   logo: (id, size) => { const c = CONNECTORS.find((x) => x.via === id && x.id === id) || (id === "google" ? CONNECTORS[0] : null); return c ? connectorTile(c, size) : null; },
 });
 

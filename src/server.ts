@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve, extname, dirname } from "node:path";
 type Server = Bun.Server<unknown>;
 import { rotateToken, sha256, deviceForToken, newPairingCode, redeemPairingCode, RateLimiter, addDevice, owners, personalDevices, isOwner, newChallenge, verifyPasskeyRegistration, verifyPasskeyAssertion, Sessions, AccessRequests } from "./auth.ts";
@@ -11,6 +11,7 @@ import { Computers, COPY_ITEMS, isCopyItem } from "./computers.ts";
 import { Machines, realE2b, realSsh, type E2b, type Ssh } from "./machines.ts";
 import { OtherBrowser } from "./other-browser.ts";
 import { Phone, phoneSkill } from "./phone.ts";
+import { Calls, callSkill, recordingPath, type Call, type CallsDeps } from "./calls.ts";
 import { registerSkills } from "./brains/skills.ts";
 import { Vault } from "./vault.ts";
 import { Connect } from "./connectors/index.ts";
@@ -115,7 +116,7 @@ class HttpError extends Error { constructor(public status: number, msg: string) 
 
 /** drivers: stand-ins for E2B and ssh in tests. */
 export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
-  drivers: { e2b?: E2b; ssh?: Ssh; readLogin?: typeof readLogin; allowLocalHub?: boolean; vault?: Vault; shares?: Shares | null } = {}) {
+  drivers: { e2b?: E2b; ssh?: Ssh; readLogin?: typeof readLogin; allowLocalHub?: boolean; vault?: Vault; shares?: Shares | null; calls?: Partial<CallsDeps> } = {}) {
   const shares = drivers.shares ?? null;
   const voiceLimiter = new RateLimiter(5, 10 * 60_000);
   const plaidLimiter = new RateLimiter(20, 60_000);
@@ -210,6 +211,35 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
     const h = config.host, local = !h || h === "0.0.0.0" || h === "::" ? "127.0.0.1" : h.includes(":") ? `[${h}]` : h;
     registerSkills(() => (phone.configured() ? [phoneSkill(`http://${local}:${config.port}`, connect.agentKeyValue())] : []));
   }
+  // Voice calls (calls.ts): Arca dials, this hub runs the call. Inert until a voice key is added in Connectors.
+  const calls = new Calls({
+    vault, dataDir: config.dataDir,
+    hubName: () => config.name,
+    publicUrl: () => process.env.HEARTH_PUBLIC_URL || null,
+    save: async (c) => { await store.put<Call>("calls", c); },
+    load: (id) => store.get<Call>("calls", id),
+    emit: (c) => hub.emit("call", c),
+    // The bot asked something: buzz the owner, opening the thread the call is in.
+    notify: (c, q) => {
+      void (async () => {
+        const job = c.jobId ? await store.get<any>("jobs", c.jobId) : null;
+        const root = job ? job.followsUp || job.id : "";
+        await hub.push?.send({ title: `On the call with ${c.to}`, body: q.text, tag: `call-${c.id}-${q.id}`, url: `/#c/${c.threadId}${root ? `/${root}` : ""}` });
+      })().catch(() => {});
+    },
+    ...drivers.calls,
+  });
+  hub.calls = calls;
+  // A restart drops live calls: anything the store still has as going is over.
+  for (const c of await store.all<Call>("calls")) {
+    let bytes = 0; try { bytes = statSync(recordingPath(config.dataDir, c.id)).size; } catch {}
+    const s = Calls.stale(c, bytes); if (s) await store.put<Call>("calls", s);
+  }
+  {
+    const h = config.host, local = !h || h === "0.0.0.0" || h === "::" ? "127.0.0.1" : h.includes(":") ? `[${h}]` : h;
+    registerSkills(() => (calls.configured() ? [callSkill(`http://${local}:${config.port}`, connect.agentKeyValue())] : []));
+  }
+  const callTickets = new Map<string, { id: string; exp: number }>();
   const computerSummary = async () => {
     const list = (await linkedComputers()).map((d) => computers.status(d.id, d.name, d.lastSeenAt));
     const rank = { online: 0, asleep: 1, offline: 2 };
@@ -564,6 +594,33 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         return new Response(JSON.stringify(r, null, 1), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
       } catch (e: any) { throw new HttpError(400, e.message); }
     }
+    // The agent's hearth-call command (from this machine, with the hub's agent key): ask for a call, then supervise it.
+    if (path === "/api/agent/call" && method === "POST") {
+      if (!fromThisMachine(req, server) || !connect.isAgentKey(req.headers.get("x-hearth-agent"))) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not the agent's key."); }
+      const form = await req.formData().catch(() => null);
+      const f = (k: string, n = 2000) => { const v = form?.get(k); return typeof v === "string" ? v.slice(0, n) : ""; };
+      const action = f("action", 20), id = f("id", 60);
+      const out = (x: unknown) => new Response(JSON.stringify(x, null, 1), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+      try {
+        if (action === "start") {
+          const voice = { ...(f("voice", 40) ? { voice: f("voice", 40) } : {}), ...(f("language", 40) ? { language: f("language", 40) } : {}) };
+          return out({ result: await hub.requestCall({ to: f("to", 40), brief: f("brief", 6000), voice }, req.headers.get("x-hearth-job")?.slice(0, 100) || undefined) });
+        }
+        if (action === "wait") { server.timeout(req, 0); return out(await calls.wait(id)); }
+        if (action === "status") return out(await calls.wait(id, 0));
+        if (action === "answer") return out({ result: await calls.answer(id, f("text"), "agent") });
+        if (action === "say") { await calls.say(id, f("text")); return out({ result: "Told the bot." }); }
+        if (action === "hangup") { await calls.hangup(id); return out({ result: "Hung up." }); }
+        throw new Error("Commands: start, wait, status, answer, say, hangup.");
+      } catch (e: any) { throw new HttpError(400, e.message); }
+    }
+    // Arca forwards each call's status here, signed with this hub's Arca key (calls.ts checks it).
+    if (seg[1] === "calls" && seg[2] === "events" && seg[3] && method === "POST") {
+      if (!webhookLimiter.allow("calls")) throw new HttpError(429, "Too many calls. Wait a minute.");
+      const raw = (await req.text()).slice(0, 16_000);
+      if (!(await calls.event(decodeURIComponent(seg[3]), raw, req.headers.get("x-arca-signature")))) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not signed for this call."); }
+      return json({ ok: true });
+    }
     // Plaid says a bank has news (new transactions, signed out). Only a body Plaid signed counts; answer fast, work after.
     if (path === "/api/plaid/webhook") {
       if (method !== "POST") throw new HttpError(405, "POST to this address.");
@@ -677,7 +734,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (method === "POST" && id && seg[3] === "join") { const r = await hub.joinRamble(id, (await body(req)).how === "keep" ? "keep" : "move"); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "GET" && id === "seen") return json(await hub.chatSeen());
         if (method === "POST" && id && seg[3] === "seen") return json({ at: await hub.markChatSeen(id), marked: await hub.markStuckSeen({ threadId: id }) });
-        if (method === "GET" && id) { const d = await hub.threadDetail(id); if (!d) break; return json({ ...d, approvals: (await store.all<Approval>("approvals")).filter((a) => a.threadId === id) }); }
+        if (method === "GET" && id) { const d = await hub.threadDetail(id); if (!d) break; return json({ ...d, approvals: (await store.all<Approval>("approvals")).filter((a) => a.threadId === id), calls: (await store.all<Call>("calls")).filter((c) => c.threadId === id) }); }
         if (method === "POST" && (!id || seg[3] === "messages")) {
           const b = await body(req);
           const fileIds = Array.isArray(b.fileIds) ? b.fileIds.map(String).slice(0, 5) : [];
@@ -1480,6 +1537,52 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (method === "DELETE") { await machines.remove(m.id); await hub.log("machines.remove", `${m.name} removed`); return json(view()); }
         break;
       }
+      // Voice calls: how the bot sounds, and the call cards' buttons (answer, hang up, Listen and Join).
+      case "calls": {
+        ownerOnly();
+        if (id === "settings" && method === "GET") return json({ ...calls.view(), line: await calls.lineStatus() });
+        if (id === "settings" && method === "PUT") { const m = calls.settings.model(); if (!m) throw new HttpError(409, "Turn voice calls on first."); calls.settings.setVoice(await body(req)); hub.emit("settings", {}); return json(calls.view()); }
+        const callId = id || "";
+        if (seg[3] === "answer" && method === "POST") { const b = await body(req); try { return json({ result: await calls.answer(callId, String(b?.text || "").trim(), "you", b?.question ? String(b.question) : undefined) }); } catch (e: any) { throw new HttpError(400, e.message); } }
+        if (seg[3] === "hangup" && method === "POST") { await calls.hangup(callId, "you"); return json({ ok: true }); }
+        // The call log: newest first, without the transcripts (a thread shows those).
+        if (!id && method === "GET") {
+          const all = (await store.all<Call>("calls")).sort((x, y) => y.createdAt.localeCompare(x.createdAt)).slice(0, 200);
+          return json({ calls: all.map(({ lines, brief, questions, ...c }) => ({ ...c, brief: brief.slice(0, 200), lines: lines.length, questions: questions.length })) });
+        }
+        // The call's MP3. ?download=1 saves it under a name that says who and when.
+        // The hub's own copy, else Arca's (it keeps every call's recording in its bucket). Delete removes both.
+        if (seg[3] === "recording") {
+          const c = await store.get<Call>("calls", callId);
+          const f = c ? recordingPath(config.dataDir, c.id) : "";
+          const here = !!c && existsSync(f);
+          if (!c || (!here && !c.arcaRecording?.bytes)) throw new HttpError(404, "No recording for that call.");
+          if (method === "DELETE") {
+            rmSync(f, { force: true });
+            await calls.deleteRecording(c);
+            const next = { ...c, recording: undefined, arcaRecording: undefined };
+            await store.put<Call>("calls", next); hub.emit("call", next);
+            return json({ ok: true });
+          }
+          if (method === "GET") {
+            const name = `call-${c.to.replace(/\D/g, "")}-${c.createdAt.slice(0, 16).replace(/[:T]/g, "-")}.mp3`;
+            const theirs = here ? null : await calls.arcaRecording(c);
+            if (!here && !theirs) throw new HttpError(404, "No recording for that call.");
+            const body = here ? Bun.file(f) : new Blob([theirs as Uint8Array<ArrayBuffer>], { type: "audio/mpeg" });
+            return new Response(body, { headers: { "Content-Type": "audio/mpeg", "Cache-Control": "private, no-store",
+              ...(url.searchParams.get("download") === "1" ? { "Content-Disposition": `attachment; filename="${name}"` } : {}) } });
+          }
+        }
+        // A one-time ticket for the call's Listen/Join socket (browsers can't put the device token on a WebSocket).
+        if (seg[3] === "live" && method === "POST") {
+          if (!calls.isLive(callId)) throw new HttpError(409, "That call isn't on any more.");
+          const t = randomBytes(18).toString("base64url");
+          for (const [k, v] of callTickets) if (v.exp < Date.now()) callTickets.delete(k);
+          callTickets.set(t, { id: callId, exp: Date.now() + 60_000 });
+          return json({ ticket: t });
+        }
+        break;
+      }
       // The on-demand Android phone: one AWS service account, then open/close. Primary device only.
       case "phone": {
         ownerOnly();
@@ -1533,13 +1636,17 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   type LiveData = { kind: "voice"; rate: number; relay?: ReturnType<typeof deepgramLive> };
   type ComputerData = { kind: "computer"; deviceId: string; name: string; want: NonNullable<Device["copy"]>; cloud: boolean };
   type PhoneData = { kind: "phone"; live?: { input(m: unknown): void; stop(): void }; closed?: boolean };
-  const server = Bun.serve<LiveData | ComputerData | PhoneData, never>({
+  /** call-audio: Vonage's audio for a call. call-live: the owner listening in (and joining). */
+  type CallData = { kind: "call-audio"; id: string } | { kind: "call-live"; id: string };
+  const server = Bun.serve<LiveData | ComputerData | PhoneData | CallData, never>({
     hostname: config.host,
     port: config.port,
     idleTimeout: 60,
     websocket: {
       maxPayloadLength: 1024 * 1024,
       open(ws) {
+        if (ws.data.kind === "call-audio") { calls.audioOpen(ws.data.id, ws as any); return; }
+        if (ws.data.kind === "call-live") { calls.listenOpen(ws.data.id, ws as any); return; }
         if (ws.data.kind === "computer") { computers.attach(ws.data.deviceId, ws.data.name, ws, ws.data.want, ws.data.cloud); return; }
         if (ws.data.kind === "phone") {
           const d = ws.data;
@@ -1553,12 +1660,16 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         ws.data.relay = deepgramLive(key, ws.data.rate, { send: (d) => ws.send(d), close: () => ws.close() });
       },
       message(ws, msg) {
+        if (ws.data.kind === "call-audio") { calls.audioIn(ws.data.id, msg as any); return; }
+        if (ws.data.kind === "call-live") { calls.listenMessage(ws.data.id, ws as any, msg as any); return; }
         if (ws.data.kind === "computer") { computers.message(ws.data.deviceId, String(msg)); return; }
         if (ws.data.kind === "phone") { try { ws.data.live?.input(JSON.parse(String(msg))); } catch {} return; }
         if (typeof msg === "string") { if (msg === "stop") ws.data.relay?.stop(); return; }
         ws.data.relay?.audio(msg);
       },
       close(ws) {
+        if (ws.data.kind === "call-audio") { calls.audioClosed(ws.data.id); return; }
+        if (ws.data.kind === "call-live") { calls.listenClosed(ws.data.id, ws as any); return; }
         if (ws.data.kind === "phone") { ws.data.closed = true; ws.data.live?.stop(); return; }
         if (ws.data.kind === "computer") {
           const { deviceId } = ws.data;
@@ -1584,6 +1695,23 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (origin && !sameOrigin && !config.allowedOrigins.includes(origin)) return new Response("Origin not allowed", { status: 403 });
         if (!(rate >= 8000 && rate <= 96000)) return new Response("Bad sample rate", { status: 400 });
         if (server.upgrade(req, { data: { kind: "voice", rate: Math.round(rate) } })) return undefined as unknown as Response;
+        return new Response("Expected a WebSocket", { status: 426 });
+      }
+      // A call's audio from Vonage (Arca gave it this address, with the call's own secret in it).
+      const ca = url.pathname.match(/^\/call-audio\/(c_[\w-]{6,40})$/);
+      if (ca) {
+        if (!calls.audioAllowed(ca[1], url.searchParams.get("t") || "")) return new Response("No such call", { status: 401 });
+        if (server.upgrade(req, { data: { kind: "call-audio", id: ca[1] } })) return undefined as unknown as Response;
+        return new Response("Expected a WebSocket", { status: 426 });
+      }
+      // Listening in on a call (and joining it): one-time ticket from POST /api/calls/<id>/live, same origin only.
+      if (url.pathname === "/call-live") {
+        const t = url.searchParams.get("ticket") || "";
+        const tk = callTickets.get(t);
+        callTickets.delete(t);
+        if (!tk || tk.exp < Date.now()) return new Response("Ticket expired", { status: 401 });
+        if (origin && !sameOrigin && !config.allowedOrigins.includes(origin)) return new Response("Origin not allowed", { status: 403 });
+        if (server.upgrade(req, { data: { kind: "call-live", id: tk.id } })) return undefined as unknown as Response;
         return new Response("Expected a WebSocket", { status: 426 });
       }
       // The phone's live video for the owner's screen: one-time ticket from POST /api/phone/live, same origin only.

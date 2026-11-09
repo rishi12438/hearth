@@ -360,7 +360,9 @@ export type Approval = Doc & {
      * own browser (or saves an API key from the site). */
     | { type: "mcp-server"; server: string; url: string }
     /** A job blocked on a site wants to carry on in Chrome on your Mac (other-browser.ts); Approve covers its conversation. */
-    | { type: "browser"; computer: string; url: string; threadId: string };
+    | { type: "browser"; computer: string; url: string; threadId: string }
+    /** A phone call an agent wants to place (calls.ts): Approve dials it from Hearth's line, through Arca. */
+    | { type: "call"; to: string; brief: string; voice?: import("./calls.ts").VoicePrefs };
   /** expired: nobody answered within a day (APPROVAL_TTL_MS), so it didn't run and no longer asks. */
   /** replaced: a newer ask for the same thing in the same task took its place (replacedBy), so it never ran. */
   status: "pending" | "approved" | "rejected" | "done" | "failed" | "expired" | "replaced";
