@@ -295,6 +295,11 @@ code { font-family: var(--mono); font-size: .86em; background: var(--surface); p
 .dropsep { height: 1px; background: var(--line); margin: 5px 4px; }
 .projbtn .projname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 600px) { .projbtn { width: 48px; padding: 0; justify-content: center; } .projbtn .projname { display: none; } }
+.hdright { flex: none; display: flex; align-items: center; gap: 8px; }
+.brainbtn { max-width: 240px; }
+.brainmenu .droplist { max-height: min(70vh, 560px); }
+.brainmenu .dropsearch { border-bottom: 0; border-top: 1px solid var(--line); margin: 4px 0 0; padding-top: 10px; }
+@media (max-width: 600px) { .brainbtn > svg:last-child { display: none; } }
 /* Home: question + box in the middle, a few one-line suggestions under it */
 #home { min-height: 100%; display: flex; }
 .hero { flex: 1; width: 100%; max-width: 680px; margin: 0 auto; padding: 0 16px 6vh; display: flex; flex-direction: column; justify-content: center; }

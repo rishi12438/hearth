@@ -858,6 +858,32 @@ export class Hub {
     return { value: saved };
   }
 
+  /** Pick the brain and model every job in this ramble runs on (the header's picker), or null for Auto. */
+  async setThreadBrain(id: string, pick: unknown) {
+    const t = await this.store.get<Thread>("threads", id);
+    if (!t || t.id.startsWith("tm-")) return { error: "No such ramble." };
+    let brain: Thread["brain"];
+    if (pick && typeof pick === "object") {
+      const harness = String((pick as any).harness || ""), model = String((pick as any).model ?? "").trim();
+      if (!availableHarnesses(this.config).includes(harness)) return { error: `${harness || "That brain"} isn't installed on this hub.` };
+      if (!MODEL_RE.test(model)) return { error: "That model name has characters it can't have." };
+      brain = { harness, model };
+    }
+    const saved = await this.store.put<Thread>("threads", { ...t, brain });
+    await this.log("ramble.brain", `#${channelOf(t)} → ${brain ? brainName(brain) : "Auto"}`);
+    this.emit("threads");
+    return { value: saved };
+  }
+
+  /** The roles for a job in this ramble: all on the brain you picked for it in the header, if you did. */
+  async jobBrains(threadId?: string): Promise<Brains> {
+    const brains = await this.brains();
+    const pin = threadId ? (await this.store.get<Thread>("threads", threadId))?.brain : undefined;
+    if (!pin) return brains;
+    const on = (role: "quick" | "workhorse" | "heavy") => ({ harness: pin.harness, model: pin.model, role, pinned: true });
+    return { ...brains, quick: on("quick"), workhorse: on("workhorse"), heavy: on("heavy") };
+  }
+
   /** Any activity in a ramble brings it back from the archive. */
   private async touchThread(id: string, patch: Partial<Thread>) {
     const t = await this.store.get<Thread>("threads", id);
@@ -1542,7 +1568,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       }
     }
 
-    const brains = await this.brains();
+    const brains = await this.jobBrains(job.threadId);
     const repairNote = failedSkill
       ? `\n\nThe saved skill "${failedSkill.name}" failed with: ${failedSkill.error}\nSolve the job fresh. Then, if you can, save a fixed version with skill.save using the same name. A recipe fix may only use scripts the old one used.`
       : "\n\nIf this job is likely to come back and you had to work it out, save it with skill.save.";
@@ -1582,7 +1608,8 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       return this.turn(hybrid && tier !== "heavy" ? "legwork" : "job", input, job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains[tier], meter, top: tier === "heavy", files });
     };
     // Start on the cheapest model the plan allows; move up a step when a model can't do it.
-    const ladder: Tier[] = job.effort === "heavy" ? ["heavy"] : job.effort === "quick" ? ["quick", "workhorse", "heavy"] : ["workhorse", "heavy"];
+    // On the brain you picked for the ramble every step is the same model, so there's nowhere to move up to.
+    const ladder: Tier[] = job.effort === "heavy" ? ["heavy"] : brains.heavy.pinned ? [job.effort === "quick" ? "quick" : "workhorse"] : job.effort === "quick" ? ["quick", "workhorse", "heavy"] : ["workhorse", "heavy"];
     let tier: Tier = ladder[0];
     let escalated = false;
     // Each step up, with why: kept on the job (the thread shows it) and in the log.
@@ -1607,14 +1634,14 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     try {
       let failed = "";
       const tryTier = (t: Tier) => attempt(t).catch((err) => {
-        if (t === "heavy") throw err;
+        if (t === ladder.at(-1)) throw err;
         failed = String(err?.message || err).slice(0, 300);
         return null;
       });
       let r: Awaited<ReturnType<typeof attempt>> | null = await tryTier(tier);
       if (stop.signal.aborted) throw new Error("Restarted with your new message.");
       if (job.mayHandBack && r?.text.includes(HAND_BACK)) return await this.handBack(cur, meter);
-      while (tier !== "heavy" && (!r || r.text.includes(ESCALATE) || !r.text.trim())) {
+      while (ladder.indexOf(tier) < ladder.length - 1 && (!r || r.text.includes(ESCALATE) || !r.text.trim())) {
         const why = !r ? `it hit an error: ${failed}` : r.text.includes(ESCALATE) ? escalateWhy(r.text) : "it replied with nothing";
         const from = tier;
         tier = ladder[ladder.indexOf(tier) + 1];
@@ -1858,7 +1885,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     await this.log("job.split", `${parent.task.slice(0, 60)} → ${subs.length} sub-agents`);
     await Promise.all(subs.map((sj) => this.runJob(sj, ramble)));
     const results = (await Promise.all(subs.map((sj) => this.store.get<Job>("jobs", sj.id)))).filter(Boolean) as Job[];
-    const brains = await this.brains();
+    const brains = await this.jobBrains(parent.threadId);
     const mate = await this.teammate(parent.teammateId);
     const text = results.map((x) => `## ${x.task} (${x.status})\n${x.result || ""}`).join("\n\n");
     const merged = await this.turn("job", `${parent.task}\n\nYour sub-agents finished. ${split.merge}\nWrite the final answer for the user. Don't split again.`, parent.task,

@@ -1196,3 +1196,24 @@ test("looks: while work is going, Hearth picks the ramble's look again every 10 
   await hub.refreshLooks();
   expect((await store.get<Thread>("threads", t.id))!.look).toBe("plane");
 });
+
+test("a brain picked in a ramble's header runs every job there on that one model, with no hybrid or moving up", async () => {
+  await hub.ensureTeammates();
+  const calls: string[] = [];
+  (hub.brain as any).think = async (b: any, p: any) => {
+    if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "List my orders", teammate: "Research", effort: "light" }] });
+    calls.push(`${b.mode}:${p.harness}/${p.model}${p.pinned ? "!" : ""}`);
+    return "[[escalate]] too hard";
+  };
+  await hub.setBrains({ workhorse: { harness: "echo", model: "small" }, heavy: { harness: "echo", model: "big" } });
+  await hub.ramble("list my orders");
+  await until(async () => (await store.all<Job>("jobs")).some((j) => j.status === "done" || j.status === "failed"));
+  const [thread] = await store.all<Thread>("threads");
+  expect((await hub.setThreadBrain(thread.id, { harness: "nope", model: "" })).error).toContain("isn't installed");
+  expect((await hub.setThreadBrain(thread.id, { harness: "echo", model: "pinned-1" })).value?.brain).toEqual({ harness: "echo", model: "pinned-1" });
+  calls.length = 0;
+  await hub.ramble("list my orders again", thread.id);
+  await until(async () => (await store.all<Job>("jobs")).filter((j) => j.status === "done" || j.status === "failed").length === 2);
+  expect(calls.filter((c) => c.startsWith("job:") || c.startsWith("legwork:") || c.startsWith("voice:") || c.startsWith("coach:"))).toEqual(["job:echo/pinned-1!"]);
+  expect((await hub.setThreadBrain(thread.id, null)).value?.brain).toBeUndefined();
+});
