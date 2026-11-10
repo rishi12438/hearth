@@ -22,6 +22,8 @@ const S = {
   threads: [] as any[],
   /** The sidebar's "Past rambles" list is open. */
   pastOpen: false,
+  /** The sidebar's "Archived projects" list is open. */
+  archivedOpen: false,
   /** The open ramble's look just changed: the faces drawn now play a squash-and-stretch as they turn into it. */
   morphing: false,
   /** Routines' runs: open ones (working, or waiting on you), and Past routines (closed: on their own, or by you). */
@@ -820,6 +822,10 @@ function drawSide() {
       keydown: (e: KeyboardEvent) => { if (e.key === "Escape") { S.pastQuery = ""; (e.target as HTMLInputElement).value = ""; drawPast(); } } } }) as HTMLInputElement : null;
   const typing = document.activeElement?.classList.contains("spastq");
   const openProject = r.view === "project" ? r.id : r.view === "chat" ? S.threads.find((t: any) => t.id === r.id)?.projectId : null;
+  // Archived projects fold away under "Archived projects" (the one you're in still shows), like Past rambles.
+  const activeProjects = S.projects.filter((p: any) => !p.archivedAt), archivedProjects = S.projects.filter((p: any) => p.archivedAt);
+  const archivedToggle = archivedProjects.length ? h("button", { class: `snav spast ${S.archivedOpen ? "open" : ""}`, "aria-expanded": String(S.archivedOpen), on: { click: () => { S.archivedOpen = !S.archivedOpen; drawSide(); } } },
+    icon("chevron", 14), h("span", { class: "grow" }, "Archived projects"), h("small", { class: "scount" }, String(archivedProjects.length))) : null;
   const host = (activeHub()?.url || location.origin).replace(/^https?:\/\//, "");
   clear(el,
     h("button", { class: "sbrand", on: { click: openConnectedDevices } },
@@ -832,15 +838,19 @@ function drawSide() {
       nav("bell", "Activity", tab === "activity", () => { location.hash = "#activity"; }, activityBadge()),
       nav("plug", "Connectors", r.view === "connectors", () => { location.hash = "#connectors"; }, warns.length ? "!" : undefined, warns.join("\n") || undefined)),
     h("div", { class: "slabel" }, "Projects", h("button", { class: "sadd", "aria-label": "New project", on: { click: newProject } }, icon("plus", 14))),
-    h("nav", { class: "sgroup" }, S.projects.length ? S.projects.map((p: any) => [
-      h("button", { class: `snav ${r.view === "project" && r.id === p.id ? "on" : ""}`, draggable: "true", title: "Drag onto another project to put them together",
-        on: { click: () => { location.hash = `#p/${p.id}`; }, dragstart: (e: DragEvent) => { e.dataTransfer?.setData("text/hearth-project", p.id); e.dataTransfer!.effectAllowed = "move"; }, ...dropTo(p.id) } },
-        p.emoji ? h("span", { class: "semoji" }, p.emoji) : icon("folder", 18), h("span", { class: "grow" }, p.name), p.rambles ? h("small", { class: "scount" }, String(p.rambles)) : null),
+    h("nav", { class: "sgroup" }, activeProjects.length || archivedProjects.length ? [...activeProjects, ...(S.archivedOpen ? archivedProjects : archivedProjects.filter((p: any) => openProject === p.id))].map((p: any) => [
+      // Archived ones (under the toggle below) sit after a gap, grayed, and can't be dragged around.
+      p === archivedProjects[0] ? archivedToggle : null,
+      h("button", { class: `snav ${p.archivedAt ? "nested parchived" : ""} ${r.view === "project" && r.id === p.id ? "on" : ""}`, draggable: p.archivedAt ? "false" : "true", title: p.archivedAt ? "Archived. Right-click to bring it back" : "Drag onto another project to put them together",
+        on: { click: () => { location.hash = `#p/${p.id}`; }, contextmenu: (e: MouseEvent) => { e.preventDefault(); projectMore(e.currentTarget as HTMLElement, p); },
+          ...(p.archivedAt ? {} : { dragstart: (e: DragEvent) => { e.dataTransfer?.setData("text/hearth-project", p.id); e.dataTransfer!.effectAllowed = "move"; }, ...dropTo(p.id) }) } },
+        p.emoji ? h("span", { class: "semoji" }, p.emoji) : icon(p.archivedAt ? "archive" : "folder", 18), h("span", { class: "grow" }, p.name), p.rambles ? h("small", { class: "scount" }, String(p.rambles)) : null),
       // Open when you're in it; else its rambles with work going or something new still show, so nothing goes missing.
       live.filter((t: any) => t.projectId === p.id && (openProject === p.id || t.working || unread(t.id, t.lastReplyAt))).map((t: any) => ramble(t, true)),
       // Its closed rambles too, grayed out, so what's listed matches its count.
       openProject === p.id ? S.threads.filter((t: any) => t.projectId === p.id && t.archived && !t.routine).map((t: any) => ramble(t, true, true)) : null,
-    ]) : h("p", { class: "snone" }, "Group rambles, files and memory, like Wedding or Move to SF.")),
+    ]) : h("p", { class: "snone" }, "Group rambles, files and memory, like Wedding or Move to SF."),
+      archivedProjects.length && !S.archivedOpen && !archivedProjects.some((p: any) => openProject === p.id) ? archivedToggle : null),
     h("div", { class: "slabel" }, "Rambles", h("button", { class: "sadd", "aria-label": "New ramble", on: { click: () => { S.newProject = null; location.hash = "#c/new"; } } }, icon("plus", 14))),
     h("nav", { class: "sgroup", on: dropTo(null) }, loose.length || past.length ? loose.map((t: any) => ramble(t)) : h("p", { class: "snone" }, "Tap + to start one."),
       past.length ? h("button", { class: `snav spast ${S.pastOpen ? "open" : ""}`, "aria-expanded": String(S.pastOpen), on: { click: () => { S.pastOpen = !S.pastOpen; if (!S.pastOpen) S.pastQuery = ""; drawSide(); if (S.pastOpen) document.querySelector<HTMLInputElement>(".spastq")?.focus(); } } },
@@ -905,6 +915,8 @@ async function drawProject(id: string) {
         inlineEdit(p.about || "", "Add a description…", "pabout", (v) => saveProject(p, { about: v }), true),
         h("small", null, `${d.rambles.length} ramble${d.rambles.length === 1 ? "" : "s"} · ${d.memory.length} thing${d.memory.length === 1 ? "" : "s"} remembered`)),
       h("button", { class: "pmore", title: "More", "aria-label": "More", on: { click: (e: Event) => projectMore(e.currentTarget as HTMLElement, p) } }, icon("more", 18))),
+    p.archivedAt ? h("div", { class: "parchnote" }, icon("archive", 16), h("span", { class: "grow" }, `Archived ${dayLabel(p.archivedAt)}. Hearth won't file new rambles here; everything in it is kept.`),
+      h("button", { class: "btn ghost", on: { click: () => archiveProject(p, false) } }, "Unarchive")) : null,
     sec("Rambles", null, d.rambles.length ? h("div", { class: "plist" }, d.rambles.map((t: any) =>
       h("button", { class: "prow", on: { click: () => { location.hash = `#c/${t.id}`; } } }, h("span", { class: "shash" }, "#"),
         h("span", { class: "grow" }, h("b", null, channelName(t)), t.title || t.archived ? h("small", null, `${t.title || ""}${t.archived ? `${t.title ? " · " : ""}archived` : ""}`) : null))))
@@ -980,9 +992,18 @@ function emojiPicker(anchor: HTMLElement, current: string, pick: (v: string) => 
 function projectMore(anchor: HTMLElement, p: any) {
   const close = popAt(anchor, [
     h("button", { class: "droprow", on: { click: () => { close(); S.newProject = p.id; location.hash = "#c/new"; } } }, icon("plus", 16), h("span", { class: "grow" }, "New ramble")),
+    h("button", { class: "droprow", on: { click: () => { close(); archiveProject(p, !p.archivedAt); } } }, icon("archive", 16), h("span", { class: "grow" }, p.archivedAt ? "Unarchive" : "Archive project")),
     h("div", { class: "dropsep" }),
     h("button", { class: "droprow danger", on: { click: () => { close(); confirmSheet(`Delete ${p.name}?`, "Its rambles and what it remembered stay; they're just not grouped anymore.", "Delete", async () => { await call(`/api/projects/${p.id}`, { method: "DELETE" }); await loadProjects(); location.hash = ""; }); } } }, icon("trash", 16), h("span", { class: "grow" }, "Delete project")),
   ]);
+}
+
+/** Archive a project (out of the sidebar list, nothing filed into it anymore; nothing deleted) or bring it back. */
+async function archiveProject(p: any, archived: boolean) {
+  try { await call(`/api/projects/${p.id}`, { method: "PATCH", body: { archived } }); await loadProjects();
+    const r = route(); if (r.view === "project" && r.id === p.id) drawProject(p.id);
+    toast(archived ? `Archived ${p.name}` : `${p.name} is back`); }
+  catch (e) { handleError(e); }
 }
 
 /** Top right of a ramble: which project it's in. Opens a menu right under it to pick or change. */
@@ -1018,7 +1039,8 @@ function projectMenuAt(anchor: HTMLElement | { x: number; y: number }, current: 
   };
   const draw = () => {
     const term = q.value.trim().toLowerCase();
-    const hits = S.projects.filter((x: any) => !term || x.name.toLowerCase().includes(term))
+    // Archived projects only come up when you search for them (or it's the one this is in).
+    const hits = S.projects.filter((x: any) => term ? x.name.toLowerCase().includes(term) : !x.archivedAt || x.id === current)
       .sort((a: any, b: any) => term ? (b.name.toLowerCase().startsWith(term) ? 1 : 0) - (a.name.toLowerCase().startsWith(term) ? 1 : 0) : 0);
     const exact = S.projects.some((x: any) => x.name.toLowerCase() === term);
     clear(list,
@@ -1080,7 +1102,7 @@ function moveToProject(t: any) {
   const pick = async (projectId: string | null) => { try { await call(`/api/threads/${t.id}/project`, { body: { projectId } }); closeSheet(); if (S.chat?.thread?.id === t.id) { S.chat.thread.projectId = projectId || undefined; drawHeader(); } loadThreads(); loadProjects(); toast(projectId ? "Moved" : "Taken out of the project"); } catch (e) { handleError(e); } };
   openSheet("Move to project", [
     h("div", { class: "wcard" },
-      S.projects.map((p: any) => h("button", { class: "wrow", on: { click: () => pick(p.id) } }, p.emoji ? h("span", { class: "semoji" }, p.emoji) : icon("folder", 18),
+      S.projects.filter((p: any) => !p.archivedAt || p.id === t.projectId).map((p: any) => h("button", { class: "wrow", on: { click: () => pick(p.id) } }, p.emoji ? h("span", { class: "semoji" }, p.emoji) : icon("folder", 18),
         h("span", { class: "grow" }, h("b", null, p.name)), t.projectId === p.id ? icon("check", 16) : null)),
       h("button", { class: "wrow", on: { click: () => { closeSheet(); newProject(); } } }, icon("plus", 18), h("span", { class: "grow" }, h("b", null, "New project…")))),
     t.projectId ? h("button", { class: "btn ghost", on: { click: () => pick(null) } }, "Take it out of the project") : null,

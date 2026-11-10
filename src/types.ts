@@ -98,7 +98,9 @@ export type Thread = Doc & { title: string; updatedAt: string; preview?: string;
 
 /** A folder of rambles ("Wedding", "Move to SF") with its own memory: teammates working in its rambles read and save
  *  facts in its notebook, so what's learned in one ramble is there in the next. */
-export type Project = Doc & { name: string; emoji?: string; notebook: string; about?: string; madeBy?: "hearth" };
+export type Project = Doc & { name: string; emoji?: string; notebook: string; about?: string; madeBy?: "hearth";
+  /** You archived it: out of the sidebar list (under "Archived projects") and Hearth files nothing new into it. Nothing in it is deleted. */
+  archivedAt?: string };
 
 export type Job = Doc & {
   threadId: string;

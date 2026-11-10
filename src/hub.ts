@@ -651,12 +651,14 @@ export class Hub {
     return { value: p };
   }
 
-  async updateProject(id: string, patch: { name?: string; emoji?: string; about?: string }) {
+  async updateProject(id: string, patch: { name?: string; emoji?: string; about?: string; archived?: boolean }) {
     const p = await this.store.get<Project>("projects", id);
     if (!p) return { error: "No such project." };
     const next = { ...p, ...(patch.name?.trim() ? { name: patch.name.trim().slice(0, 60) } : {}), ...(patch.emoji !== undefined ? { emoji: patch.emoji.slice(0, 8) || undefined } : {}),
-      ...(patch.about !== undefined ? { about: patch.about.slice(0, 1000) || undefined } : {}), updatedAt: this.clock().toISOString() };
+      ...(patch.about !== undefined ? { about: patch.about.slice(0, 1000) || undefined } : {}),
+      ...(patch.archived !== undefined ? { archivedAt: patch.archived ? p.archivedAt || this.clock().toISOString() : undefined } : {}), updatedAt: this.clock().toISOString() };
     await this.store.put("projects", next);
+    if (patch.archived !== undefined && !!patch.archived !== !!p.archivedAt) await this.log(patch.archived ? "project.archived" : "project.unarchived", p.name);
     this.emit("projects");
     return { value: next };
   }
@@ -679,7 +681,10 @@ export class Hub {
   async fileThread(threadId: string, projectId: string | null) {
     const t = await this.store.get<Thread>("threads", threadId);
     if (!t || t.id.startsWith("tm-") || t.id === "main") return { error: "No such ramble." };
-    if (projectId && !(await this.store.get<Project>("projects", projectId))) return { error: "No such project." };
+    const p = projectId ? await this.store.get<Project>("projects", projectId) : null;
+    if (projectId && !p) return { error: "No such project." };
+    // Filing something into an archived project yourself means it's going again.
+    if (p?.archivedAt) await this.store.put<Project>("projects", { ...p, archivedAt: undefined });
     const saved = await this.store.put<Thread>("threads", { ...t, projectId: projectId || undefined, filedBy: "you", groupedWhy: undefined });
     this.emit("threads"); this.emit("projects");
     return { value: saved };
@@ -729,7 +734,8 @@ export class Hub {
 
   private async groupOne(t: Thread, threads: Thread[], busy: Set<string>, jobs: Job[]): Promise<{ filed: boolean; action: string; project?: string; with?: string[]; why: string }> {
     const since = this.clock().getTime() - 45 * 86400_000;
-    const projects = await this.store.all<Project>("projects");
+    // An archived project is done: nothing new gets filed into it (a "new" one named like it just isn't made).
+    const projects = (await this.store.all<Project>("projects")).filter((p) => !p.archivedAt);
     const msgs = await this.store.all<Message>("messages");
     const said = (x: Thread, n: number) => msgs.filter((m) => m.threadId === x.id && m.role === "user" && !m.hidden).map((m) => m.text.replace(/\s+/g, " ")).join(" / ").slice(0, n);
     const labels = (x: Thread) => jobs.filter((j) => j.threadId === x.id && !j.parentId && !j.followsUp).map((j) => j.label || j.task.slice(0, 60)).slice(0, 5).join("; ");
@@ -889,6 +895,8 @@ export class Hub {
       // both said "options". Which project it belongs in is for Hearth's agent to decide later (groupRambles).
       thread = await this.store.put<Thread>("threads", { id: randomUUID(), createdAt: now, updatedAt: now, num, title: (o.title || clean.split(/\s+/).slice(0, 6).join(" ")).slice(0, 60),
         ...(project ? { projectId: project.id } : {}) });
+      // A new ramble started in an archived project brings it back.
+      if (project?.archivedAt) project = await this.store.put<Project>("projects", { ...project, archivedAt: undefined });
       if (project) this.emit("projects");
     }
     const files = (await Promise.all(fileIds.slice(0, 5).map((id) => this.store.get<StoredFile>("files", id)))).filter(Boolean) as StoredFile[];
