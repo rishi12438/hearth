@@ -174,16 +174,51 @@ export function goodSignature(key: string, raw: string, sig: string | null) {
 // ---------- audio ----------
 
 /** Linear resample of 16-bit mono PCM. Plenty for a phone line (it's 16 kHz at best). */
+/** A streaming resampler for the call's audio (24 kHz model voice ↔ 16 kHz phone). Windowed-sinc, so going down it
+ *  filters out what the lower rate can't carry (plain interpolation folds it back as a harsh, robotic buzz), and it
+ *  keeps its place and the last few samples between chunks, so chunk edges don't click. One per direction per call. */
+export class Resampler {
+  private hist = new Float32Array(0);
+  /** The next output sample's position, in input samples from the start of hist. */
+  private pos = 0;
+  private readonly step: number;
+  private readonly cutoff: number;
+  private readonly half = 16;
+  constructor(readonly from: number, readonly to: number) {
+    this.step = from / to;
+    this.cutoff = Math.min(1, to / from) * 0.92;
+  }
+  push(pcm: Int16Array): Int16Array {
+    if (this.from === this.to || !pcm.length) return pcm;
+    const buf = new Float32Array(this.hist.length + pcm.length);
+    buf.set(this.hist); for (let i = 0; i < pcm.length; i++) buf[this.hist.length + i] = pcm[i];
+    const out: number[] = [];
+    const { half, cutoff } = this;
+    while (this.pos + half < buf.length) {
+      const x = this.pos, c = Math.floor(x);
+      let acc = 0, wsum = 0;
+      for (let k = c - half + 1; k <= c + half; k++) {
+        const t = x - k;
+        const a = Math.PI * t * cutoff;
+        const sinc = Math.abs(t) < 1e-9 ? 1 : Math.sin(a) / a;
+        const win = 0.42 + 0.5 * Math.cos((Math.PI * t) / half) + 0.08 * Math.cos((2 * Math.PI * t) / half);
+        const w = sinc * win;
+        acc += (k >= 0 ? buf[k] : 0) * w; wsum += w;
+      }
+      out.push(Math.max(-32768, Math.min(32767, Math.round(acc / wsum))));
+      this.pos += this.step;
+    }
+    const keep = Math.max(0, Math.floor(this.pos) - half);
+    this.hist = buf.slice(keep);
+    this.pos -= keep;
+    return Int16Array.from(out);
+  }
+}
+/** One-off conversion of a whole clip. */
 export function resample(pcm: Int16Array, from: number, to: number): Int16Array {
   if (from === to || !pcm.length) return pcm;
-  const out = new Int16Array(Math.max(1, Math.round((pcm.length * to) / from)));
-  const step = from / to;
-  for (let i = 0; i < out.length; i++) {
-    const x = i * step, j = Math.floor(x), f = x - j;
-    const a = pcm[Math.min(j, pcm.length - 1)], b = pcm[Math.min(j + 1, pcm.length - 1)];
-    out[i] = Math.round(a + (b - a) * f);
-  }
-  return out;
+  const padded = new Int16Array(pcm.length + 64); padded.set(pcm); // lets the filter run past the end
+  return new Resampler(from, to).push(padded).slice(0, Math.max(1, Math.round((pcm.length * to) / from)));
 }
 const toB64 = (pcm: Int16Array) => Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString("base64");
 const fromB64 = (b64: string) => { const b = Buffer.from(b64, "base64"); return new Int16Array(b.buffer, b.byteOffset, Math.floor(b.byteLength / 2)).slice(); };
@@ -240,13 +275,15 @@ export function talkerInstructions(brief: string, v: VoicePrefs, maxSeconds?: nu
 - Never give card numbers, passwords, ID numbers or addresses unless a [Supervisor] message gives them to you for this call.
 - Messages that start with [Supervisor] are private instructions from the person you work for. Follow them; never read them out.
 - Phone menus: listen and say or ask for what gets you to a person.
-- Voicemail: leave a short message (who you are, who for, why, that you'll try again), then end_call.
+- Call screening is NOT voicemail. If an assistant answers asking for your name and why you're calling ("record your name and reason for calling", "this call is being screened", Google or Apple call screening), say in one sentence who you are, who you're calling for and why, then wait quietly: the person usually picks up a moment later. Don't hang up.
+- Voicemail is only when you hear "leave a message" or a beep. Then leave a short message (who you are, who for, why, that you'll try again) after the beep, then end_call.
 - When it's done or they want to go: thank them, say goodbye, then call end_call.`,
   ].join("\n\n");
 }
 
 /** OpenAI Realtime over its WebSocket. 24 kHz PCM both ways; it transcribes both sides. */
 export const openaiTalker: TalkerFactory = (spec, ev) => {
+  const up = new Resampler(RATE, 24000), down = new Resampler(24000, RATE);
   const base = process.env.HEARTH_OPENAI_REALTIME_URL || "wss://api.openai.com/v1/realtime";
   const ws = new WebSocket(`${base}?model=${encodeURIComponent(spec.model)}`, { headers: { Authorization: `Bearer ${spec.key}` } } as any);
   const waiting: string[] = [];
@@ -266,7 +303,7 @@ export const openaiTalker: TalkerFactory = (spec, ev) => {
   ws.onmessage = (e) => {
     let m: any; try { m = JSON.parse(String(e.data)); } catch { return; }
     switch (m.type) {
-      case "response.output_audio.delta": case "response.audio.delta": if (m.delta) ev.onAudio(resample(fromB64(m.delta), 24000, RATE)); return;
+      case "response.output_audio.delta": case "response.audio.delta": if (m.delta) ev.onAudio(down.push(fromB64(m.delta))); return;
       case "response.output_audio_transcript.done": case "response.audio_transcript.done": if (m.transcript?.trim()) ev.onLine("bot", m.transcript.trim()); return;
       case "conversation.item.input_audio_transcription.completed": if (m.transcript?.trim()) ev.onLine("them", m.transcript.trim()); return;
       case "input_audio_buffer.speech_started": ev.onInterrupt(); return;
@@ -276,7 +313,7 @@ export const openaiTalker: TalkerFactory = (spec, ev) => {
   };
   ws.onerror = () => ev.onError("Lost the connection to OpenAI Realtime.");
   return {
-    audio: (pcm) => send({ type: "input_audio_buffer.append", audio: toB64(resample(pcm, RATE, 24000)) }),
+    audio: (pcm) => send({ type: "input_audio_buffer.append", audio: toB64(up.push(pcm)) }),
     inject(text, respond) { send({ type: "conversation.item.create", item: { type: "message", role: "user", content: [{ type: "input_text", text }] } }); if (respond) send({ type: "response.create" }); },
     toolResult(callId, output, respond = true) { send({ type: "conversation.item.create", item: { type: "function_call_output", call_id: callId, output } }); if (respond) send({ type: "response.create" }); },
     greet: () => send({ type: "response.create" }),
@@ -286,6 +323,7 @@ export const openaiTalker: TalkerFactory = (spec, ev) => {
 
 /** Gemini Live over its WebSocket. 16 kHz in, 24 kHz out; transcripts of both sides come with it. */
 export const geminiTalker: TalkerFactory = (spec, ev) => {
+  const down = new Resampler(24000, RATE);
   const base = process.env.HEARTH_GEMINI_LIVE_URL || "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
   const ws = new WebSocket(`${base}?key=${encodeURIComponent(spec.key)}`);
   ws.binaryType = "arraybuffer";
@@ -303,6 +341,8 @@ export const geminiTalker: TalkerFactory = (spec, ev) => {
       systemInstruction: { parts: [{ text: spec.instructions }] },
       tools: [{ functionDeclarations: TOOLS }],
       inputAudioTranscription: {}, outputAudioTranscription: {},
+      // Reply as soon as they stop (measured: ~1.1 s to its first word, against ~1.4 s on the defaults).
+      realtimeInputConfig: { automaticActivityDetection: { endOfSpeechSensitivity: "END_SENSITIVITY_HIGH", prefixPaddingMs: 100, silenceDurationMs: 500 } },
     } }));
   };
   ws.onmessage = (e) => {
@@ -313,7 +353,7 @@ export const geminiTalker: TalkerFactory = (spec, ev) => {
     if (sc) {
       if (sc.inputTranscription?.text) heard += sc.inputTranscription.text;
       if (sc.outputTranscription?.text) { flushHeard(); said += sc.outputTranscription.text; }
-      for (const p of sc.modelTurn?.parts ?? []) if (p.inlineData?.data) { flushHeard(); ev.onAudio(resample(fromB64(p.inlineData.data), 24000, RATE)); }
+      for (const p of sc.modelTurn?.parts ?? []) if (p.inlineData?.data) { flushHeard(); ev.onAudio(down.push(fromB64(p.inlineData.data))); }
       if (sc.interrupted) { flushSaid(); ev.onInterrupt(); }
       if (sc.turnComplete) flushSaid();
     }
@@ -385,6 +425,8 @@ type Live = {
   told: Set<string>;
   timers: ReturnType<typeof setTimeout>[]; asked: Map<string, string>;
   ending: boolean; greetTimer?: ReturnType<typeof setTimeout>;
+  /** The model's voice that doesn't fill a whole 20 ms frame yet (frames are always whole, so speech has no gaps). */
+  carry: Int16Array;
   rec: CallRecorder | null;
 };
 
@@ -476,7 +518,7 @@ export class Calls {
       status: "dialing", lines: [], questions: [], ...(a.startedBy ? { startedBy: a.startedBy } : {}),
     };
     const lv: Live = { call, secret: randomBytes(24).toString("base64url"), talker: null, vonage: null, out: [], pump: null, listeners: new Set(), joiner: null, mic: [],
-      waiters: new Set(), seen: 0, told: new Set(), timers: [], asked: new Map(), ending: false, rec: null };
+      waiters: new Set(), seen: 0, told: new Set(), timers: [], asked: new Map(), ending: false, rec: null, carry: new Int16Array(0) };
     this.live.set(call.id, lv);
     await this.save(lv);
     const base = pub.replace(/\/$/, "");
@@ -545,26 +587,47 @@ export class Calls {
     if (lv.call.status !== "live") { lv.call.status = "live"; lv.call.answeredAt ??= this.clock().toISOString(); void this.save(lv); }
     const factory = this.d.talker ?? (m.provider === "openai" ? openaiTalker : geminiTalker);
     lv.talker = factory({ provider: m.provider, key: m.key, model: m.model, instructions: talkerInstructions(lv.call.brief, lv.call.voice, lv.call.maxSeconds), voice: lv.call.voice }, {
-      onAudio: (pcm) => { if (lv.joiner) return; for (let i = 0; i < pcm.length; i += FRAME) lv.out.push(pcm.subarray(i, i + FRAME)); },
+      onAudio: (pcm) => {
+        if (lv.joiner) return;
+        const all = lv.carry.length ? (() => { const b = new Int16Array(lv.carry.length + pcm.length); b.set(lv.carry); b.set(pcm, lv.carry.length); return b; })() : pcm;
+        let i = 0;
+        for (; i + FRAME <= all.length; i += FRAME) lv.out.push(all.slice(i, i + FRAME));
+        lv.carry = all.slice(i);
+      },
       onLine: (who, text) => { void this.line(lv, lv.joiner && who === "them" ? "them" : who, text); },
-      onInterrupt: () => { lv.out.length = 0; },
+      onInterrupt: () => { lv.out.length = 0; lv.carry = new Int16Array(0); },
       onTool: (name, args, callId) => { void this.tool(lv, name, args, callId); },
       onError: (why) => { void this.line(lv, "note", why); },
     });
-    // People answer with "Hello?": the model replies to that. If they say nothing, it starts after 3 s.
+    // People answer with "Hello?": the model replies to that. If they say nothing, it starts after 2 s.
     let heard = false;
-    lv.greetTimer = setTimeout(() => { if (!heard) lv.talker?.greet(); }, 3000);
+    lv.greetTimer = setTimeout(() => { if (!heard) lv.talker?.greet(); }, 2000);
     const origAudio = lv.talker.audio.bind(lv.talker);
     lv.talker.audio = (pcm) => { heard ||= pcm.some((x) => Math.abs(x) > 1500); origAudio(pcm); };
+    // Paced by the clock, not by timer ticks (they fire late, and one frame a late tick falls behind and stutters):
+    // every frame that's due goes out, up to 40 ms early so Vonage always has the next one in hand.
+    let due = 0;
+    const next = (): { frame: Int16Array; mic: boolean } | null => {
+      if (lv.joiner) { const m = lv.mic.shift(); return m ? { frame: m, mic: true } : null; }
+      const f = lv.out.shift();
+      if (f) return { frame: f, mic: false };
+      // The last bit of a sentence, once nothing more is coming in.
+      if (lv.carry.length) { const p = new Int16Array(FRAME); p.set(lv.carry); lv.carry = new Int16Array(0); return { frame: p, mic: false }; }
+      return null;
+    };
     lv.pump = setInterval(() => {
-      const mic = lv.joiner ? lv.mic.shift() : undefined;
-      const f = mic ?? (lv.joiner ? undefined : lv.out.shift());
-      if (!f) return;
-      const frame = f.length === FRAME ? f : (() => { const p = new Int16Array(FRAME); p.set(f.subarray(0, FRAME)); return p; })();
-      try { lv.vonage?.send(new Uint8Array(frame.buffer, frame.byteOffset, frame.byteLength)); } catch {}
-      lv.rec?.ours(frame);
-      if (!mic) for (const s of lv.listeners) { try { s.send(listenerFrame(2, frame)); } catch {} }
-    }, 20);
+      const now = performance.now();
+      if (!due || now - due > 200) due = now;
+      while (due <= now + 40) {
+        const n = next();
+        if (!n) { due = 0; return; }
+        const frame = n.frame.length === FRAME ? n.frame : (() => { const p = new Int16Array(FRAME); p.set(n.frame.subarray(0, FRAME)); return p; })();
+        try { lv.vonage?.send(new Uint8Array(frame.buffer, frame.byteOffset, frame.byteLength)); } catch {}
+        lv.rec?.ours(frame);
+        if (!n.mic) for (const s of lv.listeners) { try { s.send(listenerFrame(2, frame)); } catch {} }
+        due += 20;
+      }
+    }, 10);
   }
 
   /** One binary frame (or the opening JSON) from Vonage. */
@@ -593,6 +656,12 @@ export class Calls {
   /** The talker called a tool. */
   private async tool(lv: Live, name: string, args: any, callId: string) {
     if (name === "end_call") {
+      // Hanging up seconds in is nearly always a mistake (a call screener or a greeting taken for voicemail).
+      const since = lv.call.answeredAt ? (this.clock().getTime() - Date.parse(lv.call.answeredAt)) / 1000 : 99;
+      if (since < 12 && !(lv.call.lines.some((l) => l.who === "them" && /\b(bye|goodbye|not interested|stop calling|wrong number)\b/i.test(l.text)))) {
+        lv.talker?.toolResult(callId, "Not yet: the call only just connected. If an assistant is screening the call, say who you are and why you're calling, then wait for the person. Only end the call once you've actually talked or left a voicemail after the beep.", true);
+        return;
+      }
       lv.talker?.toolResult(callId, "ok", false);
       lv.call.outcome = String(args?.outcome || "").slice(0, 500) || lv.call.outcome;
       lv.call.endedBy ??= "bot";
