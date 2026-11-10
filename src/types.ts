@@ -83,6 +83,9 @@ export type Thread = Doc & { title: string; updatedAt: string; preview?: string;
   lookAt?: string;
   /** The project this ramble is filed under, if any. */
   projectId?: string;
+  /** Picked from the header: every job in this ramble runs on this harness and model ("" = the harness's default) instead
+   *  of the roles and the pool's pick. Unset = Auto. */
+  brain?: { harness: string; model: string };
   /** Started in an earlier ramble's workspace (its folder), because its first plan put its work there (see Hub.linkWorkspace):
    *  its jobs work there, so they can search and use what the earlier work saved. workspaceFrom is that ramble. */
   workspace?: string;

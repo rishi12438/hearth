@@ -339,7 +339,7 @@ function onEvent(e: { type: string; data?: any }) {
       else if (e.data.status === "pending") toast(`Needs your OK: ${e.data.summary}`);
       soon();
       return;
-    case "threads": if (open) markSeen(open); soon(); if (open && S.chat) call("/api/threads").then((l: any[]) => { const t = l.find((x) => x.id === open); if (t && S.chat) { const was = lookFor(S.chat.thread); S.chat.thread.title = t.title; S.chat.thread.channel = t.channel; S.chat.thread.look = t.look; const linked = t.workspaceFrom && !S.chat.thread.workspaceFrom; S.chat.thread.workspace = t.workspace; S.chat.thread.workspaceFrom = t.workspaceFrom; S.chat.thread.workspaceKept = t.workspaceKept; if (linked && !t.workspaceKept) { offerJoin(t); drawChat(); } else if (lookFor(S.chat.thread) !== was) { S.morphing = true; drawChat(); S.morphing = false; } else drawHeader(); } }).catch(() => {}); return;
+    case "threads": if (open) markSeen(open); soon(); if (open && S.chat) call("/api/threads").then((l: any[]) => { const t = l.find((x) => x.id === open); if (t && S.chat) { const was = lookFor(S.chat.thread); S.chat.thread.title = t.title; S.chat.thread.channel = t.channel; S.chat.thread.look = t.look; const linked = t.workspaceFrom && !S.chat.thread.workspaceFrom; S.chat.thread.workspace = t.workspace; S.chat.thread.workspaceFrom = t.workspaceFrom; S.chat.thread.workspaceKept = t.workspaceKept; S.chat.thread.brain = t.brain; if (linked && !t.workspaceKept) { offerJoin(t); drawChat(); } else if (lookFor(S.chat.thread) !== was) { S.morphing = true; drawChat(); S.morphing = false; } else drawHeader(); } }).catch(() => {}); return;
     case "teammates": loadTeammates().then(soon); return;
     case "skills": loadSkills(); return;
     case "frame": {
@@ -1034,6 +1034,67 @@ function projectButton(): Node {
   return btn;
 }
 
+/** The brain picked for this ramble in its header, in words: "Auto", "Opus 5.5", "Codex gpt-6.1-sol", "Codex". */
+function brainLabel(b?: { harness: string; model: string }) {
+  if (!b) return "Auto";
+  const m = b.model.replace(/^claude-/, "").replace(/-(\d+)-(\d+)$/, " $1.$2");
+  if (b.harness === "claude") return m ? m.replace(/^./, (c) => c.toUpperCase()) : "Claude";
+  return `${b.harness === "codex" ? "Codex" : b.harness}${m ? ` ${m}` : ""}`;
+}
+let brainsAvail: string[] | null = null;
+/** Top corner of a ramble: which harness and model its jobs run on. Auto = the roles in Settings → Brains. */
+function brainButton(): Node | null {
+  const t = S.chat?.thread;
+  if (!t || t.id === "new") return null;
+  const label = brainLabel(t.brain);
+  const btn: HTMLElement = h("button", { class: `projbtn brainbtn glass ${t.brain ? "on" : ""}`, "aria-label": `Model: ${label}`, "aria-haspopup": "menu", title: `Runs on: ${label} · change`,
+    on: { click: () => brainMenuAt(btn, t) } }, icon("brain", 17), h("span", { class: "projname" }, label), icon("chevron", 13));
+  return btn;
+}
+async function brainMenuAt(anchor: HTMLElement, t: any) {
+  if (closeDrop) { const was = (closeDrop as any).anchor; closeDrop(); if (was === anchor) return; }
+  if (!brainsAvail) { try { brainsAvail = (await call("/api/brains")).available || []; } catch (e) { return handleError(e); } }
+  const cur = t.brain as { harness: string; model: string } | undefined;
+  const pick = async (b: { harness: string; model: string } | null) => {
+    try {
+      const r = await call(`/api/threads/${t.id}`, { method: "PATCH", body: { brain: b } });
+      t.brain = r.brain;
+      if (S.chat?.thread?.id === t.id) S.chat.thread.brain = r.brain;
+      drawHeader(); toast(`New work here runs on ${brainLabel(r.brain)}`);
+    } catch (e) { handleError(e); }
+  };
+  const same = (b: { harness: string; model: string } | null) => (!b && !cur) || (!!b && !!cur && b.harness === cur.harness && b.model === cur.model);
+  const row = (text: string, sub: string | null, b: { harness: string; model: string } | null) =>
+    h("button", { class: "droprow", role: "menuitem", on: { click: () => { close(); if (!same(b)) pick(b); } } },
+      h("span", { class: "grow" }, text, sub ? h("small", null, sub) : null), same(b) ? icon("check", 15) : null);
+  const harnesses = (brainsAvail || []).filter((x) => x === "claude" || x === "codex");
+  const other = h("input", { class: "dropsearch", placeholder: "Other model, then Enter", autocomplete: "off", spellcheck: false, "aria-label": "Other model" }) as HTMLInputElement;
+  other.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || !other.value.trim()) return;
+    e.preventDefault();
+    const m = other.value.trim();
+    const harness = /^claude|opus|sonnet|haiku|fable/i.test(m) ? "claude" : harnesses.includes("codex") ? "codex" : harnesses[0];
+    close(); if (harness) pick({ harness, model: m });
+  });
+  const menu = h("div", { class: "dropmenu qmenu brainmenu", role: "menu" },
+    h("div", { class: "droplist" },
+      row("Auto", "The roles in Settings → Brains", null),
+      harnesses.map((hn) => [h("div", { class: "dropsep" }), h("div", { class: "droplabel" }, hn === "claude" ? "Claude Code" : "Codex"),
+        [...new Set(["", ...(MODEL_HINTS[hn] || []), ...(cur?.harness === hn && cur.model ? [cur.model] : [])])].map((m) =>
+          row(m ? brainLabel({ harness: hn, model: m }) : `${hn === "claude" ? "Claude" : "Codex"} default`, hn === "claude" && m ? m : null, { harness: hn, model: m }))])),
+    harnesses.length ? other : h("p", { class: "dropnone" }, "No Claude Code or Codex on this hub."));
+  document.body.append(menu);
+  const r = anchor.getBoundingClientRect();
+  const w = menu.offsetWidth, hgt = menu.offsetHeight;
+  menu.style.left = `${Math.max(8, Math.min(r.right - w, innerWidth - w - 8))}px`;
+  menu.style.top = `${Math.min(r.bottom + 6, innerHeight - hgt - 8)}px`;
+  const outside = (e: Event) => { if (!menu.contains(e.target as Node) && !anchor.contains(e.target as Node)) close(); };
+  const key = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
+  function close() { menu.remove(); document.removeEventListener("pointerdown", outside, true); document.removeEventListener("keydown", key); window.removeEventListener("hashchange", close); closeDrop = null; }
+  closeDrop = Object.assign(close, { anchor });
+  setTimeout(() => { document.addEventListener("pointerdown", outside, true); document.addEventListener("keydown", key); window.addEventListener("hashchange", close); });
+}
+
 let closeDrop: (() => void) | null = null;
 /** A small menu of projects that drops down from `anchor` (or opens at a point, for right-click). */
 function projectMenuAt(anchor: HTMLElement | { x: number; y: number }, current: string | null, pick: (id: string | null) => void, rename?: () => void) {
@@ -1206,7 +1267,7 @@ function drawHeader() {
     const t = mate(j?.teammateId);
     // The ramble's other threads stay in view up here (like switching threads in Slack), with how many are running.
     const others = new Set((chat?.jobs || []).filter((x: any) => !x.parentId && (x.status === "working" || x.status === "queued")).map((x: any) => x.followsUp || x.id).filter((id: string) => id !== r.job)).size;
-    clear(top, h("div", { class: "toprow stagerow" }, back, stage("chat", t, j ? jobState(j) : "idle", t.name, [`Thread in #${name}`, others ? `${others} other${others === 1 ? "" : "s"} running` : null].filter(Boolean).join(" · "), null, false, [], lookFor(chat?.thread)), search),
+    clear(top, h("div", { class: "toprow stagerow" }, back, stage("chat", t, j ? jobState(j) : "idle", t.name, [`Thread in #${name}`, others ? `${others} other${others === 1 ? "" : "s"} running` : null].filter(Boolean).join(" · "), null, false, [], lookFor(chat?.thread)), h("div", { class: "hdright" }, brainButton(), search)),
       threadTabs(chat, r.job, 2));
     return;
   }
@@ -1224,14 +1285,14 @@ function drawHeader() {
           h("button", { class: "crowdface", "aria-label": `${a.t.name}: open thread`, on: { click: () => { location.hash = `#c/${chat.thread.id}/${a.jobId}`; } } }, face(a.t, 46, a.state, lookFor(chat?.thread))))),
         h("button", { class: "stagepill", on: { click: chatMenu } }, h("b", null, names)),
         h("small", null, chanLine(chat?.thread, name, `${open} working`))),
-      projectButton()), threadTabs(chat, null));
+      h("div", { class: "hdright" }, brainButton(), projectButton())), threadTabs(chat, null));
     return;
   }
   const who = speaker(chat);
   const others = [...new Set(jobs.map((j: any) => j.teammateId))].filter((id) => id !== who.t.id).slice(0, 3).map((id) => mate(id as string));
   clear(top, h("div", { class: "toprow stagerow" }, back,
     stage("chat", who.t, who.state, who.t.name, chanLine(chat?.thread, name, open ? `${open} working` : null), chatMenu, false, others, lookFor(chat?.thread)),
-    projectButton()), threadTabs(chat, null));
+    h("div", { class: "hdright" }, brainButton(), projectButton())), threadTabs(chat, null));
 }
 
 /** Teammates with something open in this ramble (one entry each, their most recent task), busiest first. */
@@ -3784,8 +3845,8 @@ function openBadge(t: any) {
 }
 
 const MODEL_HINTS: Record<string, string[]> = {
-  claude: ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
-  codex: [],
+  claude: ["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
+  codex: ["gpt-6.1-sol"],
 };
 
 async function openBrains() {
