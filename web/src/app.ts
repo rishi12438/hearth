@@ -1042,16 +1042,34 @@ function brainLabel(b?: { harness: string; model: string }) {
   return `${b.harness === "codex" ? "Codex" : b.harness}${m ? ` ${m}` : ""}`;
 }
 let brainsAvail: string[] | null = null;
+/** Settings → Brains' workhorse: what a normal job here runs on when nothing has run yet. */
+let brainsDefault: { harness: string; model: string } | null = null;
+let brainsAsked = false;
+/** A job's model as the hub words it ("Claude opus-5-5", "Codex gpt-6.1-sol") in the picker's words ("Opus 5.5"). */
+const ranLabel = (m: string) => { const [hn, ...rest] = m.split(" "); return brainLabel({ harness: hn === "Claude" ? "claude" : hn === "Codex" ? "codex" : hn, model: (hn === "Claude" && rest.length ? "claude-" : "") + rest.join(" ") }); };
+/** What Auto is on right now here: the model this thread (or the ramble's latest job) last ran on, else the workhorse. */
+function autoNow(jobId?: string): string | null {
+  const jobs: any[] = (S.chat?.jobs || []).filter((j: any) => j.models?.length);
+  const j = jobId ? [...jobs].reverse().find((x) => x.id === jobId || x.followsUp === jobId) : jobs.filter((x) => !x.parentId).at(-1);
+  if (j) return ranLabel(j.models.at(-1));
+  if (brainsDefault) return brainLabel(brainsDefault);
+  if (!brainsAsked) {
+    brainsAsked = true;
+    call("/api/brains").then((d: any) => { brainsAvail = d.available || []; brainsDefault = d.current?.workhorse || null; if (brainsDefault) drawHeader(); }).catch(() => {});
+  }
+  return null;
+}
 /** Top corner of a ramble: which harness and model its jobs run on. Auto = the roles in Settings → Brains. */
-function brainButton(): Node | null {
+function brainButton(jobId?: string): Node | null {
   const t = S.chat?.thread;
   if (!t || t.id === "new") return null;
-  const label = brainLabel(t.brain);
+  const now = t.brain ? null : autoNow(jobId);
+  const label = t.brain ? brainLabel(t.brain) : now ? `Auto · ${now}` : "Auto";
   const btn: HTMLElement = h("button", { class: `projbtn brainbtn glass ${t.brain ? "on" : ""}`, "aria-label": `Model: ${label}`, "aria-haspopup": "menu", title: `Runs on: ${label} · change`,
-    on: { click: () => brainMenuAt(btn, t) } }, icon("brain", 17), h("span", { class: "projname" }, label), icon("chevron", 13));
+    on: { click: () => brainMenuAt(btn, t, now) } }, icon("brain", 17), h("span", { class: "projname" }, label), icon("chevron", 13));
   return btn;
 }
-async function brainMenuAt(anchor: HTMLElement, t: any) {
+async function brainMenuAt(anchor: HTMLElement, t: any, now: string | null = null) {
   if (closeDrop) { const was = (closeDrop as any).anchor; closeDrop(); if (was === anchor) return; }
   if (!brainsAvail) { try { brainsAvail = (await call("/api/brains")).available || []; } catch (e) { return handleError(e); } }
   const cur = t.brain as { harness: string; model: string } | undefined;
@@ -1078,7 +1096,7 @@ async function brainMenuAt(anchor: HTMLElement, t: any) {
   });
   const menu = h("div", { class: "dropmenu qmenu brainmenu", role: "menu" },
     h("div", { class: "droplist" },
-      row("Auto", "The roles in Settings → Brains", null),
+      row(now ? `Auto · ${now}` : "Auto", now ? "Now on this · the roles in Settings → Brains pick" : "The roles in Settings → Brains", null),
       harnesses.map((hn) => [h("div", { class: "dropsep" }), h("div", { class: "droplabel" }, hn === "claude" ? "Claude Code" : "Codex"),
         [...new Set(["", ...(MODEL_HINTS[hn] || []), ...(cur?.harness === hn && cur.model ? [cur.model] : [])])].map((m) =>
           row(m ? brainLabel({ harness: hn, model: m }) : `${hn === "claude" ? "Claude" : "Codex"} default`, hn === "claude" && m ? m : null, { harness: hn, model: m }))])),
@@ -1267,7 +1285,7 @@ function drawHeader() {
     const t = mate(j?.teammateId);
     // The ramble's other threads stay in view up here (like switching threads in Slack), with how many are running.
     const others = new Set((chat?.jobs || []).filter((x: any) => !x.parentId && (x.status === "working" || x.status === "queued")).map((x: any) => x.followsUp || x.id).filter((id: string) => id !== r.job)).size;
-    clear(top, h("div", { class: "toprow stagerow" }, back, stage("chat", t, j ? jobState(j) : "idle", t.name, [`Thread in #${name}`, others ? `${others} other${others === 1 ? "" : "s"} running` : null].filter(Boolean).join(" · "), null, false, [], lookFor(chat?.thread)), h("div", { class: "hdright" }, brainButton(), search)),
+    clear(top, h("div", { class: "toprow stagerow" }, back, stage("chat", t, j ? jobState(j) : "idle", t.name, [`Thread in #${name}`, others ? `${others} other${others === 1 ? "" : "s"} running` : null].filter(Boolean).join(" · "), null, false, [], lookFor(chat?.thread)), h("div", { class: "hdright" }, brainButton(r.job), search)),
       threadTabs(chat, r.job, 2));
     return;
   }
