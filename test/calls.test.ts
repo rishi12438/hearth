@@ -60,6 +60,8 @@ function make(waits = { check: 0.05, giveUp: 0.1 }) {
 }
 type Sent = (string | Uint8Array)[];
 const sock = (sent: Sent = []) => ({ sent, closed: false as boolean, send(d: string | Uint8Array) { sent.push(d); }, close() { this.closed = true; } });
+/** Pretend the call was answered a while ago (the bot can't hang up in its first seconds). */
+const backdate = (calls: Calls, id: string, s = 30) => { (calls as any).live.get(id).call.answeredAt = new Date(Date.now() - s * 1000).toISOString(); };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const signed = (calls: Calls, id: string, body: object) => { const raw = JSON.stringify(body); return calls.event(id, raw, arcaSignature(ARCA_KEY, raw)); };
 
@@ -87,6 +89,39 @@ test("numbers, keys and voice settings are checked and cleaned", async () => {
   const r = resample(new Int16Array([0, 100, 200, 300]), 16000, 24000);
   expect(r.length).toBe(6);
   expect(talkerInstructions("Book a table for 4 at 7pm.", { name: "Sam", owner: "Rishi", language: "Spanish" })).toContain("You are Sam, a voice assistant on a phone call on behalf of Rishi");
+});
+
+test("the model's voice reaches the phone clean: no clicks at chunk edges, no folded-back buzz, whole frames", async () => {
+  const { Resampler } = await import("../src/calls.ts");
+  const tone = (hz: number, n: number, rate: number, from = 0) => Int16Array.from({ length: n }, (_, i) => Math.round(Math.sin((2 * Math.PI * hz * (from + i)) / rate) * 10000));
+  // 1 kHz at 24 kHz, in odd-sized chunks, as Gemini sends it: the 16 kHz result is one smooth sine, chunk edges and all.
+  const r = new Resampler(24000, 16000);
+  const parts: Int16Array[] = []; let at = 0;
+  for (const n of [480, 777, 1013, 333, 2400]) { parts.push(r.push(tone(1000, n, 24000, at))); at += n; }
+  const out = Int16Array.from(parts.flatMap((p) => [...p]));
+  expect(Math.abs(out.length - Math.round((at * 2) / 3))).toBeLessThan(20);
+  let worst = 0;
+  for (let i = 40; i < out.length - 40; i++) worst = Math.max(worst, Math.abs(out[i + 1] - 2 * out[i] + out[i - 1]));
+  // A clean 1 kHz sine at 16 kHz changes its slope by at most ~1540 a sample; a click or a gap would be far more.
+  expect(worst).toBeLessThan(1700);
+  // 11 kHz can't exist at 16 kHz: it's filtered out, not folded back down to 5 kHz as noise.
+  const hi = new Resampler(24000, 16000).push(tone(11000, 4800, 24000));
+  const rms = Math.sqrt(hi.slice(100, -100).reduce((a, x) => a + x * x, 0) / (hi.length - 200));
+  expect(rms).toBeLessThan(300); // the tone went in at ~7000 rms
+
+  // Chunks that aren't whole frames still go out as whole, gapless frames.
+  const calls = make();
+  await calls.connect(OPENAI_KEY);
+  const c = await calls.start({ to: "+14155550199", brief: "Hi.", threadId: "t1" });
+  const vonage = sock();
+  calls.audioOpen(c.id, vonage);
+  talker!.ev.onAudio(new Int16Array(500).fill(1000));
+  talker!.ev.onAudio(new Int16Array(460).fill(1000)); // 960 samples: exactly 3 frames between them
+  await sleep(150);
+  const frames = vonage.sent.filter((x) => x instanceof Uint8Array) as Uint8Array[];
+  expect(frames.length).toBe(3);
+  for (const f of frames) expect(new Int16Array(f.buffer.slice(f.byteOffset, f.byteOffset + f.byteLength)).every((x) => x === 1000)).toBe(true);
+  await calls.hangup(c.id);
 });
 
 test("turning calls on checks the key, gets the hub its own Arca key once, and keeps both in the vault", async () => {
@@ -160,6 +195,12 @@ test("a call: Arca dials, Vonage's audio reaches the talker, its voice goes back
   expect(w.new).toEqual(["Them: Hola, restaurante.", "Bot: Hola, soy Sam."]);
 
   // The bot ends the call: once its goodbye has played, the hub hangs up through Arca.
+  // Seconds after answering, hanging up is refused (it's nearly always a screener or greeting taken for voicemail).
+  talker!.ev.onTool("end_call", { outcome: "Left voicemail." }, "t-early");
+  await sleep(5);
+  expect(talker!.results.at(-1)).toMatchObject({ id: "t-early" });
+  expect(talker!.results.at(-1)!.out).toContain("Not yet");
+  backdate(calls, c.id);
   talker!.ev.onTool("end_call", { outcome: "Booked for 7pm, name Rishi." }, "t-end");
   await sleep(900);
   expect(hungUp).toEqual(["arca-1"]);
@@ -200,6 +241,7 @@ test("a question: answered in time it goes straight back; unanswered, the bot ch
   expect(talker!.injected.at(-1)!.text).toContain("you'll get back to them on that shortly");
   // The owner answers after that: kept for the call back, not spoken.
   expect(await calls.answer(c.id, "Use the Amex", "you")).toContain("call or text them back");
+  backdate(calls, c.id);
   talker!.ev.onTool("end_call", { outcome: "Asked to hold; will call back with card." }, "t-end");
   await sleep(900);
   const end: any = await calls.wait(c.id, 0);
