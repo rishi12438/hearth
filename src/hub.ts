@@ -2621,6 +2621,62 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     return { ok: true, output: `${mode === "mine" ? "The user's own Chrome" : "A background Chrome"} on ${act.computer} is open to you in this conversation. Carry on: hearth-browser open ${act.url}` };
   }
 
+  // ---------- running commands on another machine (run-elsewhere.ts) ----------
+
+  /** Set by the server once computers are linked. */
+  runElsewhere: import("./run-elsewhere.ts").RunElsewhere | null = null;
+  /** "<thread>|<device>": you said yes (or no) to running there in that conversation, until when. */
+  private runYes = new Map<string, number>();
+  private runNo = new Map<string, number>();
+
+  /** May this conversation run things on that machine? There's no "always": every conversation asks. */
+  async runGate(threadId: string, deviceId: string): Promise<import("./run-elsewhere.ts").RunGate> {
+    const t = this.clock().getTime(), k = `${threadId}|${deviceId}`;
+    if ((this.runYes.get(k) ?? 0) > t) return "ok";
+    if ((this.runNo.get(k) ?? 0) > t) return "no";
+    const waiting = (await this.store.all<Approval>("approvals")).some((a) => a.status === "pending" && a.action.type === "run" && a.action.threadId === threadId && a.action.deviceId === deviceId);
+    return waiting ? "pending" : "ask";
+  }
+
+  /** A job wants to run on another machine: one card in its thread, saying where, what and why. */
+  async requestRun(c: { threadId: string; jobId?: string; place: import("./run-elsewhere.ts").RunPlace; cmd: string; why?: string }) {
+    const job = c.jobId ? await this.store.get<Job>("jobs", c.jobId) : null;
+    const mate = job?.teammateId ? await this.store.get<any>("teammates", job.teammateId) : null;
+    const where = c.place.mac ? `your Mac (${c.place.name})` : c.place.name;
+    const ap = await this.store.put<Approval>("approvals", {
+      ...this.doc({}), threadId: c.threadId, jobId: job?.id,
+      summary: `Run code on ${where}`.slice(0, 200),
+      details: `${mate?.name || "A teammate"} wants to run commands on ${where}${c.why ? `: ${c.why}` : ""}. First: ${c.cmd.slice(0, 300)}
+
+Its work folder is copied to ~/Hearth/runs there, the commands run in that copy, and the files they change come back. Yes covers ${c.place.mac ? "your Mac" : c.place.name} in this conversation for 12 hours.`,
+      action: { type: "run", computer: c.place.name, deviceId: c.place.deviceId, threadId: c.threadId, cmd: c.cmd.slice(0, 2000), ...(c.why ? { why: c.why } : {}) },
+      status: "pending",
+    } as Approval);
+    if (job) await this.saveJob({ ...job, approvalIds: [...(job.approvalIds || []), ap.id] });
+    await this.log("approval.requested", `${ap.summary} (asked by ${mate?.name || "an agent"})`);
+    await this.replaceOlder(ap);
+    this.emit("approval", ap);
+    await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: await this.approvalLink(ap) });
+  }
+
+  private runOk(act: Extract<Approval["action"], { type: "run" }>): { ok: boolean; output: string } {
+    this.runYes.set(`${act.threadId}|${act.deviceId}`, this.clock().getTime() + 12 * 3600_000);
+    this.runNo.delete(`${act.threadId}|${act.deviceId}`);
+    return { ok: true, output: `The user said yes: you can run commands on ${act.computer} in this conversation. Carry on: run the same hearth-run again (${act.cmd.slice(0, 200)}).` };
+  }
+
+  /** What `hearth-run <argv>` does from cwd, for /api/agent/run. */
+  async runAgent(argv: string[], cwd: string, jobId?: string): Promise<{ code: number; text: string }> {
+    if (!this.runElsewhere) return { code: 1, text: "This hub can't run things on other machines." };
+    let job = jobId ? await this.store.get<Job>("jobs", jobId) : null;
+    if (!job) {
+      const working = (await this.store.all<Job>("jobs")).filter((j) => j.status === "working");
+      if (working.length === 1) job = working[0];
+    }
+    if (argv[0] && argv[0] !== "list" && argv[0] !== "help") await this.log("run.elsewhere", `hearth-run ${argv.join(" ").slice(0, 200)}`);
+    return this.runElsewhere.run(argv, { threadId: job?.threadId || ORPHAN_THREAD, jobId: job?.id, cwd });
+  }
+
   /** The online Mac's name (set by the server), for hearth-help. */
   macName: () => string | null = () => null;
 
@@ -3056,6 +3112,7 @@ ${JSON.stringify(shown, null, 1)}
       await this.log("approval.always", `Always let teammates use ${macMode === "mine" ? "your own Chrome" : "a background Chrome"} on your Mac for blocked sites`);
     }
     if (!yes && !byTyping && ap.action.type === "browser") this.macBrowserNo.set(ap.action.threadId, this.clock().getTime() + 12 * 3600_000);
+    if (!yes && !byTyping && ap.action.type === "run") this.runNo.set(`${ap.action.threadId}|${ap.action.deviceId}`, this.clock().getTime() + 12 * 3600_000);
     if (yes && always && ap.action.type === "mcp") {
       this.connect?.mcp.setGate(ap.action.server, ap.action.tool, false);
       await this.log("approval.always", `Always allow ${ap.action.server}: ${ap.action.tool}`);
@@ -3080,6 +3137,7 @@ ${JSON.stringify(shown, null, 1)}
         : act.type === "mcp" ? await this.runMcp(act)
         : act.type === "skill" ? await this.runSkillInstall(act)
         : act.type === "browser" ? await this.runMacBrowserOk(act, macMode)
+        : act.type === "run" ? this.runOk(act)
         : act.type === "message"
         ? await (this.senders[act.channel]?.send(act.to, act.text, { subject: act.subject, threadId: act.threadId, from: act.from }).then(() => ({ ok: true, output: "Sent." }), (e: any) => ({ ok: false, output: String(e?.message || e) }))
           ?? { ok: false, output: `${act.channel} isn't connected.` })

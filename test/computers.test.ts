@@ -328,3 +328,34 @@ test("end to end: the owner picks what to copy, and the Mac's login lands on the
   await api(`/api/devices/${device.id}/copy`, phoneToken, { method: "PUT", body: JSON.stringify({ claude: false }) });
   expect(existsSync(file)).toBe(false);
 });
+
+test("end to end: hearth-run asks, then runs on the linked Mac in a copy of the folder, and the changes come back", async () => {
+  const { hub, store, url } = await realHub();
+  const { token, device } = await addDevice(store, "Studio (Mac)", "computer");
+  const home = mkdtempSync(join(tmpdir(), "hearth-mac-home-"));
+  const stop = connect({ config: macBrain(), link: { hub: url, token, deviceId: device.id, name: "Studio (Mac)" }, log: () => {}, home });
+  cleanups.push(stop);
+  await until(() => hub.runElsewhere!.find("mac")?.online === true);
+  const ws = join(hub.config.dataDir, "brain", "workspaces", "app");
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(ws, "in.txt"), "from the hub");
+  const { runElsewhereSkill } = await import("../src/run-elsewhere.ts");
+  const script = join(hub.config.dataDir, "hearth-run");
+  writeFileSync(script, runElsewhereSkill(url, hub.connect!.agentKeyValue()).scripts["hearth-run"], { mode: 0o755 });
+  // Spawned, not spawnSync: the hub answering it runs in this same process.
+  const sh = async (...argv: string[]) => { const p = Bun.spawn([script, ...argv], { cwd: ws, stdout: "pipe" }); const out = await new Response(p.stdout).text(); return { code: await p.exited, out }; };
+
+  const first = await sh("mac", "--why", "it needs Xcode", "--", "cat in.txt > out.txt");
+  expect(first.code).toBe(3);
+  expect(first.out).toContain("waits for the user's Yes");
+  const card = (await store.all<any>("approvals")).find((a) => a.action.type === "run");
+  expect(card.summary).toBe("Run code on your Mac (Studio (Mac))");
+  await hub.decideApproval(card.id, true);
+
+  const ran = await sh("mac", "--", "cat in.txt > out.txt; echo done there; exit 7");
+  expect(ran.code).toBe(7);
+  expect(ran.out).toContain("Ran on Studio (Mac): exit 7");
+  expect(ran.out).toContain("done there");
+  expect(readFileSync(join(ws, "out.txt"), "utf8")).toBe("from the hub");
+  expect(existsSync(join(home, "Hearth", "runs"))).toBe(true);
+});

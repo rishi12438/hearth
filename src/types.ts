@@ -365,6 +365,8 @@ export type Approval = Doc & {
     | { type: "mcp-server"; server: string; url: string }
     /** A job blocked on a site wants to carry on in Chrome on your Mac (other-browser.ts); Approve covers its conversation. */
     | { type: "browser"; computer: string; url: string; threadId: string }
+    /** A job wants to run commands on another machine (run-elsewhere.ts); Yes covers that machine in its conversation. */
+    | { type: "run"; computer: string; deviceId: string; threadId: string; cmd: string; why?: string }
     /** A phone call an agent wants to place (calls.ts): Approve dials it from Hearth's line, through Arca. */
     | { type: "call"; to: string; brief: string; voice?: import("./calls.ts").VoicePrefs };
   /** expired: nobody answered within a day (APPROVAL_TTL_MS), so it didn't run and no longer asks. */

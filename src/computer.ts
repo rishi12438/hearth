@@ -13,12 +13,14 @@ import { registerSkills } from "./brains/skills.ts";
 import { linkedinSkill } from "./connectors/linkedin-api.ts";
 import { chromeHere } from "./mac-chrome.ts";
 import { googleSkills } from "./connectors/google-agent.ts";
+import { execHere, KEY_RE, type ExecReq } from "./run-elsewhere.ts";
 
 // The computer side of a link (run on your Mac): join a hub once, then keep a line open to it and run the work it sends,
 // with this computer's own Claude/Codex login. The hub never gets a shell here: it can only ask for a brain call, which
 // runs with the same slim, web-only tool set as on the hub, and for the login files and browser cookies you chose to
-// copy. Cookies are read from your browser here (read-only) and sent up; your Mac never takes a shell or gives the hub
-// its files, and it re-copies when the hub asks (a session expired).
+// copy. Cookies are read from your browser here (read-only) and sent up, and it re-copies when the hub asks (a session
+// expired). The one exception is hearth-run (run-elsewhere.ts): a job's command, run in its own folder under
+// ~/Hearth/runs, and only after you said yes to it on a card in that conversation. HEARTH_NO_RUN=1 turns it off here.
 
 /** cloud: the hub set this machine up (a sandbox or your VM) and may hand it logins. Your Mac's link never has it. */
 export type Link = { hub: string; token: string; deviceId: string; name: string; cloud?: boolean };
@@ -212,6 +214,8 @@ type Opts = { config: Config; link: Link; brain?: Brain; readCopy?: (item: CopyI
   tools?: () => Promise<ToolStatus[]>;
   /** hearth-browser commands from the hub (browseOnMac); swapped in tests. */
   browse?: typeof browseOnMac;
+  /** hearth-run commands from the hub (execHere); swapped in tests. */
+  exec?: typeof execHere;
   /** The hub signed this computer out for good. */
   onSignedOut?: () => void };
 
@@ -306,6 +310,35 @@ export function connect(opts: Opts) {
     } finally { runs.delete(m.id); }
   };
 
+  // A job's hearth-run, after you said yes on its card (run-elsewhere.ts). Its files come and go over HTTP.
+  const runHere = (m: any) => {
+    const id = m.id as string;
+    if (process.env.HEARTH_NO_RUN === "1") { send({ t: "execd", id, error: `${link.name} doesn't take commands from the hub (HEARTH_NO_RUN is set there).` }); return; }
+    const strs = (x: unknown) => (Array.isArray(x) ? x.filter((s) => typeof s === "string").slice(0, 20_000) : []);
+    const tid = typeof m.tid === "string" && /^[0-9a-f-]{36}$/.test(m.tid) ? m.tid : null;
+    if (!KEY_RE.test(String(m.key)) || typeof m.cmd !== "string" || m.cmd.length > 20_000) { send({ t: "execd", id, error: "That run didn't make sense." }); return; }
+    const req: ExecReq = { key: m.key, tid, deleted: strs(m.deleted), full: m.full === true, cmd: m.cmd, bg: m.bg === true,
+      timeoutSec: Math.min(Math.max(Number(m.timeoutSec) || 1800, 10), 24 * 3600), get: strs(m.get).slice(0, 50) };
+    log(`  the hub is running a command here: ${req.cmd.slice(0, 160)}`);
+    const ctl = new AbortController();
+    runs.set(id, ctl);
+    const auth = { Authorization: `Bearer ${link.token}` };
+    (opts.exec ?? execHere)(req, {
+      home: opts.home || homedir(), side: link.name, signal: ctl.signal,
+      onLine: (text) => send({ t: "execLine", id, text }),
+      fetchIn: async (t, to) => {
+        const r = await fetch(`${link.hub}/computer/x/${t}`, { headers: auth });
+        if (!r.ok) throw new Error(`couldn't get the files from the hub (${r.status})`);
+        await Bun.write(to, r);
+      },
+      sendUp: async (file) => {
+        const r = await fetch(`${link.hub}/computer/x/up/${id}`, { method: "POST", headers: { ...auth, "Content-Type": "application/gzip" }, body: Bun.file(file) });
+        if (!r.ok) throw new Error(`couldn't send the files back to the hub (${r.status})`);
+      },
+    }).then((r) => send({ t: "execd", id, ...r }), (e) => send({ t: "execd", id, error: String(e?.message || e).slice(0, 500) }))
+      .finally(() => runs.delete(id));
+  };
+
   let opened = false;
   const signedOut = () => { log(`  ${link.name} was signed out of the hub. Run join again to link it.`); stopped = true; opts.onSignedOut?.(); };
   const retry = (why: string) => {
@@ -322,7 +355,8 @@ export function connect(opts: Opts) {
       opened = true;
       backoff = 1000;
       log(`  connected to ${link.hub}`);
-      send({ t: "hello", harnesses: availableHarnesses(config), platform: platform() });
+      // can: what this app knows how to do beyond brain runs, so the hub doesn't wait on an older app for nothing.
+      send({ t: "hello", harnesses: availableHarnesses(config), platform: platform(), can: process.env.HEARTH_NO_RUN === "1" ? [] : ["exec"] });
       alive = setInterval(() => send({ t: "alive" }), ALIVE_EVERY_MS);
       copyTimer = setInterval(copyUp, opts.copyEveryMs ?? 5 * 60_000);
       // Its tools' health for Settings, now and every few minutes (a daemon can stop or come back).
@@ -342,6 +376,7 @@ export function connect(opts: Opts) {
         (opts.browse ?? browseOnMac)(String(m.sid), String(m.action), params, m.mode)
           .then((r) => send({ t: "browsed", id: m.id, ...r }), (e) => send({ t: "browsed", id: m.id, ok: false, out: String(e?.message || e) }));
       }
+      else if (m.t === "exec" && typeof m.id === "string") runHere(m);
       else if (m.t === "want") { want = { items: (m.items || []).filter(isCopyItem), have: m.have || {} }; copyUp(); }
       else if (m.t === "skills" && typeof m.key === "string") { agentSkills = { key: m.key, google: m.google === true, linkedin: m.linkedin === true }; brain.refreshSkills?.(); }
       else if (m.t === "wantCookies") { cookieWant = { sites: (m.sites || []).filter(isValidDomain), have: m.have || {}, fresh: isValidDomain(m.fresh) ? m.fresh : undefined }; copyCookiesUp(); }

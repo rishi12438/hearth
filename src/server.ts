@@ -10,6 +10,7 @@ import { availableHarnesses } from "./brain.ts";
 import { Computers, COPY_ITEMS, isCopyItem } from "./computers.ts";
 import { Machines, realE2b, realSsh, type E2b, type Ssh } from "./machines.ts";
 import { OtherBrowser } from "./other-browser.ts";
+import { RunElsewhere } from "./run-elsewhere.ts";
 import { Phone, phoneSkill } from "./phone.ts";
 import { Calls, callSkill, recordingPath, type Call, type CallsDeps } from "./calls.ts";
 import { registerSkills } from "./brains/skills.ts";
@@ -196,6 +197,21 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   machines.onChange = () => hub.emit("computers", {});
   machines.startTimer();
   hub.onNeedsComputer = () => { machines.wake().catch((e) => console.error(e)); };
+  // hearth-run (run-elsewhere.ts): a job's command on your Mac or a cloud computer, in a copy of its folder. Each
+  // conversation asks you first, per machine.
+  hub.runElsewhere = new RunElsewhere({
+    root: join(config.dataDir, "brain"), stateDir: join(config.dataDir, "run-sync"),
+    places: () => {
+      const on = computers.places();
+      const asleep = machines.list().filter((m) => !on.some((p) => p.deviceId === m.deviceId))
+        .map((m) => ({ deviceId: m.deviceId, name: m.name, mac: false, online: false, platform: "" }));
+      return [...on, ...asleep];
+    },
+    exec: (deviceId, req, staged, onLine) => computers.exec(deviceId, req, staged, onLine),
+    gate: (threadId, deviceId) => hub.runGate(threadId, deviceId),
+    ask: (c) => hub.requestRun(c),
+    wake: () => { machines.wake().catch((e) => console.error(e)); },
+  });
   // The on-demand Android phone (its own AWS box). Inert until an account is set in Settings → Phone, so it adds nothing
   // to a hub that doesn't use it. The hub starts/stops it; the brain drives it with hearth-phone, which asks this hub.
   const phone = new Phone({
@@ -479,6 +495,18 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         .catch((e: any) => ({ text: `Error: ${String(e?.message || e).slice(0, 400)}` }));
       if ("png" in out) return new Response(new Blob([out.png as Uint8Array<ArrayBuffer>]), { headers: { "Content-Type": out.mime || "image/png", "Cache-Control": "no-store" } });
       return new Response(out.text + "\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
+    }
+    // The agent's hearth-run (run-elsewhere.ts): a command on another machine, in a copy of the folder it's in. The
+    // first line of the answer is the command's exit code, for the script to exit with.
+    if (path === "/api/agent/run" && method === "POST") {
+      const key = req.headers.get("x-hearth-agent");
+      if (!fromThisMachine(req, server) || !connect.isAgentKey(key)) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not the agent's key."); }
+      let argv: string[] = [], cwd = "";
+      try { const f = await req.formData(); argv = f.getAll("a").slice(0, 200).map((a) => String(a).slice(0, 20_000)); cwd = String(f.get("cwd") || "").slice(0, 4000); } catch { throw new HttpError(400, "Send the command's words as a fields."); }
+      server.timeout(req, 0);
+      const out = await hub.runAgent(argv, cwd, req.headers.get("x-hearth-job")?.slice(0, 100) || undefined)
+        .catch((e: any) => ({ code: 1, text: `Error: ${String(e?.message || e).slice(0, 400)}` }));
+      return new Response(`HEARTH-EXIT ${out.code}\n${out.text}\n`, { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
     }
     // The agent's hearth-skill-store (brains/skill-store.ts): find, read and install public skills. An install is an Approve
     // card in the job's thread (X-Hearth-Job); nothing is installed until you tap it. Same keys as hearth-mcp.
@@ -1726,7 +1754,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         return new Response("Expected a WebSocket", { status: 426 });
       }
       // A linked computer dials in here and keeps the line open; work comes down it. Its key goes in a header.
-      if (url.pathname === "/computer" || url.pathname === "/computer/bundle" || url.pathname === "/computer/share-key") {
+      if (url.pathname === "/computer" || url.pathname === "/computer/bundle" || url.pathname === "/computer/share-key" || url.pathname.startsWith("/computer/x/")) {
         const ip = clientIp(req, server);
         if (badToken.blocked(ip)) return new Response("Too many wrong keys. Wait 10 minutes.", { status: 429 });
         const d = await deviceForToken(store, req.headers.get("authorization"));
@@ -1741,6 +1769,21 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
           if (r.error) return new Response(r.error, { status: 400 });
           await hub.log("share", `${d.name} set up the Claude key for shared links`);
           return new Response("ok");
+        }
+        // hearth-run's files (run-elsewhere.ts): the computer fetches what a run sends it, and uploads what changed.
+        const x = url.pathname.match(/^\/computer\/x\/(?:(up)\/)?([0-9a-f-]{36})$/);
+        if (url.pathname.startsWith("/computer/x/")) {
+          if (!x) return new Response("Not here.", { status: 404 });
+          if (x[1] && req.method === "POST") {
+            if (Number(req.headers.get("content-length") || 0) > 100 * 1024 * 1024) return new Response("Too large.", { status: 413 });
+            server.timeout(req, 600);
+            const ok = await computers.takeUpload(d.id, x[2], await req.arrayBuffer(), join(config.dataDir, "run-sync", "tmp"));
+            return ok ? new Response("ok") : new Response("Nothing is waiting for that.", { status: 404 });
+          }
+          const file = !x[1] && req.method === "GET" ? computers.stagedFile(d.id, x[2]) : null;
+          if (!file) return new Response("Not here.", { status: 404 });
+          server.timeout(req, 600);
+          return new Response(Bun.file(file), { headers: { "Content-Type": "application/gzip", "Cache-Control": "no-store" } });
         }
         // A cloud computer being set up downloads Hearth from its own hub, so the two always run the same code.
         if (url.pathname === "/computer/bundle") {
