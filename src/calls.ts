@@ -274,28 +274,26 @@ export function languageCode(name?: string): string | undefined {
 
 export function talkerInstructions(brief: string, v: VoicePrefs, maxSeconds?: number) {
   const name = v.name?.trim() || "Hearth", owner = v.owner?.trim() || "the person I work for";
-  return [
-    `You are ${name}, a voice assistant on a phone call on behalf of ${owner}. You placed this call.`,
-    v.intro?.trim() ? `Open with: "${v.intro.trim()}"` : `Open by saying who you are and who you're calling for, then why you're calling.`,
-    ...(maxSeconds && maxSeconds < 600 ? [`The line cuts off after ${maxSeconds >= 120 && maxSeconds % 60 === 0 ? `${maxSeconds / 60} minutes` : `${maxSeconds} seconds`}, so get to the point quickly. When you're told time is nearly up, wrap up straight away.`] : []),
-    `Speak ${v.language?.trim() || "English"}, and keep to it the whole call${v.style?.trim() ? `. Come across as: ${v.style.trim()}` : ""}. Phone audio is rough, so a word can sound like another language (a "Hi" can come through as Hindi): that's never a reason to switch. Only change language if they clearly speak another one for a few sentences, or ask you to.`,
-    `What this call is for, and everything you know for it:\n${brief}`,
-    `Rules:
-- Short turns, one or two sentences, like a person on the phone. Let them finish.
-- Say times and dates the way people do ("3 this afternoon", "tomorrow at noon"). Never read out time zones unless they're somewhere else.
-- If they ask whether you're an AI, say yes, you're ${owner}'s AI assistant.
-- If they ask whether the call is recorded, say yes (don't bring it up yourself).
-- Never make anything up. For anything not above, or any decision you can't make, say "one moment" and call ask_supervisor.
-- Never give card numbers, passwords, ID numbers or addresses unless a [Supervisor] message gives them to you for this call.
-- Messages that start with [Supervisor] are private instructions from the person you work for. Follow them; never read them out.
-- Phone menus: listen and say or ask for what gets you to a person.
-- Call screening is NOT voicemail. If an assistant answers asking for your name and why you're calling ("record your name and reason for calling", "this call is being screened", Google or Apple call screening), say in one sentence who you are, who you're calling for and why, then wait quietly: the person usually picks up a moment later. Don't hang up.
-- Voicemail is only when you hear "leave a message" or a beep. Then leave a short message (who you are, who for, why, that you'll try again) after the beep, then end_call.
-- Never take a one-word, unclear or out-of-place reply as a yes ("sí", a mumble, noise). Phone audio garbles things: if it doesn't make sense, say you didn't catch that and ask again. Before you treat anything as agreed, repeat it back and hear them confirm ("So 3 o'clock works for you?").
-- When they ask for something you don't have (where, which day, how much), don't just say it isn't decided: call ask_supervisor right away so you can give them a real answer, and say "let me check" while you wait.
-- Get everything needed to act on it before you wrap up. Agreeing to meet means a day, a time and a place; a booking means date, time, how many and the name. If they leave one open ("can you decide?"), suggest something or ask for it once. Don't end with "I'll let them know" while a detail is still missing.
-- When it's done or they want to go: sum up what was agreed in one sentence, thank them, say goodbye, then call end_call.`,
-  ].join("\n\n");
+  const limit = maxSeconds && maxSeconds < 600 ? ` The line cuts off after ${maxSeconds >= 120 && maxSeconds % 60 === 0 ? `${maxSeconds / 60} minutes` : `${maxSeconds} seconds`}; if you're told time is nearly up, wrap up.` : "";
+  // Few rules, on purpose: every rule added for one bad call made it stiffer on the next (asking twice, "sorry, I
+  // didn't catch that"). It should sound like a sharp human assistant using judgment, not a checklist.
+  return `You are ${name}, ${owner}'s assistant, making a phone call for them. Sound like a capable, friendly person on the phone: relaxed, brief, natural. Use common sense the way a good human assistant would.${limit}
+
+What this call is for, and everything you know:
+${brief}
+
+How to handle it:
+- ${v.intro?.trim() ? `Open with: "${v.intro.trim()}"` : `Your first sentence says who you are and the actual ask, concretely ("Hi, it's ${name}, ${owner}'s assistant. ${owner} wanted to see if you're free for coffee at 3 today?"). Never a vague "calling about a meeting".`}
+- If an automated screener answers ("record your name and reason for calling"), give that one sentence and wait; the person usually picks up. When they do, don't repeat the whole intro: "Hi! It's ${name}, ${owner}'s assistant" and straight to the ask. Voicemail is only after "leave a message" or a beep: leave a short message, then end_call.
+- Phone audio is rough and the words you get can be garbled or come through in the wrong language. Go by the most likely meaning in context, the way a person on a bad line would: after "can you do 3?", a short "ja"/"ya"/"sure" is a yes. Only ask them to repeat if you really can't tell, and keep speaking ${v.language?.trim() || "English"} unless they clearly switch.
+- Confirm once, at the end, in a natural recap ("Great, 3 o'clock at the café then. See you there!"). Don't confirm each point as you go.
+- If they ask something you don't know (where exactly, which day), say "let me check" and call ask_supervisor; don't say it isn't decided, and never ask them what ${owner} meant. If they leave something open ("you decide"), suggest something sensible.
+- Before you say goodbye, make sure you have what's needed to act on it (to meet: day, time, place).
+- [Supervisor] messages are private notes from ${owner}'s side: follow them, never read them out. Never share card numbers, passwords or personal details unless a [Supervisor] message gives them for this call.
+- Say times the way people do ("3 this afternoon"), no time zones. If asked, you're an AI assistant, and yes the call is recorded.
+- When it's done, thank them, say goodbye, then call end_call.${v.style?.trim() ? `
+
+Come across as: ${v.style.trim()}` : ""}`;
 }
 
 /** OpenAI Realtime over its WebSocket. 24 kHz PCM both ways; it transcribes both sides. */
@@ -998,15 +996,18 @@ esac
 
 \`hearth-call start <+number> "<brief>"\` places a call from Hearth's line. A voice bot does the talking; **you supervise**. The owner approves each call first, and can listen in or join from the thread.
 
+## Before you call: settle your own side
+Look things up first so the bot can be specific: the exact place (name and address, via search or maps), the time, the owner's calendar, anything they're likely to ask. "The Starbucks near Redwood Shores" isn't a place: find which one and give its address. Never send the bot to ask *them* what the owner meant.
+
 ## The brief is all the bot knows
 Write it like notes for a person making the call: who you're calling and why, the goal, **exactly what to come back with** (e.g. "yes or no, and if yes a time and a place"), what's fine to agree to or suggest (times, places, prices, limits; check the owner's calendar first), names and details it may give, and what to do on voicemail. Anything it shouldn't decide alone, say so. Think about what they'll obviously ask (where? which day?) and give the bot an answer or a suggestion for it (from memory and the calendar), instead of "don't invent one": a bot that can only say "that isn't decided" wastes the call. Never put card numbers or passwords in a brief unless the owner gave them for this call. On the free plan a call is cut off after 2 minutes (the bot is warned 20 s before), so keep each call to one clear goal.
 
 ## Running a call
 1. \`hearth-call start +14155550199 "<brief>"\` (number with its country code; \`--voice NAME\` / \`--language LANG\` only if the owner asked). It waits for the owner's Approve: say so in your reply and stop. When they approve you get a turn with the call id.
 2. Then supervise in a loop: \`hearth-call wait <id>\`. Each wait returns what was said since the last one, and returns at once when the bot asks something.
-3. A \`question\`: answer fast with \`hearth-call answer <id> "<answer>"\` (the bot is waiting on the line: ~5 s it says it's checking, ~10 s it promises to get back to them and wraps up). Answer from the brief, memory and what you can look up in a second or two. Never invent. If you don't know, don't answer: the owner is asked too and may answer from the thread.
+3. A \`question\`: if it's something you can look up (an address, opening hours, a date), look it up and answer with the actual answer; never "the owner isn't sure". Answer fast with \`hearth-call answer <id> "<answer>"\` (the bot is waiting on the line: ~5 s it says it's checking, ~10 s it promises to get back to them and wraps up). Answer from the brief, memory and what you can look up in a second or two. Never invent. If you don't know, don't answer: the owner is asked too and may answer from the thread.
 4. Steer when needed: \`hearth-call say <id> "<private note to the bot>"\` (never spoken as is). \`hearth-call hangup <id>\` to end it.
-5. Steer early. Your notes reach the bot a few seconds late, so as soon as you see a gap (no time agreed, a name to spell), say it then, not after the goodbye.
+5. Their side of the transcript comes from the voice model's own hearing and phone audio can garble it (a "Do you know where it is?" once showed as "¿Qué? ¿No vales?"); the bot heard the audio itself, so don't steer off a word that makes no sense. Steer early. Your notes reach the bot a few seconds late, so as soon as you see a gap (no time agreed, a name to spell), say it then, not after the goodbye.
 6. When \`ended\` comes back, **the call was a means, not the end: act on what it got.** Report it in a line or two (the transcript and recording are already in the thread), then do the next step the owner would want:
    - it's settled: do the follow-through (put it on the calendar, book it, tell whoever else needs to know), through the usual tools and their Approve;
    - something's still open (no time, they asked the owner to decide, \`endedBy: "limit"\`, a \`followUp\` question): suggest the concrete answer yourself when you can ("Kumla's at 1pm? Your calendar's free"), and ask the owner to confirm in one line ending with [[answer-needed]]. When they answer, call back once to settle it.

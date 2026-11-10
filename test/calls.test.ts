@@ -88,7 +88,7 @@ test("numbers, keys and voice settings are checked and cleaned", async () => {
   expect(cleanVoice({ voice: "kore" }, "gemini")).toEqual({ voice: "Kore" });
   const r = resample(new Int16Array([0, 100, 200, 300]), 16000, 24000);
   expect(r.length).toBe(6);
-  expect(talkerInstructions("Book a table for 4 at 7pm.", { name: "Sam", owner: "Rishi", language: "Spanish" })).toContain("You are Sam, a voice assistant on a phone call on behalf of Rishi");
+  expect(talkerInstructions("Book a table for 4 at 7pm.", { name: "Sam", owner: "Rishi", language: "Spanish" })).toContain("You are Sam, Rishi's assistant, making a phone call for them");
 });
 
 test("the model's voice reaches the phone clean: no clicks at chunk edges, no folded-back buzz, whole frames", async () => {
@@ -300,7 +300,7 @@ test("tracking: who started it, how long, who ended it, and the whole call as a 
   calls.audioOpen(c.id, sock());
   // The bot doesn't announce the recording (it only says yes if asked).
   expect(talker!.spec.instructions).not.toContain("This call is recorded");
-  expect(talker!.spec.instructions).toContain("If they ask whether the call is recorded, say yes");
+  expect(talker!.spec.instructions).toContain("yes the call is recorded");
   // 2 s of them (Vonage sends a frame every 20 ms, silence included) while the bot talks for a bit.
   talker!.ev.onAudio(new Int16Array(8000).map((_, i) => Math.round(Math.sin(i / 5) * 6000)));
   for (let i = 0; i < 100; i++) {
@@ -374,7 +374,7 @@ test("the bot keeps to its language: pinned for Gemini, and told a misheard word
   expect(languageCode("Spanish")).toBe("es-US");
   expect(languageCode("hi-IN")).toBe("hi-IN");
   expect(languageCode("Klingon")).toBeUndefined();
-  expect(talkerInstructions("Hi.", {})).toContain("Speak English, and keep to it the whole call");
+  expect(talkerInstructions("Hi.", {})).toContain("keep speaking English unless they clearly switch");
   // The setup Gemini gets carries the language code.
   const sent: string[] = [];
   const Real = globalThis.WebSocket;
@@ -415,7 +415,7 @@ test("one run supervises a call; another is told to stand down; the end tells it
   expect(calls.claim(c.id, "job-a")).toBeNull();
   expect(calls.claim(c.id, "job-a")).toBeNull();
   expect(calls.claim(c.id, "job-b")).toContain("Another run is already supervising this call");
-  expect(talker!.spec.instructions).toContain("Never take a one-word, unclear or out-of-place reply as a yes");
+  expect(talker!.spec.instructions).toContain("Go by the most likely meaning in context");
   backdate(calls, c.id);
   await calls.hangup(c.id, "agent");
   const end: any = await calls.wait(c.id, 0);
@@ -428,7 +428,8 @@ test("the bot gets what's needed to act, and a fresh note from the supervisor is
   await calls.connect(OPENAI_KEY);
   const c = await calls.start({ to: "+14155550199", brief: "Ask if they're up for lunch.", threadId: "t1" });
   calls.audioOpen(c.id, sock());
-  expect(talker!.spec.instructions).toContain("Agreeing to meet means a day, a time and a place");
+  expect(talker!.spec.instructions).toContain("to meet: day, time, place");
+  expect(talker!.spec.instructions).toContain("never ask them what");
   backdate(calls, c.id);
   await calls.say(c.id, "Ask what time works for them.");
   talker!.ev.onTool("end_call", { outcome: "They suggested Kumla's." }, "t-1");
@@ -443,6 +444,7 @@ test("the bot gets what's needed to act, and a fresh note from the supervisor is
   const { callSkill } = await import("../src/calls.ts");
   const body = callSkill("http://hub", "k").body;
   expect(body).toContain("the call was a means, not the end");
+  expect(body).toContain("settle your own side");
   expect(body).toContain("[[answer-needed]]");
 });
 
