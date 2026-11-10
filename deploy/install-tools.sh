@@ -13,6 +13,21 @@ HUB_USER="${HUB_USER:-hearth}"
 RELEASES="${ENKIDU_RELEASES:-https://tryarca.ai/install}"
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
 
+# cloudflared, for hearth-tunnel (src/tunnels.ts): a link the user can open to a web app a job runs. Quick tunnels
+# need no Cloudflare account. Cloudflare's own .deb from its GitHub releases (amd64 or arm64).
+if ! command -v cloudflared >/dev/null; then
+  case "$(uname -m)" in x86_64) CF_ARCH=amd64 ;; aarch64|arm64) CF_ARCH=arm64 ;; *) CF_ARCH= ;; esac
+  if [ -n "$CF_ARCH" ]; then
+    CF_DEB=$(mktemp --suffix=.deb)
+    curl -fsSL --retry 3 "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$CF_ARCH.deb" -o "$CF_DEB" \
+      && dpkg -i "$CF_DEB" >/dev/null || echo "   cloudflared didn't install; hearth-tunnel won't work until it does."
+    rm -f "$CF_DEB"
+  else
+    echo "   No cloudflared for $(uname -m); hearth-tunnel won't work."
+  fi
+fi
+command -v cloudflared >/dev/null && echo "   $(cloudflared --version 2>/dev/null | head -1)"
+
 # Chrome. Google only ships it for x86_64.
 if ! command -v google-chrome >/dev/null && ! command -v chromium >/dev/null; then
   if [ "$(uname -m)" = "x86_64" ]; then
