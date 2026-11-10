@@ -1245,8 +1245,8 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     const continued: Job[] = [];
     for (const j of (plan.jobs || []).slice(0, 8)) {
       if (typeof j?.task !== "string" || !j.task.trim()) continue;
-      if (typeof j.addTo === "string" && !declined.has(j.addTo) && (await this.addToJob(j.addTo, thread.id, j.task, j.label))) continue;
-      if (typeof j.continue === "string" && !declined.has(j.continue)) { const c = await this.continueTask(j.continue, thread.id, m, j.task); if (c) { continued.push(c); continue; } }
+      if (typeof j.addTo === "string" && !declined.has(j.addTo) && (await this.addToJob(j.addTo, thread.id, j.task, j.label))) { await this.markAddedTo(batch, j.addTo); continue; }
+      if (typeof j.continue === "string" && !declined.has(j.continue)) { const c = await this.continueTask(j.continue, thread.id, m, j.task); if (c) { await this.markAddedTo(batch, c.followsUp || c.id); continued.push(c); continue; } }
       const wanted = String(j.teammate || "Hearth").toLowerCase();
       let mate = team.find((t) => t.name.toLowerCase() === wanted || t.id === wanted);
       if (!mate && j.newTeammate) {
@@ -1717,6 +1717,18 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     const marked = await this.store.put<Message>("messages", { ...cur, interrupted: run.teammateId });
     this.emit("message", marked);
     return marked;
+  }
+
+  /** These messages went into a task (any job of it): that task's thread shows them, even with no job of their own. */
+  private async markAddedTo(batch: Message[], jobId: string) {
+    const job = await this.store.get<Job>("jobs", jobId);
+    const root = job?.followsUp || job?.id;
+    if (!root) return;
+    for (const b of batch) {
+      const cur = await this.store.get<Message>("messages", b.id);
+      if (!cur || cur.role !== "user" || cur.replyTo || cur.addedTo === root) continue;
+      this.emit("message", await this.store.put<Message>("messages", { ...cur, addedTo: root }));
+    }
   }
 
   /** A run is going (not just waiting its turn), so folding a message in would stop it and start over. */

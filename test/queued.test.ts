@@ -221,3 +221,23 @@ test("a job left 'working' by a hub restart goes back in the queue and runs agai
   expect(after.status).toBe("done");
   expect(starts()).toBeGreaterThan(before);
 });
+
+test("a channel message folded into a task that's still going is tagged with that task, so its thread shows it", async () => {
+  await setup();
+  process.env.FAKE_PLAN = JSON.stringify({ title: "t", reply: "On it", jobs: [{ task: "find a restaurant", teammate: "Scout" }] });
+  const { thread } = (await hub.ramble("dinner")).value!;
+  await until(() => settled(1));
+  const [root] = await jobs();
+  process.env.FAKE_MS = "1500";
+  await hub.replyToJob(root.id, "somewhere quiet");
+  await until(working);
+  await Bun.sleep(150);
+  process.env.FAKE_MS = "50";
+  process.env.FAKE_PLAN = JSON.stringify({ title: "t", reply: "Scout is on it in the dinner thread.", jobs: [{ task: "also somewhere with parking", teammate: "Scout", continue: root.id }] });
+  const sent = (await hub.ramble("also parking", thread.id)).value!.message;
+  await until(async () => !!(await store.get<Message>("messages", sent.id))?.addedTo);
+  const m = (await store.get<Message>("messages", sent.id))!;
+  expect(m.addedTo).toBe(root.id);
+  expect(m.replyTo).toBeUndefined(); // still in the channel too
+  expect((await jobs()).some((j) => j.messageId === sent.id)).toBe(false); // folded: no job of its own
+});
