@@ -60,6 +60,8 @@ export type Message = Doc & {
   queued?: boolean;
   /** It stopped this teammate's run (id) partway: the thread shows "Interrupted" there, and the run carries on with it. */
   interrupted?: string;
+  /** Went into a task that was already going (root job id), with no job of its own: that task's thread shows it. */
+  addedTo?: string;
   error?: boolean;
 };
 

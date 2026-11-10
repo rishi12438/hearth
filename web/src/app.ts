@@ -2049,7 +2049,13 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
   // One timeline, in the order things happened: every message you sent here (also the ones added to a run that was
   // still going, which have no job of their own) and each answer where it landed. A run still going sits at the bottom.
   const asks = new Set(follow.map((f: any) => f.messageId));
-  const mine = S.chat.messages.filter((m: any) => m.role === "user" && (m.replyTo === j.id || asks.has(m.id)));
+  // Older messages folded into a running task have no addedTo: the ones just before Hearth's "Continued in" line count.
+  const msgs = S.chat.messages as any[];
+  msgs.forEach((m: any, i: number) => {
+    if (m.role !== "assistant" || !m.continues?.includes(j.id)) return;
+    for (let k = i - 1; k >= 0 && msgs[k].role === "user" && !msgs[k].replyTo; k--) asks.add(msgs[k].id);
+  });
+  const mine = msgs.filter((m: any) => m.role === "user" && (m.replyTo === j.id || m.addedTo === j.id || asks.has(m.id)));
   const yours = mine.filter((m: any) => !m.queued);
   const live = (x: any) => x.status === "queued" || x.status === "working";
   const when = (x: any) => (live(x) ? Infinity : Date.parse(x.finishedAt || x.updatedAt || x.createdAt) || 0);
