@@ -590,7 +590,11 @@ export class Calls {
       return true;
     }
     if (s === "answered" && lv.call.status === "ringing") { lv.call.status = "live"; lv.call.answeredAt = this.clock().toISOString(); await this.save(lv); }
-    const ended: Record<string, string> = { busy: "They were busy.", cancelled: "The call was cancelled.", failed: "The call failed.", rejected: "They declined the call.", timeout: "Nobody picked up.", unanswered: "Nobody picked up.", machine: "" };
+    // "rejected"/"failed" before it rang is usually the phone network (an unknown number screened or blocked, Do Not
+    // Disturb), not them: never tell the owner they declined.
+    const notThrough = "It didn't go through: it was stopped before their phone rang (usually their phone network or phone screening an unknown number, or Do Not Disturb).";
+    const why = typeof e?.detail === "string" && e.detail ? ` (${String(e.detail).slice(0, 60)})` : "";
+    const ended: Record<string, string> = { busy: "Their line was busy.", cancelled: "The call was cancelled.", failed: notThrough + why, rejected: notThrough + why, timeout: "It rang, but nobody picked up.", unanswered: "It rang, but nobody picked up.", machine: "" };
     if (s === "completed") await this.finish(lv, "ended", lv.call.outcome || (lv.call.answeredAt ? "The call ended." : "Nobody picked up."), "them");
     else if (s in ended && s !== "machine") await this.finish(lv, lv.call.answeredAt ? "ended" : "failed", ended[s], "them");
     return true;
@@ -841,7 +845,9 @@ export class Calls {
       ...(open.length ? { question: { id: open[0].id, text: open[0].text, howTo: `hearth-call answer ${c.id} "<answer>" (within ~${this.waits.giveUp}s, or the bot promises to get back to them)` } } : {}),
       ...(c.status === "ended" || c.status === "failed" ? {
         ended: { outcome: c.outcome || null, error: c.error || null, seconds: c.seconds ?? 0, endedBy: c.endedBy || null,
-          next: "Now act on it; don't stop at a report. Settled: do the follow-through (calendar, booking, telling whoever needs to know) through the usual tools. Anything open (no clear yes, no time or place, they asked the owner to decide, time ran out): suggest a concrete answer yourself (check calendar and memory), ask the owner to confirm in one line ending with [[answer-needed]], and call back once they answer. The transcript and recording are already in the thread: don't repeat them.",
+          next: !c.answeredAt
+            ? "It never connected, so nobody spoke: don't say they declined or that you talked. Tell the owner plainly in a line what happened (from the error). If it didn't go through, their phone or network likely blocked an unknown number: suggest they save Hearth's number in their contacts, and don't call again more than once."
+            : "Now act on it; don't stop at a report. Settled: do the follow-through (calendar, booking, telling whoever needs to know) through the usual tools. Anything open (no clear yes, no time or place, they asked the owner to decide, time ran out): suggest a concrete answer yourself (check calendar and memory), ask the owner to confirm in one line ending with [[answer-needed]], and call back once they answer. The transcript and recording are already in the thread: don't repeat them.",
           recording: c.recording?.bytes ? recordingPath(this.d.dataDir, c.id) : null,
           followUp: unanswered.map((q) => ({ question: q.text, answer: q.answer || null })) },
         transcript: c.lines.filter((l) => l.who !== "note").map((l) => `${l.who === "them" ? "Them" : l.who === "bot" ? "Bot" : "Owner"}: ${l.text}`),

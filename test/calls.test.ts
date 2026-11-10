@@ -468,7 +468,13 @@ test("nobody picks up: Arca's event ends it as not answered", async () => {
   await calls.connect(OPENAI_KEY);
   const c = await calls.start({ to: "+14155550199", brief: "Say hi.", threadId: "t1" });
   await signed(calls, c.id, { id: "arca-1", status: "timeout" });
-  expect(saved.get(c.id)).toMatchObject({ status: "failed", error: "Nobody picked up." });
+  expect(saved.get(c.id)).toMatchObject({ status: "failed", error: "It rang, but nobody picked up." });
+  // Stopped before it rang: never "they declined", and the agent is told it never connected.
+  const c2 = await calls.start({ to: "+14155550199", brief: "Say hi.", threadId: "t1" });
+  await signed(calls, c2.id, { id: "arca-2", status: "rejected", detail: "restricted" });
+  expect(saved.get(c2.id)!.error).toBe("It didn't go through: it was stopped before their phone rang (usually their phone network or phone screening an unknown number, or Do Not Disturb). (restricted)");
+  const end: any = await calls.wait(c2.id, 0);
+  expect(end.ended.next).toContain("It never connected, so nobody spoke");
   expect(calls.audioAllowed(c.id, new URL(placed[0].audioUrl).searchParams.get("t")!)).toBe(false);
 });
 
