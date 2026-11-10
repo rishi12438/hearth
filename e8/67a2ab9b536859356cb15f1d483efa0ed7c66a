@@ -1,0 +1,36 @@
+test/skills.test.ts
+  s_31645d1131c42e::t_de688550642808 6-7
+test/tunnels.test.ts
+  s_31645d1131c42e::t_b2c347a3f646f3 21
+  s_31645d1131c42e::t_4a42e6428bf052 1-20,22-127
+src/server.ts
+  s_31645d1131c42e::t_c99dbd80832482 523
+  s_31645d1131c42e::t_418f064af7c291 511-522,524-526
+src/tunnels.ts
+  s_31645d1131c42e::t_b2c347a3f646f3 112-114,116,228,230-236
+  s_31645d1131c42e::t_53e0355869c461 1-105,111,118-198,201-227,229,237-330
+  s_31645d1131c42e::t_1273d459be7312 199-200
+  s_31645d1131c42e::t_8321394344ffbd 106-110,115
+  s_31645d1131c42e::t_8c824fc60d454c 117
+deploy/install-tools.sh
+  s_31645d1131c42e::t_fdf25265b45605 16-30
+src/connectors/index.ts
+  s_31645d1131c42e::t_c99dbd80832482 120-123
+  s_31645d1131c42e::t_51243aff44fc91 1,18,129-130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "e867a2ab9b536859356cb15f1d483efa0ed7c66a",
+  "prompts": {},
+  "sessions": {
+    "s_31645d1131c42e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7ff56be1-ba8c-43f6-ad17-141072f6b46d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
