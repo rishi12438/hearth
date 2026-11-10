@@ -368,6 +368,24 @@ test("free plan: Arca caps the call at 2 minutes; the bot knows, is told to wrap
   expect(await calls.event(c.id, JSON.stringify({ status: "recorded" }), "forged")).toBe(false);
 });
 
+test("the bot keeps to its language: pinned for Gemini, and told a misheard word is no reason to switch", async () => {
+  const { languageCode, geminiTalker } = await import("../src/calls.ts");
+  expect(languageCode(undefined)).toBe("en-US");
+  expect(languageCode("Spanish")).toBe("es-US");
+  expect(languageCode("hi-IN")).toBe("hi-IN");
+  expect(languageCode("Klingon")).toBeUndefined();
+  expect(talkerInstructions("Hi.", {})).toContain("Speak English, and keep to it the whole call");
+  // The setup Gemini gets carries the language code.
+  const sent: string[] = [];
+  const Real = globalThis.WebSocket;
+  (globalThis as any).WebSocket = class { readyState = 1; onopen: any; constructor() { setTimeout(() => this.onopen?.(), 0); } send(m: string) { sent.push(m); } close() {} };
+  try {
+    geminiTalker({ provider: "gemini", key: "k", model: "gemini-3.8-live", instructions: "x", voice: { language: "Spanish" } }, { onAudio() {}, onLine() {}, onInterrupt() {}, onTool() {}, onError() {} });
+    await sleep(5);
+  } finally { (globalThis as any).WebSocket = Real; }
+  expect(JSON.parse(sent[0]).setup.generationConfig.speechConfig.languageCode).toBe("es-US");
+});
+
 test("the bot gets what's needed to act, and a fresh note from the supervisor is done before it hangs up", async () => {
   const calls = make();
   await calls.connect(OPENAI_KEY);
