@@ -6,6 +6,7 @@ import { lastRefresh } from "./brains/logins.ts";
 import { cleanToolStatus, type ToolStatus } from "./brains/tools.ts";
 import { MAX_FRAME_BYTES } from "./brains/live-view.ts";
 import { ComputerGone, MODEL_RE, type BrainInput, type BrainProfile, type Meter, type Remote, type RemoteRunner } from "./brain.ts";
+import { MAX_TRANSFER, type ExecReq, type ExecRes, type RunPlace } from "./run-elsewhere.ts";
 
 // Computers linked to this hub (a Mac at home, say). The hub has a public address and the computer doesn't, so the
 // computer dials in over a WebSocket and keeps the line open; the hub sends work down it. Like Enkidu's Mac and cloud
@@ -20,6 +21,9 @@ import { ComputerGone, MODEL_RE, type BrainInput, type BrainProfile, type Meter,
 // hub -> Mac        browse {id, sid, action, params, mode}   (a job's hearth-browser command, after you approved it; other-browser.ts)
 //                   mode "mine": your own Chrome (mac-chrome.ts); "background": a headless one (computer.ts browseHere)
 // Mac -> hub        browsed {id, ok, out?, png?, frame?}     (the answer; a screenshot, and a small live-view frame, as base64)
+// hub -> computer   exec {id, key, tid, deleted, full, cmd, bg, timeoutSec, get}   (a job's hearth-run, after you said yes;
+//                   run-elsewhere.ts). Files go over HTTP, not this line: GET /computer/x/<tid>, POST /computer/x/up/<id>
+// computer -> hub   execLine {id, text}   execd {id, ...ExecRes}
 
 /** What a computer can copy up so the cloud can work while it's off. Each is a login file the harness reads. */
 export const COPY_ITEMS = {
@@ -46,6 +50,8 @@ type Link = {
   connectedAt: number; lastAlive: number; rttMs: number | null; running: Map<string, Pending>; want: CopyItem[];
   /** hearth-browser commands waiting for this Mac's answer. */
   browsing: Map<string, { done: (r: Browsed | Error) => void }>;
+  /** hearth-run commands waiting for this computer's answer, and the file it uploaded for each. */
+  execs: Map<string, { done: (r: ExecRes) => void; onLine?: (s: string) => void; upFile?: string }>;
   /** The hub set this computer up (a sandbox or your VM), so it gets the hub's logins. */
   cloud: boolean;
   /** Opens the agent's Google commands for jobs this computer runs; made fresh for each connection, dead when it closes. */
@@ -99,7 +105,7 @@ export class Computers implements Remote {
   attach(deviceId: string, name: string, ws: Socket, want: CopyItem[] = [], cloud = false) {
     if (this.links.has(deviceId)) this.drop(deviceId, "replaced by a new connection");
     const t = this.now();
-    this.links.set(deviceId, { deviceId, name, ws, harnesses: [], platform: "", tools: [], connectedAt: t, lastAlive: t, rttMs: null, running: new Map(), browsing: new Map(), want, cloud, agentKey: randomBytes(24).toString("hex") });
+    this.links.set(deviceId, { deviceId, name, ws, harnesses: [], platform: "", tools: [], connectedAt: t, lastAlive: t, rttMs: null, running: new Map(), browsing: new Map(), execs: new Map(), want, cloud, agentKey: randomBytes(24).toString("hex") });
     this.seen.set(deviceId, t);
     this.send(deviceId, { t: "ping", ts: t });
   }
@@ -156,6 +162,14 @@ export class Computers implements Remote {
         else w.done(new Error(String(m.out || "The Mac's browser couldn't do it.").slice(0, 600)));
         return;
       }
+      case "execLine": if (typeof m.id === "string") link.execs.get(m.id)?.onLine?.(String(m.text || "").slice(0, 200)); return;
+      case "execd": {
+        const w = typeof m.id === "string" ? link.execs.get(m.id) : undefined;
+        if (!w) return;
+        link.execs.delete(m.id);
+        w.done(cleanExecRes(m, w.upFile));
+        return;
+      }
       case "copy": this.receiveCopy(link, m); return;
       case "cookies": this.receiveCookies(link, m); return;
       case "noCookies": this.receiveNoCookies(link, m); return;
@@ -169,6 +183,8 @@ export class Computers implements Remote {
     this.links.delete(deviceId);
     for (const p of link.running.values()) p.reject(new ComputerGone(`${link.name} went offline.`));
     for (const b of link.browsing.values()) b.done(new Error(`${link.name} went offline.`));
+    for (const x of link.execs.values()) { if (x.upFile) rmSync(x.upFile, { force: true }); x.done({ error: `${link.name} went offline.` }); }
+    for (const [tid, s] of [...this.staged]) if (s.deviceId === deviceId) this.staged.delete(tid);
     this.changed();
   }
 
@@ -235,6 +251,51 @@ export class Computers implements Remote {
       link.browsing.set(id, { done: (r) => { clearTimeout(timer); if (r instanceof Error) reject(r); else resolve(r); } });
       this.send(link.deviceId, { t: "browse", id, sid, action, params, mode });
     });
+  }
+
+  // ---- hearth-run: a job's command on another machine (run-elsewhere.ts) ----
+
+  /** Files waiting for a computer to fetch them (GET /computer/x/<tid>), and whose. */
+  private staged = new Map<string, { deviceId: string; file: string }>();
+
+  /** The computers online now, as places a job can run. */
+  places(): RunPlace[] {
+    const t = this.now();
+    return [...this.links.values()].filter((l) => t - l.lastAlive <= ASLEEP_MS)
+      .map((l) => ({ deviceId: l.deviceId, name: l.name, mac: !l.cloud && l.platform === "darwin", online: true, platform: l.platform }));
+  }
+
+  /** One hearth-run on a computer: it fetches staged (if any), runs, uploads what changed, then answers. */
+  exec(deviceId: string, req: ExecReq, staged: string | null, onLine?: (s: string) => void): Promise<ExecRes & { upFile?: string }> {
+    const link = this.links.get(deviceId);
+    if (!link) return Promise.resolve({ error: "That computer went offline." });
+    const id = randomUUID(), tid = staged ? randomUUID() : null;
+    if (staged && tid) this.staged.set(tid, { deviceId, file: staged });
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => { const w = link.execs.get(id); link.execs.delete(id); if (w?.upFile) rmSync(w.upFile, { force: true }); resolve({ error: `${link.name} didn't answer. If this keeps happening, its Hearth app may be too old for hearth-run: update it.` }); },
+        (req.bg ? 10 * 60 : req.timeoutSec + 15 * 60) * 1000);
+      (timer as any).unref?.();
+      link.execs.set(id, { onLine, done: (r) => { clearTimeout(timer); if (tid) this.staged.delete(tid); resolve(r); } });
+      this.send(deviceId, { t: "exec", id, ...req, tid });
+    });
+  }
+
+  /** The staged file a computer asked for, if it's for that computer. */
+  stagedFile(deviceId: string, tid: string): string | null {
+    const s = this.staged.get(tid);
+    return s && s.deviceId === deviceId && existsSync(s.file) ? s.file : null;
+  }
+
+  /** A computer's upload for one of its hearth-runs: kept until its answer comes. False if nothing is waiting for it. */
+  async takeUpload(deviceId: string, id: string, body: ArrayBuffer, dir: string): Promise<boolean> {
+    const w = this.links.get(deviceId)?.execs.get(id);
+    if (!w || body.byteLength > MAX_TRANSFER) return false;
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = join(dir, `up-${randomUUID()}.tgz`);
+    writeFileSync(file, new Uint8Array(body), { mode: 0o600 });
+    if (w.upFile) rmSync(w.upFile, { force: true });
+    w.upFile = file;
+    return true;
   }
 
   // ---- what the app shows ----
@@ -418,4 +479,23 @@ export class Computers implements Remote {
   private send(deviceId: string, m: unknown) {
     try { this.links.get(deviceId)?.ws.send(JSON.stringify(m)); } catch {}
   }
+}
+
+/** A computer's answer to an exec, trimmed to what it may say. */
+function cleanExecRes(m: any, upFile?: string): ExecRes & { upFile?: string } {
+  const strs = (x: unknown, n: number) => (Array.isArray(x) ? x.filter((s) => typeof s === "string").slice(0, n).map((s: string) => s.slice(0, 1000)) : []);
+  const num = (x: unknown) => (typeof x === "number" && Number.isFinite(x) ? x : undefined);
+  const r: ExecRes & { upFile?: string } = {};
+  if (m.need === "full") r.need = "full";
+  if (typeof m.error === "string") r.error = m.error.slice(0, 600);
+  if (num(m.code) !== undefined) r.code = num(m.code);
+  if (typeof m.out === "string") r.out = m.out.slice(0, 70_000);
+  r.deleted = strs(m.deleted, 20_000);
+  if (Array.isArray(m.big)) r.big = m.big.filter((b: any) => typeof b?.path === "string" && typeof b?.size === "number").slice(0, 200).map((b: any) => ({ path: b.path.slice(0, 1000), size: b.size }));
+  if (Array.isArray(m.kept)) r.kept = m.kept.filter((k: any) => typeof k?.path === "string" && typeof k?.as === "string").slice(0, 200).map((k: any) => ({ path: k.path.slice(0, 1000), as: k.as.slice(0, 1000) }));
+  if (num(m.secs) !== undefined) r.secs = num(m.secs);
+  if (num(m.pid) !== undefined) r.pid = num(m.pid);
+  if (m.up && upFile) r.upFile = upFile;
+  else if (upFile) rmSync(upFile, { force: true });
+  return r;
 }
