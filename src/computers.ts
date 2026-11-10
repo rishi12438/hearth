@@ -54,6 +54,8 @@ type Link = {
   execs: Map<string, { done: (r: ExecRes) => void; onLine?: (s: string) => void; upFile?: string }>;
   /** The hub set this computer up (a sandbox or your VM), so it gets the hub's logins. */
   cloud: boolean;
+  /** What its app says it can do beyond brain runs ("exec": hearth-run). An older app says nothing. */
+  can: string[];
   /** Opens the agent's Google commands for jobs this computer runs; made fresh for each connection, dead when it closes. */
   agentKey: string;
 };
@@ -105,7 +107,7 @@ export class Computers implements Remote {
   attach(deviceId: string, name: string, ws: Socket, want: CopyItem[] = [], cloud = false) {
     if (this.links.has(deviceId)) this.drop(deviceId, "replaced by a new connection");
     const t = this.now();
-    this.links.set(deviceId, { deviceId, name, ws, harnesses: [], platform: "", tools: [], connectedAt: t, lastAlive: t, rttMs: null, running: new Map(), browsing: new Map(), execs: new Map(), want, cloud, agentKey: randomBytes(24).toString("hex") });
+    this.links.set(deviceId, { deviceId, name, ws, harnesses: [], platform: "", tools: [], connectedAt: t, lastAlive: t, rttMs: null, running: new Map(), browsing: new Map(), execs: new Map(), can: [], want, cloud, agentKey: randomBytes(24).toString("hex") });
     this.seen.set(deviceId, t);
     this.send(deviceId, { t: "ping", ts: t });
   }
@@ -121,6 +123,7 @@ export class Computers implements Remote {
       case "hello":
         link.harnesses = Array.isArray(m.harnesses) ? m.harnesses.filter((h: unknown) => typeof h === "string").slice(0, 8) : [];
         link.platform = String(m.platform || "").slice(0, 20);
+        link.can = Array.isArray(m.can) ? m.can.filter((x: unknown) => typeof x === "string").slice(0, 20) : [];
         this.sendWant(link);
         this.sendCookieWant(link);
         this.sendSkills(link);
@@ -262,7 +265,7 @@ export class Computers implements Remote {
   places(): RunPlace[] {
     const t = this.now();
     return [...this.links.values()].filter((l) => t - l.lastAlive <= ASLEEP_MS)
-      .map((l) => ({ deviceId: l.deviceId, name: l.name, mac: !l.cloud && l.platform === "darwin", online: true, platform: l.platform }));
+      .map((l) => ({ deviceId: l.deviceId, name: l.name, mac: !l.cloud && l.platform === "darwin", online: true, platform: l.platform, canRun: l.can.includes("exec") }));
   }
 
   /** One hearth-run on a computer: it fetches staged (if any), runs, uploads what changed, then answers. */

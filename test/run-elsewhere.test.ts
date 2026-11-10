@@ -37,7 +37,7 @@ test("scan skips symlinks and build folders; diff sees changes and deletions", (
 });
 
 /** A hub folder, a pretend computer (its home in a temp folder, talking to a real Computers over a fake socket). */
-function rig(o: { gate?: RunGate; mac?: boolean } = {}) {
+function rig(o: { gate?: RunGate; mac?: boolean; old?: boolean } = {}) {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "hr-")));
   const root = join(base, "brain"), ws = join(root, "workspaces", "app"), home = join(base, "mac-home"), state = join(base, "run-sync");
   mkdirSync(ws, { recursive: true });
@@ -57,7 +57,7 @@ function rig(o: { gate?: RunGate; mac?: boolean } = {}) {
     close() {},
   };
   computers.attach("d1", "Studio", socket);
-  computers.message("d1", JSON.stringify({ t: "hello", harnesses: [], platform: o.mac === false ? "linux" : "darwin" }));
+  computers.message("d1", JSON.stringify({ t: "hello", harnesses: [], platform: o.mac === false ? "linux" : "darwin", can: o.old ? [] : ["exec"] }));
   const run = new RunElsewhere({
     root, stateDir: state, places: () => computers.places(),
     exec: (id, req, staged, onLine) => computers.exec(id, req, staged, onLine),
@@ -161,6 +161,14 @@ test("only the workspace can be copied, and only to a machine that's there", asy
   symlinkSync("/etc", join(r.ws, "etc"));
   await r.go(["mac", "--", "true"]);
   expect(existsSync(r.there("etc"))).toBe(false);
+});
+
+test("an older Mac app that can't take runs says so right away", async () => {
+  const r = rig({ old: true });
+  const out = await r.go(["mac", "--", "ls"]);
+  expect(out.code).toBe(3);
+  expect(out.text).toContain("too old for hearth-run");
+  expect((await r.go(["list"])).text).toContain("needs an update");
 });
 
 test("--bg starts it and returns", async () => {

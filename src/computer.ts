@@ -355,7 +355,8 @@ export function connect(opts: Opts) {
       opened = true;
       backoff = 1000;
       log(`  connected to ${link.hub}`);
-      send({ t: "hello", harnesses: availableHarnesses(config), platform: platform() });
+      // can: what this app knows how to do beyond brain runs, so the hub doesn't wait on an older app for nothing.
+      send({ t: "hello", harnesses: availableHarnesses(config), platform: platform(), can: process.env.HEARTH_NO_RUN === "1" ? [] : ["exec"] });
       alive = setInterval(() => send({ t: "alive" }), ALIVE_EVERY_MS);
       copyTimer = setInterval(copyUp, opts.copyEveryMs ?? 5 * 60_000);
       // Its tools' health for Settings, now and every few minutes (a daemon can stop or come back).

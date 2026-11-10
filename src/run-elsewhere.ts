@@ -285,7 +285,9 @@ const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 // ---------------------------------------------------------------- the hub's side
 
 /** A machine a job can run on. */
-export type RunPlace = { deviceId: string; name: string; mac: boolean; online: boolean; platform: string };
+export type RunPlace = { deviceId: string; name: string; mac: boolean; online: boolean; platform: string;
+  /** Its app takes hearth-run (an older one, or one with HEARTH_NO_RUN, doesn't). */
+  canRun?: boolean };
 export type RunGate = "ok" | "ask" | "pending" | "no";
 
 export type RunElsewhereOpts = {
@@ -359,7 +361,7 @@ export class RunElsewhere {
     const rows = await Promise.all(all.map(async (p) => {
       const g = p.online ? await this.o.gate(threadId, p.deviceId) : null;
       const what = p.mac ? "the user's own Mac: macOS, Xcode, their apps and files" : `a cloud computer${p.platform ? ` (${p.platform})` : ""}: for heavy or long work`;
-      const state = !p.online ? "offline" : g === "ok" ? "online, the user said yes in this conversation" : g === "no" ? "online, but the user said no in this conversation" : g === "pending" ? "online, waiting for the user's answer" : "online, asks the user first";
+      const state = !p.online ? "offline" : p.canRun === false ? "online, but its Hearth app can't take hearth-run (needs an update)" : g === "ok" ? "online, the user said yes in this conversation" : g === "no" ? "online, but the user said no in this conversation" : g === "pending" ? "online, waiting for the user's answer" : "online, asks the user first";
       return `- ${p.mac ? "mac" : p.name}${p.mac ? ` (${p.name})` : ""}: ${what}. ${state}.`;
     }));
     return `Machines you can run on (hearth-run <machine> -- <command>):\n${rows.join("\n")}`;
@@ -379,6 +381,7 @@ export class RunElsewhere {
       if (!place.mac) this.o.wake?.();
       return { code: 3, text: place.mac ? `${place.name} (the user's Mac) is offline, so nothing can run there now. Do what you can here, and tell the user it needs their Mac to be on.` : `${place.name} is asleep. It's being woken now: try again in a minute or two.` };
     }
+    if (place.canRun === false) return { code: 3, text: `${place.name} can't take commands from the hub: its Hearth app is too old for hearth-run, or turned it off. Do it here, and tell the user that updating the Hearth app on ${place.mac ? "their Mac" : place.name} would let you run it there.` };
     let dir: string;
     try { dir = realpathSync(resolve(ctx.cwd)); } catch { return { code: 2, text: "Your current folder doesn't exist." }; }
     const root = realpathSync(this.o.root);
