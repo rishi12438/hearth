@@ -723,7 +723,13 @@ function fitBottom() {
   s.addEventListener("touchmove", you, { passive: true });
   s.addEventListener("mousedown", (e) => { if ((e as MouseEvent).offsetX > s.clientWidth) you(); }); // the scrollbar
   s.addEventListener("keydown", (e) => { if (["ArrowUp", "PageUp", "Home", " "].includes((e as KeyboardEvent).key)) you(); });
+  // Moving up while the page didn't get shorter is always you, even when the wheel or finger was over an inline page
+  // (its frame gets those events, not this page, and the scroll just carries on out to the conversation).
+  let lastTop = s.scrollTop, lastHeight = s.scrollHeight;
   s.addEventListener("scroll", () => {
+    const up = s.scrollTop < lastTop - 1 && s.scrollHeight >= lastHeight;
+    lastTop = s.scrollTop; lastHeight = s.scrollHeight;
+    if (up) you();
     if (nearBottom(s)) { pinned = true; return; }
     if (performance.now() - touched < 1200) { pinned = false; grabAnchor(s); }
     else if (pinned) s.scrollTop = s.scrollHeight;
