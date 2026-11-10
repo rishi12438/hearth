@@ -1452,6 +1452,11 @@ html:has(.phonescreen) { overscroll-behavior-x: none; }
 .callcard .callline { font-size: 14px; line-height: 1.4; }
 .callcard .callline b { font-weight: var(--fw-semibold); margin-right: 2px; }
 .callcard .callfacts { margin: 6px 0 0; }
+/* A call that's on: pinned to the bottom of the thread until it ends. */
+.callpin { position: sticky; bottom: 0; z-index: 3; padding-top: 8px; background: linear-gradient(to bottom, transparent, var(--bg, #fbfaf8) 24px); }
+.callpin .callcard { box-shadow: 0 6px 24px rgba(0, 0, 0, .12); }
+.callpin .calllines { max-height: 180px; }
+.callcard .callask.urgent { border: 2px solid var(--ok); border-radius: 12px; padding: 10px 12px; margin-top: 10px; }
 .callcard .recplayer { display: flex; align-items: center; gap: 10px; margin-top: 10px; padding: 6px 8px; border-radius: 999px; background: var(--surface-2); }
 .callcard .recplay { width: 34px; height: 34px; flex: none; display: grid; place-items: center; border-radius: 50%; background: var(--ok); color: #fff; }
 .callcard .recplay:disabled { opacity: .5; }

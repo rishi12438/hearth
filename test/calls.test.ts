@@ -445,6 +445,7 @@ test("the bot gets what's needed to act, and a fresh note from the supervisor is
   const body = callSkill("http://hub", "k").body;
   expect(body).toContain("the call was a means, not the end");
   expect(body).toContain("settle your own side");
+  expect(body).toContain("only answer with the real answer");
   expect(body).toContain("[[answer-needed]]");
 });
 
