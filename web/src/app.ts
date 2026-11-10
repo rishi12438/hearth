@@ -2123,31 +2123,65 @@ function callFacts(c: any): Node {
   return h("p", { class: "muted small callfacts" }, bits.join(" · "));
 }
 
-/** The call's MP3 (fetched with the device token, so it can't be a plain link): play, save, or delete. */
-const recUrls = new Map<string, string>();
+/** The call's recording, as a player right in the card. The MP3 is fetched with the device token (it can't be a
+ *  plain link), as soon as the card shows, and its player outlives redraws so playback doesn't stop when the thread
+ *  updates. No native <audio controls>: WKWebView (the Mac app) can draw them as nothing. */
+const recPlayers = new Map<string, { audio?: HTMLAudioElement; url?: string; loading?: Promise<void>; error?: string; render?: () => void }>();
 async function recordingBlob(id: string) {
   const hub = activeHub()!;
   const res = await fetch(`${hub.url}/api/calls/${id}/recording`, { headers: authHeaders(hub) });
   if (!res.ok) throw new Error(res.status === 404 ? "That recording is gone." : "Couldn't fetch the recording");
   return new Blob([await res.arrayBuffer()], { type: "audio/mpeg" });
 }
+const clockOf = (s: number) => (Number.isFinite(s) && s >= 0 ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}` : "0:00");
 function callRecording(c: any): Node | null {
   if (!c.recording?.bytes && !c.arcaRecording?.bytes) return null;
-  const box = h("div", { class: "callrec" });
+  let p = recPlayers.get(c.id);
+  if (!p) { p = {}; recPlayers.set(c.id, p); }
+  const entry = p;
+  const known = Number(c.recording?.seconds || c.seconds || 0);
+  const length = () => { const d = entry.audio?.duration; return d && Number.isFinite(d) ? d : known; };
+  const btn = h("button", { class: "recplay", "aria-label": "Play the recording" }) as HTMLButtonElement;
+  const fill = h("div", { class: "recfill" });
+  const bar = h("div", { class: "recbar", role: "slider", "aria-label": "Position in the recording", tabindex: "0" }, fill);
+  const time = h("span", { class: "rectime muted small" });
+  const render = () => {
+    const a = entry.audio, playing = !!a && !a.paused && !a.ended;
+    clear(btn, icon(playing ? "pause" : "play", 16));
+    btn.setAttribute("aria-label", playing ? "Pause" : "Play the recording");
+    btn.disabled = !a && !entry.error;
+    const at = a?.currentTime ?? 0, len = length();
+    fill.style.width = `${len ? Math.min(100, (at / len) * 100) : 0}%`;
+    time.textContent = entry.error ? entry.error : `${clockOf(at)} / ${clockOf(len)}`;
+  };
+  entry.render = render;
+  const load = () => entry.loading ??= recordingBlob(c.id).then((b) => {
+    entry.url = URL.createObjectURL(b);
+    const a = new Audio(entry.url);
+    a.preload = "auto";
+    for (const ev of ["play", "pause", "ended", "timeupdate", "loadedmetadata", "durationchange"]) a.addEventListener(ev, () => entry.render?.());
+    entry.audio = a;
+    entry.render?.();
+  }).catch((e) => { entry.error = String((e as Error).message || e); entry.loading = undefined; entry.render?.(); });
+  btn.addEventListener("click", () => {
+    const a = entry.audio;
+    if (!a) { entry.error = undefined; void load(); return; }
+    // One recording at a time.
+    for (const [id, o] of recPlayers) if (id !== c.id) o.audio?.pause();
+    if (a.paused || a.ended) void a.play().catch((e) => handleError(e)); else a.pause();
+  });
+  const seek = (x: number) => { const a = entry.audio, len = length(); if (!a || !len) return; const r = bar.getBoundingClientRect(); a.currentTime = Math.max(0, Math.min(1, (x - r.left) / r.width)) * len; render(); };
+  bar.addEventListener("click", (e) => seek((e as MouseEvent).clientX));
+  bar.addEventListener("keydown", (e) => { const a = entry.audio, k = (e as KeyboardEvent).key; if (!a) return; if (k === "ArrowRight") a.currentTime = Math.min(length(), a.currentTime + 5); if (k === "ArrowLeft") a.currentTime = Math.max(0, a.currentTime - 5); render(); });
   const name = `call-${String(c.to).replace(/\D/g, "")}-${String(c.createdAt).slice(0, 16).replace(/[:T]/g, "-")}.mp3`;
-  const player = (url: string, auto: boolean) => { const a = h("audio", { controls: "", preload: "metadata", src: url }) as HTMLAudioElement; if (auto) void a.play().catch(() => {}); return a; };
-  const play = h("button", { class: "sbtn", on: { click: async () => {
-    play.disabled = true;
-    try { let u = recUrls.get(c.id); if (!u) { u = URL.createObjectURL(await recordingBlob(c.id)); recUrls.set(c.id, u); } play.replaceWith(player(u, true)); }
-    catch (e) { play.disabled = false; handleError(e); }
-  } } }, icon("play", 14), `Play recording${c.recording?.seconds ? ` (${callLength(c.recording.seconds)})` : ""}`) as HTMLButtonElement;
-  const save = h("button", { class: "sbtn", on: { click: async () => { try { await saveBlob(await recordingBlob(c.id), name); } catch (e) { handleError(e); } } } }, "Save MP3");
-  const del = h("button", { class: "sbtn ghost", on: { click: () => confirmSheet("Delete this recording?", "The MP3 is removed from your hub. The transcript stays.", "Delete", async () => {
-    await call(`/api/calls/${c.id}/recording`, { method: "DELETE" }); const u = recUrls.get(c.id); if (u) URL.revokeObjectURL(u); recUrls.delete(c.id); toast("Recording deleted");
-  }) } }, "Delete");
-  const u = recUrls.get(c.id);
-  box.append(u ? player(u, false) : play, h("div", { class: "blockbtns" }, save, del));
-  return box;
+  const save = h("button", { class: "iconbtn small", title: "Download the MP3", "aria-label": "Download the MP3", on: { click: async () => { try { await saveBlob(await recordingBlob(c.id), name); } catch (e) { handleError(e); } } } }, icon("download", 16));
+  const del = h("button", { class: "iconbtn small", title: "Delete the recording", "aria-label": "Delete the recording", on: { click: () => confirmSheet("Delete this recording?", "The audio is removed for good. The transcript stays.", "Delete", async () => {
+    await call(`/api/calls/${c.id}/recording`, { method: "DELETE" });
+    entry.audio?.pause(); if (entry.url) URL.revokeObjectURL(entry.url); recPlayers.delete(c.id); toast("Recording deleted");
+  }) } }, icon("trash", 16));
+  render();
+  void load();
+  return h("div", { class: "recplayer" }, btn, bar, time, save, del);
 }
 
 /** The call you're listening to: its socket, playback, and your mic while you've joined. */

@@ -298,8 +298,9 @@ test("tracking: who started it, how long, who ended it, and the whole call as a 
     startedBy: { agent: "Sam", task: "Sunday opening", approvedAt: "2026-11-09T10:00:00.000Z" } });
   await signed(calls, c.id, { id: "arca-1", status: "answered" });
   calls.audioOpen(c.id, sock());
-  // The bot is told to say the call is recorded.
-  expect(talker!.spec.instructions).toContain("This call is recorded");
+  // The bot doesn't announce the recording (it only says yes if asked).
+  expect(talker!.spec.instructions).not.toContain("This call is recorded");
+  expect(talker!.spec.instructions).toContain("If they ask whether the call is recorded, say yes");
   // 2 s of them (Vonage sends a frame every 20 ms, silence included) while the bot talks for a bit.
   talker!.ev.onAudio(new Int16Array(8000).map((_, i) => Math.round(Math.sin(i / 5) * 6000)));
   for (let i = 0; i < 100; i++) {
@@ -324,7 +325,7 @@ test("tracking: who started it, how long, who ended it, and the whole call as a 
   const c1 = await calls.start({ to: "+14155550199", brief: "Hi.", threadId: "t1" });
   expect(placed.at(-1).record).toBe(false);
   calls.audioOpen(c1.id, sock());
-  expect(talker!.spec.instructions).toContain("This call is recorded");
+  expect(talker!.spec.instructions).not.toContain("This call is recorded");
   calls.audioIn(c1.id, new Uint8Array(640));
   await calls.hangup(c1.id, "you");
   expect(saved.get(c1.id)!.recording!.bytes).toBeGreaterThan(0);
@@ -335,7 +336,7 @@ test("tracking: who started it, how long, who ended it, and the whole call as a 
   const c2 = await calls.start({ to: "+14155550199", brief: "Hi.", threadId: "t1", voice: { record: true } as any });
   expect(placed.at(-1).record).toBe(false); // Arca doesn't record it either
   calls.audioOpen(c2.id, sock());
-  expect(talker!.spec.instructions).not.toContain("recorded");
+  expect(talker!.spec.instructions).not.toContain("This call is recorded");
   calls.audioIn(c2.id, new Uint8Array(640));
   await calls.hangup(c2.id, "you");
   expect(saved.get(c2.id)).toMatchObject({ endedBy: "you" });
