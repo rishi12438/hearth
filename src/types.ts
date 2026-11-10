@@ -83,6 +83,9 @@ export type Thread = Doc & { title: string; updatedAt: string; preview?: string;
   lookAt?: string;
   /** The project this ramble is filed under, if any. */
   projectId?: string;
+  /** Picked from the header: every job in this ramble runs on this harness and model ("" = the harness's default) instead
+   *  of the roles and the pool's pick. Unset = Auto. */
+  brain?: { harness: string; model: string };
   /** Started in an earlier ramble's workspace (its folder), because its first plan put its work there (see Hub.linkWorkspace):
    *  its jobs work there, so they can search and use what the earlier work saved. workspaceFrom is that ramble. */
   workspace?: string;
@@ -365,6 +368,8 @@ export type Approval = Doc & {
     | { type: "mcp-server"; server: string; url: string }
     /** A job blocked on a site wants to carry on in Chrome on your Mac (other-browser.ts); Approve covers its conversation. */
     | { type: "browser"; computer: string; url: string; threadId: string }
+    /** A job wants to run commands on another machine (run-elsewhere.ts); Yes covers that machine in its conversation. */
+    | { type: "run"; computer: string; deviceId: string; threadId: string; cmd: string; why?: string }
     /** A phone call an agent wants to place (calls.ts): Approve dials it from Hearth's line, through Arca. */
     | { type: "call"; to: string; brief: string; voice?: import("./calls.ts").VoicePrefs };
   /** expired: nobody answered within a day (APPROVAL_TTL_MS), so it didn't run and no longer asks. */

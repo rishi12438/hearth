@@ -14,6 +14,7 @@ import { registerSkills } from "../brains/skills.ts";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { serper, serperKey } from "./serper.ts";
 import { otherBrowserSkill } from "../other-browser.ts";
+import { runElsewhereSkill } from "../run-elsewhere.ts";
 import { helpSkill } from "../help.ts";
 import { Tunnels, tunnelSkill } from "../tunnels.ts";
 import { deepgram } from "./deepgram.ts";
@@ -115,6 +116,8 @@ export class Connect {
     registerSkills(() => [lessonsSkill(base, this.agentKey)]);
     // A site blocks the browser here: carry on in Chrome on your Mac (once you approve) or Browserbase (other-browser.ts).
     registerSkills(() => [otherBrowserSkill(base, this.agentKey)]);
+    // A step needs another machine (your Mac, a cloud computer): run it there in a copy of the folder (run-elsewhere.ts).
+    registerSkills(() => [runElsewhereSkill(base, this.agentKey)]);
     // Stuck on something: hearth-help stuck says what's there right now (help.ts).
     registerSkills(() => [helpSkill(base, this.agentKey)]);
     // A link the user can open to a web app a job runs or a site it built (tunnels.ts). The hub owns each tunnel, so the

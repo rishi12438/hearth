@@ -757,7 +757,9 @@ function tierOf(p: BrainProfile): string {
 export const POOL_HARNESSES = ["claude", "codex"] as const;
 
 /** Which harness runs a turn, and with which model. "" model = the harness's default. */
-export type BrainProfile = { harness: string; model: string; role?: "orchestrator" | "quick" | "workhorse" | "heavy" };
+export type BrainProfile = { harness: string; model: string; role?: "orchestrator" | "quick" | "workhorse" | "heavy";
+  /** You picked this brain for the ramble (its header): it runs there, not on whichever brain has more room. */
+  pinned?: boolean };
 /** Every brain the user picked is near its plan limit. The job parks until the first one resets. */
 export class BrainsFull extends Error { constructor(msg: string, readonly until: number | null) { super(msg); } }
 /** Collects model spend across calls. `unknown` flips when a harness can't report cost. */
@@ -1004,6 +1006,8 @@ export class Brain {
     // A brain that's signed out sits out while another can do the work (it's tried again once you reconnect it).
     const healthy = picked.filter((h) => !this.health.problem(h));
     const pool = healthy.length ? healthy : picked;
+    // Picked for this ramble from its header: that brain does it (dispatch still moves on if it's signed out).
+    if (asked.pinned) return this.thinkOn(b, asked, meter);
     // A thread's working run goes back to the brain that holds its session, so a follow-up carries on with everything
     // so far instead of starting over on whichever brain has more room (see brains/sessions.ts).
     const held = !NO_TOOLS.has(b.mode) ? await this.sessionBrain(meter?.thread, asked) : undefined;
@@ -1050,6 +1054,7 @@ export class Brain {
    *  asked for): a follow-up in the thread goes back to it. */
   async sessionBrain(thread: string | undefined, asked: BrainProfile): Promise<SessionHarness | undefined> {
     if (!thread) return undefined;
+    if (asked.pinned) return (asked.harness === "claude" || asked.harness === "codex") && this.sessions.get(thread, asked.harness) ? asked.harness : undefined;
     const picked = (await this.pool().catch(() => [] as string[])).filter((h) => (POOL_HARNESSES as readonly string[]).includes(h));
     const may = picked.length ? picked.filter((h) => !this.health.problem(h)) : [asked.harness];
     const order = [asked.harness, ...may.filter((h) => h !== asked.harness)].filter((h) => may.includes(h));

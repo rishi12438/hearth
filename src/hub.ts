@@ -858,6 +858,32 @@ export class Hub {
     return { value: saved };
   }
 
+  /** Pick the brain and model every job in this ramble runs on (the header's picker), or null for Auto. */
+  async setThreadBrain(id: string, pick: unknown) {
+    const t = await this.store.get<Thread>("threads", id);
+    if (!t || t.id.startsWith("tm-")) return { error: "No such ramble." };
+    let brain: Thread["brain"];
+    if (pick && typeof pick === "object") {
+      const harness = String((pick as any).harness || ""), model = String((pick as any).model ?? "").trim();
+      if (!availableHarnesses(this.config).includes(harness)) return { error: `${harness || "That brain"} isn't installed on this hub.` };
+      if (!MODEL_RE.test(model)) return { error: "That model name has characters it can't have." };
+      brain = { harness, model };
+    }
+    const saved = await this.store.put<Thread>("threads", { ...t, brain });
+    await this.log("ramble.brain", `#${channelOf(t)} → ${brain ? brainName(brain) : "Auto"}`);
+    this.emit("threads");
+    return { value: saved };
+  }
+
+  /** The roles for a job in this ramble: all on the brain you picked for it in the header, if you did. */
+  async jobBrains(threadId?: string): Promise<Brains> {
+    const brains = await this.brains();
+    const pin = threadId ? (await this.store.get<Thread>("threads", threadId))?.brain : undefined;
+    if (!pin) return brains;
+    const on = (role: "quick" | "workhorse" | "heavy") => ({ harness: pin.harness, model: pin.model, role, pinned: true });
+    return { ...brains, quick: on("quick"), workhorse: on("workhorse"), heavy: on("heavy") };
+  }
+
   /** Any activity in a ramble brings it back from the archive. */
   private async touchThread(id: string, patch: Partial<Thread>) {
     const t = await this.store.get<Thread>("threads", id);
@@ -1542,7 +1568,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       }
     }
 
-    const brains = await this.brains();
+    const brains = await this.jobBrains(job.threadId);
     const repairNote = failedSkill
       ? `\n\nThe saved skill "${failedSkill.name}" failed with: ${failedSkill.error}\nSolve the job fresh. Then, if you can, save a fixed version with skill.save using the same name. A recipe fix may only use scripts the old one used.`
       : "\n\nIf this job is likely to come back and you had to work it out, save it with skill.save.";
@@ -1582,7 +1608,8 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       return this.turn(hybrid && tier !== "heavy" ? "legwork" : "job", input, job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains[tier], meter, top: tier === "heavy", files });
     };
     // Start on the cheapest model the plan allows; move up a step when a model can't do it.
-    const ladder: Tier[] = job.effort === "heavy" ? ["heavy"] : job.effort === "quick" ? ["quick", "workhorse", "heavy"] : ["workhorse", "heavy"];
+    // On the brain you picked for the ramble every step is the same model, so there's nowhere to move up to.
+    const ladder: Tier[] = job.effort === "heavy" ? ["heavy"] : brains.heavy.pinned ? [job.effort === "quick" ? "quick" : "workhorse"] : job.effort === "quick" ? ["quick", "workhorse", "heavy"] : ["workhorse", "heavy"];
     let tier: Tier = ladder[0];
     let escalated = false;
     // Each step up, with why: kept on the job (the thread shows it) and in the log.
@@ -1607,14 +1634,14 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     try {
       let failed = "";
       const tryTier = (t: Tier) => attempt(t).catch((err) => {
-        if (t === "heavy") throw err;
+        if (t === ladder.at(-1)) throw err;
         failed = String(err?.message || err).slice(0, 300);
         return null;
       });
       let r: Awaited<ReturnType<typeof attempt>> | null = await tryTier(tier);
       if (stop.signal.aborted) throw new Error("Restarted with your new message.");
       if (job.mayHandBack && r?.text.includes(HAND_BACK)) return await this.handBack(cur, meter);
-      while (tier !== "heavy" && (!r || r.text.includes(ESCALATE) || !r.text.trim())) {
+      while (ladder.indexOf(tier) < ladder.length - 1 && (!r || r.text.includes(ESCALATE) || !r.text.trim())) {
         const why = !r ? `it hit an error: ${failed}` : r.text.includes(ESCALATE) ? escalateWhy(r.text) : "it replied with nothing";
         const from = tier;
         tier = ladder[ladder.indexOf(tier) + 1];
@@ -1858,7 +1885,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     await this.log("job.split", `${parent.task.slice(0, 60)} → ${subs.length} sub-agents`);
     await Promise.all(subs.map((sj) => this.runJob(sj, ramble)));
     const results = (await Promise.all(subs.map((sj) => this.store.get<Job>("jobs", sj.id)))).filter(Boolean) as Job[];
-    const brains = await this.brains();
+    const brains = await this.jobBrains(parent.threadId);
     const mate = await this.teammate(parent.teammateId);
     const text = results.map((x) => `## ${x.task} (${x.status})\n${x.result || ""}`).join("\n\n");
     const merged = await this.turn("job", `${parent.task}\n\nYour sub-agents finished. ${split.merge}\nWrite the final answer for the user. Don't split again.`, parent.task,
@@ -2621,6 +2648,62 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     return { ok: true, output: `${mode === "mine" ? "The user's own Chrome" : "A background Chrome"} on ${act.computer} is open to you in this conversation. Carry on: hearth-browser open ${act.url}` };
   }
 
+  // ---------- running commands on another machine (run-elsewhere.ts) ----------
+
+  /** Set by the server once computers are linked. */
+  runElsewhere: import("./run-elsewhere.ts").RunElsewhere | null = null;
+  /** "<thread>|<device>": you said yes (or no) to running there in that conversation, until when. */
+  private runYes = new Map<string, number>();
+  private runNo = new Map<string, number>();
+
+  /** May this conversation run things on that machine? There's no "always": every conversation asks. */
+  async runGate(threadId: string, deviceId: string): Promise<import("./run-elsewhere.ts").RunGate> {
+    const t = this.clock().getTime(), k = `${threadId}|${deviceId}`;
+    if ((this.runYes.get(k) ?? 0) > t) return "ok";
+    if ((this.runNo.get(k) ?? 0) > t) return "no";
+    const waiting = (await this.store.all<Approval>("approvals")).some((a) => a.status === "pending" && a.action.type === "run" && a.action.threadId === threadId && a.action.deviceId === deviceId);
+    return waiting ? "pending" : "ask";
+  }
+
+  /** A job wants to run on another machine: one card in its thread, saying where, what and why. */
+  async requestRun(c: { threadId: string; jobId?: string; place: import("./run-elsewhere.ts").RunPlace; cmd: string; why?: string }) {
+    const job = c.jobId ? await this.store.get<Job>("jobs", c.jobId) : null;
+    const mate = job?.teammateId ? await this.store.get<any>("teammates", job.teammateId) : null;
+    const where = c.place.mac ? `your Mac (${c.place.name})` : c.place.name;
+    const ap = await this.store.put<Approval>("approvals", {
+      ...this.doc({}), threadId: c.threadId, jobId: job?.id,
+      summary: `Run code on ${where}`.slice(0, 200),
+      details: `${mate?.name || "A teammate"} wants to run commands on ${where}${c.why ? `: ${c.why}` : ""}. First: ${c.cmd.slice(0, 300)}
+
+Its work folder is copied to ~/Hearth/runs there, the commands run in that copy, and the files they change come back. Yes covers ${c.place.mac ? "your Mac" : c.place.name} in this conversation for 12 hours.`,
+      action: { type: "run", computer: c.place.name, deviceId: c.place.deviceId, threadId: c.threadId, cmd: c.cmd.slice(0, 2000), ...(c.why ? { why: c.why } : {}) },
+      status: "pending",
+    } as Approval);
+    if (job) await this.saveJob({ ...job, approvalIds: [...(job.approvalIds || []), ap.id] });
+    await this.log("approval.requested", `${ap.summary} (asked by ${mate?.name || "an agent"})`);
+    await this.replaceOlder(ap);
+    this.emit("approval", ap);
+    await this.push?.send({ title: "Needs your OK", body: ap.summary, tag: ap.id, url: await this.approvalLink(ap) });
+  }
+
+  private runOk(act: Extract<Approval["action"], { type: "run" }>): { ok: boolean; output: string } {
+    this.runYes.set(`${act.threadId}|${act.deviceId}`, this.clock().getTime() + 12 * 3600_000);
+    this.runNo.delete(`${act.threadId}|${act.deviceId}`);
+    return { ok: true, output: `The user said yes: you can run commands on ${act.computer} in this conversation. Carry on: run the same hearth-run again (${act.cmd.slice(0, 200)}).` };
+  }
+
+  /** What `hearth-run <argv>` does from cwd, for /api/agent/run. */
+  async runAgent(argv: string[], cwd: string, jobId?: string): Promise<{ code: number; text: string }> {
+    if (!this.runElsewhere) return { code: 1, text: "This hub can't run things on other machines." };
+    let job = jobId ? await this.store.get<Job>("jobs", jobId) : null;
+    if (!job) {
+      const working = (await this.store.all<Job>("jobs")).filter((j) => j.status === "working");
+      if (working.length === 1) job = working[0];
+    }
+    if (argv[0] && argv[0] !== "list" && argv[0] !== "help") await this.log("run.elsewhere", `hearth-run ${argv.join(" ").slice(0, 200)}`);
+    return this.runElsewhere.run(argv, { threadId: job?.threadId || ORPHAN_THREAD, jobId: job?.id, cwd });
+  }
+
   /** The online Mac's name (set by the server), for hearth-help. */
   macName: () => string | null = () => null;
 
@@ -3056,6 +3139,7 @@ ${JSON.stringify(shown, null, 1)}
       await this.log("approval.always", `Always let teammates use ${macMode === "mine" ? "your own Chrome" : "a background Chrome"} on your Mac for blocked sites`);
     }
     if (!yes && !byTyping && ap.action.type === "browser") this.macBrowserNo.set(ap.action.threadId, this.clock().getTime() + 12 * 3600_000);
+    if (!yes && !byTyping && ap.action.type === "run") this.runNo.set(`${ap.action.threadId}|${ap.action.deviceId}`, this.clock().getTime() + 12 * 3600_000);
     if (yes && always && ap.action.type === "mcp") {
       this.connect?.mcp.setGate(ap.action.server, ap.action.tool, false);
       await this.log("approval.always", `Always allow ${ap.action.server}: ${ap.action.tool}`);
@@ -3080,6 +3164,7 @@ ${JSON.stringify(shown, null, 1)}
         : act.type === "mcp" ? await this.runMcp(act)
         : act.type === "skill" ? await this.runSkillInstall(act)
         : act.type === "browser" ? await this.runMacBrowserOk(act, macMode)
+        : act.type === "run" ? this.runOk(act)
         : act.type === "message"
         ? await (this.senders[act.channel]?.send(act.to, act.text, { subject: act.subject, threadId: act.threadId, from: act.from }).then(() => ({ ok: true, output: "Sent." }), (e: any) => ({ ok: false, output: String(e?.message || e) }))
           ?? { ok: false, output: `${act.channel} isn't connected.` })
