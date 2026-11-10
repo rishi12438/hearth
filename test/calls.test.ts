@@ -429,6 +429,7 @@ test("the bot gets what's needed to act, and a fresh note from the supervisor is
   const c = await calls.start({ to: "+14155550199", brief: "Ask if they're up for lunch.", threadId: "t1" });
   calls.audioOpen(c.id, sock());
   expect(talker!.spec.instructions).toContain("Agreeing to meet means a day, a time and a place");
+  expect(talker!.spec.instructions).toContain("Never ask them about the details of your own side's plan");
   backdate(calls, c.id);
   await calls.say(c.id, "Ask what time works for them.");
   talker!.ev.onTool("end_call", { outcome: "They suggested Kumla's." }, "t-1");
@@ -443,6 +444,7 @@ test("the bot gets what's needed to act, and a fresh note from the supervisor is
   const { callSkill } = await import("../src/calls.ts");
   const body = callSkill("http://hub", "k").body;
   expect(body).toContain("the call was a means, not the end");
+  expect(body).toContain("settle your own side");
   expect(body).toContain("[[answer-needed]]");
 });
 
