@@ -1130,6 +1130,9 @@ a.item { color: inherit; text-decoration: none; }
 .spast svg { width: 18px; transition: transform .15s; }
 .spast.open svg { transform: rotate(90deg); }
 .spast-more { color: var(--muted); font-size: 13px; }
+.snav.parchived { color: var(--muted); }
+.parchnote { display: flex; align-items: center; gap: 10px; margin: 0 0 18px; padding: 10px 14px; border-radius: 12px; background: var(--soft, rgba(127,127,127,.08)); color: var(--muted); font-size: 14px; }
+.parchnote .btn { flex: none; }
 .spastq { width: calc(100% - 24px); margin: 4px 0 4px 24px; padding: 6px 10px; border: 0; border-radius: 8px; background: var(--card); box-shadow: 0 0 0 1px var(--line); font-size: 13.5px; outline: none; }
 .spastq:focus { box-shadow: 0 0 0 1.5px var(--ink-2); }
 .snone.nested { padding-left: 34px; }

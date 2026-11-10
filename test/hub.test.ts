@@ -11,7 +11,7 @@ import { parseReply } from "../src/reply.ts";
 import { nextOccurrence, nextScheduledRun, zonedToUtc } from "../src/time.ts";
 import { recall } from "../src/memory.ts";
 import { newPairingCode, redeemPairingCode, deviceForToken } from "../src/auth.ts";
-import type { Fact, Job, Message, Thread } from "../src/types.ts";
+import type { Fact, Job, Message, Project, Thread } from "../src/types.ts";
 
 const TZ = "America/Los_Angeles";
 let dir: string, store: Store, hub: Hub, now: Date;
@@ -1037,6 +1037,14 @@ test("projects: file rambles under one, its memory comes first in that ramble, a
   expect((await store.get<Thread>("threads", started.thread.id))?.projectId).toBe(p.id);
   expect((await hub.ramble("loose one", undefined, [], "nope")).value!.thread.projectId).toBeUndefined();
   await until(async () => !hub.thinking);
+  // Archiving keeps everything; filing into it yourself brings it back.
+  expect((await hub.updateProject(p.id, { archived: true })).value?.archivedAt).toBeTruthy();
+  expect((await store.get<Thread>("threads", "t1"))?.projectId).toBe(p.id);
+  expect((await hub.listProjects())[0].archivedAt).toBeTruthy();
+  await hub.fileThread("t2", p.id);
+  expect((await store.get<Project>("projects", p.id))?.archivedAt).toBeUndefined();
+  await hub.updateProject(p.id, { archived: true });
+  expect((await hub.updateProject(p.id, { archived: false })).value?.archivedAt).toBeUndefined();
   expect(await hub.removeProject(p.id)).toBe(true);
   expect((await store.get<Thread>("threads", "t1"))?.projectId).toBeUndefined();
 });
