@@ -259,16 +259,30 @@ const TOOLS = [
 ];
 
 /** What the talker is told: who it is, what the call is for, and the rules. */
+/** "English" → "en-US" (Gemini's speech language). Unknown names: none, and the model goes by its instructions. */
+export function languageCode(name?: string): string | undefined {
+  const n = (name || "English").trim().toLowerCase();
+  const codes: Record<string, string> = {
+    english: "en-US", "us english": "en-US", "american english": "en-US", "british english": "en-GB", "uk english": "en-GB", "indian english": "en-IN", "australian english": "en-AU",
+    spanish: "es-US", "mexican spanish": "es-US", "castilian spanish": "es-ES", french: "fr-FR", "canadian french": "fr-CA", german: "de-DE", italian: "it-IT",
+    portuguese: "pt-BR", "brazilian portuguese": "pt-BR", dutch: "nl-NL", polish: "pl-PL", russian: "ru-RU", turkish: "tr-TR", arabic: "ar-XA",
+    hindi: "hi-IN", bengali: "bn-IN", tamil: "ta-IN", telugu: "te-IN", marathi: "mr-IN", gujarati: "gu-IN", kannada: "kn-IN", malayalam: "ml-IN",
+    japanese: "ja-JP", korean: "ko-KR", chinese: "cmn-CN", mandarin: "cmn-CN", vietnamese: "vi-VN", thai: "th-TH", indonesian: "id-ID",
+  };
+  return codes[n] ?? (/^[a-z]{2,3}-[A-Za-z]{2}$/.test(name?.trim() || "") ? name!.trim() : undefined);
+}
+
 export function talkerInstructions(brief: string, v: VoicePrefs, maxSeconds?: number) {
   const name = v.name?.trim() || "Hearth", owner = v.owner?.trim() || "the person I work for";
   return [
     `You are ${name}, a voice assistant on a phone call on behalf of ${owner}. You placed this call.`,
     v.intro?.trim() ? `Open with: "${v.intro.trim()}"` : `Open by saying who you are and who you're calling for, then why you're calling.`,
     ...(maxSeconds && maxSeconds < 600 ? [`The line cuts off after ${maxSeconds >= 120 && maxSeconds % 60 === 0 ? `${maxSeconds / 60} minutes` : `${maxSeconds} seconds`}, so get to the point quickly. When you're told time is nearly up, wrap up straight away.`] : []),
-    `Speak ${v.language?.trim() || "English"}${v.style?.trim() ? `. Come across as: ${v.style.trim()}` : ""}.`,
+    `Speak ${v.language?.trim() || "English"}, and keep to it the whole call${v.style?.trim() ? `. Come across as: ${v.style.trim()}` : ""}. Phone audio is rough, so a word can sound like another language (a "Hi" can come through as Hindi): that's never a reason to switch. Only change language if they clearly speak another one for a few sentences, or ask you to.`,
     `What this call is for, and everything you know for it:\n${brief}`,
     `Rules:
 - Short turns, one or two sentences, like a person on the phone. Let them finish.
+- Say times and dates the way people do ("3 this afternoon", "tomorrow at noon"). Never read out time zones unless they're somewhere else.
 - If they ask whether you're an AI, say yes, you're ${owner}'s AI assistant.
 - If they ask whether the call is recorded, say yes (don't bring it up yourself).
 - Never make anything up. For anything not above, or any decision you can't make, say "one moment" and call ask_supervisor.
@@ -338,7 +352,9 @@ export const geminiTalker: TalkerFactory = (spec, ev) => {
   ws.onopen = () => {
     ws.send(JSON.stringify({ setup: {
       model: `models/${spec.model}`,
-      generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: spec.voice.voice || "Puck" } } } },
+      generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: spec.voice.voice || "Puck" } },
+        // Pinned, so a word misheard as another language doesn't flip it (it once heard "Hi" as Hindi and stayed there).
+        ...(languageCode(spec.voice.language) ? { languageCode: languageCode(spec.voice.language) } : {}) } },
       systemInstruction: { parts: [{ text: spec.instructions }] },
       tools: [{ functionDeclarations: TOOLS }],
       inputAudioTranscription: {}, outputAudioTranscription: {},
