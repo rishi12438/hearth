@@ -3105,7 +3105,8 @@ ${JSON.stringify(shown, null, 1)}
       const job = await this.store.get<Job>("jobs", ap.jobId);
       if (job) {
         const still = (await this.store.all<Approval>("approvals")).some((a) => a.jobId === job.id && a.status === "pending");
-        const note = yes ? `\n\n${next.status === "done" ? "Done" : "Failed"}: ${ap.summary}${next.result ? `\n${next.result.slice(0, 600)}` : ""}` : byTyping ? `\n\nYou wrote something else instead, so it didn't run: ${ap.summary}` : `\n\nYou said no: ${ap.summary}`;
+        // A call's own card in the thread shows it; its result is instructions for the agent, not for you.
+        const note = yes && ap.action.type === "call" && next.status === "done" ? "" : yes ? `\n\n${next.status === "done" ? "Done" : "Failed"}: ${ap.summary}${next.result ? `\n${next.result.slice(0, 600)}` : ""}` : byTyping ? `\n\nYou wrote something else instead, so it didn't run: ${ap.summary}` : `\n\nYou said no: ${ap.summary}`;
         await this.saveJob({ ...job, status: still ? "waiting" : "done", result: `${job.result || ""}${note}`.trim(), finishedAt: still ? undefined : this.clock().toISOString() });
         // Once nothing of this job's is left to decide, the agent hears what came back and carries on: a read it
         // asked for goes into the reply it was writing, a failure gets fixed. Otherwise its session still thinks it's

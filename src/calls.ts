@@ -291,6 +291,8 @@ export function talkerInstructions(brief: string, v: VoicePrefs, maxSeconds?: nu
 - Phone menus: listen and say or ask for what gets you to a person.
 - Call screening is NOT voicemail. If an assistant answers asking for your name and why you're calling ("record your name and reason for calling", "this call is being screened", Google or Apple call screening), say in one sentence who you are, who you're calling for and why, then wait quietly: the person usually picks up a moment later. Don't hang up.
 - Voicemail is only when you hear "leave a message" or a beep. Then leave a short message (who you are, who for, why, that you'll try again) after the beep, then end_call.
+- Never take a one-word, unclear or out-of-place reply as a yes ("sí", a mumble, noise). Phone audio garbles things: if it doesn't make sense, say you didn't catch that and ask again. Before you treat anything as agreed, repeat it back and hear them confirm ("So 3 o'clock works for you?").
+- When they ask for something you don't have (where, which day, how much), don't just say it isn't decided: call ask_supervisor right away so you can give them a real answer, and say "let me check" while you wait.
 - Get everything needed to act on it before you wrap up. Agreeing to meet means a day, a time and a place; a booking means date, time, how many and the name. If they leave one open ("can you decide?"), suggest something or ask for it once. Don't end with "I'll let them know" while a detail is still missing.
 - When it's done or they want to go: sum up what was agreed in one sentence, thank them, say goodbye, then call end_call.`,
   ].join("\n\n");
@@ -358,8 +360,9 @@ export const geminiTalker: TalkerFactory = (spec, ev) => {
       systemInstruction: { parts: [{ text: spec.instructions }] },
       tools: [{ functionDeclarations: TOOLS }],
       inputAudioTranscription: {}, outputAudioTranscription: {},
-      // Reply as soon as they stop (measured: ~1.1 s to its first word, against ~1.4 s on the defaults).
-      realtimeInputConfig: { automaticActivityDetection: { endOfSpeechSensitivity: "END_SENSITIVITY_HIGH", prefixPaddingMs: 100, silenceDurationMs: 500 } },
+      // Wait for a real pause before replying: the most eager setting replied ~0.3 s sooner but cut people off
+      // mid-sentence on a phone line ("Where is the…").
+      realtimeInputConfig: { automaticActivityDetection: { prefixPaddingMs: 150, silenceDurationMs: 700 } },
     } }));
   };
   ws.onmessage = (e) => {
@@ -440,6 +443,8 @@ type Live = {
   waiters: Set<() => void>; seen: number;
   /** Questions hearth-call wait has already reported. */
   told: Set<string>;
+  /** The run supervising this call (one at a time) and when it last checked in. */
+  supervisor?: { job: string; at: number };
   /** Private steers from the supervisor the bot hasn't been held to yet (end_call is sent back once if one is fresh). */
   steers: { text: string; at: number }[];
   timers: ReturnType<typeof setTimeout>[]; asked: Map<string, string>;
@@ -465,6 +470,8 @@ export type CallsDeps = {
   clock?: () => Date;
   /** Seconds before "let me check" and before giving up and promising a call back (5 and 10). */
   waits?: { check: number; giveUp: number };
+  /** hearth-call wait gathers this long after the first new line (5000). */
+  gatherMs?: number;
 };
 
 const listenerFrame = (tag: number, pcm: Int16Array) => { const b = new Uint8Array(1 + pcm.byteLength); b[0] = tag; b.set(new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength), 1); return b; };
@@ -475,11 +482,14 @@ export class Calls {
   private live = new Map<string, Live>();
   private clock: () => Date;
   private waits: { check: number; giveUp: number };
+  /** How long hearth-call wait gathers talk before returning (ms). */
+  private gather: number;
   constructor(private d: CallsDeps) {
     this.settings = new CallSettings(d.vault, d.dataDir);
     this.arca = d.arca ?? arcaApi(undefined, d.fetcher);
     this.clock = d.clock ?? (() => new Date());
     this.waits = d.waits ?? { check: 5, giveUp: 10 };
+    this.gather = d.gatherMs ?? 5000;
   }
 
   configured() { return !!this.settings.model() && !!this.settings.line(); }
@@ -782,6 +792,19 @@ export class Calls {
     setTimeout(() => this.live.delete(lv.call.id), 60_000);
   }
 
+  /** One run supervises a call. Another run that tries gets told to stand down (two used to report the same call twice,
+   *  at twice the cost). Null: go ahead. A supervisor that hasn't checked in for 90 s gives way. */
+  claim(id: string, job: string | undefined): string | null {
+    const lv = this.live.get(id);
+    if (!lv || !job) return null;
+    const cur = lv.supervisor;
+    if (cur && cur.job !== job && Date.now() - cur.at < 90_000) {
+      return "Another run is already supervising this call, so don't. End your turn now with one short line saying the call is in progress, and post nothing about its result: that run reports it.";
+    }
+    lv.supervisor = { job, at: Date.now() };
+    return null;
+  }
+
   /** hearth-call wait: blocks until something new happens on the call (or ~45 s), then says what. */
   async wait(id: string, ms = 45_000) {
     const lv = this.live.get(id);
@@ -789,12 +812,19 @@ export class Calls {
     // Something to say: new lines, a question it hasn't been told about yet, or the end.
     const news = () => lv.call.lines.length > lv.seen || lv.call.status === "ended" || lv.call.status === "failed"
       || lv.call.questions.some((q) => !q.answer && q.stage < 2 && !lv.told.has(q.id));
-    if (!news() && ms > 0) {
-      await new Promise<void>((res) => {
-        const done = () => { clearTimeout(t); lv.waiters.delete(done); res(); };
-        const t = setTimeout(done, ms);
-        lv.waiters.add(done);
-      });
+    const urgent = () => lv.call.status === "ended" || lv.call.status === "failed"
+      || lv.call.questions.some((q) => !q.answer && q.stage < 2 && !lv.told.has(q.id));
+    const until = (cond: () => boolean, wait: number) => new Promise<void>((res) => {
+      if (cond() || wait <= 0) return res();
+      const done = () => { if (!cond()) return; clearTimeout(t); lv.waiters.delete(done); res(); };
+      const t = setTimeout(() => { lv.waiters.delete(done); res(); }, wait);
+      lv.waiters.add(done);
+    });
+    if (ms > 0) {
+      await until(news, ms);
+      // Each return is a whole turn for the agent (it re-reads everything), so gather a few seconds of talk per
+      // return; a question or the end still comes straight away.
+      if (news() && !urgent() && lv.call.lines.length - lv.seen < 4) await until(() => urgent() || lv.call.lines.length - lv.seen >= 4, Math.min(this.gather, ms));
     }
     const r = this.report(lv.call, lv.seen);
     lv.seen = lv.call.lines.length;
@@ -811,6 +841,7 @@ export class Calls {
       ...(open.length ? { question: { id: open[0].id, text: open[0].text, howTo: `hearth-call answer ${c.id} "<answer>" (within ~${this.waits.giveUp}s, or the bot promises to get back to them)` } } : {}),
       ...(c.status === "ended" || c.status === "failed" ? {
         ended: { outcome: c.outcome || null, error: c.error || null, seconds: c.seconds ?? 0, endedBy: c.endedBy || null,
+          next: "Now act on it; don't stop at a report. Settled: do the follow-through (calendar, booking, telling whoever needs to know) through the usual tools. Anything open (no clear yes, no time or place, they asked the owner to decide, time ran out): suggest a concrete answer yourself (check calendar and memory), ask the owner to confirm in one line ending with [[answer-needed]], and call back once they answer. The transcript and recording are already in the thread: don't repeat them.",
           recording: c.recording?.bytes ? recordingPath(this.d.dataDir, c.id) : null,
           followUp: unanswered.map((q) => ({ question: q.text, answer: q.answer || null })) },
         transcript: c.lines.filter((l) => l.who !== "note").map((l) => `${l.who === "them" ? "Them" : l.who === "bot" ? "Bot" : "Owner"}: ${l.text}`),
@@ -962,7 +993,7 @@ esac
 \`hearth-call start <+number> "<brief>"\` places a call from Hearth's line. A voice bot does the talking; **you supervise**. The owner approves each call first, and can listen in or join from the thread.
 
 ## The brief is all the bot knows
-Write it like notes for a person making the call: who you're calling and why, the goal, **exactly what to come back with** (e.g. "yes or no, and if yes a time and a place"), what's fine to agree to or suggest (times, places, prices, limits; check the owner's calendar first), names and details it may give, and what to do on voicemail. Anything it shouldn't decide alone, say so. Never put card numbers or passwords in a brief unless the owner gave them for this call. On the free plan a call is cut off after 2 minutes (the bot is warned 20 s before), so keep each call to one clear goal.
+Write it like notes for a person making the call: who you're calling and why, the goal, **exactly what to come back with** (e.g. "yes or no, and if yes a time and a place"), what's fine to agree to or suggest (times, places, prices, limits; check the owner's calendar first), names and details it may give, and what to do on voicemail. Anything it shouldn't decide alone, say so. Think about what they'll obviously ask (where? which day?) and give the bot an answer or a suggestion for it (from memory and the calendar), instead of "don't invent one": a bot that can only say "that isn't decided" wastes the call. Never put card numbers or passwords in a brief unless the owner gave them for this call. On the free plan a call is cut off after 2 minutes (the bot is warned 20 s before), so keep each call to one clear goal.
 
 ## Running a call
 1. \`hearth-call start +14155550199 "<brief>"\` (number with its country code; \`--voice NAME\` / \`--language LANG\` only if the owner asked). It waits for the owner's Approve: say so in your reply and stop. When they approve you get a turn with the call id.

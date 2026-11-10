@@ -602,6 +602,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       const action = f("action", 20), id = f("id", 60);
       const out = (x: unknown) => new Response(JSON.stringify(x, null, 1), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
       try {
+        if (action !== "start" && action !== "status") { const busy = calls.claim(id, req.headers.get("x-hearth-job")?.slice(0, 100) || undefined); if (busy) return out({ error: busy }); }
         if (action === "start") {
           const voice = { ...(f("voice", 40) ? { voice: f("voice", 40) } : {}), ...(f("language", 40) ? { language: f("language", 40) } : {}) };
           return out({ result: await hub.requestCall({ to: f("to", 40), brief: f("brief", 6000), voice }, req.headers.get("x-hearth-job")?.slice(0, 100) || undefined) });
