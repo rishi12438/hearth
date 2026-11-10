@@ -470,6 +470,8 @@ export type CallsDeps = {
   clock?: () => Date;
   /** Seconds before "let me check" and before giving up and promising a call back (5 and 10). */
   waits?: { check: number; giveUp: number };
+  /** hearth-call wait gathers this long after the first new line (5000). */
+  gatherMs?: number;
 };
 
 const listenerFrame = (tag: number, pcm: Int16Array) => { const b = new Uint8Array(1 + pcm.byteLength); b[0] = tag; b.set(new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength), 1); return b; };
@@ -480,11 +482,14 @@ export class Calls {
   private live = new Map<string, Live>();
   private clock: () => Date;
   private waits: { check: number; giveUp: number };
+  /** How long hearth-call wait gathers talk before returning (ms). */
+  private gather: number;
   constructor(private d: CallsDeps) {
     this.settings = new CallSettings(d.vault, d.dataDir);
     this.arca = d.arca ?? arcaApi(undefined, d.fetcher);
     this.clock = d.clock ?? (() => new Date());
     this.waits = d.waits ?? { check: 5, giveUp: 10 };
+    this.gather = d.gatherMs ?? 5000;
   }
 
   configured() { return !!this.settings.model() && !!this.settings.line(); }
@@ -807,12 +812,19 @@ export class Calls {
     // Something to say: new lines, a question it hasn't been told about yet, or the end.
     const news = () => lv.call.lines.length > lv.seen || lv.call.status === "ended" || lv.call.status === "failed"
       || lv.call.questions.some((q) => !q.answer && q.stage < 2 && !lv.told.has(q.id));
-    if (!news() && ms > 0) {
-      await new Promise<void>((res) => {
-        const done = () => { clearTimeout(t); lv.waiters.delete(done); res(); };
-        const t = setTimeout(done, ms);
-        lv.waiters.add(done);
-      });
+    const urgent = () => lv.call.status === "ended" || lv.call.status === "failed"
+      || lv.call.questions.some((q) => !q.answer && q.stage < 2 && !lv.told.has(q.id));
+    const until = (cond: () => boolean, wait: number) => new Promise<void>((res) => {
+      if (cond() || wait <= 0) return res();
+      const done = () => { if (!cond()) return; clearTimeout(t); lv.waiters.delete(done); res(); };
+      const t = setTimeout(() => { lv.waiters.delete(done); res(); }, wait);
+      lv.waiters.add(done);
+    });
+    if (ms > 0) {
+      await until(news, ms);
+      // Each return is a whole turn for the agent (it re-reads everything), so gather a few seconds of talk per
+      // return; a question or the end still comes straight away.
+      if (news() && !urgent() && lv.call.lines.length - lv.seen < 4) await until(() => urgent() || lv.call.lines.length - lv.seen >= 4, Math.min(this.gather, ms));
     }
     const r = this.report(lv.call, lv.seen);
     lv.seen = lv.call.lines.length;

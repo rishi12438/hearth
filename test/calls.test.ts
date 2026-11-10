@@ -55,7 +55,7 @@ function make(waits = { check: 0.05, giveUp: 0.1 }) {
     vault, dataDir: dir, hubName: () => "Test hub", publicUrl: () => "https://hub.example.com",
     save: async (c) => { saved.set(c.id, structuredClone(c)); }, load: async (id) => saved.get(id) ?? null,
     emit: () => {}, notify: (_c, q) => buzzed.push(q.text),
-    arca: fakeArca(), talker: fakeTalker, fetcher: models, waits,
+    arca: fakeArca(), talker: fakeTalker, fetcher: models, waits, gatherMs: 30,
   });
 }
 type Sent = (string | Uint8Array)[];
@@ -386,6 +386,27 @@ test("the bot keeps to its language: pinned for Gemini, and told a misheard word
   expect(JSON.parse(sent[0]).setup.generationConfig.speechConfig.languageCode).toBe("es-US");
 });
 
+test("hearth-call wait gathers a few seconds of talk per return (each return costs the agent a whole turn), but a question comes at once", async () => {
+  const calls = new Calls({ ...(make() as any).d, gatherMs: 150 });
+  await calls.connect(OPENAI_KEY);
+  const c = await calls.start({ to: "+14155550199", brief: "Hi.", threadId: "t1" });
+  calls.audioOpen(c.id, sock());
+  const t0 = Date.now();
+  const w = calls.wait(c.id, 2000);
+  setTimeout(() => talker!.ev.onLine("them", "Hello?"), 20);
+  setTimeout(() => talker!.ev.onLine("bot", "Hi, it's Sam."), 60);
+  const r: any = await w;
+  expect(r.new).toEqual(["Them: Hello?", "Bot: Hi, it's Sam."]); // both lines in one return
+  expect(Date.now() - t0).toBeGreaterThanOrEqual(150);
+  const t1 = Date.now();
+  const w2 = calls.wait(c.id, 2000);
+  setTimeout(() => talker!.ev.onTool("ask_supervisor", { question: "Where?" }, "q-1"), 20);
+  const r2: any = await w2;
+  expect(r2.question.text).toBe("Where?");
+  expect(Date.now() - t1).toBeLessThan(140);
+  await calls.hangup(c.id);
+});
+
 test("one run supervises a call; another is told to stand down; the end tells it to act", async () => {
   const calls = make();
   await calls.connect(OPENAI_KEY);
@@ -504,7 +525,7 @@ test("through the server: hearth-call asks, Approve dials, Vonage's socket carri
   const config = { ...loadConfig({ HEARTH_PORT: "0" }), dataDir: dir, agent: "echo" };
   const hub = new Hub(config, store, new Brain(config), new Scripts(store, dir, join(dir, "none")), null);
   process.env.HEARTH_PUBLIC_URL = "https://hub.example.com";
-  const { server } = await startServer(hub, null, { vault, calls: { arca: fakeArca(), talker: fakeTalker, fetcher: models, waits: { check: 5, giveUp: 10 } } });
+  const { server } = await startServer(hub, null, { vault, calls: { arca: fakeArca(), talker: fakeTalker, fetcher: models, waits: { check: 5, giveUp: 10 }, gatherMs: 50 } });
   try {
     const base = `http://127.0.0.1:${server.port}`;
     expect(await hub.calls!.connect(OPENAI_KEY)).toBeNull();
