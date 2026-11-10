@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { portsSkill } from "../events/ports.ts";
 import { sendInPage } from "../browser.ts";
 import { webSender } from "./web-senders.ts";
@@ -14,6 +15,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { serper, serperKey } from "./serper.ts";
 import { otherBrowserSkill } from "../other-browser.ts";
 import { helpSkill } from "../help.ts";
+import { Tunnels, tunnelSkill } from "../tunnels.ts";
 import { deepgram } from "./deepgram.ts";
 import { calls } from "./calls.ts";
 import { instagram, linkedin } from "./cookies.ts";
@@ -115,11 +117,17 @@ export class Connect {
     registerSkills(() => [otherBrowserSkill(base, this.agentKey)]);
     // Stuck on something: hearth-help stuck says what's there right now (help.ts).
     registerSkills(() => [helpSkill(base, this.agentKey)]);
+    // A link the user can open to a web app a job runs or a site it built (tunnels.ts). The hub owns each tunnel, so the
+    // job's jail ending doesn't take it down.
+    this.tunnels = new Tunnels({ hubPort: hub.config.port, roots: [join(hub.config.dataDir, "brain")], log: (s) => console.log(s) });
+    registerSkills(() => [tunnelSkill(base, this.agentKey)]);
     hub.brain.mcpServers = (jobId) => this.mcp.forRun(base, this.agentKey, jobId);
   }
 
   /** LinkedIn's own API with your login (linkedin-api.ts). */
   readonly linkedin: LinkedInApi;
+  /** hearth-tunnel: links to what jobs run or build (tunnels.ts). */
+  readonly tunnels: Tunnels;
   /** The hearth-linkedin command. */
   linkedinAgent(argv: string[]) { return linkedinAgent(this.linkedin, argv); }
 

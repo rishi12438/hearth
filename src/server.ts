@@ -508,6 +508,22 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       const out = await hub.lessonsAgent(argv, `${mate?.name || "an agent"}${from === "hub" ? "" : ` on ${from}`}`, jobId);
       return new Response(out + "\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
     }
+    // The agent's hearth-tunnel (tunnels.ts): a link to a server the job runs, or a folder it built. Only from this
+    // machine: the tunnel points at this machine's 127.0.0.1.
+    if (path === "/api/agent/tunnel" && method === "POST") {
+      const key = req.headers.get("x-hearth-agent");
+      if (!fromThisMachine(req, server) || !connect.isAgentKey(key)) { if (!badToken.allow(ip)) throw banned(); throw new HttpError(401, "Not the agent's key."); }
+      let argv: string[] = [];
+      try { argv = (await req.formData()).getAll("a").slice(0, 5).map((a) => String(a).slice(0, 4000)); } catch { throw new HttpError(400, "Send the command's words as a fields."); }
+      server.timeout(req, 90);
+      const jobId = req.headers.get("x-hearth-job")?.slice(0, 100) || null;
+      const job = jobId ? await store.get<any>("jobs", jobId) : null;
+      const mate = job?.teammateId ? await store.get<any>("teammates", job.teammateId) : null;
+      const who = { by: mate?.name || "Hearth", jobId: job ? job.id : null, threadId: job?.threadId ?? null };
+      const out = await connect.tunnels.agent(argv, who).catch((e: any) => `Error: ${String(e?.message || e).slice(0, 300)}`);
+      if (argv[0] === "open" || argv[0] === "serve" || argv[0] === "close") await hub.log(`tunnel.${argv[0]}`, `${who.by}: hearth-tunnel ${argv.join(" ").slice(0, 200)} -> ${out.split("\n")[0].slice(0, 120)}`);
+      return new Response(out + "\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
+    }
     // The agent's hearth-trigger-port (events/ports.ts): claim a callback URL for a webhook, list, release. The claim
     // records which teammate and job took it (X-Hearth-Job), so every live URL can be traced to the task that wanted it.
     if (path === "/api/agent/ports" && method === "POST") {
