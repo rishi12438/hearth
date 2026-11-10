@@ -2050,8 +2050,11 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
   const items = [
     ...yours.map((m: any) => ({ at: Date.parse(m.createdAt) || 0, node: () => cutHere(m, userRow(m)) })),
     ...[j, ...follow].map((x: any) => ({ at: when(x), node: () => answer(x) })),
+    // Its phone calls, where they happened: before the answer that reports on them. Live: Listen, Join, answer its question.
+    ...(S.chat.calls || []).filter((c: any) => [j, ...follow].some((x: any) => x.id === c.jobId)).map((c: any) => ({ at: Date.parse(c.createdAt) || 0, call: true,
+      node: () => row(mateWho(j.teammateId, c.status === "live" || c.status === "ringing" ? "working" : "idle"), c.createdAt, [callCard(c)]) })),
   ].sort((a, b) => a.at - b.at);
-  const n = items.filter((x) => x.at !== Infinity).length;
+  const n = items.filter((x: any) => x.at !== Infinity && !x.call).length;
   // Started by a routine: its ⚡ name and this run's own name; the routine's long brief stays folded, never the post.
   const handoff = S.chat.messages.find((m: any) => m.id === j.messageId && m.fromTrigger);
   const nodes: (Node | null)[] = [
@@ -2061,8 +2064,6 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
     ...items.map((x) => x.node()),
     ...looseApprovals((S.chat.approvals || []).filter((a: any) => [j, ...follow].some((x: any) => x.id === a.jobId)),
       new Set((S.chat.approvals || []).filter((a: any) => [j, ...follow].some((x: any) => x.id === a.jobId && x.status === "waiting")).map((a: any) => a.id))).map((x) => x.node),
-    // Its phone calls: live (Listen, Join, answer its question) or done, with the transcript.
-    ...(S.chat.calls || []).filter((c: any) => [j, ...follow].some((x: any) => x.id === c.jobId)).map((c: any) => row(mateWho(j.teammateId, c.status === "live" || c.status === "ringing" ? "working" : "idle"), c.createdAt, [callCard(c)])),
     ...queuedRows(mine.filter((m: any) => m.queued), [j, ...follow]),
   ];
   redraw(el, nodes);

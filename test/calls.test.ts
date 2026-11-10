@@ -386,6 +386,22 @@ test("the bot keeps to its language: pinned for Gemini, and told a misheard word
   expect(JSON.parse(sent[0]).setup.generationConfig.speechConfig.languageCode).toBe("es-US");
 });
 
+test("one run supervises a call; another is told to stand down; the end tells it to act", async () => {
+  const calls = make();
+  await calls.connect(OPENAI_KEY);
+  const c = await calls.start({ to: "+14155550199", brief: "Coffee at 3?", threadId: "t1" });
+  calls.audioOpen(c.id, sock());
+  expect(calls.claim(c.id, "job-a")).toBeNull();
+  expect(calls.claim(c.id, "job-a")).toBeNull();
+  expect(calls.claim(c.id, "job-b")).toContain("Another run is already supervising this call");
+  expect(talker!.spec.instructions).toContain("Never take a one-word, unclear or out-of-place reply as a yes");
+  backdate(calls, c.id);
+  await calls.hangup(c.id, "agent");
+  const end: any = await calls.wait(c.id, 0);
+  expect(end.ended.next).toContain("Now act on it");
+  expect(end.ended.next).toContain("[[answer-needed]]");
+});
+
 test("the bot gets what's needed to act, and a fresh note from the supervisor is done before it hangs up", async () => {
   const calls = make();
   await calls.connect(OPENAI_KEY);
