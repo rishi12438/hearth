@@ -154,6 +154,11 @@ async function boot() {
   matchMedia("(min-width: 980px)").addEventListener("change", () => { lastLayout = ""; show(); });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) { checkForUpdate(); refresh(); live?.restart(); } });
   document.addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openJump(); } });
+  // WebKit (Safari, the Mac app) follows a Control-click's context menu with a click too, which opened the row and closed
+  // the menu it had just shown. A click right after a context menu is that same press, so it goes nowhere.
+  let menuAt = 0;
+  document.addEventListener("contextmenu", () => { menuAt = Date.now(); }, true);
+  document.addEventListener("click", (e) => { if (Date.now() - menuAt < 1000 && (e.ctrlKey || e.button !== 0)) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
   setInterval(checkForUpdate, 5 * 60_000);
   setInterval(() => { if (route().view === "home") drawHome(); }, 30_000);
   if (backFromGoogle) {
