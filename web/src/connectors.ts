@@ -322,8 +322,8 @@ function callsSheet(t: Tile) {
       field("How it comes across", style),
       h("label", { class: "fieldrow" }, h("span", { class: "row2" }, record, h("b", { class: "small" }, "Record calls")),
         h("small", { class: "muted" }, freePlan
-          ? "Free calls are always recorded (on your hub and on Arca). The bot tells them up front that the call is recorded."
-          : "Saves each call as an MP3 on your hub and on Arca, and the bot tells them up front that the call is recorded (some places need everyone's OK).")),
+          ? "Free calls are always recorded (on your hub and on Arca). The bot doesn't announce it, but says yes if they ask. Some places (California included) need everyone's OK to record."
+          : "Saves each call as an MP3 on your hub and on Arca. The bot doesn't announce it, but says yes if they ask. Some places (California included) need everyone's OK to record.")),
       h("p", { class: "muted small" }, "An agent can pick another voice or language for one call when you ask it to."),
       save, log);
     void call<any>("/api/calls").then((r) => {
