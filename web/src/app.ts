@@ -784,9 +784,10 @@ function routinesSide(r: Route) {
 }
 
 /** The desktop sidebar: where you are, your projects and rambles, your teammates, and the rest. One place for each thing. */
+let renaming = false; // the sidebar holds off redrawing while you're typing a ramble's new name
 function drawSide() {
   const el = document.getElementById("side");
-  if (!el) return;
+  if (!el || renaming) return;
   const r = route(), tab = tabOf(r);
   const nav = (ic: string, label: string, on: boolean, go: () => void, badge?: number | string, title?: string) =>
     h("button", { class: `snav ${on ? "on" : ""}`, on: { click: go }, ...(title ? { title } : {}) }, icon(ic, 18), h("span", { class: "grow" }, label), badge ? h("em", { class: typeof badge === "string" ? "warn" : "" }, String(badge)) : null);
@@ -794,8 +795,9 @@ function drawSide() {
   // A ramble row: drag it onto a project (or onto Rambles to take it out); the folder button or right-click files it too.
   const ramble = (t: any, nested = false, closed = false) => h("div", { class: `srow ${closed ? "closed" : ""}`, draggable: "true", ...(closed ? { title: "Archived" } : {}),
       on: { dragstart: (e: DragEvent) => { e.dataTransfer?.setData("text/hearth-thread", t.id); e.dataTransfer!.effectAllowed = "move"; },
-        contextmenu: (e: MouseEvent) => { e.preventDefault(); projectMenuAt({ x: e.clientX, y: e.clientY }, t.projectId || null, (id) => fileRamble(t.id, id)); } } },
-    h("button", { class: `snav ${nested ? "nested" : ""} ${r.view === "chat" && r.id === t.id ? "on" : ""} ${unread(t.id, t.lastReplyAt) ? "unread" : ""}`, on: { click: () => { location.hash = `#c/${t.id}`; } } },
+        contextmenu: (e: MouseEvent) => { e.preventDefault(); const row = e.currentTarget as HTMLElement; projectMenuAt({ x: e.clientX, y: e.clientY }, t.projectId || null, (id) => fileRamble(t.id, id), () => renameInline(row, t)); } } },
+    h("button", { class: `snav ${nested ? "nested" : ""} ${r.view === "chat" && r.id === t.id ? "on" : ""} ${unread(t.id, t.lastReplyAt) ? "unread" : ""}`, title: "Double-click to rename",
+      on: { click: () => { location.hash = `#c/${t.id}`; }, dblclick: (e: Event) => { e.preventDefault(); renameInline((e.currentTarget as HTMLElement).parentElement!, t); } } },
       h("span", { class: "shash" }, "#"), h("span", { class: "grow" }, channelName(t)),
       // Blinks while someone's working in it; a steady dot once something new came back that you haven't opened.
       t.working ? h("i", { class: "rundot", title: `${t.working} running` }) : unread(t.id, t.lastReplyAt) ? h("i", { class: "udot", title: "New since you last looked" }) : null),
@@ -1034,7 +1036,7 @@ function projectButton(): Node {
 
 let closeDrop: (() => void) | null = null;
 /** A small menu of projects that drops down from `anchor` (or opens at a point, for right-click). */
-function projectMenuAt(anchor: HTMLElement | { x: number; y: number }, current: string | null, pick: (id: string | null) => void) {
+function projectMenuAt(anchor: HTMLElement | { x: number; y: number }, current: string | null, pick: (id: string | null) => void, rename?: () => void) {
   if (closeDrop) { const was = (closeDrop as any).anchor; closeDrop(); if (was === anchor) return; } // a second click on the button closes it
   const row = (lead: Node, text: string, on: () => void, check = false, cls = "") =>
     h("button", { class: `droprow ${cls}`, role: "menuitem", on: { click: () => { close(); on(); }, mouseenter: (e: Event) => setActive(rows().indexOf(e.currentTarget as HTMLElement)) } }, lead, h("span", { class: "grow" }, text), check ? icon("check", 15) : null);
@@ -1055,6 +1057,7 @@ function projectMenuAt(anchor: HTMLElement | { x: number; y: number }, current: 
       .sort((a: any, b: any) => term ? (b.name.toLowerCase().startsWith(term) ? 1 : 0) - (a.name.toLowerCase().startsWith(term) ? 1 : 0) : 0);
     const exact = S.projects.some((x: any) => x.name.toLowerCase() === term);
     clear(list,
+      rename && !term ? [row(icon("edit", 16), "Rename ramble", rename), h("div", { class: "dropsep" })] : null,
       hits.map((x: any) => row(x.emoji ? h("span", { class: "semoji" }, x.emoji) : icon("folder", 16), x.name, () => { if (x.id !== current) pick(x.id); }, x.id === current)),
       term && !hits.length ? h("p", { class: "dropnone" }, "No project by that name.") : null,
       h("div", { class: "dropsep" }),
@@ -1220,14 +1223,14 @@ function drawHeader() {
         h("div", { class: "crowdfaces" }, busy.slice(0, 4).map((a) =>
           h("button", { class: "crowdface", "aria-label": `${a.t.name}: open thread`, on: { click: () => { location.hash = `#c/${chat.thread.id}/${a.jobId}`; } } }, face(a.t, 46, a.state, lookFor(chat?.thread))))),
         h("button", { class: "stagepill", on: { click: chatMenu } }, h("b", null, names)),
-        h("small", null, [`#${name}`, `${open} working`].join(" · "))),
+        h("small", null, chanLine(chat?.thread, name, `${open} working`))),
       projectButton()), threadTabs(chat, null));
     return;
   }
   const who = speaker(chat);
   const others = [...new Set(jobs.map((j: any) => j.teammateId))].filter((id) => id !== who.t.id).slice(0, 3).map((id) => mate(id as string));
   clear(top, h("div", { class: "toprow stagerow" }, back,
-    stage("chat", who.t, who.state, who.t.name, [`#${name}`, open ? `${open} working` : null].filter(Boolean).join(" · "), chatMenu, false, others, lookFor(chat?.thread)),
+    stage("chat", who.t, who.state, who.t.name, chanLine(chat?.thread, name, open ? `${open} working` : null), chatMenu, false, others, lookFor(chat?.thread)),
     projectButton()), threadTabs(chat, null));
 }
 
@@ -1315,7 +1318,7 @@ function speaker(chat: any): { t: any; state: string } {
 // The stage keeps one face per place and morphs it (color, badge, a little squash) when someone else takes over.
 const stages = new Map<string, { id: string; face: HTMLElement }>();
 /** look: the ramble's look (looks.ts), so the big face on top dresses like the ones in the messages. */
-function stage(place: string, t: any, state: string, title: string, sub: string | null, onTap: (() => void) | null, live = false, others: any[] = [], look: string | null = null) {
+function stage(place: string, t: any, state: string, title: string, sub: string | Node | null, onTap: (() => void) | null, live = false, others: any[] = [], look: string | null = null) {
   const prev = stages.get(place);
   let f: HTMLElement;
   if (prev && prev.id === t.id) {
@@ -2346,13 +2349,50 @@ function chatMenu() {
   ]);
 }
 
+/** "#channel · 2 working" under the stage; tapping the #channel part renames the ramble. */
+function chanLine(t: any, name: string, rest: string | null) {
+  const canRename = t && t.id !== "new" && !String(t.id).startsWith("tm-");
+  const chan = canRename ? h("span", { class: "channame", role: "button", tabindex: "0", title: "Rename this ramble",
+    on: { click: (e: Event) => { e.stopPropagation(); renameRamble(t); }, keydown: (e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); renameRamble(t); } } } }, `#${name}`, icon("edit", 12)) : `#${name}`;
+  return h("span", null, chan, rest ? ` · ${rest}` : null);
+}
+
+/** Rename a ramble right in its sidebar row: Enter saves, Escape or clicking away puts it back. */
+function renameInline(row: HTMLElement, t: any) {
+  const label = row.querySelector(".snav") as HTMLElement | null;
+  if (!label || row.querySelector(".srename")) return;
+  const input = h("input", { class: `srename ${label.classList.contains("nested") ? "nested" : ""}`, value: channelName(t), maxLength: 30, autocapitalize: "off", spellcheck: false, "aria-label": "Ramble name" }) as HTMLInputElement;
+  let done = false;
+  const finish = async (save: boolean) => {
+    if (done) return; done = true; renaming = false;
+    const v = input.value.trim();
+    if (!save || !v || v === channelName(t)) { drawSide(); return; }
+    await saveRambleName(t, v);
+  };
+  input.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter") { e.preventDefault(); finish(true); } else if (e.key === "Escape") { e.preventDefault(); finish(false); } });
+  input.addEventListener("blur", () => finish(true));
+  for (const ev of ["click", "dblclick", "pointerdown", "mousedown"]) input.addEventListener(ev, (e) => e.stopPropagation());
+  row.setAttribute("draggable", "false");
+  renaming = true;
+  label.replaceWith(input);
+  input.focus(); input.select();
+}
+
+async function saveRambleName(t: any, value: string) {
+  try {
+    const r = await call(`/api/threads/${t.id}`, { method: "PATCH", body: { channel: value } });
+    t.channel = r.channel;
+    if (S.chat?.thread?.id === t.id) { S.chat.thread.channel = r.channel; drawChat(); }
+    await loadThreads(); toast(`Renamed to #${r.channel}`); return true;
+  } catch (e) { handleError(e); drawSide(); return false; }
+}
+
 function renameRamble(t: any) {
   const name = h("input", { class: "field", value: channelName(t), maxLength: 30, autocapitalize: "off", spellcheck: false, placeholder: "japan-trip" });
   openSheet("Rename", [h("label", null, h("span", null, "Channel name"), name),
-    h("button", { class: "btn primary big", on: { click: async () => {
-      try { const r = await call(`/api/threads/${t.id}`, { method: "PATCH", body: { channel: name.value } }); S.chat.thread.channel = r.channel; closeSheet(); drawChat(); loadThreads(); toast(`Renamed to #${r.channel}`); }
-      catch (e) { handleError(e); }
-    } } }, "Save")]);
+    h("button", { class: "btn primary big", on: { click: save } }, "Save")]);
+  async function save() { if (await saveRambleName(t, name.value)) closeSheet(); }
+  name.addEventListener("keydown", (e) => { if ((e as KeyboardEvent).key === "Enter") { e.preventDefault(); save(); } });
   setTimeout(() => { name.focus(); name.select(); }, 60);
 }
 

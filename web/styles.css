@@ -1473,3 +1473,12 @@ html:has(.phonescreen) { overscroll-behavior-x: none; }
 .callcard .callask .field { flex: 1; min-width: 0; }
 .callcard .blockhead time { margin-left: auto; }
 .callcard .sbtn .icon { margin-right: 4px; vertical-align: -2px; }
+
+/* Renaming a ramble in the sidebar (double-click or right-click → Rename) */
+.srename { flex: 1; min-width: 0; margin: 1px 0; padding: 6px 10px; font: inherit; font-size: 14.5px; color: var(--ink); background: var(--card); border: 1.5px solid var(--blue); border-radius: 8px; outline: none; }
+.srename.nested { margin-left: 24px; font-size: 14px; }
+/* The #channel under the header's name: tap it to rename */
+.channame { display: inline-flex; align-items: center; gap: 3px; border-radius: 6px; padding: 0 3px; margin: 0 -3px; cursor: text; }
+.channame svg { opacity: 0; transition: opacity .15s; }
+.channame:hover, .channame:focus-visible { background: rgba(0,0,0,.06); outline: none; }
+.channame:hover svg, .channame:focus-visible svg { opacity: .7; }
