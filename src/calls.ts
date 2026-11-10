@@ -277,7 +277,8 @@ export function talkerInstructions(brief: string, v: VoicePrefs, maxSeconds?: nu
 - Phone menus: listen and say or ask for what gets you to a person.
 - Call screening is NOT voicemail. If an assistant answers asking for your name and why you're calling ("record your name and reason for calling", "this call is being screened", Google or Apple call screening), say in one sentence who you are, who you're calling for and why, then wait quietly: the person usually picks up a moment later. Don't hang up.
 - Voicemail is only when you hear "leave a message" or a beep. Then leave a short message (who you are, who for, why, that you'll try again) after the beep, then end_call.
-- When it's done or they want to go: thank them, say goodbye, then call end_call.`,
+- Get everything needed to act on it before you wrap up. Agreeing to meet means a day, a time and a place; a booking means date, time, how many and the name. If they leave one open ("can you decide?"), suggest something or ask for it once. Don't end with "I'll let them know" while a detail is still missing.
+- When it's done or they want to go: sum up what was agreed in one sentence, thank them, say goodbye, then call end_call.`,
   ].join("\n\n");
 }
 
@@ -423,6 +424,8 @@ type Live = {
   waiters: Set<() => void>; seen: number;
   /** Questions hearth-call wait has already reported. */
   told: Set<string>;
+  /** Private steers from the supervisor the bot hasn't been held to yet (end_call is sent back once if one is fresh). */
+  steers: { text: string; at: number }[];
   timers: ReturnType<typeof setTimeout>[]; asked: Map<string, string>;
   ending: boolean; greetTimer?: ReturnType<typeof setTimeout>;
   /** The model's voice that doesn't fill a whole 20 ms frame yet (frames are always whole, so speech has no gaps). */
@@ -518,7 +521,7 @@ export class Calls {
       status: "dialing", lines: [], questions: [], ...(a.startedBy ? { startedBy: a.startedBy } : {}),
     };
     const lv: Live = { call, secret: randomBytes(24).toString("base64url"), talker: null, vonage: null, out: [], pump: null, listeners: new Set(), joiner: null, mic: [],
-      waiters: new Set(), seen: 0, told: new Set(), timers: [], asked: new Map(), ending: false, rec: null, carry: new Int16Array(0) };
+      waiters: new Set(), seen: 0, told: new Set(), timers: [], asked: new Map(), ending: false, rec: null, carry: new Int16Array(0), steers: [] };
     this.live.set(call.id, lv);
     await this.save(lv);
     const base = pub.replace(/\/$/, "");
@@ -662,6 +665,13 @@ export class Calls {
         lv.talker?.toolResult(callId, "Not yet: the call only just connected. If an assistant is screening the call, say who you are and why you're calling, then wait for the person. Only end the call once you've actually talked or left a voicemail after the beep.", true);
         return;
       }
+      // The supervisor's notes come a few seconds behind the conversation: a fresh one gets done before the goodbye.
+      const fresh = lv.steers.filter((x) => Date.now() - x.at < 20_000);
+      if (fresh.length) {
+        lv.steers.length = 0;
+        lv.talker?.toolResult(callId, `Not yet. Your supervisor asked: "${fresh.map((x) => x.text).join(" / ")}". Do that first (ask them now), then end the call.`, true);
+        return;
+      }
       lv.talker?.toolResult(callId, "ok", false);
       lv.call.outcome = String(args?.outcome || "").slice(0, 500) || lv.call.outcome;
       lv.call.endedBy ??= "bot";
@@ -724,6 +734,7 @@ export class Calls {
     const lv = this.live.get(id);
     if (!lv || lv.call.status !== "live") throw new Error("That call isn't live.");
     lv.talker?.inject(`[Supervisor] ${text.slice(0, 2000)}`, false);
+    lv.steers.push({ text: text.slice(0, 600), at: Date.now() });
     await this.line(lv, "note", `Supervisor: ${text.slice(0, 300)}`);
   }
 
@@ -935,14 +946,18 @@ esac
 \`hearth-call start <+number> "<brief>"\` places a call from Hearth's line. A voice bot does the talking; **you supervise**. The owner approves each call first, and can listen in or join from the thread.
 
 ## The brief is all the bot knows
-Write it like notes for a person making the call: who you're calling and why, the goal, what's fine to agree to (times, prices, limits), names and details it may give, and what to do on voicemail. Anything it shouldn't decide alone, say so. Never put card numbers or passwords in a brief unless the owner gave them for this call. On the free plan a call is cut off after 2 minutes (the bot is warned 20 s before), so keep each call to one clear goal.
+Write it like notes for a person making the call: who you're calling and why, the goal, **exactly what to come back with** (e.g. "yes or no, and if yes a time and a place"), what's fine to agree to or suggest (times, places, prices, limits; check the owner's calendar first), names and details it may give, and what to do on voicemail. Anything it shouldn't decide alone, say so. Never put card numbers or passwords in a brief unless the owner gave them for this call. On the free plan a call is cut off after 2 minutes (the bot is warned 20 s before), so keep each call to one clear goal.
 
 ## Running a call
 1. \`hearth-call start +14155550199 "<brief>"\` (number with its country code; \`--voice NAME\` / \`--language LANG\` only if the owner asked). It waits for the owner's Approve: say so in your reply and stop. When they approve you get a turn with the call id.
 2. Then supervise in a loop: \`hearth-call wait <id>\`. Each wait returns what was said since the last one, and returns at once when the bot asks something.
 3. A \`question\`: answer fast with \`hearth-call answer <id> "<answer>"\` (the bot is waiting on the line: ~5 s it says it's checking, ~10 s it promises to get back to them and wraps up). Answer from the brief, memory and what you can look up in a second or two. Never invent. If you don't know, don't answer: the owner is asked too and may answer from the thread.
 4. Steer when needed: \`hearth-call say <id> "<private note to the bot>"\` (never spoken as is). \`hearth-call hangup <id>\` to end it.
-5. When \`ended\` comes back: report the outcome in a line or two (the transcript and a recording are already in the thread). \`endedBy: "limit"\` means the time ran out: call back for whatever was left. For each \`followUp\` question: if it has an answer, call or text them back with it; if not, ask the owner in your reply (end it with [[answer-needed]]), then call back once they answer.
+5. Steer early. Your notes reach the bot a few seconds late, so as soon as you see a gap (no time agreed, a name to spell), say it then, not after the goodbye.
+6. When \`ended\` comes back, **the call was a means, not the end: act on what it got.** Report it in a line or two (the transcript and recording are already in the thread), then do the next step the owner would want:
+   - it's settled: do the follow-through (put it on the calendar, book it, tell whoever else needs to know), through the usual tools and their Approve;
+   - something's still open (no time, they asked the owner to decide, \`endedBy: "limit"\`, a \`followUp\` question): suggest the concrete answer yourself when you can ("Kumla's at 1pm? Your calendar's free"), and ask the owner to confirm in one line ending with [[answer-needed]]. When they answer, call back once to settle it.
+   Never end on just "no time was agreed".
 
 Don't call anyone the owner didn't ask you to, don't call the same number again and again, and never more than one call at a time.`,
   };

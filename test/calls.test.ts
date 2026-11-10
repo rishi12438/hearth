@@ -368,6 +368,29 @@ test("free plan: Arca caps the call at 2 minutes; the bot knows, is told to wrap
   expect(await calls.event(c.id, JSON.stringify({ status: "recorded" }), "forged")).toBe(false);
 });
 
+test("the bot gets what's needed to act, and a fresh note from the supervisor is done before it hangs up", async () => {
+  const calls = make();
+  await calls.connect(OPENAI_KEY);
+  const c = await calls.start({ to: "+14155550199", brief: "Ask if they're up for lunch.", threadId: "t1" });
+  calls.audioOpen(c.id, sock());
+  expect(talker!.spec.instructions).toContain("Agreeing to meet means a day, a time and a place");
+  backdate(calls, c.id);
+  await calls.say(c.id, "Ask what time works for them.");
+  talker!.ev.onTool("end_call", { outcome: "They suggested Kumla's." }, "t-1");
+  await sleep(5);
+  expect(talker!.results.at(-1)!.out).toContain('Your supervisor asked: "Ask what time works for them."');
+  expect(saved.get(c.id)!.status).toBe("live");
+  // Asked once; after that it may hang up.
+  talker!.ev.onTool("end_call", { outcome: "Kumla's at 1pm." }, "t-2");
+  await sleep(900);
+  expect(saved.get(c.id)).toMatchObject({ status: "ended", outcome: "Kumla's at 1pm." });
+  // The agent's skill: act on the result, don't stop at a report.
+  const { callSkill } = await import("../src/calls.ts");
+  const body = callSkill("http://hub", "k").body;
+  expect(body).toContain("the call was a means, not the end");
+  expect(body).toContain("[[answer-needed]]");
+});
+
 test("the recorder lines our side up with theirs, and a hub restart keeps what was recorded", async () => {
   const f = join(dir, "calls", "x.mp3");
   const r = new CallRecorder(f);
