@@ -1414,6 +1414,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
   }
 
   private async runJob(job: Job, ramble: string, earlier = "") {
+    const runStarted = this.clock().toISOString();
     const started = Date.now();
     const stop = new AbortController();
     this.stops.set(job.id, stop);
@@ -1639,7 +1640,10 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
           return { text: r0.text, did: [] as Done[], used: [] as string[], tiles: [] as Tile[], fileIds: [] as string[] };
         });
         if (stop.signal.aborted) throw new Error("Restarted with your new message.");
-        if (v.text.includes(REDO) || !v.text.trim()) {
+        // Waiting on the owner's Approve is a fine place for the legwork to stop, not a reason to do it all again: a
+        // redo then asked again and posted a second set of "waiting for your Approve" tiles.
+        const askedThisRun = (await this.store.all<Approval>("approvals")).some((a) => a.jobId === job.id && a.createdAt >= runStarted);
+        if ((v.text.includes(REDO) && !askedThisRun) || !v.text.trim()) {
           // The lead wasn't happy with the legwork: it does the job itself.
           const note = v.text.replace(REDO, "").trim().slice(0, 300) || "the notes came back empty";
           await this.log("job.redo", `${job.task.slice(0, 80)}: ${note.slice(0, 120)}`);

@@ -2053,12 +2053,13 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
   const yours = mine.filter((m: any) => !m.queued);
   const live = (x: any) => x.status === "queued" || x.status === "working";
   const when = (x: any) => (live(x) ? Infinity : Date.parse(x.finishedAt || x.updatedAt || x.createdAt) || 0);
+  const threadCalls = (S.chat.calls || []).filter((c: any) => [j, ...follow].some((x: any) => x.id === c.jobId));
   const items = [
     ...yours.map((m: any) => ({ at: Date.parse(m.createdAt) || 0, node: () => cutHere(m, userRow(m)) })),
     ...[j, ...follow].map((x: any) => ({ at: when(x), node: () => answer(x) })),
-    // Its phone calls, where they happened: before the answer that reports on them. Live: Listen, Join, answer its question.
-    ...(S.chat.calls || []).filter((c: any) => [j, ...follow].some((x: any) => x.id === c.jobId)).map((c: any) => ({ at: Date.parse(c.createdAt) || 0, call: true,
-      node: () => row(mateWho(j.teammateId, c.status === "live" || c.status === "ringing" ? "working" : "idle"), c.createdAt, [callCard(c)]) })),
+    // Its finished phone calls, where they happened: before the answer that reports on them.
+    ...threadCalls.filter((c: any) => !callIsOn(c)).map((c: any) => ({ at: Date.parse(c.createdAt) || 0, call: true,
+      node: () => row(mateWho(j.teammateId, "idle"), c.createdAt, [callCard(c)]) })),
   ].sort((a, b) => a.at - b.at);
   const n = items.filter((x: any) => x.at !== Infinity && !x.call).length;
   // Started by a routine: its ⚡ name and this run's own name; the routine's long brief stays folded, never the post.
@@ -2071,6 +2072,9 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
     ...looseApprovals((S.chat.approvals || []).filter((a: any) => [j, ...follow].some((x: any) => x.id === a.jobId)),
       new Set((S.chat.approvals || []).filter((a: any) => [j, ...follow].some((x: any) => x.id === a.jobId && x.status === "waiting")).map((a: any) => a.id))).map((x) => x.node),
     ...queuedRows(mine.filter((m: any) => m.queued), [j, ...follow]),
+    // A call that's on stays pinned at the bottom (Listen, Join, its question for you); once it ends it moves up to
+    // where it happened.
+    ...threadCalls.filter(callIsOn).map((c: any) => h("div", { class: "callpin" }, row(mateWho(j.teammateId, "working"), c.createdAt, [callCard(c)]))),
   ];
   redraw(el, nodes);
   if (stick) stickBottom();
@@ -2082,6 +2086,8 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
 const CALL_STATE: Record<string, string> = { dialing: "Dialing…", ringing: "Ringing…", live: "On the call", ended: "Call ended", failed: "Didn't connect" };
 const callWho = (w: string) => (w === "them" ? "Them" : w === "bot" ? "Bot" : w === "you" ? "You" : "");
 /** One call: who and how it's going, the transcript as it happens, its question for you, and the buttons. */
+const callIsOn = (c: any) => c.status === "live" || c.status === "ringing" || c.status === "dialing";
+
 function callCard(c: any) {
   const live = c.status === "live" || c.status === "ringing" || c.status === "dialing";
   const mine = callAudio?.id === c.id;
@@ -2100,7 +2106,7 @@ function callCard(c: any) {
       catch (e) { handleError(e); }
     };
     input.addEventListener("keydown", (e) => { if ((e as KeyboardEvent).key === "Enter") void send(); });
-    askBox = h("div", { class: "callask" }, h("p", null, h("b", null, live ? "They're asking: " : "Still to answer: "), ask.text), h("div", { class: "row2" }, input, h("button", { class: "sbtn primary", on: { click: send } }, "Answer")));
+    askBox = h("div", { class: `callask${live ? " urgent" : ""}` }, h("p", null, h("b", null, live ? "They're asking: " : "Still to answer: "), ask.text), h("div", { class: "row2" }, input, h("button", { class: "sbtn primary", on: { click: send } }, "Answer")));
   }
   const btns = live ? h("div", { class: "blockbtns" },
     c.status === "live" ? h("button", { class: `sbtn${mine ? " on" : ""}`, on: { click: () => (mine ? stopCallAudio() : listenToCall(c.id)) } }, icon(mine ? "pause" : "play", 14), mine ? "Stop listening" : "Listen") : null,
