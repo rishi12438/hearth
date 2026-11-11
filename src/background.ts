@@ -40,6 +40,8 @@ export type BgTask = BgWho & {
   endedAt?: number;
   /** Times it started again after a hub restart. */
   restarts?: number;
+  /** Why the hub stopped it ("memory": the machine was nearly out). Shown in list/status and when it's started again. */
+  stoppedFor?: "memory";
   /** Memory it was using when the hub stopped it for memory. */
   memoryMB?: number;
   /** When its process last started. */
@@ -52,7 +54,7 @@ export type BgEnd = { task: BgTask; why: "exited" | "hub-restart" | "restart-loo
 
 /** How busy the machine is. availMB: memory a new process can still use (Linux MemAvailable, else free). */
 export type Machine = { cores: number; load: number; availMB: number; totalMB: number };
-/** Below this much free memory a new task isn't started: it would run the machine out (the hub went down that way). */
+/** Below this much free memory a start comes with a warning: another task could run the machine out. */
 export const MIN_FREE_MB = 700;
 /** While tasks run, below this much free memory the one using the most is stopped (watch()), before the kernel starts killing. */
 export const LOW_FREE_MB = 400;
@@ -240,10 +242,15 @@ export class Background {
     const running = this.list().filter((t) => t.status === "running").length;
     if (running >= MAX_RUNNING) return `Error: ${MAX_RUNNING} background tasks are running already. hearth-bg list shows them; stop one that's done.`;
     const m = this.o.machine();
-    if (m.availMB < MIN_FREE_MB) return `Error: not started, the machine is nearly out of memory.
-${machineLine(m, running)}
-Starting more would run it out and take everything down with it. Wait for a running task to finish, or stop one
-(hearth-bg list), and run things one after another instead of side by side. Tell the user that's why it waits.`;
+    // Nearly out of memory: say so; whether to go ahead is the agent's call (the hub stops the biggest if it runs out).
+    const tight = m.availMB < MIN_FREE_MB
+      ? `\nHeads-up: the machine was nearly out of memory when this started. If it runs out, the hub stops the task using the most. If this one won't fit beside the others, consider stopping it and running them one after another.`
+      : "";
+    // Stopped for memory before: say so, so whoever starts it again knows why it stopped (the notice can land after a
+    // turn that restarts it began). Their call what to do about it.
+    const wasStarved = have?.stoppedFor === "memory"
+      ? `\nHeads-up: the hub stopped ${name} ${ago(this.o.now() - (have.endedAt || this.o.now()))} ago because the machine ran out of memory${have.memoryMB ? ` (it was using ${gb(have.memoryMB)})` : ""}. If there isn't room for it now, it'll be stopped again. Check the numbers below and what else is running (hearth-bg list), and if it doesn't fit, stop it and tell the user why it's waiting or run things one after another.`
+      : "";
     const t: BgTask = { name, cmd: command, cwd: dir, log: `.hearth-bg/${name}.log`, restart, startedAt: this.o.now(), status: "running", ...who };
     const out = this.launch(t, `started by ${who.by}`);
     if (!out.ok) return `Error: ${out.error}`;
@@ -252,7 +259,7 @@ Starting more would run it out and take everything down with it. Wait for a runn
     this.save();
     this.o.log(`background ${name} started (${who.by}): ${command.slice(0, 200)}`);
     return `Started ${name} in the background (pid ${t.pid}). It keeps running after this turn ends and when the user sends new messages${restart ? ", and starts again if the hub restarts" : ""}.
-${machineLine(m, running + 1)} (before this one got going)
+${machineLine(m, running + 1)} (before this one got going)${tight}${wasStarved}
 Output: ${t.log} (in this folder). Check it with hearth-bg status ${name}; stop it with hearth-bg stop ${name}.
 When it ends you get a turn in this conversation to tell the user how it went.
 Now reply to the user: say what's running, roughly how long it takes, and how they can follow along. Don't wait for it.`;
@@ -289,6 +296,7 @@ Now reply to the user: say what's running, roughly how long it takes, and how th
         this.starved.delete(t.name);
         this.stopping.delete(t.name);
         this.finish(t, "stopped", code);
+        t.stoppedFor = "memory";
         this.save();
         await this.tell({ task: t, why: "memory", tail: tailFile(logPath, 15), machine: starved });
         return;
@@ -325,7 +333,9 @@ Now reply to the user: say what's running, roughly how long it takes, and how th
 
   private line(t: BgTask): string {
     const now = this.o.now();
-    const state = t.status === "running" ? `running ${ago(now - t.startedAt)}` : `${t.status}${t.code !== undefined ? ` (exit ${t.code})` : ""} ${ago(now - (t.endedAt || now))} ago`;
+    const state = t.status === "running" ? `running ${ago(now - t.startedAt)}`
+      : t.stoppedFor === "memory" ? `stopped by the hub ${ago(now - (t.endedAt || now))} ago: machine ran out of memory${t.memoryMB ? ` (it used ${gb(t.memoryMB)})` : ""}`
+      : `${t.status}${t.code !== undefined ? ` (exit ${t.code})` : ""} ${ago(now - (t.endedAt || now))} ago`;
     return `${t.name}  ${state}  ${t.restart ? "[restarts] " : ""}(${t.by})  ${t.log} in ${t.cwd}`;
   }
 
@@ -436,7 +446,7 @@ memory and everything stops, your tasks and the conversation with them. So befor
   and \`free -m\` again. A coding agent (claude, codex) or a browser is often 1 GB or more each.
 - Only then add more, and keep at least a quarter of memory free and no more busy processes than cores. If they
   don't fit, run them one after another (one script that loops) and say so to the user.
-Each start tells you how busy the machine is; hearth-bg won't start a task when memory is nearly gone, and if memory
+Each start tells you how busy the machine is (and warns when memory is nearly gone), and if memory
 runs low while tasks run, the hub stops the one using the most and tells you here. Tasks run at low CPU priority, so the
 hub and conversations stay quick even when they use every core.
 
