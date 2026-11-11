@@ -259,6 +259,22 @@ code { font-family: var(--mono); font-size: .86em; background: var(--surface); p
 .repdiv::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 .cutline { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; padding: 4px 16px; }
 .cutline::before, .cutline::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.bgcard { margin: 8px 0 4px 52px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; display: flex; flex-direction: column; gap: 6px; }
+.bghead { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.bghead small { color: var(--muted); }
+.bgrow summary { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px; list-style: none; }
+.bgrow summary::-webkit-details-marker { display: none; }
+.bgrow summary small { color: var(--muted); }
+.bgdot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--muted); }
+.bgrow.running .bgdot, .bgstrip .bgdot { background: var(--ok); animation: bgpulse 1.6s ease-in-out infinite; }
+.bgrow.failed .bgdot { background: var(--badge); }
+.bgrow.failed summary small { color: var(--badge); }
+@keyframes bgpulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .bgrow.running .bgdot, .bgstrip .bgdot { animation: none; } }
+.bgcmd { display: block; margin: 4px 0 0 16px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bgtail { margin: 4px 0 0 16px; padding: 6px 8px; font-size: 12px; line-height: 1.35; max-height: 140px; overflow: auto; white-space: pre-wrap; word-break: break-word; border-radius: 6px; background: rgba(127,127,127,.1); }
+.bgstrip { display: flex; align-items: center; gap: 8px; margin: 6px 0 2px 52px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px; background: none; color: inherit; font: inherit; font-size: 13px; cursor: pointer; max-width: calc(100% - 52px); text-align: left; }
+.bgstrip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .did-line { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 13px; color: var(--muted); }
 .linkbtn { color: var(--blue); font-size: 14px; font-weight: var(--fw-semibold); margin-top: 4px; display: inline-flex; align-items: center; gap: 4px; }
 .linkbtn + .linkbtn { margin-left: 16px; }

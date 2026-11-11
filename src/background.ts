@@ -135,6 +135,32 @@ export function tailFile(file: string, lines = 20): string {
   } catch { return ""; }
 }
 
+/** The command after --, as one shell line. One word is a shell line already (\`-- "cd x && make"\`). Several words are a
+ * command and its arguments as the agent's shell split them, so each is quoted back: joining them with spaces turned
+ * \`bash -c 'codex exec "..."'\` into \`bash -c codex exec ...\`, which ran a bare \`codex\` (and died on "stdin is not a terminal"). */
+export function commandLine(words: string[]): string {
+  if (words.length <= 1) return (words[0] || "").trim();
+  return words.map(shellQuote).join(" ");
+}
+
+function shellQuote(w: string): string {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(w) ? w : `'${w.replace(/'/g, `'\\''`)}'`;
+}
+
+/** A coding agent's CLI run straight from the command (codex exec, claude -p, ...), or null. Looks through wrappers
+ * like bash -c, env, nohup, timeout and cd ... &&. */
+export function codingAgent(command: string): string | null {
+  const parts = command.split(/&&|\|\||;|\|/);
+  for (const part of parts) {
+    const words = part.replace(/['"]/g, " ").trim().split(/\s+/).filter(Boolean);
+    let k = 0;
+    while (k < words.length && (/^(bash|sh|zsh|env|nohup|exec|time|timeout|nice|stdbuf|-\S*|\d+[smh]?|[A-Z_][A-Z0-9_]*=\S*)$/.test(words[k]))) k++;
+    const w = (words[k] || "").split("/").pop() || "";
+    if (w === "codex" || w === "claude" || w === "gemini" || w === "aider" || w === "cursor-agent") return w;
+  }
+  return null;
+}
+
 const ago = (ms: number) => { const m = Math.round(ms / 60_000); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`; };
 
 export class Background {
@@ -229,8 +255,10 @@ export class Background {
       else if (a === "--restart") restart = true;
       else break;
     }
-    const command = args.slice(i).join(" ").trim();
+    const command = commandLine(args.slice(i));
     if (!command) return `Error: give the command after --, like hearth-bg start --name sim -- python3 sim.py\n${USAGE}`;
+    const agentCli = codingAgent(command);
+    if (agentCli) return `Error: that starts ${agentCli}, another coding agent, to do the work. Writing code, editing files and thinking are your job: do them yourself in your turn, with the model this conversation runs on. hearth-bg is for programs that run on their own (a simulation, a batch of runs, a server). If one of those calls an AI as part of what it tests, start the program, not the AI.`;
     let dir: string;
     try { dir = realpathSync(resolve(cwd || ".")); } catch { return "Error: your current folder doesn't exist."; }
     const roots = this.o.roots.map((r) => { try { return realpathSync(r); } catch { return resolve(r); } });
@@ -375,6 +403,17 @@ Now reply to the user: say what's running, roughly how long it takes, and how th
   }
 }
 
+/** What the user sees of a conversation's background work (its thread's "In the background" card): the hub's
+ * hearth-bg tasks, running or ended in the last day, each with its last lines of output. */
+export type BgView = { name: string; cmd: string; jobId: string | null; where: string; status: BgTask["status"]; code?: number;
+  startedAt: number; endedAt?: number; stoppedFor?: "memory"; tail: string };
+export function bgView(tasks: BgTask[], threadId: string, now = Date.now()): BgView[] {
+  return tasks.filter((t) => t.threadId === threadId && (t.status === "running" || now - (t.endedAt || 0) < 24 * 3600_000))
+    .sort((a, b) => b.startedAt - a.startedAt).slice(0, 12)
+    .map((t) => ({ name: t.name, cmd: t.cmd.slice(0, 300), jobId: t.jobId, where: "hub", status: t.status, code: t.code, startedAt: t.startedAt,
+      endedAt: t.endedAt, stoppedFor: t.stoppedFor, tail: tailFile(join(t.cwd, t.log), t.status === "running" ? 3 : 6).slice(-1200) }));
+}
+
 /** How a task's ending reads to the agent in its conversation (a hidden turn). */
 export function endedText(e: BgEnd, now = Date.now()): string {
   const t = e.task;
@@ -425,6 +464,12 @@ Your turn ends when you reply, and everything you started in it stops then: nohu
 it. A new message from the user ends your turn too. So never run something long in your turn and wait for it, and never
 sleep or poll in a loop to watch it. Start it with hearth-bg instead: the hub runs it, and it keeps going through your
 replies and the user's messages.
+
+## Programs, not your own work
+hearth-bg is for programs that run on their own. Writing the code, editing files and working out what to do are your
+job: do them yourself in your turn, with your own model. Never start another coding agent (codex exec, claude -p) to
+write code for you; hearth-bg refuses it. A program that calls an AI as part of what it tests (a flight sim that asks a
+model where the plane is) is fine: start the program.
 
 ## Start it, then talk to the user
 1. Make the command pick up where it left off if it's started again (resume from its saved results), and have it write

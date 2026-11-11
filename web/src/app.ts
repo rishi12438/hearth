@@ -364,6 +364,12 @@ function onEvent(e: { type: string; data?: any }) {
       }
       return;
     }
+    case "bg": {
+      // Background work in this thread started or ended: refresh its "Background work" card.
+      const id = S.chat?.thread?.id;
+      if (id && id === e.data?.threadId) call(`/api/threads/${id}`).then((d: any) => { if (S.chat?.thread?.id === id) { S.chat.bg = d.bg || []; drawChat(false); } }).catch(() => {});
+      return;
+    }
     case "people": if (hubPage() === "people") void drawPeople(); return;
     case "pipeline": {
       // A teammate made a trigger, timer or source: it flies into Triggers.
@@ -1774,6 +1780,8 @@ function drawChannel(el: HTMLElement, stick: boolean) {
     lastWho = m.taskJobId ? "task" : who; lastAt = t;
   }
   if (S.planning === S.chat.thread.id) nodes.push(row(mateWho("hearth", "thinking"), new Date().toISOString(), [h("div", { class: "typing" }, h("i"), h("i"), h("i"), h("span", null, "Reading that and splitting it up…"))], lastWho === "hearth"));
+  const bgStrip = bgRunningStrip(S.chat.bg || []);
+  if (bgStrip) nodes.push(bgStrip);
   // Asks here with no task of their own to sit under.
   nodes.push(...looseApprovals((S.chat.approvals || []).filter((a: any) => !S.chat.jobs.some((x: any) => x.id === a.jobId)), new Set()).map((x) => x.node));
   const atBottom = el.parentElement!.scrollHeight - el.parentElement!.scrollTop - el.parentElement!.clientHeight < 120;
@@ -1983,6 +1991,42 @@ function stepRow(s: { at: string; text: string }) {
   return h("li", null, h("time", null, clockTime(s.at)), h("span", null, s.text));
 }
 
+/** "Also worked on it" under a finished answer: helpers, background tasks, the lead, other machines or coding agents. */
+function teamLine(j: any): Node | null {
+  const team = (j.did || []).filter((d: any) => d.kind === "team").map((d: any) => String(d.label));
+  return team.length ? h("div", { class: "did-line team-line" }, icon("zap", 12), `Also on it: ${team.join(" · ")}`) : null;
+}
+
+const bgWhere = (b: any) => (b.where === "hub" ? "on the hub" : `on ${b.where}`);
+function bgState(b: any): Node {
+  if (b.status === "running") return h("span", null, "running ", h("time", { "data-since": new Date(b.startedAt).toISOString() }, elapsed(new Date(b.startedAt).toISOString())));
+  const at = b.endedAt ? ` at ${clockTime(new Date(b.endedAt).toISOString())}` : "";
+  if (b.stoppedFor === "memory") return h("span", null, `stopped by the hub${at}: the machine ran out of memory`);
+  if (b.status === "failed") return h("span", null, `failed${b.code !== undefined ? ` (exit ${b.code})` : ""}${at}`);
+  return h("span", null, `${b.status === "done" ? "finished" : "stopped"}${at}`);
+}
+
+/** A thread's background work: what the agent left running (hearth-bg, or --bg on the Mac or a cloud computer),
+ * whether it's still going, and for one that ended, its last lines, so you can see what broke. */
+function bgCard(tasks: any[]): Node | null {
+  if (!tasks.length) return null;
+  return h("div", { class: "bgcard" }, h("div", { class: "bghead" }, icon("zap", 13), h("b", null, "Background work"), h("small", null, "keeps going between messages")),
+    tasks.map((b: any) => h("details", { class: `bgrow ${b.status}`, open: b.status === "failed" || undefined },
+      h("summary", null, h("i", { class: "bgdot" }), h("b", null, b.name), h("small", null, bgState(b), ` · ${bgWhere(b)}`)),
+      h("code", { class: "bgcmd", title: b.cmd }, b.cmd),
+      b.tail ? h("pre", { class: "bgtail" }, b.tail) : null)));
+}
+
+/** The channel's one line for background work still running here; tap opens the thread that started it. */
+function bgRunningStrip(tasks: any[]): Node | null {
+  const on = tasks.filter((b: any) => b.status === "running");
+  if (!on.length) return null;
+  const first = on.find((b: any) => b.jobId), job = first ? (S.chat.jobs || []).find((x: any) => x.id === first.jobId) : null;
+  const root = job ? job.followsUp || job.id : null;
+  return h("button", { class: "bgstrip", on: { click: () => { if (root) location.hash = `#c/${S.chat.thread.id}/${root}`; } } },
+    h("i", { class: "bgdot" }), h("span", null, `In the background: ${on.map((b: any) => `${b.name} (${bgWhere(b)})`).join(", ")}`), icon("chevron", 14));
+}
+
 /** "0:42" since a task started; kept ticking by the clock below. */
 function elapsed(since: string) {
   const s = Math.max(0, Math.round((Date.now() - new Date(since).getTime()) / 1000));
@@ -2159,6 +2203,7 @@ function drawThread(el: HTMLElement, jobId: string, stick: boolean) {
     ...items.map((x) => x.node()),
     ...looseApprovals((S.chat.approvals || []).filter((a: any) => [j, ...follow].some((x: any) => x.id === a.jobId)),
       new Set((S.chat.approvals || []).filter((a: any) => [j, ...follow].some((x: any) => x.id === a.jobId && x.status === "waiting")).map((a: any) => a.id))).map((x) => x.node),
+    bgCard((S.chat.bg || []).filter((b: any) => [j, ...follow].some((x: any) => x.id === b.jobId))),
     ...queuedRows(mine.filter((m: any) => m.queued), [j, ...follow]),
     // A call that's on stays pinned at the bottom (Listen, Join, its question for you); once it ends it moves up to
     // where it happened.
@@ -2393,6 +2438,8 @@ function answer(j: any) {
     appCards(j),
     (j.fileIds || []).map(fileCard),
     did.length ? h("div", { class: "did-line" }, icon("check", 12), did.join(" · ")) : null,
+    // Who else worked on it: helpers (sub-agents), background tasks, the lead, another machine or coding agent.
+    teamLine(j),
     // Why it moved up a model: the model's own reason, the lead's redo note, or the error it hit.
     (j.escalations || []).map((e: any) => h("div", { class: "did-line muted" }, `Moved up from ${e.from}: ${e.why}`)),
   ], false, j.status === "failed" ? "err" : "");

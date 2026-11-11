@@ -575,6 +575,9 @@ function atScale(code: "claude" | "codex" | null | undefined, workspace: Place |
     "minute to make sure\". Anything that takes more than a minute or two (a simulation, a batch of runs, training, a long",
     "build, a run on the Mac): start it in the background (hearth-bg here, hearth-run --bg on another machine), check once that",
     "it started, and reply. The hub gives you a turn when it ends. Anything else you start stops when your turn ends.",
+    "That's for programs that run. Writing code, editing files and working things out are YOUR work: do them yourself, in your",
+    "turn, with your own model, and tell the user what you're changing as you go. Never hand them to another coding agent",
+    "(codex exec, claude -p) in the background: the user picked who works on this.",
     ...(code === "claude" ? ["For wide searching, hand pieces to the scout agent (a small fast model), several at once in one message, and keep the",
       "judgement and the answer for yourself."] : []),
     ...(lead ? ["THE LEAD (a stronger model on your team) is on hand: ask it when you're stuck after two tries, before you pick an",
@@ -826,7 +829,7 @@ export function describeStep(name: string, input: any): string | null {
   const q = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 70);
   if (name === "WebSearch") return `Searching: ${q(input?.query)}`;
   if (name === "Bash") return describeSkillStep(input?.command) ?? (/\b(python3?|node|bun|curl|bash|sh)\b/.test(String(input?.command ?? "")) ? `Running code${input?.description ? `: ${q(input.description)}` : ""}` : null);
-  if (name === "Agent") return `Asking a helper: ${q(input?.description)}`;
+  if (name === "Agent") return `Asking a helper (sub-agent): ${q(input?.description)}`;
   if (name === "Write") return /\.(py|sh|js|ts|mjs)$/i.test(String(input?.file_path ?? "")) ? "Writing a script" : null;
   if (name === "Skill") return `Reading the ${String(input?.skill ?? input?.name ?? "").slice(0, 40)} skill`;
   if (name === "Read" && /\.png$/i.test(String(input?.file_path ?? ""))) return "Looking at the page";

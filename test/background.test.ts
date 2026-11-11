@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Background, backgroundSkill, endedText, MAX_QUICK_RESTARTS, treeMemoryMB, type BgEnd } from "../src/background.ts";
+import { Background, backgroundSkill, bgView, codingAgent, commandLine, endedText, MAX_QUICK_RESTARTS, treeMemoryMB, type BgEnd } from "../src/background.ts";
+import { describeSkillStep } from "../src/brains/skills.ts";
 import { expendable } from "../src/oom.ts";
 import { buildPrompt } from "../src/brain.ts";
 
@@ -207,5 +208,57 @@ describe("out of memory", () => {
   test("the wrapped command runs with its arguments intact", async () => {
     const p = Bun.spawn(expendable(["printf", "%s|", "a b", "$HOME", "x;y"], "linux"), { stdout: "pipe" });
     expect(await new Response(p.stdout).text()).toBe("a b|$HOME|x;y|");
+  });
+});
+
+describe("hearth-bg command words", () => {
+  test("several words keep their quoting: bash -c '<script>' runs the whole script, not just its first word", async () => {
+    const { bg, ws, ends } = setup();
+    // How the agent's shell hands `hearth-bg start -- bash -c 'echo "$(cat spec.txt)" > out.txt'` to the hub.
+    await Bun.write(join(ws, "spec.txt"), "the spec");
+    const out = await bg.agent(["start", "--name", "wrapped", "--", "bash", "-c", 'echo "got: $(cat spec.txt)" > out.txt'], ws, who);
+    expect(out).toContain("Started wrapped");
+    await until(() => ends.length === 1);
+    expect(ends[0].task.code).toBe(0);
+    expect(readFileSync(join(ws, "out.txt"), "utf8").trim()).toBe("got: the spec");
+  });
+
+  test("one word is a shell line as is; several are quoted back", () => {
+    expect(commandLine(["cd sim && python3 run.py --resume"])).toBe("cd sim && python3 run.py --resume");
+    expect(commandLine(["python3", "run.py", "--resume"])).toBe("python3 run.py --resume");
+    expect(commandLine(["bash", "-c", "a && b"])).toBe("bash -c 'a && b'");
+    expect(commandLine(["echo", "it's"])).toBe("echo 'it'\\''s'");
+  });
+
+  test("won't start another coding agent to do the agent's own work", async () => {
+    const { bg, ws } = setup();
+    for (const words of [["bash", "-c", "codex exec --skip-git-repo-check \"$(cat spec.md)\""], ["codex exec - < spec.md"], ["cd x && claude -p 'write it'"], ["timeout", "3600", "codex", "exec", "go"]]) {
+      expect(await bg.agent(["start", "--name", "build", "--", ...words], ws, who)).toContain("another coding agent");
+    }
+    expect(codingAgent("python3 scripts/codex_flight.py --realtime")).toBeNull();
+    expect(codingAgent("bash scripts/run16_10hour.sh")).toBeNull();
+    expect(codingAgent("cd sim && python3 run.py")).toBeNull();
+  });
+
+  test("the thread's view lists its tasks with their last lines", async () => {
+    const { bg, ws, ends } = setup();
+    await bg.agent(["start", "--name", "boom", "--", "echo oh no; exit 2"], ws, who);
+    await until(() => ends.length === 1);
+    const v = bgView(bg.list(), "t1");
+    expect(v).toHaveLength(1);
+    expect(v[0]).toMatchObject({ name: "boom", status: "failed", code: 2, where: "hub", jobId: "j1" });
+    expect(v[0].tail).toContain("oh no");
+    expect(bgView(bg.list(), "other")).toHaveLength(0);
+  });
+});
+
+describe("steps say when someone else is on it", () => {
+  test("background, other machines, the lead, other coding agents", () => {
+    expect(describeSkillStep("hearth-bg start --name run16 --restart -- bash x.sh")).toBe("Started in the background: run16");
+    expect(describeSkillStep("hearth-bg status run16")).toBe("Checking on background work");
+    expect(describeSkillStep("hearth-run mac --bg -- python3 x.py")).toBe("Started in the background on your Mac");
+    expect(describeSkillStep('hearth-lead "which approach?"')).toBe("Asking the lead (a stronger model)");
+    expect(describeSkillStep("cd w && codex exec - < spec.md")).toBe("Handing work to Codex");
+    expect(describeSkillStep("python3 scripts/codex_flight.py")).toBeNull();
   });
 });
