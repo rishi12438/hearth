@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve, extname, dirname } from "node:path";
+import { bgView, type BgView } from "./background.ts";
 type Server = Bun.Server<unknown>;
 import { rotateToken, sha256, deviceForToken, newPairingCode, redeemPairingCode, RateLimiter, addDevice, owners, personalDevices, isOwner, newChallenge, verifyPasskeyRegistration, verifyPasskeyAssertion, Sessions, AccessRequests } from "./auth.ts";
 import QRCode from "qrcode";
@@ -168,6 +169,12 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
   const connect = new Connect(hub, vault, voice);
   void connect.start();
   hub.connect = connect;
+  /** A thread's background work for its "In the background" card: hub tasks (hearth-bg) and --bg runs on the Mac or a cloud computer. */
+  const threadBg = (threadId: string): BgView[] => [
+    ...bgView(connect.background.list(), threadId),
+    ...(hub.runElsewhere?.bgRuns(threadId) || []).map((w) => ({ name: (w.cmd.match(/[A-Za-z0-9_-]+(?=\.[a-z]+\b)/)?.[0] || w.cmd.split(/\s+/)[0]).slice(0, 30), cmd: w.cmd.slice(0, 300),
+      jobId: w.jobId ?? null, where: w.place, status: "running" as const, startedAt: w.startedAt, tail: "" })),
+  ];
   // Another browser for jobs a site blocks (other-browser.ts): Chrome on your Mac once you approve. What else there is
   // when that can't be, hearth-help stuck says (help.ts).
   hub.otherBrowser = new OtherBrowser({
@@ -507,8 +514,11 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       let argv: string[] = [], cwd = "";
       try { const f = await req.formData(); argv = f.getAll("a").slice(0, 200).map((a) => String(a).slice(0, 20_000)); cwd = String(f.get("cwd") || "").slice(0, 4000); } catch { throw new HttpError(400, "Send the command's words as a fields."); }
       server.timeout(req, 0);
-      const out = await hub.runAgent(argv, cwd, req.headers.get("x-hearth-job")?.slice(0, 100) || undefined)
+      const runJob = req.headers.get("x-hearth-job")?.slice(0, 100) || undefined;
+      const out = await hub.runAgent(argv, cwd, runJob)
         .catch((e: any) => ({ code: 1, text: `Error: ${String(e?.message || e).slice(0, 400)}` }));
+      // A --bg run started elsewhere shows in its thread's "In the background" card.
+      if (argv.includes("--bg") && runJob) { const rj = await store.get<any>("jobs", runJob); if (rj?.threadId) hub.emit("bg", { threadId: rj.threadId }); }
       return new Response(`HEARTH-EXIT ${out.code}\n${out.text}\n`, { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
     }
     // The agent's hearth-skill-store (brains/skill-store.ts): find, read and install public skills. An install is an Approve
@@ -567,7 +577,10 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       const mate = job?.teammateId ? await store.get<any>("teammates", job.teammateId) : null;
       const who = { by: mate?.name || "Hearth", jobId: job ? job.id : null, threadId: job?.threadId ?? null };
       const out = await connect.background.agent(argv, cwd, who).catch((e: any) => `Error: ${String(e?.message || e).slice(0, 300)}`);
-      if (argv[0] === "start" || argv[0] === "stop") await hub.log(`bg.${argv[0]}`, `${who.by}: hearth-bg ${argv.join(" ").slice(0, 200)} -> ${out.split("\n")[0].slice(0, 120)}`);
+      if (argv[0] === "start" || argv[0] === "stop") {
+        await hub.log(`bg.${argv[0]}`, `${who.by}: hearth-bg ${argv.join(" ").slice(0, 200)} -> ${out.split("\n")[0].slice(0, 120)}`);
+        if (who.threadId) hub.emit("bg", { threadId: who.threadId });
+      }
       return new Response(out + "\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
     }
     // The agent's hearth-trigger-port (events/ports.ts): claim a callback URL for a webhook, list, release. The claim
@@ -797,7 +810,7 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
         if (method === "POST" && id && seg[3] === "join") { const r = await hub.joinRamble(id, (await body(req)).how === "keep" ? "keep" : "move"); if (r.error) throw new HttpError(400, r.error); return json(r.value); }
         if (method === "GET" && id === "seen") return json(await hub.chatSeen());
         if (method === "POST" && id && seg[3] === "seen") return json({ at: await hub.markChatSeen(id), marked: await hub.markStuckSeen({ threadId: id }) });
-        if (method === "GET" && id) { const d = await hub.threadDetail(id); if (!d) break; return json({ ...d, approvals: (await store.all<Approval>("approvals")).filter((a) => a.threadId === id), calls: (await store.all<Call>("calls")).filter((c) => c.threadId === id) }); }
+        if (method === "GET" && id) { const d = await hub.threadDetail(id); if (!d) break; return json({ ...d, approvals: (await store.all<Approval>("approvals")).filter((a) => a.threadId === id), calls: (await store.all<Call>("calls")).filter((c) => c.threadId === id), bg: threadBg(id) }); }
         if (method === "POST" && (!id || seg[3] === "messages")) {
           const b = await body(req);
           const fileIds = Array.isArray(b.fileIds) ? b.fileIds.map(String).slice(0, 5) : [];

@@ -449,6 +449,19 @@ export function describeSkillStep(command: unknown): string | null {
     : ["tap", "type", "swipe", "key", "open-app"].includes(phone) ? "Using the phone" : "On the phone";
   const find = c.match(/(?:^|[\s;&|/])hearth-skill\s+(search|show)\s+(.+)/);
   if (find) return find[1] === "search" ? `Looking for a skill: ${find[2].replace(/["']/g, "").trim().slice(0, 50)}` : `Reading the ${find[2].replace(/["']/g, "").trim().slice(0, 40)} skill`;
+  // Work that isn't this turn's own: background tasks, other machines, the lead, another coding agent. The thread shows
+  // these so you can see when someone or something else is involved.
+  const bg = c.match(/(?:^|[\s;&|/])hearth-bg\s+(start|stop|status|log|list)\b(.*)/);
+  if (bg) {
+    if (bg[1] === "start") { const n = bg[2].match(/--name[\s=]+["']?([\w.-]+)/)?.[1]; return `Started in the background${n ? `: ${n}` : ""}`; }
+    if (bg[1] === "stop") { const n = bg[2].trim().split(/\s+/)[0]?.replace(/["']/g, ""); return `Stopping background task${n ? ` ${n}` : ""}`; }
+    return "Checking on background work";
+  }
+  const run = c.match(/(?:^|[\s;&|/])hearth-run\s+(mac|cloud)\b(.*)/);
+  if (run) return `${/\s--bg\b/.test(run[2]) ? "Started in the background " : "Running a step "}${run[1] === "mac" ? "on your Mac" : "on a cloud computer"}`;
+  if (/(?:^|[\s;&|/])hearth-lead\s/.test(c)) return "Asking the lead (a stronger model)";
+  const cli = c.match(/(?:^|[\s;&|/'"(])(codex\s+exec|claude\s+(?:-p|--print))\b/)?.[1];
+  if (cli) return `Handing work to ${cli.startsWith("codex") ? "Codex" : "Claude"}`;
   const tool = c.match(/(?:^|[\s;&|/])(enkidu-browser|enkidu-cua)\s/)?.[1];
   if (!tool) return null;
   // Any web address in the call, however it's quoted or escaped ('{"url":"…"}', "{\"url\":\"…\"}").

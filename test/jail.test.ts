@@ -41,7 +41,7 @@ describe("working at scale", () => {
     expect(buildPrompt({ ...job, mode: "legwork" }, "claude")).toContain("scout agent");
   });
   test("progress lines for code and helpers", () => {
-    expect(describeStep("Agent", { description: "COST sector" })).toBe("Asking a helper: COST sector");
+    expect(describeStep("Agent", { description: "COST sector" })).toBe("Asking a helper (sub-agent): COST sector");
     expect(describeStep("Bash", { command: "python3 sectors.py", description: "Look up sectors" })).toBe("Running code: Look up sectors");
     expect(describeStep("Write", { file_path: "/x/sectors.py" })).toBe("Writing a script");
     expect(describeStep("Bash", { command: "ls" })).toBeNull();

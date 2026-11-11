@@ -1467,7 +1467,10 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     this.stops.set(job.id, stop);
     this.jobThreads.set(job.id, job.threadId);
     // Live progress for the app ("Searching: pottery gifts"): an event only, not stored, so it can't race the job's own saves.
+    // Who else worked on it (helpers, background tasks, the lead, another machine or coding agent): kept on the answer.
+    const involved: string[] = [];
     const show = (what: string) => {
+      if (/^(Asking a helper|Started in the background|Asking the lead|Handing work to|Running a step on)/.test(what) && !involved.includes(what) && involved.length < 12) involved.push(what);
       const log = this.steps.get(job.id) ?? [];
       if (log.at(-1)?.text === what) return;
       const at = this.clock().toISOString();
@@ -1519,6 +1522,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       // whatever the write-up kept. The tool owns this, not the wording.
       if (this.phoneHandover?.(job.id) && typeof patch.result === "string" && !patch.result.includes("[[phone]]")) patch = { ...patch, result: `${patch.result.trim()}\n\n[[phone]]` };
       const stepsSoFar = (this.steps.get(job.id) || []).map((x) => x.text);
+      if (involved.length) patch = { ...patch, did: [...(patch.did || []), ...involved.map((label) => ({ kind: "team", label }))] };
       this.stops.delete(job.id); this.jobThreads.delete(job.id); this.steps.delete(job.id); this.frames.delete(job.id); this.running.delete(job.id);
       if (stop.signal.aborted && this.cancelled.delete(job.id)) {
         this.additions.delete(job.id); this.additions.delete(`${job.id}:label`);
@@ -2732,6 +2736,7 @@ Its work folder is copied to ~/Hearth/runs there, the commands run in that copy,
   /** A background task (background.ts) ended on its own: its conversation gets a hidden turn to tell the user how it went. */
   async backgroundEnded(e: import("./background.ts").BgEnd) {
     await this.log("bg.ended", `${e.task.name}: ${e.why === "hub-restart" ? "stopped by a hub restart" : e.why === "memory" ? "stopped, machine nearly out of memory" : `${e.task.status}, exit ${e.task.code}`}`).catch(() => {});
+    if (e.task.threadId) this.emit("bg", { threadId: e.task.threadId });
     const { endedText } = await import("./background.ts");
     await this.wakeForEnd(e.task.jobId, e.task.threadId, endedText(e, this.clock().getTime()));
   }
@@ -2739,6 +2744,7 @@ Its work folder is copied to ~/Hearth/runs there, the commands run in that copy,
   /** A --bg run on the Mac or a cloud computer ended (run-elsewhere.ts watches it): its conversation gets a turn to report. */
   async remoteBgEnded(w: import("./run-elsewhere.ts").BgWatch, text: string) {
     await this.log("run.bg.ended", `${w.place}: ${w.cmd.slice(0, 80)}`).catch(() => {});
+    this.emit("bg", { threadId: w.threadId });
     await this.wakeForEnd(w.jobId, w.threadId, text);
   }
 
