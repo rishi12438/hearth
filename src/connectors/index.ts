@@ -168,6 +168,7 @@ export class Connect {
   async start() {
     this.mcp.start();
     await this.background.restore().catch((e) => console.error("background tasks: restore failed", e));
+    this.background.watch();
     for (const c of CONNECTORS) await c.start?.(this.ctx).catch(() => {});
   }
   stop() { this.mcp.stop(); }
