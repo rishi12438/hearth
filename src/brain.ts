@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { expendable } from "./oom";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -1225,7 +1226,8 @@ export class Brain {
     if (owner) env.ENKIDU_OWNER = owner;
     // Which job this run is: hearth-mcp sends it, so a call that waits for your Approve lands in this job's thread.
     if (meter?.jobId) env.HEARTH_JOB = meter.jobId;
-    const proc = Bun.spawn(cmd, { cwd, env, stdin: harness === "codex" ? "pipe" : new Blob([prompt]), stdout: "pipe", stderr: "pipe" });
+    // If memory runs out, the kernel kills this run, not the hub (src/oom.ts).
+    const proc = Bun.spawn(expendable(cmd), { cwd, env, stdin: harness === "codex" ? "pipe" : new Blob([prompt]), stdout: "pipe", stderr: "pipe" });
     const stopLive = owner && meter?.onFrame ? watchLive(owner, meter.onFrame) : () => {};
     proc.exited.then(stopLive, stopLive);
     // Codex: one turn over its app-server's stdio; the server stays up until we close it once the turn is over.
@@ -1364,7 +1366,11 @@ export class Brain {
         if (typeof j.session_id === "string") session = j.session_id;
         if (meter && typeof j.total_cost_usd === "number") { meter.costUsd += j.total_cost_usd; meter.onUsage?.(); }
         else if (meter) meter.unknown = true;
-      } catch { if (meter) meter.unknown = true; }
+      } catch {
+        // No "result" line: it was cut off (killed, out of memory). Its stdout is the event stream, never an answer.
+        reply = "";
+        if (meter) meter.unknown = true;
+      }
     } else if (meter) meter.unknown = true;
     if (app) { reply = codexLast; said = codexLast; session = app.threadId ?? undefined; } // stdout is the event stream, never the answer
     // The saved session is gone (its files were cleared, or it's from another machine): start a new one, once.
@@ -1387,7 +1393,10 @@ export class Brain {
       if (!failed) this.health.fine(harness);
     }
     if (app && failed && !reply.trim()) throw new Error(`${name} failed: ${(codexErrors.trim() || err.trim()).slice(-300)}`);
-    if (!app && code !== 0 && !reply.trim()) throw new Error(`${name} exited with ${code}: ${(codexErrors.trim() || err.trim()).slice(-300)}`);
+    // 137/143: killed (SIGKILL/SIGTERM), most often the machine running out of memory.
+    if (!app && code !== 0 && !reply.trim()) throw new Error(code === 137 || code === 143
+      ? `${name} was stopped before it finished (the machine likely ran out of memory). Send it again.`
+      : `${name} exited with ${code}: ${(codexErrors.trim() || err.trim()).slice(-300)}`);
     return reply.trim();
   }
 }

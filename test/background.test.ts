@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Background, backgroundSkill, endedText, type BgEnd } from "../src/background.ts";
+import { Background, backgroundSkill, endedText, MAX_QUICK_RESTARTS, type BgEnd } from "../src/background.ts";
+import { expendable } from "../src/oom.ts";
 import { buildPrompt } from "../src/brain.ts";
 
 const who = { by: "Research", jobId: "j1", threadId: "t1" };
@@ -80,6 +81,43 @@ describe("hearth-bg", () => {
     for (const t of first.list()) await first.agent(["stop", t.name], ws, who);
   });
 
+  test("a --restart task the hub keeps going down right after starting isn't started again (out-of-memory loop)", async () => {
+    const { ws, ends, make } = setup();
+    let hub = make();
+    await hub.agent(["start", "--name", "hog", "--restart", "--", "sleep 30"], ws, who);
+    const hubs = [hub];
+    for (let i = 0; i < MAX_QUICK_RESTARTS; i++) {
+      hub.closingDown();
+      hub = make();
+      hubs.push(hub);
+      await hub.restore();
+    }
+    const hog = hub.list().find((t) => t.name === "hog")!;
+    expect(hog.status).toBe("failed");
+    expect(hog.restarts).toBe(MAX_QUICK_RESTARTS - 1);
+    expect(ends.map((e) => e.why)).toEqual(["restart-loop"]);
+    expect(endedText(ends[0])).toContain("won't start again");
+    for (const h of hubs) for (const t of h.list()) if (t.status === "running") await h.agent(["stop", t.name], ws, who);
+  });
+
+  test("a --restart task that ran a while before the hub restarted starts again every time", async () => {
+    let now = 0;
+    const { ws, ends, make } = setup({ now: () => now });
+    let hub = make();
+    await hub.agent(["start", "--name", "long", "--restart", "--", "sleep 30"], ws, who);
+    const hubs = [hub];
+    for (let i = 0; i < MAX_QUICK_RESTARTS + 2; i++) {
+      now += 10 * 60_000;
+      hub.closingDown();
+      hub = make();
+      hubs.push(hub);
+      await hub.restore();
+    }
+    expect(hub.list()[0].status).toBe("running");
+    expect(ends).toHaveLength(0);
+    for (const h of hubs) for (const t of h.list()) if (t.status === "running") await h.agent(["stop", t.name], ws, who);
+  });
+
   test("the end turn tells the agent to report, with the output as data", () => {
     const text = endedText({ task: { ...who, name: "sim", cmd: "python3 sim.py", cwd: "/w", log: ".hearth-bg/sim.log", restart: false, startedAt: 0, endedAt: 3600_000, status: "done", code: 0 }, why: "exited", tail: "avg 9 m" }, 3600_000);
     expect(text).toContain("finished: exit 0 after 1 h 0 min");
@@ -95,5 +133,20 @@ describe("hearth-bg", () => {
     expect(s.scripts["hearth-bg"]).toContain("/api/agent/bg");
     const prompt = buildPrompt({ mode: "job", input: "x" } as any, "claude");
     expect(prompt).toContain("start it with hearth-bg");
+  });
+});
+
+describe("out of memory", () => {
+  test("on Linux, runs start with a raised OOM score and keep their command (exec, same pid)", () => {
+    const cmd = expendable(["claude", "-p", "it's \"quoted\""], "linux");
+    expect(cmd.slice(0, 2)).toEqual(["sh", "-c"]);
+    expect(cmd[2]).toContain("/proc/self/oom_score_adj");
+    expect(cmd.slice(3)).toEqual(["sh", "claude", "-p", "it's \"quoted\""]);
+    expect(expendable(["claude"], "darwin")).toEqual(["claude"]);
+  });
+
+  test("the wrapped command runs with its arguments intact", async () => {
+    const p = Bun.spawn(expendable(["printf", "%s|", "a b", "$HOME", "x;y"], "linux"), { stdout: "pipe" });
+    expect(await new Response(p.stdout).text()).toBe("a b|$HOME|x;y|");
   });
 });
