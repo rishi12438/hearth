@@ -1,0 +1,23 @@
+src/hub.ts
+  s_07fcdca4f3adfd::t_83b674ca125028 1982-1984,4763-4767,4777
+src/connections.ts
+  s_07fcdca4f3adfd::t_83b674ca125028 81-82
+test/social.test.ts
+  s_07fcdca4f3adfd::t_83b674ca125028 300-317
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "c0773dddf5b479507909338fee0fc92b5f00faed",
+  "prompts": {},
+  "sessions": {
+    "s_07fcdca4f3adfd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7f362ab-26e5-4a9b-98c4-78e683e51405",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
