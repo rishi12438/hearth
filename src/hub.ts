@@ -1627,9 +1627,11 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     const attempt = async (tier: Tier) => {
       cur = await this.saveJob({ ...cur, status: "working", tier });
       meter.lead = hybrid && tier !== "heavy" && label(brains[tier]) !== label(brains.heavy);
-      return this.turn(hybrid && tier !== "heavy" ? "legwork" : "job", input, job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains[tier], meter, top: tier === "heavy", files });
+      return this.turn(hybrid && tier !== "heavy" ? "legwork" : "job", input, job.task, { teammate: mate, threadId: job.threadId, jobId: job.id, profile: brains[tier], meter, top: tier === ladder.at(-1), files });
     };
     // Start on the cheapest model the plan allows; move up a step when a model can't do it.
+    // The last step is told it's at the top (never hand up): on a pinned ramble that's its one model, which used to be
+    // told "a stronger model will take it", handed up, and failed with "Couldn't do it: <its note to that model>".
     // On the brain you picked for the ramble every step is the same model, so there's nowhere to move up to.
     const ladder: Tier[] = job.effort === "heavy" ? ["heavy"] : brains.heavy.pinned ? [job.effort === "quick" ? "quick" : "workhorse"] : job.effort === "quick" ? ["quick", "workhorse", "heavy"] : ["workhorse", "heavy"];
     let tier: Tier = ladder[0];
