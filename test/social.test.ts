@@ -297,6 +297,24 @@ test("a job that hits a sign-out checks your Mac: a fresh login reruns it, a sig
   expect((r4 as any).value.status).toBe("blocked");
   expect(await blockedOf(j1.id)).toMatchObject({ needs: "login", why: expect.stringContaining("still isn't signed in") });
 
+  // Try again when the Mac sends the login the hub already holds (it copied it moments ago): that's the one to try, so
+  // the job runs instead of staying parked on "sign in on your Mac" forever.
+  const fresh2 = JSON.stringify({ cookies: [{ name: "xman_t", value: "fresh2", domain: ".aliexpress.com" }] });
+  await store.put("jobs", { ...(await store.get("jobs", j2.id)), status: "blocked" } as any);
+  const p6 = realRetry(j2.id);
+  await Bun.sleep(5);
+  cmp.message("mac1", JSON.stringify({ t: "cookies", site: "aliexpress.com", data: fresh2, hash: "h2" }));
+  const r6 = await p6;
+  expect((r6 as any).value.status).toBe("queued");
+
+  // A job asking for a fresh login right after the hub got one isn't told the Mac is signed out: it runs again once.
+  const j7 = await job();
+  const p7 = hub.applyActions([{ type: "connection.refresh", site: "aliexpress.com" }], "t", { jobId: j7.id, threadId: "t1" });
+  await Bun.sleep(5);
+  cmp.message("mac1", JSON.stringify({ t: "cookies", site: "aliexpress.com", data: fresh2, hash: "h2" }));
+  const out7 = await p7;
+  expect(out7.done.some((d: any) => /running it again/.test(d.label))).toBe(true);
+
   // The hub couldn't hand logins to the jobs' browser: the job says that, not "sign in on your Mac", and doesn't rerun.
   hub.loginsProblem = "EROFS";
   const j5 = await job();
