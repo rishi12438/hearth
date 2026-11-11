@@ -1,0 +1,35 @@
+src/hub.ts
+  s_49fe397f81e18c::t_adb8655c5231fd 2707-2722
+test/background.test.ts
+  s_49fe397f81e18c::t_c1eade779040d6 1-99
+src/connectors/index.ts
+  s_49fe397f81e18c::t_adb8655c5231fd 20,128-135,143-144,170
+src/brain.ts
+  s_49fe397f81e18c::t_adb8655c5231fd 942-947
+  s_49fe397f81e18c::t_19c401d03e644a 571-572
+src/server.ts
+  s_49fe397f81e18c::t_adb8655c5231fd 555-569
+test/skills.test.ts
+  s_49fe397f81e18c::t_da07dda59ab918 6-7
+src/background.ts
+  s_49fe397f81e18c::t_adb8655c5231fd 2-3,59-61
+  s_49fe397f81e18c::t_0f7cfd0d600717 1,4-58,62-324
+src/tunnels.ts
+  s_49fe397f81e18c::t_19c401d03e644a 309-310,314-315
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "65932878f8818e8957ad34eb58c8e8ecd012f50f",
+  "prompts": {},
+  "sessions": {
+    "s_49fe397f81e18c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b02d5b22-3ea9-4e52-a73f-4d8f036682d5",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Rishi Mahadevan <rishimahadevan@gmail.com>"
+    }
+  }
+}
