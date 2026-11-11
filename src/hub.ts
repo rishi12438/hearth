@@ -1979,7 +1979,9 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     const site = job.blocked?.site;
     if (site && !opts.refreshed) {
       const r = await this.refreshConnection(site, "Try again");
-      if (r.state === "offline" || r.state === "missing") {
+      // "same": the hub already holds your Mac's current login (often the one it just copied). Your tap means try it, so
+      // run the job; parking here would block it forever, since every later tap gets the same answer.
+      if (r.state === "offline" || (r.state === "missing" && r.why !== "same")) {
         const name = labelFor(site);
         const blocked = r.state === "offline"
           ? { need: `Your Mac, for the ${name} login`, why: `${name} signed Hearth out, and your Mac is offline.`, unblock: "Open your Mac: this picks up again by itself", needs: "computer" as const, site }
@@ -4758,7 +4760,11 @@ ${JSON.stringify(shown, null, 1)}
     // the problem, so say the real cause and don't spend a rerun on it.
     if (this.loginsProblem)
       return park({ need: `The hub's browser can't get your logins`, why: `${name} shows signed out because the hub couldn't give the jobs' browser your logins (${this.loginsProblem}). Your Mac's login is fine.`, unblock: "Tap Try again once the hub is fixed (a redeploy with the browser-logins fix)", needs: "login" });
-    if ((r.state === "fresh" || r.state === "timeout") && !tried) {
+    // "same" right after the hub got that login (another run or Try again just copied it) isn't a dead login: it's the
+    // fresh one, not yet tried by this job.
+    const savedAt = Date.parse(this.connections.savedAt(domain) || "");
+    const justGot = r.state === "missing" && r.why === "same" && this.clock().getTime() - savedAt < 10 * 60_000;
+    if ((r.state === "fresh" || r.state === "timeout" || justGot) && !tried) {
       // Got one (or a Mac that's still reading): run the job again with it as soon as this turn ends.
       this.rerunAfterLogin.add(jobId);
       await park({ need: `A fresh ${name} login`, why: r.state === "fresh" ? `${name} signed Hearth out, so I pulled a fresh login from your Mac.` : `${name} signed Hearth out; I asked your Mac for a fresh login.`, unblock: "Running it again by itself" }, false);
@@ -4768,6 +4774,7 @@ ${JSON.stringify(shown, null, 1)}
       return park({ need: `Your Mac, for the ${name} login`, why: `${name} signed Hearth out, and your Mac is where the login lives. It's offline right now.`, unblock: "Open your Mac: this picks up again by itself", needs: "computer" });
     const why = tried ? `${name} still shows Hearth signed out, even with the latest login from your Mac.`
       : r.why === "unreadable" ? `${name} signed Hearth out, and Hearth couldn't read Chrome on your Mac.`
+      : r.why === "same" ? `${name} signed Hearth out, and Chrome on your Mac has that same signed-out login.`
       : `${name} signed Hearth out, and Chrome on your Mac isn't signed in to ${name} either.`;
     return park({ need: `Sign in to ${name} on your Mac`, why, unblock: `Sign in to ${name} in Chrome on your Mac, then tap Try again`, needs: "login" });
   }

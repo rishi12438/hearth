@@ -78,6 +78,8 @@ export class Connections {
 
   /** The hash of the cookies the hub already holds for a domain, so a Mac only re-copies on change. */
   cookieHave(domain: string): string | undefined { return isValidDomain(domain) ? this.saved(domain)?.hash : undefined; }
+  /** When the hub got the login it holds for a domain (ISO time), or undefined. */
+  savedAt(domain: string): string | undefined { return isValidDomain(domain) ? this.saved(domain)?.savedAt : undefined; }
 
   /** Turn on "keep this fed from my Mac". The hub then asks any linked Mac to copy it up. */
   wantFromMac(id: string) {
