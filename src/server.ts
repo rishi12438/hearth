@@ -211,6 +211,9 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
     gate: (threadId, deviceId) => hub.runGate(threadId, deviceId),
     ask: (c) => hub.requestRun(c),
     wake: () => { machines.wake().catch((e) => console.error(e)); },
+    // --bg runs there: the hub checks on them and gives the conversation a turn when one ends, so agents never wait.
+    onBgEnd: (w, text) => hub.remoteBgEnded(w, text),
+    busy: (threadId) => hub.threadBusy(threadId),
   });
   // The on-demand Android phone (its own AWS box). Inert until an account is set in Settings → Phone, so it adds nothing
   // to a hub that doesn't use it. The hub starts/stops it; the brain drives it with hearth-phone, which asks this hub.

@@ -442,9 +442,10 @@ replies and the user's messages.
 Every task shares this machine's CPU and memory with the hub and everyone else's work. Too many at once runs it out of
 memory and everything stops, your tasks and the conversation with them. So before running things side by side:
 - Look: \`nproc\` (CPU cores), \`free -m\` (memory; the "available" column), \`hearth-bg list\` (what's running).
-- Find out what one costs: start ONE, wait a minute, check its memory (\`ps -o rss,args -u $(whoami) --sort=-rss | head\`)
-  and \`free -m\` again. A coding agent (claude, codex) or a browser is often 1 GB or more each.
-- Only then add more, and keep at least a quarter of memory free and no more busy processes than cores. If they
+- Unsure what one costs? Start ONE and reply; next time you're on, check its memory (\`hearth-bg status <name>\`,
+  \`ps -o rss,args -u $(whoami) --sort=-rss | head\`, \`free -m\`). A coding agent (claude, codex) or a browser is often
+  1 GB or more each. Don't sit in your turn waiting to measure it.
+- Add more only when they fit: keep at least a quarter of memory free and no more busy processes than cores. If they
   don't fit, run them one after another (one script that loops) and say so to the user.
 Each start tells you how busy the machine is (and warns when memory is nearly gone), and if memory
 runs low while tasks run, the hub stops the one using the most and tells you here. Tasks run at low CPU priority, so the

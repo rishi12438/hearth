@@ -37,7 +37,7 @@ test("scan skips symlinks and build folders; diff sees changes and deletions", (
 });
 
 /** A hub folder, a pretend computer (its home in a temp folder, talking to a real Computers over a fake socket). */
-function rig(o: { gate?: RunGate; mac?: boolean; old?: boolean } = {}) {
+function rig(o: { gate?: RunGate; mac?: boolean; old?: boolean; onBgEnd?: (w: any, text: string) => Promise<void>; busy?: (t: string) => boolean } = {}) {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "hr-")));
   const root = join(base, "brain"), ws = join(root, "workspaces", "app"), home = join(base, "mac-home"), state = join(base, "run-sync");
   mkdirSync(ws, { recursive: true });
@@ -62,6 +62,7 @@ function rig(o: { gate?: RunGate; mac?: boolean; old?: boolean } = {}) {
     root, stateDir: state, places: () => computers.places(),
     exec: (id, req, staged, onLine) => computers.exec(id, req, staged, onLine),
     gate: async () => gate, ask: async (c) => { asked.push(c); gate = "pending"; },
+    onBgEnd: o.onBgEnd, busy: o.busy, checkEveryMs: 3_600_000,
   });
   const there = (p: string) => {
     const runs = join(home, "Hearth", "runs");
@@ -180,6 +181,51 @@ test("--bg starts it and returns", async () => {
   const next = await r.go(["studio", "--", "cat .hearth-bg/*.log"]);
   expect(next.text).toContain("later");
   expect(next.text).toMatch(/Back here, changed: .*\.hearth-bg\//);
+});
+
+test("--bg: the hub watches it and gives the conversation a turn when it ends, with the exit code and its files", async () => {
+  const ended: { w: any; text: string }[] = [];
+  let busy = false;
+  const r = rig({ mac: true, onBgEnd: async (w, text) => { ended.push({ w, text }); }, busy: () => busy });
+  const out = await r.go(["mac", "--bg", "--", "echo flying; sleep 0.4; echo landed > result.txt; echo done-flying"]);
+  expect(out.text).toContain("Started on Studio.");
+  expect(out.text).toContain("don't wait or check on it now");
+  expect(r.run.bgRuns("t1")).toEqual([expect.objectContaining({ threadId: "t1", jobId: "j1", cmd: expect.stringContaining("echo flying") })]);
+  // Still going: nothing said.
+  await r.run.checkBg();
+  expect(ended).toEqual([]);
+  await Bun.sleep(900);
+  // A turn is working in that conversation: it waits, so copying files back doesn't race it.
+  busy = true;
+  await r.run.checkBg();
+  expect(ended).toEqual([]);
+  busy = false;
+  await r.run.checkBg();
+  expect(ended.length).toBe(1);
+  expect(ended[0].w.threadId).toBe("t1");
+  expect(ended[0].text).toContain("[Background run on the user's Mac finished: exit 0");
+  expect(ended[0].text).toContain("done-flying");
+  expect(ended[0].text).toMatch(/Back here, changed: .*result\.txt/);
+  expect(readFileSync(join(r.ws, "result.txt"), "utf8")).toBe("landed\n");
+  expect(r.run.bgRuns()).toEqual([]);
+  // Said once.
+  await r.run.checkBg();
+  expect(ended.length).toBe(1);
+});
+
+test("--bg: a failed run says so, and watches survive a hub restart", async () => {
+  const ended: string[] = [];
+  const r = rig({ mac: true, onBgEnd: async (_w, text) => { ended.push(text); } });
+  await r.go(["mac", "--bg", "--", "sleep 0.3; echo oops >&2; exit 4"]);
+  // The hub restarts: a new RunElsewhere over the same state folder still knows the run.
+  const again = new RunElsewhere({ root: r.root, stateDir: join(r.base, "run-sync"), places: () => (r.run as any).o.places(), exec: (r.run as any).o.exec,
+    gate: async () => "ok", ask: async () => {}, onBgEnd: async (_w, text) => { ended.push(text); }, checkEveryMs: 3_600_000 });
+  expect(again.bgRuns().length).toBe(1);
+  await Bun.sleep(700);
+  await again.checkBg();
+  expect(ended.length).toBe(1);
+  expect(ended[0]).toContain("failed: exit 4");
+  expect(ended[0]).toContain("oops");
 });
 
 test("the skill's command passes the exit code through", () => {

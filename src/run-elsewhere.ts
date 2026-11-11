@@ -303,7 +303,17 @@ export type RunElsewhereOpts = {
   /** A paused cloud computer could be woken for this. */
   wake?: () => void;
   onLine?: (jobId: string, s: string) => void;
+  /** A --bg run there ended: give its conversation a turn with this text (the hub's backgroundEnded path). */
+  onBgEnd?: (w: BgWatch, text: string) => Promise<void>;
+  /** A turn is working in this conversation now: checking (which copies files back) waits so it doesn't race it. */
+  busy?: (threadId: string) => boolean;
+  /** How often --bg runs are checked on (default 3 min); now(): for tests. */
+  checkEveryMs?: number;
+  now?: () => number;
 };
+
+/** A --bg run on another machine the hub keeps an eye on, so the agent never has to: it gets a turn when the run ends. */
+export type BgWatch = { id: string; threadId: string; jobId?: string; deviceId: string; place: string; mac: boolean; dir: string; pid: number; log?: string; cmd: string; startedAt: number };
 
 export type RunArgs = { place: string; cmd: string; why?: string; bg: boolean; with: string[]; get: string[]; timeoutMin: number };
 
@@ -345,7 +355,53 @@ export function parseRunArgv(argv: string[]): RunArgs | "list" | string {
 export const folderKey = (realDir: string) => `${basename(realDir).replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 40) || "work"}-${createHash("sha256").update(realDir).digest("hex").slice(0, 12)}`;
 
 export class RunElsewhere {
-  constructor(private o: RunElsewhereOpts) {}
+  private watches: BgWatch[] = [];
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private checking = false;
+  constructor(private o: RunElsewhereOpts) {
+    try { this.watches = JSON.parse(readFileSync(this.watchFile(), "utf8")); } catch { this.watches = []; }
+    if (this.watches.length) this.startWatching();
+  }
+
+  private now() { return this.o.now?.() ?? Date.now(); }
+  private watchFile() { return join(this.o.stateDir, "bg-watches.json"); }
+  private saveWatches() {
+    mkdirSync(this.o.stateDir, { recursive: true, mode: 0o700 });
+    writeFileSync(this.watchFile(), JSON.stringify(this.watches));
+    if (!this.watches.length && this.timer) { clearInterval(this.timer); this.timer = null; }
+  }
+  private startWatching() {
+    if (this.timer || !this.o.onBgEnd) return;
+    this.timer = setInterval(() => { void this.checkBg(); }, this.o.checkEveryMs ?? 3 * 60_000);
+    (this.timer as any).unref?.();
+  }
+  /** The --bg runs being watched for a conversation (all of them without one). */
+  bgRuns(threadId?: string) { return this.watches.filter((w) => !threadId || w.threadId === threadId); }
+
+  /**
+   * Look in on each --bg run whose machine is online and whose conversation isn't mid-turn. Still going: nothing to say
+   * (its files come back as a side effect). Ended: its files come back and its conversation gets a turn to report.
+   */
+  async checkBg() {
+    if (this.checking || !this.o.onBgEnd) return;
+    this.checking = true;
+    try {
+      for (const w of [...this.watches]) {
+        // A run nobody's heard from in 3 days (the machine never came back): stop watching it.
+        if (this.now() - w.startedAt > 3 * 86_400_000) { this.dropWatch(w.id); continue; }
+        const place = this.o.places().find((p) => p.deviceId === w.deviceId);
+        if (!place?.online || this.o.busy?.(w.threadId)) continue;
+        if (!existsSync(w.dir)) { this.dropWatch(w.id); continue; }
+        const look = `if kill -0 ${w.pid} 2>/dev/null; then echo HEARTH-BG-RUNNING; else echo HEARTH-BG-ENDED; echo "HEARTH-BG-CODE $(cat .hearth-bg/${w.id}.exit 2>/dev/null)"; ${w.log ? `tail -n 30 ${shq(w.log)}` : "true"}; fi`;
+        let r: { code: number; text: string };
+        try { r = await this.sync(place, { place: w.place, cmd: look, bg: false, with: [], get: [], timeoutMin: 2 }, w.dir); } catch { continue; }
+        if (!r.text.includes("HEARTH-BG-ENDED")) continue;
+        this.dropWatch(w.id);
+        try { await this.o.onBgEnd(w, bgEndedText(w, r.text, this.now())); } catch { /* the hub logs its own failures */ }
+      }
+    } finally { this.checking = false; }
+  }
+  private dropWatch(id: string) { this.watches = this.watches.filter((x) => x.id !== id); this.saveWatches(); }
 
   /** Which machine "mac" or a name means. */
   find(name: string): RunPlace | null {
@@ -393,7 +449,17 @@ export class RunElsewhere {
       if (g === "ask") await this.o.ask({ threadId: ctx.threadId, jobId: ctx.jobId, place, cmd: a.cmd, why: a.why });
       return { code: 3, text: `Not run yet: running on ${who} waits for the user's Yes on the card under your reply. ${a.why ? "" : "(Next time, add --why \"<reason>\" so the card says why.) "}In your reply, ask them plainly, for example "Can I run this on ${place.mac ? "your Mac" : place.name}? ${a.why || "<why it needs that machine>"}", and say what it would do there. Finish what you can here meanwhile. When they answer you get a turn; then run the same hearth-run again.` };
     }
-    return this.sync(place, a, dir, ctx.jobId);
+    if (!a.bg || !this.o.onBgEnd) return this.sync(place, a, dir, ctx.jobId);
+    // --bg: the command writes its exit code when it's done, so the hub can say how it ended.
+    const id = randomUUID().slice(0, 8);
+    const res = await this.sync(place, { ...a, cmd: `__hd="$PWD"; (\n${a.cmd}\n); __hc=$?; printf '%s\\n' "$__hc" > "$__hd/.hearth-bg/${id}.exit"` }, dir, ctx.jobId);
+    const pid = Number(res.text.match(/\(pid (\d+)\)/)?.[1]);
+    if (res.code !== 0 || !pid) return res;
+    const log = res.text.match(/output goes to (\.hearth-bg\/\S+\.log)/)?.[1];
+    this.watches.push({ id, threadId: ctx.threadId, jobId: ctx.jobId, deviceId: place.deviceId, place: a.place, mac: place.mac, dir, pid, log, cmd: a.cmd, startedAt: this.now() });
+    this.saveWatches();
+    this.startWatching();
+    return { ...res, text: `${res.text}\nThe hub watches it: when it ends, you get a turn here with how it went, and its files come back. So don't wait or check on it now: reply to the user.` };
   }
 
   private async sync(place: RunPlace, a: RunArgs, dir: string, jobId?: string): Promise<{ code: number; text: string }> {
@@ -437,6 +503,24 @@ export class RunElsewhere {
     writeManifest(mfile, after(r.sent, scan(dir, r.sent), back.got, back.removed));
     return { code: res.code ?? 1, text: report(place, a, r.sentCount, r.left, res, back) };
   }
+}
+
+/** The turn a conversation gets when its --bg run on another machine ended. */
+export function bgEndedText(w: BgWatch, checked: string, now = Date.now()): string {
+  const code = checked.match(/HEARTH-BG-CODE (\d+)/)?.[1];
+  const mins = Math.max(1, Math.round((now - w.startedAt) / 60_000));
+  const took = mins < 90 ? `${mins} min` : `${(mins / 60).toFixed(1)} h`;
+  const where = w.mac ? "the user's Mac" : w.place;
+  const head = code === undefined
+    ? `[Background run on ${where} stopped after about ${took}, without finishing normally (no exit code: it was killed, or the machine restarted).]`
+    : `[Background run on ${where} ${code === "0" ? "finished" : "failed"}: exit ${code} after about ${took}.]`;
+  const [files, out = ""] = checked.split("--- output ---");
+  const last = out.replace(/HEARTH-BG-ENDED\n?|HEARTH-BG-CODE \d*\n?/g, "").trim();
+  const back = files.split("\n").filter((l) => /^(Back here|Left on|.* changed on both sides)/.test(l)).join("\n");
+  return `${head}
+Command: ${w.cmd}
+${back ? `${back}\n` : "No files changed since the last look.\n"}${last ? `Last lines of its output:\n<untrusted>\n${last.slice(-3000)}\n</untrusted>\n` : ""}
+Tell the user how it went: the results or what broke, and where to look. Read the output and the files it wrote first.`;
 }
 
 function report(place: RunPlace, a: RunArgs, sent: number, left: { path: string; size: number }[], res: ExecRes, back: { got: string[]; kept: { path: string; as: string }[]; removed: string[] }) {
@@ -495,9 +579,12 @@ Everything else: just run it here. Don't move work for no reason.
   reply and tells you so. In your reply, ask them plainly and say why ("Can I run the build on your Mac? It needs
   Xcode."). Always pass \`--why\` so the card says it. When they say yes you get a turn: run the same command again.
   If they say no, don't ask again in this conversation; do what you can here.
-- \`--bg\` starts something that keeps running (a dev server, a watcher) and returns right away with its pid; its output
-  goes to .hearth-bg/<time>.log, which comes back with your next run. Stop it with \`hearth-run mac -- kill <pid>\`.
-- \`--timeout <min>\` (default 30) for long builds.
+- Anything that takes more than a minute or two there (a batch of runs, a long build or test, a dev server): use
+  \`--bg\`. It returns right away with its pid; its output goes to .hearth-bg/<time>.log. Then reply to the user. Don't
+  wait, sleep or check on it in a loop: the hub checks on it, and when it ends you get a turn with its exit code and
+  last output, and its files are back in your folder. The user asks how it's going: one quick
+  \`hearth-run mac -- tail -5 .hearth-bg/*.log\`. Stop it with \`hearth-run mac -- kill <pid>\`.
+- \`--timeout <min>\` (default 30) only for something short you need the answer to before you can reply.
 
 ## Files
 - Folders like node_modules, .venv, DerivedData, Pods never move: each machine builds its own (run the install there).
