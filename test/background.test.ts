@@ -50,16 +50,17 @@ describe("hearth-bg", () => {
     expect(ends).toHaveLength(0);
   });
 
-  test("each start says how busy the machine is, and nothing starts when memory is nearly gone", async () => {
+  test("each start says how busy the machine is, and warns when memory is nearly gone", async () => {
     let avail = 3000;
     const { bg, ws } = setup({ machine: () => ({ cores: 2, load: 2.4, availMB: avail, totalMB: 3800 }) });
     const ok = await bg.agent(["start", "--name", "a", "--", "sleep 5"], ws, who);
     expect(ok).toContain("Machine now: 2 CPU cores, load 2.4 (CPU fully busy); 2.9 GB of 3.7 GB memory free; 1 background task running.");
     avail = 400;
-    const no = await bg.agent(["start", "--name", "b", "--", "sleep 5"], ws, who);
-    expect(no).toContain("not started, the machine is nearly out of memory");
-    expect(no).toContain("one after another");
-    expect(bg.list().map((t) => t.name)).toEqual(["a"]);
+    const tight = await bg.agent(["start", "--name", "b", "--", "sleep 5"], ws, who);
+    expect(tight).toContain("Started b");
+    expect(tight).toContain("nearly out of memory when this started");
+    expect(tight).toContain("one after another");
+    await bg.agent(["stop", "b"], ws, who);
     await bg.agent(["stop", "a"], ws, who);
   });
 
@@ -86,6 +87,14 @@ describe("hearth-bg", () => {
     expect(text).toContain("nearly out of memory (0.2 GB free of 3.7 GB");
     expect(text).toContain("using the most (1.9 GB)");
     expect(text).toContain("one after another");
+    // Started again (by an agent that may not have seen the notice): it starts, and the reply says why it stopped.
+    expect(await bg.agent(["list"], ws, who)).toContain("machine ran out of memory (it used 1.9 GB)");
+    const again = await bg.agent(["start", "--name", "new", "--", "sleep 30"], ws, who);
+    expect(again).toContain("Started new");
+    expect(again).toContain("the hub stopped new");
+    expect(again).toContain("because the machine ran out of memory (it was using 1.9 GB)");
+    await bg.agent(["stop", "new"], ws, who);
+    await until(() => bg.list().find((t) => t.name === "new")!.status !== "running");
     now += 31_000;
     expect(bg.checkMemory()).toBe("old");
     await until(() => ends.length === 2);
