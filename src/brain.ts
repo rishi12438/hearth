@@ -568,6 +568,8 @@ function atScale(code: "claude" | "codex" | null | undefined, workspace: Place |
     "When a job covers many items (every holding, every product, a dozen sites), don't do them one by one by hand: write a short",
     "script (Python or bash) that fetches or computes them all, with the requests running in parallel, and read its output (the",
     "automate-repetitive-work skill says how, and how to keep every item right: counts, spot-checks, no silent drops). Use the hub's tools (hearth-*) for the user's own data. Check what a script printed before relying on it.",
+    "Anything that takes more than a few minutes (a simulation, a batch of runs, training, a long build): start it with hearth-bg",
+    "(the hearth-bg skill) and reply to the user while it runs. Everything you start yourself stops when your turn ends.",
     ...(code === "claude" ? ["For wide searching, hand pieces to the scout agent (a small fast model), several at once in one message, and keep the",
       "judgement and the answer for yourself."] : []),
     ...(lead ? ["THE LEAD (a stronger model on your team) is on hand: ask it when you're stuck after two tries, before you pick an",
@@ -935,6 +937,12 @@ export class Brain {
     // The browser's logins file too: only the browser daemon (outside the jail) reads it, never the brain.
     const args = jailArgs({ dataDir: this.config.dataDir, workDir: this.workDir, hideFiles: [join(process.cwd(), ".env"), masterKeyPath(), loginsFile()] });
     return (this.jailState = jailWorks(args) ? args : null);
+  }
+
+  /** A shell for a hub-owned background task (background.ts): this hub's jail, started in that folder, with a job's env. */
+  bgShell(cwd: string): { prefix: string[]; env: Record<string, string> } | null {
+    const jail = this.jail();
+    return jail ? { prefix: inFolder(jail, cwd), env: agentEnv(undefined, this.skills().paths) } : null;
   }
 
   /** Set by the hub: write your connected logins where the brain's browser loads them (brains/browser-logins.ts). */
