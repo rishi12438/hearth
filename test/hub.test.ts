@@ -1202,7 +1202,7 @@ test("a brain picked in a ramble's header runs every job there on that one model
   const calls: string[] = [];
   (hub.brain as any).think = async (b: any, p: any) => {
     if (b.mode === "orchestrate") return JSON.stringify({ reply: "On it", jobs: [{ task: "List my orders", teammate: "Research", effort: "light" }] });
-    calls.push(`${b.mode}:${p.harness}/${p.model}${p.pinned ? "!" : ""}`);
+    calls.push(`${b.mode}:${p.harness}/${p.model}${p.pinned ? "!" : ""}${b.top ? "^" : ""}`);
     return "[[escalate]] too hard";
   };
   await hub.setBrains({ workhorse: { harness: "echo", model: "small" }, heavy: { harness: "echo", model: "big" } });
@@ -1214,7 +1214,7 @@ test("a brain picked in a ramble's header runs every job there on that one model
   calls.length = 0;
   await hub.ramble("list my orders again", thread.id);
   await until(async () => (await store.all<Job>("jobs")).filter((j) => j.status === "done" || j.status === "failed").length === 2);
-  expect(calls.filter((c) => c.startsWith("job:") || c.startsWith("legwork:") || c.startsWith("voice:") || c.startsWith("coach:"))).toEqual(["job:echo/pinned-1!"]);
+  expect(calls.filter((c) => c.startsWith("job:") || c.startsWith("legwork:") || c.startsWith("voice:") || c.startsWith("coach:"))).toEqual(["job:echo/pinned-1!^"]); // ^: told it's at the top, so it won't hand up
   expect((await hub.setThreadBrain(thread.id, null)).value?.brain).toBeUndefined();
 });
 
