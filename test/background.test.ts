@@ -14,7 +14,7 @@ function setup(over: Partial<ConstructorParameters<typeof Background>[0]> = {}) 
   mkdirSync(ws, { recursive: true });
   const ends: BgEnd[] = [];
   const stateFile = join(root, "background", "tasks.json");
-  const make = () => new Background({ roots: [join(root, "brain")], stateFile, shell: () => ({ prefix: [], env: { PATH: process.env.PATH || "/usr/bin:/bin", HOME: root } }), onEnd: (e) => { ends.push(e); }, ...over });
+  const make = () => new Background({ roots: [join(root, "brain")], stateFile, machine: () => ({ cores: 2, load: 0.5, availMB: 3000, totalMB: 4000 }), shell: () => ({ prefix: [], env: { PATH: process.env.PATH || "/usr/bin:/bin", HOME: root } }), onEnd: (e) => { ends.push(e); }, ...over });
   return { root, ws, ends, stateFile, bg: make(), make };
 }
 
@@ -48,6 +48,19 @@ describe("hearth-bg", () => {
     expect(bg.list()[0].status).toBe("stopped");
     await Bun.sleep(100);
     expect(ends).toHaveLength(0);
+  });
+
+  test("each start says how busy the machine is, and nothing starts when memory is nearly gone", async () => {
+    let avail = 3000;
+    const { bg, ws } = setup({ machine: () => ({ cores: 2, load: 2.4, availMB: avail, totalMB: 3800 }) });
+    const ok = await bg.agent(["start", "--name", "a", "--", "sleep 5"], ws, who);
+    expect(ok).toContain("Machine now: 2 CPU cores, load 2.4 (CPU fully busy); 2.9 GB of 3.7 GB memory free; 1 background task running.");
+    avail = 400;
+    const no = await bg.agent(["start", "--name", "b", "--", "sleep 5"], ws, who);
+    expect(no).toContain("not started, the machine is nearly out of memory");
+    expect(no).toContain("one after another");
+    expect(bg.list().map((t) => t.name)).toEqual(["a"]);
+    await bg.agent(["stop", "a"], ws, who);
   });
 
   test("only runs inside the workspaces", async () => {

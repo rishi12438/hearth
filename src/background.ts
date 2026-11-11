@@ -1,6 +1,6 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
-import { constants as osConstants } from "node:os";
+import { constants as osConstants, cpus, freemem, loadavg, totalmem } from "node:os";
 import { expendable } from "./oom";
 
 // Background tasks: something long a job starts (a simulation, a batch of runs, a training loop, a dev server) that keeps
@@ -48,6 +48,23 @@ export type BgTask = BgWho & {
 };
 export type BgEnd = { task: BgTask; why: "exited" | "hub-restart" | "restart-loop"; tail: string };
 
+/** How busy the machine is. availMB: memory a new process can still use (Linux MemAvailable, else free). */
+export type Machine = { cores: number; load: number; availMB: number; totalMB: number };
+/** Below this much free memory a new task isn't started: it would run the machine out (the hub went down that way). */
+export const MIN_FREE_MB = 700;
+
+export function machineNow(): Machine {
+  let availMB = Math.round(freemem() / 1048576);
+  try { const m = readFileSync("/proc/meminfo", "utf8").match(/MemAvailable:\s+(\d+) kB/); if (m) availMB = Math.round(Number(m[1]) / 1024); } catch {}
+  return { cores: cpus().length || 1, load: loadavg()[0], availMB, totalMB: Math.round(totalmem() / 1048576) };
+}
+
+const gb = (mb: number) => `${(mb / 1024).toFixed(1)} GB`;
+export function machineLine(m: Machine, running: number): string {
+  const busy = m.load >= m.cores ? " (CPU fully busy)" : "";
+  return `Machine now: ${m.cores} CPU cores, load ${m.load.toFixed(1)}${busy}; ${gb(m.availMB)} of ${gb(m.totalMB)} memory free; ${running} background task${running === 1 ? "" : "s"} running.`;
+}
+
 export type BgProc = { pid: number; exited: Promise<number>; kill: () => void };
 export type BackgroundOpts = {
   /** Folders a task may run in (the brains' workspaces). */
@@ -60,6 +77,8 @@ export type BackgroundOpts = {
   onEnd?: (e: BgEnd) => void | Promise<void>;
   spawn?: (cmd: string[], cwd: string, env: Record<string, string>, logFd: number) => BgProc;
   now?: () => number;
+  /** How busy the machine is (tests pass their own). */
+  machine?: () => Machine;
   log?: (s: string) => void;
 };
 
@@ -93,7 +112,7 @@ export class Background {
   private o: Required<Omit<BackgroundOpts, "onEnd">> & { onEnd?: BackgroundOpts["onEnd"] };
 
   constructor(opts: BackgroundOpts) {
-    this.o = { spawn: realSpawn, now: Date.now, log: () => {}, ...opts } as any;
+    this.o = { spawn: realSpawn, now: Date.now, machine: machineNow, log: () => {}, ...opts } as any;
     try { for (const t of JSON.parse(readFileSync(this.o.stateFile, "utf8")) as BgTask[]) if (t?.name) this.tasks.set(t.name, t); } catch {}
   }
 
@@ -159,6 +178,11 @@ export class Background {
     if (have?.status === "running") return `Error: ${name} is already running (since ${ago(this.o.now() - have.startedAt)} ago). hearth-bg status ${name} shows it; stop it first, or pick another --name.`;
     const running = this.list().filter((t) => t.status === "running").length;
     if (running >= MAX_RUNNING) return `Error: ${MAX_RUNNING} background tasks are running already. hearth-bg list shows them; stop one that's done.`;
+    const m = this.o.machine();
+    if (m.availMB < MIN_FREE_MB) return `Error: not started, the machine is nearly out of memory.
+${machineLine(m, running)}
+Starting more would run it out and take everything down with it. Wait for a running task to finish, or stop one
+(hearth-bg list), and run things one after another instead of side by side. Tell the user that's why it waits.`;
     const t: BgTask = { name, cmd: command, cwd: dir, log: `.hearth-bg/${name}.log`, restart, startedAt: this.o.now(), status: "running", ...who };
     const out = this.launch(t, `started by ${who.by}`);
     if (!out.ok) return `Error: ${out.error}`;
@@ -167,6 +191,7 @@ export class Background {
     this.save();
     this.o.log(`background ${name} started (${who.by}): ${command.slice(0, 200)}`);
     return `Started ${name} in the background (pid ${t.pid}). It keeps running after this turn ends and when the user sends new messages${restart ? ", and starts again if the hub restarts" : ""}.
+${machineLine(m, running + 1)} (before this one got going)
 Output: ${t.log} (in this folder). Check it with hearth-bg status ${name}; stop it with hearth-bg stop ${name}.
 When it ends you get a turn in this conversation to tell the user how it went.
 Now reply to the user: say what's running, roughly how long it takes, and how they can follow along. Don't wait for it.`;
@@ -326,9 +351,20 @@ replies and the user's messages.
    - It runs in your current folder, with the same tools and logins you have. Output goes to .hearth-bg/<name>.log.
    - \`--restart\`: if the hub restarts (a deploy), it starts again. Use it when the command resumes safely; leave it off
      for something that must not run twice.
-   - Several at once: one task each (\`--name sf\`, \`--name desert\`), or one script that runs them all.
+   - Several at once: one task each (\`--name sf\`, \`--name desert\`), or one script that runs them all. See
+     "Check the machine first" below before you do.
 3. Reply right away: what's running, about how long it takes, and how they can follow (a live page, see hearth-tunnel
    serve, or "ask me how it's going"). Then your turn is done; the task isn't.
+
+## Check the machine first
+Every task shares this machine's CPU and memory with the hub and everyone else's work. Too many at once runs it out of
+memory and everything stops, your tasks and the conversation with them. So before running things side by side:
+- Look: \`nproc\` (CPU cores), \`free -m\` (memory; the "available" column), \`hearth-bg list\` (what's running).
+- Find out what one costs: start ONE, wait a minute, check its memory (\`ps -o rss,args -u $(whoami) --sort=-rss | head\`)
+  and \`free -m\` again. A coding agent (claude, codex) or a browser is often 1 GB or more each.
+- Only then add more, and keep at least a quarter of memory free and no more busy processes than cores. If they
+  don't fit, run them one after another (one script that loops) and say so to the user.
+Each start tells you how busy the machine is; hearth-bg won't start a task when memory is nearly gone.
 
 ## While it runs
 - The user asks how it's going: \`hearth-bg status <name>\` (and read its result files), then answer with real numbers.
