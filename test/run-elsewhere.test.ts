@@ -84,8 +84,6 @@ test("asks first: no run, no copy until the user says yes", async () => {
   // Asking again while the card waits doesn't make a second card.
   await r.go(["mac", "--", "echo hi"]);
   expect(r.asked.length).toBe(1);
-  r.setGate("no");
-  expect((await r.go(["mac", "--", "echo hi"])).text).toContain("said no");
 });
 
 test("copies the folder there, runs, and brings changes back; next time only what changed", async () => {
@@ -247,7 +245,7 @@ beforeEach(async () => {
 });
 afterEach(async () => { hub.stop(); await hub.idle(20_000); await store.close(); });
 
-test("hub: one card per conversation and machine; Yes lets it run there, No is remembered, no Always", async () => {
+test("hub: one card per conversation and machine; Yes lets it run there, No is for that card only, no Always", async () => {
   const place = { deviceId: "d1", name: "Studio", mac: true, online: true, platform: "darwin" };
   expect(await hub.runGate("t1", "d1")).toBe("ask");
   await hub.requestRun({ threadId: "t1", place, cmd: "xcodebuild build", why: "it needs Xcode" });
@@ -267,5 +265,8 @@ test("hub: one card per conversation and machine; Yes lets it run there, No is r
   await hub.requestRun({ threadId: "t2", place, cmd: "ls" });
   const c2 = (await store.all<Approval>("approvals")).find((a) => a.action.type === "run" && a.status === "pending")!;
   await hub.decideApproval(c2.id, false);
-  expect(await hub.runGate("t2", "d1")).toBe("no");
+  // A No doesn't lock the conversation: asking again puts up a new card.
+  expect(await hub.runGate("t2", "d1")).toBe("ask");
+  await hub.requestRun({ threadId: "t2", place, cmd: "ls" });
+  expect((await store.all<Approval>("approvals")).filter((a) => a.action.type === "run" && a.status === "pending").length).toBe(1);
 });

@@ -2678,15 +2678,13 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
 
   /** Set by the server once computers are linked. */
   runElsewhere: import("./run-elsewhere.ts").RunElsewhere | null = null;
-  /** "<thread>|<device>": you said yes (or no) to running there in that conversation, until when. */
+  /** "<thread>|<device>": you said yes to running there in that conversation, until when. A No is for that one card only. */
   private runYes = new Map<string, number>();
-  private runNo = new Map<string, number>();
 
   /** May this conversation run things on that machine? There's no "always": every conversation asks. */
   async runGate(threadId: string, deviceId: string): Promise<import("./run-elsewhere.ts").RunGate> {
     const t = this.clock().getTime(), k = `${threadId}|${deviceId}`;
     if ((this.runYes.get(k) ?? 0) > t) return "ok";
-    if ((this.runNo.get(k) ?? 0) > t) return "no";
     const waiting = (await this.store.all<Approval>("approvals")).some((a) => a.status === "pending" && a.action.type === "run" && a.action.threadId === threadId && a.action.deviceId === deviceId);
     return waiting ? "pending" : "ask";
   }
@@ -2714,7 +2712,6 @@ Its work folder is copied to ~/Hearth/runs there, the commands run in that copy,
 
   private runOk(act: Extract<Approval["action"], { type: "run" }>): { ok: boolean; output: string } {
     this.runYes.set(`${act.threadId}|${act.deviceId}`, this.clock().getTime() + 12 * 3600_000);
-    this.runNo.delete(`${act.threadId}|${act.deviceId}`);
     return { ok: true, output: `The user said yes: you can run commands on ${act.computer} in this conversation. Carry on: run the same hearth-run again (${act.cmd.slice(0, 200)}).` };
   }
 
@@ -3191,7 +3188,6 @@ ${JSON.stringify(shown, null, 1)}
       await this.log("approval.always", `Always let teammates use ${macMode === "mine" ? "your own Chrome" : "a background Chrome"} on your Mac for blocked sites`);
     }
     if (!yes && !byTyping && ap.action.type === "browser") this.macBrowserNo.set(ap.action.threadId, this.clock().getTime() + 12 * 3600_000);
-    if (!yes && !byTyping && ap.action.type === "run") this.runNo.set(`${ap.action.threadId}|${ap.action.deviceId}`, this.clock().getTime() + 12 * 3600_000);
     if (yes && always && ap.action.type === "mcp") {
       this.connect?.mcp.setGate(ap.action.server, ap.action.tool, false);
       await this.log("approval.always", `Always allow ${ap.action.server}: ${ap.action.tool}`);

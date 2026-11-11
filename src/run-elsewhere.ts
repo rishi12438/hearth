@@ -288,7 +288,7 @@ const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 export type RunPlace = { deviceId: string; name: string; mac: boolean; online: boolean; platform: string;
   /** Its app takes hearth-run (an older one, or one with HEARTH_NO_RUN, doesn't). */
   canRun?: boolean };
-export type RunGate = "ok" | "ask" | "pending" | "no";
+export type RunGate = "ok" | "ask" | "pending";
 
 export type RunElsewhereOpts = {
   /** The brain's folder: only folders inside it can be copied (a job's workspace). */
@@ -417,7 +417,7 @@ export class RunElsewhere {
     const rows = await Promise.all(all.map(async (p) => {
       const g = p.online ? await this.o.gate(threadId, p.deviceId) : null;
       const what = p.mac ? "the user's own Mac: macOS, Xcode, their apps and files" : `a cloud computer${p.platform ? ` (${p.platform})` : ""}: for heavy or long work`;
-      const state = !p.online ? "offline" : p.canRun === false ? "online, but its Hearth app can't take hearth-run (needs an update)" : g === "ok" ? "online, the user said yes in this conversation" : g === "no" ? "online, but the user said no in this conversation" : g === "pending" ? "online, waiting for the user's answer" : "online, asks the user first";
+      const state = !p.online ? "offline" : p.canRun === false ? "online, but its Hearth app can't take hearth-run (needs an update)" : g === "ok" ? "online, the user said yes in this conversation" : g === "pending" ? "online, waiting for the user's answer" : "online, asks the user first";
       return `- ${p.mac ? "mac" : p.name}${p.mac ? ` (${p.name})` : ""}: ${what}. ${state}.`;
     }));
     return `Machines you can run on (hearth-run <machine> -- <command>):\n${rows.join("\n")}`;
@@ -444,7 +444,6 @@ export class RunElsewhere {
     if (!dir.startsWith(root + sep)) return { code: 2, text: "hearth-run copies your current folder, and that has to be your workspace (or a folder in it). cd back there and run it again." };
     const g = await this.o.gate(ctx.threadId, place.deviceId);
     const who = place.mac ? `the user's Mac (${place.name})` : place.name;
-    if (g === "no") return { code: 3, text: `The user said no to running things on ${who} in this conversation. Do it here, or tell them what you'd need it for.` };
     if (g !== "ok") {
       if (g === "ask") await this.o.ask({ threadId: ctx.threadId, jobId: ctx.jobId, place, cmd: a.cmd, why: a.why });
       return { code: 3, text: `Not run yet: running on ${who} waits for the user's Yes on the card under your reply. ${a.why ? "" : "(Next time, add --why \"<reason>\" so the card says why.) "}In your reply, ask them plainly, for example "Can I run this on ${place.mac ? "your Mac" : place.name}? ${a.why || "<why it needs that machine>"}", and say what it would do there. Finish what you can here meanwhile. When they answer you get a turn; then run the same hearth-run again.` };
@@ -578,7 +577,8 @@ Everything else: just run it here. Don't move work for no reason.
 - **It asks the user first.** The first run on a machine in a conversation doesn't run: it puts a card under your
   reply and tells you so. In your reply, ask them plainly and say why ("Can I run the build on your Mac? It needs
   Xcode."). Always pass \`--why\` so the card says it. When they say yes you get a turn: run the same command again.
-  If they say no, don't ask again in this conversation; do what you can here.
+  A No is for that one card only: do what you can here, and don't keep re-asking for the same run. If they later
+  ask you to run it there, just run it again: it puts up a new card.
 - Anything that takes more than a minute or two there (a batch of runs, a long build or test, a dev server): use
   \`--bg\`. It returns right away with its pid; its output goes to .hearth-bg/<time>.log. Then reply to the user. Don't
   wait, sleep or check on it in a loop: the hub checks on it, and when it ends you get a turn with its exit code and
