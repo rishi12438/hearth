@@ -194,6 +194,7 @@ export class Hub {
   private started = new Set<string>();   // job ids already handed to runJob
   private stops = new Map<string, AbortController>(); // running jobs, so a new message can restart one
   private cancelled = new Set<string>();              // running jobs you tapped Stop on
+  private jobThreads = new Map<string, string>();  // running job id -> its thread
   private running = new Map<string, string>();     // job id -> the model on it now and where ("Claude opus on the cloud")
   private flushing = new Set<string>();               // threads whose queued messages are going out right now
   private additions = new Map<string, string[]>();    // what the user added to a running job, applied when it restarts
@@ -1119,7 +1120,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     return true;
   }
   private async handBack(job: Job, meter: Meter) {
-    this.stops.delete(job.id); this.steps.delete(job.id); this.frames.delete(job.id);
+    this.stops.delete(job.id); this.jobThreads.delete(job.id); this.steps.delete(job.id); this.frames.delete(job.id);
     await this.addSpend(job.messageId, meter.costUsd);
     await this.store.remove("jobs", job.id);
     this.emit("job", { ...job, handedBack: true });
@@ -1444,6 +1445,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
     const started = Date.now();
     const stop = new AbortController();
     this.stops.set(job.id, stop);
+    this.jobThreads.set(job.id, job.threadId);
     // Live progress for the app ("Searching: pottery gifts"): an event only, not stored, so it can't race the job's own saves.
     const show = (what: string) => {
       const log = this.steps.get(job.id) ?? [];
@@ -1497,7 +1499,7 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
       // whatever the write-up kept. The tool owns this, not the wording.
       if (this.phoneHandover?.(job.id) && typeof patch.result === "string" && !patch.result.includes("[[phone]]")) patch = { ...patch, result: `${patch.result.trim()}\n\n[[phone]]` };
       const stepsSoFar = (this.steps.get(job.id) || []).map((x) => x.text);
-      this.stops.delete(job.id); this.steps.delete(job.id); this.frames.delete(job.id); this.running.delete(job.id);
+      this.stops.delete(job.id); this.jobThreads.delete(job.id); this.steps.delete(job.id); this.frames.delete(job.id); this.running.delete(job.id);
       if (stop.signal.aborted && this.cancelled.delete(job.id)) {
         this.additions.delete(job.id); this.additions.delete(`${job.id}:label`);
         await this.addSpend(job.messageId, meter.costUsd);
@@ -2614,6 +2616,8 @@ ${JSON.stringify({ variables: e.variables, payload: e.payload }).slice(0, 6000)}
 
   /** Is this job running right now? (The phone stays on, and in live view, while it is.) */
   isJobRunning(jobId: string) { return this.stops.has(jobId); }
+  /** A turn is running in this conversation right now. */
+  threadBusy(threadId: string) { return [...this.jobThreads.values()].includes(threadId); }
 
   /** A live-view picture for a job (its own browser's, or one from your Mac's background Chrome). */
   pushFrame(jobId: string, f: { mime: string; data: Uint8Array }, threadId?: string) {
@@ -2707,11 +2711,21 @@ Its work folder is copied to ~/Hearth/runs there, the commands run in that copy,
   /** A background task (background.ts) ended on its own: its conversation gets a hidden turn to tell the user how it went. */
   async backgroundEnded(e: import("./background.ts").BgEnd) {
     await this.log("bg.ended", `${e.task.name}: ${e.why === "hub-restart" ? "stopped by a hub restart" : e.why === "memory" ? "stopped, machine nearly out of memory" : `${e.task.status}, exit ${e.task.code}`}`).catch(() => {});
-    const job = e.task.jobId ? await this.store.get<Job>("jobs", e.task.jobId) : null;
-    const root = job?.followsUp ? await this.store.get<Job>("jobs", job.followsUp) : job;
-    if (!root || root.threadId !== e.task.threadId) return;
     const { endedText } = await import("./background.ts");
-    const task = endedText(e, this.clock().getTime());
+    await this.wakeForEnd(e.task.jobId, e.task.threadId, endedText(e, this.clock().getTime()));
+  }
+
+  /** A --bg run on the Mac or a cloud computer ended (run-elsewhere.ts watches it): its conversation gets a turn to report. */
+  async remoteBgEnded(w: import("./run-elsewhere.ts").BgWatch, text: string) {
+    await this.log("run.bg.ended", `${w.place}: ${w.cmd.slice(0, 80)}`).catch(() => {});
+    await this.wakeForEnd(w.jobId, w.threadId, text);
+  }
+
+  /** Something the agent left running ended: a hidden turn in its conversation (held if a turn is going) to tell the user. */
+  private async wakeForEnd(jobId: string | null | undefined, threadId: string | null | undefined, task: string) {
+    const job = jobId ? await this.store.get<Job>("jobs", jobId) : null;
+    const root = job?.followsUp ? await this.store.get<Job>("jobs", job.followsUp) : job;
+    if (!root || !threadId || root.threadId !== threadId) return;
     const m = await this.addMessage({ role: "user", text: task, threadId: root.threadId, continues: [root.id], ...(root.threadId.startsWith("tm-") ? {} : { hidden: true }) } as any);
     const { job: next, held } = await this.followUp(root, m, task, false, true);
     if (held) return;

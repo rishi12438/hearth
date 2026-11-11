@@ -183,7 +183,9 @@ describe("hearth-bg", () => {
     expect(s.body).toContain("never\nsleep or poll");
     expect(s.scripts["hearth-bg"]).toContain("/api/agent/bg");
     const prompt = buildPrompt({ mode: "job", input: "x" } as any, "claude");
-    expect(prompt).toContain("start it with hearth-bg");
+    expect(prompt).toContain("NEVER SIT WAITING IN YOUR TURN");
+    expect(prompt).toContain("hearth-bg here, hearth-run --bg on another machine");
+    expect(s.body).not.toContain("wait a minute");
   });
 });
 
