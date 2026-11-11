@@ -315,6 +315,16 @@ test("a job that hits a sign-out checks your Mac: a fresh login reruns it, a sig
   const out7 = await p7;
   expect(out7.done.some((d: any) => /running it again/.test(d.label))).toBe(true);
 
+  // Rerun and asked again ("sync from my Mac" does that): the same login again doesn't park it on "sign in on your Mac",
+  // where Try again would only rerun the ask and park it again.
+  await store.put("jobs", { ...(await store.get("jobs", j7.id)), blocked: undefined, status: "working" } as any);
+  const p8 = hub.applyActions([{ type: "connection.refresh", site: "aliexpress.com" }], "t", { jobId: j7.id, threadId: "t1" });
+  await Bun.sleep(5);
+  cmp.message("mac1", JSON.stringify({ t: "cookies", site: "aliexpress.com", data: fresh2, hash: "h2" }));
+  const out8 = await p8;
+  expect(await blockedOf(j7.id)).toBeUndefined();
+  expect(out8.done.some((d: any) => /already has your Mac's latest/.test(d.label))).toBe(true);
+
   // The hub couldn't hand logins to the jobs' browser: the job says that, not "sign in on your Mac", and doesn't rerun.
   hub.loginsProblem = "EROFS";
   const j5 = await job();
