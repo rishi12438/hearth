@@ -2706,7 +2706,7 @@ Its work folder is copied to ~/Hearth/runs there, the commands run in that copy,
 
   /** A background task (background.ts) ended on its own: its conversation gets a hidden turn to tell the user how it went. */
   async backgroundEnded(e: import("./background.ts").BgEnd) {
-    await this.log("bg.ended", `${e.task.name}: ${e.why === "hub-restart" ? "stopped by a hub restart" : `${e.task.status}, exit ${e.task.code}`}`).catch(() => {});
+    await this.log("bg.ended", `${e.task.name}: ${e.why === "hub-restart" ? "stopped by a hub restart" : e.why === "memory" ? "stopped, machine nearly out of memory" : `${e.task.status}, exit ${e.task.code}`}`).catch(() => {});
     const job = e.task.jobId ? await this.store.get<Job>("jobs", e.task.jobId) : null;
     const root = job?.followsUp ? await this.store.get<Job>("jobs", job.followsUp) : job;
     if (!root || root.threadId !== e.task.threadId) return;

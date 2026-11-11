@@ -63,6 +63,28 @@ describe("hearth-bg", () => {
     await bg.agent(["stop", "a"], ws, who);
   });
 
+  test("memory running low while tasks run: the newest is stopped and its conversation told why", async () => {
+    let avail = 3000, now = 1_000_000;
+    const { bg, ws, ends } = setup({ machine: () => ({ cores: 2, load: 3, availMB: avail, totalMB: 3800 }), now: () => now });
+    await bg.agent(["start", "--name", "old", "--", "sleep 30"], ws, who);
+    now += 1000;
+    await bg.agent(["start", "--name", "new", "--", "sleep 30"], ws, who);
+    expect(bg.checkMemory()).toBeNull();
+    avail = 200;
+    expect(bg.checkMemory()).toBe("new");
+    expect(bg.checkMemory()).toBeNull(); // one at a time: its memory gets time to come back
+    await until(() => ends.length === 1);
+    expect(ends[0].why).toBe("memory");
+    expect(bg.list().find((t) => t.name === "new")!.status).toBe("stopped");
+    expect(bg.list().find((t) => t.name === "old")!.status).toBe("running");
+    const text = endedText(ends[0]);
+    expect(text).toContain("nearly out of memory (0.2 GB free of 3.7 GB");
+    expect(text).toContain("one after another");
+    now += 31_000;
+    expect(bg.checkMemory()).toBe("old");
+    await until(() => ends.length === 2);
+  });
+
   test("only runs inside the workspaces", async () => {
     const { bg, root } = setup();
     expect(await bg.agent(["start", "--", "true"], root, who)).toContain("runs in your workspace");
