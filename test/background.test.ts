@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Background, backgroundSkill, endedText, MAX_QUICK_RESTARTS, type BgEnd } from "../src/background.ts";
+import { Background, backgroundSkill, endedText, MAX_QUICK_RESTARTS, treeMemoryMB, type BgEnd } from "../src/background.ts";
 import { expendable } from "../src/oom.ts";
 import { buildPrompt } from "../src/brain.ts";
 
@@ -63,13 +63,18 @@ describe("hearth-bg", () => {
     await bg.agent(["stop", "a"], ws, who);
   });
 
-  test("memory running low while tasks run: the newest is stopped and its conversation told why", async () => {
+  test("memory running low while tasks run: the biggest is stopped and its conversation told why", async () => {
     let avail = 3000, now = 1_000_000;
-    const { bg, ws, ends } = setup({ machine: () => ({ cores: 2, load: 3, availMB: avail, totalMB: 3800 }), now: () => now });
+    let sizes: Record<string, number> = {};
+    const { bg, ws, ends } = setup({ machine: () => ({ cores: 2, load: 3, availMB: avail, totalMB: 3800 }), now: () => now,
+      memoryOf: (pids) => new Map(pids.map((p) => [p, sizes[bg.list().find((t) => t.pid === p)!.name] || 0])) });
     await bg.agent(["start", "--name", "old", "--", "sleep 30"], ws, who);
     now += 1000;
     await bg.agent(["start", "--name", "new", "--", "sleep 30"], ws, who);
     expect(bg.checkMemory()).toBeNull();
+    // A small newer task (a viewer) is left alone; the big older one goes.
+    await bg.agent(["start", "--name", "tiny", "--", "sleep 30"], ws, who);
+    sizes = { old: 300, new: 1900, tiny: 40 };
     avail = 200;
     expect(bg.checkMemory()).toBe("new");
     expect(bg.checkMemory()).toBeNull(); // one at a time: its memory gets time to come back
@@ -79,10 +84,12 @@ describe("hearth-bg", () => {
     expect(bg.list().find((t) => t.name === "old")!.status).toBe("running");
     const text = endedText(ends[0]);
     expect(text).toContain("nearly out of memory (0.2 GB free of 3.7 GB");
+    expect(text).toContain("using the most (1.9 GB)");
     expect(text).toContain("one after another");
     now += 31_000;
     expect(bg.checkMemory()).toBe("old");
     await until(() => ends.length === 2);
+    await bg.agent(["stop", "tiny"], ws, who);
   });
 
   test("only runs inside the workspaces", async () => {
@@ -172,6 +179,12 @@ describe("hearth-bg", () => {
 });
 
 describe("out of memory", () => {
+  test("a process tree's memory counts everything under it", () => {
+    if (process.platform !== "linux") return;
+    const m = treeMemoryMB([process.pid]);
+    expect(m.get(process.pid)!).toBeGreaterThan(5);
+  });
+
   test("on Linux, runs start with a raised OOM score and keep their command (exec, same pid)", () => {
     const cmd = expendable(["claude", "-p", "it's \"quoted\""], "linux");
     expect(cmd.slice(0, 2)).toEqual(["sh", "-c"]);
