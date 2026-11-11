@@ -1,4 +1,4 @@
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { constants as osConstants, cpus, freemem, loadavg, totalmem } from "node:os";
 import { expendable } from "./oom";
@@ -40,6 +40,8 @@ export type BgTask = BgWho & {
   endedAt?: number;
   /** Times it started again after a hub restart. */
   restarts?: number;
+  /** Memory it was using when the hub stopped it for memory. */
+  memoryMB?: number;
   /** When its process last started. */
   launchedAt?: number;
   /** Hub restarts in a row that came within QUICK_MS of it starting. */
@@ -52,7 +54,7 @@ export type BgEnd = { task: BgTask; why: "exited" | "hub-restart" | "restart-loo
 export type Machine = { cores: number; load: number; availMB: number; totalMB: number };
 /** Below this much free memory a new task isn't started: it would run the machine out (the hub went down that way). */
 export const MIN_FREE_MB = 700;
-/** While tasks run, below this much free memory the newest one is stopped (watch()), before the kernel starts killing. */
+/** While tasks run, below this much free memory the one using the most is stopped (watch()), before the kernel starts killing. */
 export const LOW_FREE_MB = 400;
 /** After stopping one, give its memory this long to come back before stopping another. */
 const SETTLE_MS = 30_000;
@@ -69,6 +71,29 @@ export function machineLine(m: Machine, running: number): string {
   return `Machine now: ${m.cores} CPU cores, load ${m.load.toFixed(1)}${busy}; ${gb(m.availMB)} of ${gb(m.totalMB)} memory free; ${running} background task${running === 1 ? "" : "s"} running.`;
 }
 
+/** Memory (MB) each process tree uses, by root pid: the process and everything under it (Linux /proc; else empty). */
+export function treeMemoryMB(roots: number[]): Map<number, number> {
+  const out = new Map<number, number>();
+  let pids: string[];
+  try { pids = readdirSync("/proc").filter((d) => /^\d+$/.test(d)); } catch { return out; }
+  const parent = new Map<number, number>(), rss = new Map<number, number>();
+  for (const d of pids) {
+    try {
+      const st = readFileSync(`/proc/${d}/stat`, "utf8");
+      const f = st.slice(st.lastIndexOf(")") + 2).split(" ");
+      parent.set(Number(d), Number(f[1]));
+      rss.set(Number(d), (Number(f[21]) * 4096) / 1048576);
+    } catch {}
+  }
+  const want = new Set(roots);
+  for (const [pid, mb] of rss) {
+    for (let p = pid, hops = 0; p > 1 && hops < 64; p = parent.get(p) ?? 0, hops++) {
+      if (want.has(p)) { out.set(p, (out.get(p) || 0) + mb); break; }
+    }
+  }
+  return out;
+}
+
 export type BgProc = { pid: number; exited: Promise<number>; kill: () => void };
 export type BackgroundOpts = {
   /** Folders a task may run in (the brains' workspaces). */
@@ -81,6 +106,8 @@ export type BackgroundOpts = {
   onEnd?: (e: BgEnd) => void | Promise<void>;
   spawn?: (cmd: string[], cwd: string, env: Record<string, string>, logFd: number) => BgProc;
   now?: () => number;
+  /** Memory (MB) each task's process tree uses, by pid (tests pass their own). */
+  memoryOf?: (pids: number[]) => Map<number, number>;
   /** How busy the machine is (tests pass their own). */
   machine?: () => Machine;
   log?: (s: string) => void;
@@ -88,7 +115,8 @@ export type BackgroundOpts = {
 
 function realSpawn(cmd: string[], cwd: string, env: Record<string, string>, logFd: number): BgProc {
   // If memory runs out, the kernel kills the task, not the hub (src/oom.ts).
-  const p = Bun.spawn(expendable(cmd), { cwd, env, stdin: "ignore", stdout: logFd, stderr: logFd });
+  // Low CPU priority: a task can use every core, but the hub and conversations go first.
+  const p = Bun.spawn(expendable(process.platform === "linux" ? ["nice", "-n", "10", ...cmd] : cmd), { cwd, env, stdin: "ignore", stdout: logFd, stderr: logFd });
   // Killed by a signal: 128 + its number, like a shell says it.
   const exited = p.exited.then((c) => (p.signalCode ? 128 + (osConstants.signals[p.signalCode as keyof typeof osConstants.signals] || 15) : c));
   return { pid: p.pid, exited, kill: () => { try { p.kill("SIGTERM"); } catch {} setTimeout(() => { try { p.kill("SIGKILL"); } catch {} }, 5000).unref?.(); } };
@@ -119,7 +147,7 @@ export class Background {
   private o: Required<Omit<BackgroundOpts, "onEnd">> & { onEnd?: BackgroundOpts["onEnd"] };
 
   constructor(opts: BackgroundOpts) {
-    this.o = { spawn: realSpawn, now: Date.now, machine: machineNow, log: () => {}, ...opts } as any;
+    this.o = { spawn: realSpawn, now: Date.now, machine: machineNow, memoryOf: treeMemoryMB, log: () => {}, ...opts } as any;
     try { for (const t of JSON.parse(readFileSync(this.o.stateFile, "utf8")) as BgTask[]) if (t?.name) this.tasks.set(t.name, t); } catch {}
   }
 
@@ -133,7 +161,7 @@ export class Background {
     return () => clearInterval(t);
   }
 
-  /** Memory nearly gone while tasks run: stop the newest one (often several were started at once, each looking fine
+  /** Memory nearly gone while tasks run: stop the one using the most memory (ties: the newest; often several were started at once, each looking fine
    * alone) and tell its conversation why, so the agent runs fewer at once. One per SETTLE_MS. Returns its name. */
   checkMemory(): string | null {
     if (this.closing || this.o.now() - this.lastStarved < SETTLE_MS) return null;
@@ -141,7 +169,10 @@ export class Background {
     if (!running.length) return null;
     const m = this.o.machine();
     if (m.availMB >= LOW_FREE_MB) return null;
-    const t = running.sort((a, b) => (b.launchedAt ?? b.startedAt) - (a.launchedAt ?? a.startedAt))[0];
+    const use = this.o.memoryOf(running.map((x) => this.procs.get(x.name)!.pid));
+    const mb = (x: BgTask) => use.get(this.procs.get(x.name)!.pid) || 0;
+    const t = running.sort((a, b) => mb(b) - mb(a) || (b.launchedAt ?? b.startedAt) - (a.launchedAt ?? a.startedAt))[0];
+    if (use.size) t.memoryMB = Math.round(mb(t));
     this.starved.set(t.name, m);
     this.lastStarved = this.o.now();
     this.o.log(`background ${t.name}: stopped, the machine is nearly out of memory (${m.availMB} MB free of ${m.totalMB} MB)`);
@@ -339,7 +370,7 @@ export function endedText(e: BgEnd, now = Date.now()): string {
   const t = e.task;
   const took = ago((t.endedAt || now) - t.startedAt);
   const head = e.why === "memory"
-    ? `[Background task ${t.name} was stopped by the hub: the machine was nearly out of memory${e.machine ? ` (${gb(e.machine.availMB)} free of ${gb(e.machine.totalMB)}, ${e.machine.cores} CPU cores, load ${e.machine.load.toFixed(1)})` : ""}, and it was the newest task running. It won't start again on its own.]`
+    ? `[Background task ${t.name} was stopped by the hub: the machine was nearly out of memory${e.machine ? ` (${gb(e.machine.availMB)} free of ${gb(e.machine.totalMB)}, ${e.machine.cores} CPU cores, load ${e.machine.load.toFixed(1)})` : ""}, and it was using the most${t.memoryMB ? ` (${gb(t.memoryMB)})` : ""}. It won't start again on its own.]`
     : e.why === "restart-loop"
     ? `[Background task ${t.name} was stopped and won't start again: the hub went down ${t.quickRestarts}x in a row within minutes of starting it, most likely because it ran the machine out of memory.]`
     : e.why === "hub-restart"
@@ -406,7 +437,8 @@ memory and everything stops, your tasks and the conversation with them. So befor
 - Only then add more, and keep at least a quarter of memory free and no more busy processes than cores. If they
   don't fit, run them one after another (one script that loops) and say so to the user.
 Each start tells you how busy the machine is; hearth-bg won't start a task when memory is nearly gone, and if memory
-runs low while tasks run, the hub stops the newest one and tells you here.
+runs low while tasks run, the hub stops the one using the most and tells you here. Tasks run at low CPU priority, so the
+hub and conversations stay quick even when they use every core.
 
 ## While it runs
 - The user asks how it's going: \`hearth-bg status <name>\` (and read its result files), then answer with real numbers.
