@@ -17,6 +17,7 @@ import { otherBrowserSkill } from "../other-browser.ts";
 import { runElsewhereSkill } from "../run-elsewhere.ts";
 import { helpSkill } from "../help.ts";
 import { Tunnels, tunnelSkill } from "../tunnels.ts";
+import { Background, backgroundSkill } from "../background.ts";
 import { deepgram } from "./deepgram.ts";
 import { calls } from "./calls.ts";
 import { instagram, linkedin } from "./cookies.ts";
@@ -124,6 +125,14 @@ export class Connect {
     // job's jail ending doesn't take it down.
     this.tunnels = new Tunnels({ hubPort: hub.config.port, roots: [join(hub.config.dataDir, "brain")], log: (s) => console.log(s) });
     registerSkills(() => [tunnelSkill(base, this.agentKey)]);
+    // Long work a job starts (hearth-bg): the hub runs it in a jail of its own, so it outlives the job's turn (background.ts).
+    this.background = new Background({
+      roots: [join(hub.config.dataDir, "brain")], stateFile: join(hub.config.dataDir, "background", "tasks.json"),
+      shell: (cwd) => hub.brain.bgShell(cwd), log: (s) => console.log(s),
+      onEnd: (e) => hub.backgroundEnded(e),
+    });
+    for (const sig of ["SIGTERM", "SIGINT"] as const) process.once(sig, () => this.background.closingDown());
+    registerSkills(() => [backgroundSkill(base, this.agentKey)]);
     hub.brain.mcpServers = (jobId) => this.mcp.forRun(base, this.agentKey, jobId);
   }
 
@@ -131,6 +140,8 @@ export class Connect {
   readonly linkedin: LinkedInApi;
   /** hearth-tunnel: links to what jobs run or build (tunnels.ts). */
   readonly tunnels: Tunnels;
+  /** hearth-bg: long tasks jobs start, kept by the hub (background.ts). */
+  readonly background: Background;
   /** The hearth-linkedin command. */
   linkedinAgent(argv: string[]) { return linkedinAgent(this.linkedin, argv); }
 
@@ -156,6 +167,7 @@ export class Connect {
   /** Let each connector pick up where it left off (WhatsApp keeps its link across restarts). */
   async start() {
     this.mcp.start();
+    await this.background.restore().catch((e) => console.error("background tasks: restore failed", e));
     for (const c of CONNECTORS) await c.start?.(this.ctx).catch(() => {});
   }
   stop() { this.mcp.stop(); }

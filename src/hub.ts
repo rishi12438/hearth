@@ -2704,6 +2704,22 @@ Its work folder is copied to ~/Hearth/runs there, the commands run in that copy,
     return this.runElsewhere.run(argv, { threadId: job?.threadId || ORPHAN_THREAD, jobId: job?.id, cwd });
   }
 
+  /** A background task (background.ts) ended on its own: its conversation gets a hidden turn to tell the user how it went. */
+  async backgroundEnded(e: import("./background.ts").BgEnd) {
+    await this.log("bg.ended", `${e.task.name}: ${e.why === "hub-restart" ? "stopped by a hub restart" : `${e.task.status}, exit ${e.task.code}`}`).catch(() => {});
+    const job = e.task.jobId ? await this.store.get<Job>("jobs", e.task.jobId) : null;
+    const root = job?.followsUp ? await this.store.get<Job>("jobs", job.followsUp) : job;
+    if (!root || root.threadId !== e.task.threadId) return;
+    const { endedText } = await import("./background.ts");
+    const task = endedText(e, this.clock().getTime());
+    const m = await this.addMessage({ role: "user", text: task, threadId: root.threadId, continues: [root.id], ...(root.threadId.startsWith("tm-") ? {} : { hidden: true }) } as any);
+    const { job: next, held } = await this.followUp(root, m, task, false, true);
+    if (held) return;
+    await this.store.put<Message>("messages", { ...m, jobIds: [next.id] });
+    this.emit("job", next);
+    this.pump(m.id);
+  }
+
   /** The online Mac's name (set by the server), for hearth-help. */
   macName: () => string | null = () => null;
 

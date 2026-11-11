@@ -306,12 +306,13 @@ localhost URL in your reply is a dead link to them, and so is a screenshot when 
 When you've made something they should open (a web app, a dashboard, a demo, a simulation, a game), give them a tunnel.
 
 ## A server you're running
-1. Start it in the background, listening on 127.0.0.1 (or 0.0.0.0), and check it answers:
-   \`nohup python3 -m http.server 8000 >_scratchpad/server.log 2>&1 &\` then \`curl -sI http://127.0.0.1:8000\`.
+1. Start it listening on 127.0.0.1 (or 0.0.0.0), and check it answers. To keep it up after your turn, start it with
+   hearth-bg: \`hearth-bg start --name site -- python3 -m http.server 8000\` then \`curl -sI http://127.0.0.1:8000\`.
    A dev server is fine (npm run dev, vite, next dev, flask, uvicorn); the tunnel sends Host: localhost, so its host
    check passes.
 2. \`hearth-tunnel open 8000\` prints an https link. Put that link in your reply, on its own line.
-3. It works while your server answers, and your server stops when this run ends. Say so: "open while I'm working on it".
+3. It works while your server answers. A server you started yourself (not with hearth-bg) stops when this run ends; then
+   say so: "open while I'm working on it".
 
 ## Something that should stay up after you finish
 Build it into a folder of static files (index.html plus its js/css/data; \`npm run build\` → dist/) and
