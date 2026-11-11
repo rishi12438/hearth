@@ -14,6 +14,11 @@ ExecStart=/home/hearth/.bun/bin/bun src/cli.ts start
 Environment=PATH=/home/hearth/.local/bin:/home/hearth/.bun/bin:/usr/local/bin:/usr/bin:/bin
 Restart=always
 RestartSec=3
+# Out of memory: the kernel kills an agent run or background task (they start with a raised score, src/oom.ts), not the
+# hub, and the hub keeps running. With the default OOMPolicy=stop, one killed child took the whole hub down, which
+# restarted every --restart background task, which ran out of memory again: a loop.
+OOMPolicy=continue
+OOMScoreAdjust=-500
 # Hardening: the hub only needs its own folder.
 NoNewPrivileges=true
 PrivateTmp=true

@@ -40,6 +40,13 @@ if ! cmp -s "$APP/deploy/hearth.service" "$UNIT"; then
   systemctl daemon-reload
 fi
 
+# Swap, so a memory spike slows the box down instead of having the kernel kill things (small Lightsail boxes have none).
+if [ -z "$(swapon --noheadings 2>/dev/null)" ]; then
+  say "Adding 4 GB of swap"
+  fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile
+  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
 say "Restarting the hub"
 systemctl restart hearth
 sleep 3
