@@ -1217,3 +1217,21 @@ test("a brain picked in a ramble's header runs every job there on that one model
   expect(calls.filter((c) => c.startsWith("job:") || c.startsWith("legwork:") || c.startsWith("voice:") || c.startsWith("coach:"))).toEqual(["job:echo/pinned-1!"]);
   expect((await hub.setThreadBrain(thread.id, null)).value?.brain).toBeUndefined();
 });
+
+test("context: recent messages name their ramble and skip other rambles' routine briefs", async () => {
+  const at = (m: number) => new Date(now.getTime() - (60 - m) * 60_000).toISOString();
+  await store.put<Thread>("threads", { id: "plane", createdAt: at(0), title: "Plane sim", channel: "plane-sim" } as any);
+  await store.put<Thread>("threads", { id: "ali", createdAt: at(0), title: "AliExpress orders" } as any);
+  await store.put<Thread>("threads", { id: "inbox", createdAt: at(0), title: "Inbox watch", routine: true } as any);
+  const msg = (id: string, threadId: string, m: number, text: string, extra = {}) =>
+    store.put<Message>("messages", { id, createdAt: at(m), threadId, role: "user", text, ...extra } as any);
+  await msg("p1", "plane", 1, "how does map matching work?");
+  await msg("a1", "ali", 2, "Run scripts/monitor.py in the aliexpress-orders workspace", { hidden: true, fromTrigger: { id: "t", title: "AliExpress check" } });
+  await msg("i1", "inbox", 3, "A new email came in");
+  await msg("a2", "ali", 4, "how many packages left?");
+  await msg("p2", "plane", 5, "wait what?");
+  const recent = ((await hub.context("map matching", "job", null, "plane")) as any).recentMessages;
+  expect(recent.map((m: any) => m.text)).toEqual(["how does map matching work?", "how many packages left?", "wait what?"]);
+  expect(recent.map((m: any) => [m.ramble, !!m.here])).toEqual([["plane-sim", true], [expect.any(String), false], ["plane-sim", true]]);
+  expect(recent[1].ramble).not.toBe("plane-sim");
+});

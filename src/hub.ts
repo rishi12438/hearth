@@ -294,6 +294,25 @@ export class Hub {
 
   // ---------- context for the brain ----------
 
+  /**
+   * The last 14 messages across the hub for an agent's prompt. Each names its ramble and `here` marks this one, so an agent
+   * never reads another ramble's chat as its own. Routine briefs and the hidden prompts a routine or inbox watch posts in
+   * other rambles are left out: they read like the user typing (a 7 PM AliExpress check showed up mid plane-sim chat).
+   */
+  private async recentForPrompt(threadId?: string) {
+    const threads = new Map((await this.store.all<Thread>("threads")).map((t) => [t.id, t]));
+    const msgs = await this.store.recent<Message>("messages", 60);
+    return msgs.filter((m) => {
+      if (threadId && m.threadId === threadId) return true;
+      const t = m.threadId ? threads.get(m.threadId) : undefined;
+      return !m.hidden && !m.fromTrigger && !t?.routine;
+    }).slice(-14).map((m) => {
+      const t = m.threadId ? threads.get(m.threadId) : undefined;
+      return { role: m.role, at: m.createdAt, ramble: t ? channelOf(t) : undefined, ...(threadId && m.threadId === threadId ? { here: true } : {}),
+        text: m.text.slice(0, 600) };
+    });
+  }
+
   async context(query: string, mode: BrainInput["mode"], teammate?: Teammate | null, threadId?: string) {
     const now = this.clock();
     const prefs = await this.prefs();
@@ -320,7 +339,7 @@ export class Hub {
       : [...own, ...recall(facts.filter((f) => !own.includes(f)), query, 40 - own.length, now)];
     const places = await this.store.all<Place>("places");
     const fix = (await this.store.recent<LocationFix>("locations", 1))[0];
-    const history = await this.store.recent<Message>("messages", 14);
+    const history = await this.recentForPrompt(threadId);
     const today = localDate(now, prefs.tz);
     let location: Record<string, unknown> | null = null;
     if (fix) {
@@ -349,7 +368,8 @@ export class Hub {
       notebooks: (await this.store.all<Notebook>("notebooks")).map((n) => ({ name: n.name, summary: n.summary })),
       ...(lessons.length ? { lessons: lessons.map((f) => ({ id: f.id, lesson: f.fact })) } : {}),
       scripts: (await this.scripts.list()).filter((s) => s.status !== "rejected").map((s) => ({ name: s.name, description: s.description, status: s.status })),
-      recentMessages: history.map((m) => ({ role: m.role, at: m.createdAt, text: m.text.slice(0, 600) })),
+      // Last messages across the hub, each marked with its ramble, so another ramble's chat is never taken for this one's.
+      recentMessages: history,
       library: mode === "review" ? undefined : await this.searchLibrary(query),
       ...(mode === "review" || mode === "ideas" ? { recentDays: await this.recentDays(mode === "ideas" ? 3 : 2) } : {}),
       ...(mode === "ideas" ? { ideas: await this.ideaTitles() } : {}),
