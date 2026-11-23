@@ -319,3 +319,67 @@ test("Android 15 with Play, set up to pass apps' root checks: release-build sett
   expect(ENSURE_ANDROID).toContain("/opt/redroid-data/misc/adb/adb_keys");
   expect(ENSURE_ANDROID.indexOf("misc/adb && break")).toBeLessThan(ENSURE_ANDROID.indexOf("rm -f /system/xbin/su")); // after Android is up
 });
+
+test("pull-apk lists the app's installed APK files and streams each one straight off the phone", async () => {
+  const v = vault();
+  configured(null as any, v);
+  v.set("phone-sshkey", "KEY");
+  const piped: string[] = [];
+  const base = new Uint8Array([0x50, 0x4b, 3, 4, 9, 9]);
+  const ssh = {
+    runner: () => ({ run: async (cmd: string, o: { onLine?: (l: string) => void }) => {
+      if (cmd.includes("pm path com.whatsapp")) { o.onLine?.("6 /data/app/~~x==/com.whatsapp-y==/base.apk"); o.onLine?.("4 /data/app/~~x==/com.whatsapp-y==/split_config.arm64_v8a.apk"); }
+      return { code: 0, stderr: "" };
+    } }),
+    pipe: async (_t: unknown, cmd: string) => {
+      piped.push(cmd);
+      return { stdout: new Response(base).body!, write() {}, kill() {}, exited: Promise.resolve(0) };
+    },
+  } as any;
+  const phone = new Phone({ dataDir: mkdtempSync(join(tmpdir(), "hearth-phone-apk-")), vault: v, ssh, isBusy: () => false });
+  (phone as any).save({ state: "ready", instanceId: "i-1", publicIp: "1.2.3.4", lastUseAt: Date.now() });
+  expect(await phone.control("pull-apk", { pkg: "com.whatsapp" })).toEqual({ ok: true, pkg: "com.whatsapp", parts: [{ name: "base.apk", size: 6 }, { name: "split_config.arm64_v8a.apk", size: 4 }] });
+  const { stream, size } = await phone.apkStream("com.whatsapp", "base.apk");
+  expect(size).toBe(6);
+  expect(new Uint8Array(await new Response(stream).arrayBuffer())).toEqual(base);
+  expect(piped[0]).toContain("adb exec-out cat '/data/app/~~x==/com.whatsapp-y==/base.apk'");
+  await expect(phone.apkStream("com.whatsapp", "../../etc/passwd")).rejects.toThrow(/has no/);
+  await expect(phone.control("pull-apk", { pkg: "x; rm -rf /" })).rejects.toThrow(/package name/);
+  await expect(phone.control("pull-apk", { pkg: "com.nope.app" })).rejects.toThrow(/isn't installed/);
+  expect((phone as any).pulling).toBe(0);
+});
+
+test("hearth-phone pull-apk saves each APK part into out/ and checks its size", async () => {
+  const { phoneSkill } = await import("../src/phone.ts");
+  const { writeFileSync, readFileSync, chmodSync, existsSync } = await import("node:fs");
+  const parts: Record<string, Uint8Array<ArrayBuffer>> = { "base.apk": new Uint8Array(3000).fill(7), "split_config.en.apk": new Uint8Array([1, 2, 3]) };
+  let short = false;
+  const srv = Bun.serve({ port: 0, async fetch(req) {
+    const f = await req.formData();
+    if (f.get("pkg") !== "com.whatsapp") return new Response(JSON.stringify({ error: "com.nope isn't installed" }), { status: 400 });
+    const part = f.get("part");
+    if (!part) return new Response(JSON.stringify({ ok: true, pkg: "com.whatsapp", parts: Object.entries(parts).map(([name, b]) => ({ name, size: b.length })) }, null, 1));
+    const b = parts[String(part)];
+    return new Response(short ? b.slice(0, 1) : b);
+  } });
+  try {
+    const dir = mkdtempSync(join(tmpdir(), "hearth-phone-pull-"));
+    const sh = join(dir, "hearth-phone");
+    writeFileSync(sh, phoneSkill(`http://127.0.0.1:${srv.port}`, "k").scripts!["hearth-phone"]); chmodSync(sh, 0o755);
+    const run = async (pkg: string) => { const p = Bun.spawn([sh, "pull-apk", pkg], { cwd: dir, stdout: "pipe" }); const out = await new Response(p.stdout).text(); return { code: await p.exited, out }; };
+    const ok = await run("com.whatsapp");
+    expect(ok.code).toBe(0);
+    expect(JSON.parse(ok.out).files).toEqual([{ path: "out/com.whatsapp-base.apk", bytes: 3000 }, { path: "out/com.whatsapp-split_config.en.apk", bytes: 3 }]);
+    expect(new Uint8Array(readFileSync(join(dir, "out/com.whatsapp-base.apk")))).toEqual(parts["base.apk"]);
+    const bad = await run("com.nope");
+    expect(bad.code).toBe(1);
+    expect(bad.out).toContain("isn't installed");
+    short = true;
+    const cut = await run("com.whatsapp");
+    expect(cut.code).toBe(1);
+    expect(cut.out).toContain("stopped partway");
+    expect(existsSync(join(dir, "out/com.whatsapp-base.apk"))).toBe(false);
+    delete parts["split_config.en.apk"]; short = false;
+    expect(JSON.parse((await run("com.whatsapp")).out).files).toEqual([{ path: "out/com.whatsapp.apk", bytes: 3000 }]);
+  } finally { srv.stop(true); }
+});
