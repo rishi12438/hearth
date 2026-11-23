@@ -34,7 +34,13 @@ export type Skill = {
 
 /** Skills a connector adds while it's connected (Plaid's hearth-plaid). Registered once by the hub. */
 const EXTRA: (() => Skill[])[] = [];
-export function registerSkills(fn: () => Skill[]) { EXTRA.push(fn); }
+/**
+ * Bumped on every registration, so a brain that already looked (at startup, before the phone and voice-call skills
+ * registered) looks again on its next call instead of serving its cached list, without them, for five minutes.
+ */
+let registered = 0;
+export function registerSkills(fn: () => Skill[]) { EXTRA.push(fn); registered++; }
+export const skillsRegistered = () => registered;
 
 type Tool = { name: string; off: string; description: string; rules: string; commands?: string[] };
 
