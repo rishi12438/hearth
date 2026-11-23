@@ -661,9 +661,15 @@ export async function startServer(hub: Hub, voice: VoiceSettings | null = null,
       const form = await req.formData().catch(() => null);
       const action = String(form?.get("action") || "");
       const args: Record<string, string> = {};
-      for (const k of ["x", "y", "x1", "y1", "x2", "y2", "ms", "text", "key", "pkg"]) { const v = form?.get(k); if (typeof v === "string") args[k] = v.slice(0, 1000); }
+      for (const k of ["x", "y", "x1", "y1", "x2", "y2", "ms", "text", "key", "pkg", "part"]) { const v = form?.get(k); if (typeof v === "string") args[k] = v.slice(0, 1000); }
       try {
         server.timeout(req, 0); // an install can take minutes
+        // One APK file of an app, streamed straight from the phone to hearth-phone pull-apk (it checks the size).
+        if (action === "pull-apk" && args.part) {
+          const { stream, size } = await phone.apkStream(args.pkg || "", args.part, req.headers.get("x-hearth-job")?.slice(0, 100) || undefined);
+          await hub.log("phone.agent", `hearth-phone pull-apk ${args.pkg} ${args.part}`);
+          return new Response(stream, { headers: { "Content-Type": "application/vnd.android.package-archive", "Content-Length": String(size), "Cache-Control": "no-store" } });
+        }
         const r = await phone.control(action, args, req.headers.get("x-hearth-job")?.slice(0, 100) || undefined);
         await hub.log("phone.agent", `hearth-phone ${action}`);
         return new Response(JSON.stringify(r, null, 1), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });

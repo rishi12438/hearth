@@ -353,6 +353,8 @@ export class Phone {
    * conversation didn't know to run it, and the owner never got a way in.
    */
   private handovers = new Set<string>();
+  /** APK downloads streaming off the phone right now: they keep it from idling off mid-copy. */
+  private pulling = 0;
   takeHandover(jobId: string) { return this.handovers.delete(jobId); }
   /** The start in progress: a second open (the agent retrying, the owner's screen) waits for it instead of failing. */
   private opening: Promise<{ ok: true } | { error: string }> | null = null;
@@ -712,10 +714,50 @@ export class Phone {
       }
       // Apps the owner (or the agent) installed, plus the Play Store: -3 alone hides it, as it came with the phone.
       case "apps": { const r = await this.run(ip, "adb shell pm list packages -3; adb shell pm list packages com.android.vending"); return { ok: r.code === 0, packages: r.out.split("\n").map((l) => l.replace("package:", "").trim()).filter(Boolean) }; }
+      case "pull-apk": return { ok: true, pkg: args.pkg, parts: (await this.apkParts(ip, args.pkg || "")).map(({ name, size }) => ({ name, size })) };
       case "dump": { const r = await this.run(ip, "adb exec-out uiautomator dump /dev/tty; echo", { timeoutMs: 20_000 }); return { ok: r.code === 0, ui: r.out.slice(0, 20_000) }; }
       default: throw new Error(`Unknown phone action: ${action}`);
     }
   }
+  /**
+   * The installed app's APK files, exactly as Android has them: `pm path` lists the base APK and, for an app installed
+   * as splits (most Play installs), each split beside it. Names are the files' own (base.apk, split_config.arm64_v8a.apk).
+   */
+  private async apkParts(ip: string, pkg: string): Promise<{ name: string; path: string; size: number }[]> {
+    if (!PKG_RE.test(pkg)) throw new Error("Give the app's package name, like com.whatsapp (see hearth-phone apps).");
+    const r = await this.run(ip, `adb shell pm path ${pkg} | tr -d '\\r' | sed -n 's/^package://p' | while read -r f; do echo "$(adb shell stat -c %s "$f" </dev/null | tr -d '\\r') $f"; done`);
+    const parts = r.out.split("\n").map((l) => l.trim().match(/^(\d+) (\/\S+\.apk)$/)).filter((m): m is RegExpMatchArray => !!m)
+      .map((m) => ({ name: m[2].split("/").pop()!, path: m[2], size: Number(m[1]) }));
+    if (!parts.length) throw new Error(`${pkg} isn't installed (hearth-phone apps lists what's there).`);
+    return parts;
+  }
+
+  /**
+   * One APK file of an installed app, streamed straight off the phone (never held in the hub's memory: APKs run to
+   * hundreds of MB). The caller checks the byte count against the size apkParts gave.
+   */
+  async apkStream(pkg: string, part: string, jobId?: string): Promise<{ stream: ReadableStream<Uint8Array>; size: number }> {
+    const pipeOf = this.ssh().pipe;
+    if (!pipeOf) throw new Error("Copying files off the phone isn't available here.");
+    const ip = await this.ready(jobId);
+    const p = (await this.apkParts(ip, pkg)).find((x) => x.name === part);
+    if (!p) throw new Error(`${pkg} has no ${part}.`);
+    const pipe = await pipeOf.call(this.ssh(), this.sshTarget(ip), `touch ${IDLE_MARK} 2>/dev/null; export ANDROID_SERIAL=${ADB_SERIAL}; adb exec-out cat ${shq(p.path)}`);
+    this.pulling++;
+    let done = false;
+    const finish = () => { if (!done) { done = true; this.pulling--; this.patch({ lastUseAt: this.now() }); } };
+    void pipe.exited.then(finish, finish);
+    const reader = pipe.stdout.getReader();
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(c) {
+        try { const { done: end, value } = await reader.read(); if (end) { finish(); c.close(); } else c.enqueue(value); }
+        catch (e) { finish(); c.error(e); }
+      },
+      cancel() { pipe.kill(); finish(); },
+    });
+    return { stream, size: p.size };
+  }
+
   /** imagemagick (small live-view frames), on boxes made before they were in the user-data. */
   private async ensureTools(ip: string) {
     if (this.toolsOk) return;
@@ -761,7 +803,7 @@ export class Phone {
     const s = this.state();
     if (s.state === "ready") {
       // A working owner job keeps it alive; otherwise close once it's been idle past the limit.
-      if (s.ownerJob && this.opts.isBusy(s.ownerJob)) { this.patch({ lastUseAt: this.now() }); return; }
+      if (this.pulling > 0 || (s.ownerJob && this.opts.isBusy(s.ownerJob))) { this.patch({ lastUseAt: this.now() }); return; }
       const idleMs = this.now() - (s.lastUseAt || 0);
       if (idleMs > this.idleStopMin() * 60_000) { await this.close(); return; }
     }
@@ -800,7 +842,7 @@ export function phoneSkill(hubUrl: string, key: string): Skill {
 set -uo pipefail
 cmd="\${1:-}"; shift 2>/dev/null || true
 job=(); if [ -n "\${HEARTH_JOB:-}" ]; then job=(-H "X-Hearth-Job: \${HEARTH_JOB}"); fi
-post() { curl -sS -m 180 -H "X-Hearth-Agent: ${key}" "\${job[@]}" "$@" "${hubUrl}/api/agent/phone"; }
+post() { curl -sS -m 180 -H "X-Hearth-Agent: ${key}" \${job[@]+"\${job[@]}"} "$@" "${hubUrl}/api/agent/phone"; }
 case "$cmd" in
   open) post -m 1500 --data-urlencode action=open ;; # the first start builds Android: several minutes
   close|status|screenshot|apps|dump|gsf-id) post --data-urlencode "action=$cmd" ;;
@@ -810,7 +852,23 @@ case "$cmd" in
   type)  post --data-urlencode action=type --data-urlencode "text=$*" ;;
   key)   post --data-urlencode action=key --data-urlencode "key=\${1:-KEYCODE_HOME}" ;;
   open-app) post --data-urlencode action=open-app --data-urlencode "pkg=\${1:-}" ;;
-  *) echo '{"error":"usage: hearth-phone open|close|status|screenshot|tap X Y|swipe X1 Y1 X2 Y2 [ms]|type TEXT…|key KEYCODE|open-app PKG|apps|dump|gsf-id|handover WHAT"}' >&2; exit 1 ;;
+  pull-apk)
+    # The installed app's APK file(s), copied into out/ so you can send them with @file.
+    pkg="\${1:-}"; list=$(post --data-urlencode action=pull-apk --data-urlencode "pkg=$pkg") || { echo "$list"; exit 1; }
+    case "$list" in *'"parts"'*) ;; *) echo "$list"; exit 1 ;; esac
+    mkdir -p out; files=(); n=$(printf '%s' "$list" | grep -o '"name": "[^"]*"' | wc -l | tr -d ' ')
+    while read -r part size; do
+      [ -n "$part" ] || continue
+      if [ "$n" = 1 ]; then dest="out/$pkg.apk"; else dest="out/$pkg-$part"; fi
+      code=$(curl -sS -m 1800 -o "$dest" -w '%{http_code}' -H "X-Hearth-Agent: ${key}" \${job[@]+"\${job[@]}"} --data-urlencode action=pull-apk --data-urlencode "pkg=$pkg" --data-urlencode "part=$part" "${hubUrl}/api/agent/phone")
+      got=$(wc -c < "$dest" | tr -d ' ')
+      if [ "$code" != 200 ]; then cat "$dest"; echo; rm -f "$dest"; exit 1; fi
+      if [ "$got" != "$size" ]; then printf '{"error":"Copying %s stopped partway (%s of %s bytes). Try again."}\\n' "$part" "$got" "$size"; rm -f "$dest"; exit 1; fi
+      files+=("$(printf '{"path":"%s","bytes":%s}' "$dest" "$size")")
+    done < <(printf '%s' "$list" | tr -d '\n' | grep -o '"name": "[^"]*", *"size": [0-9]*' | sed 's/"name": "\\([^"]*\\)", *"size": \\([0-9]*\\)/\\1 \\2/')
+    printf '{"ok":true,"files":['; sep=""; for f in "\${files[@]}"; do printf '%s%s' "$sep" "$f"; sep=","; done
+    printf '],"note":"Send each with its own line in your reply: @file <path>. Over 50 MB is too big to attach: say so instead."}\n' ;;
+  *) echo '{"error":"usage: hearth-phone open|close|status|screenshot|tap X Y|swipe X1 Y1 X2 Y2 [ms]|type TEXT…|key KEYCODE|open-app PKG|pull-apk PKG|apps|dump|gsf-id|handover WHAT"}' >&2; exit 1 ;;
 esac
 `;
   return {
@@ -840,6 +898,7 @@ The phone starts when you open it: \`hearth-phone open\` waits until it's ready 
 | \`hearth-phone key KEYCODE\` | A key: KEYCODE_HOME, KEYCODE_BACK, KEYCODE_ENTER, KEYCODE_APP_SWITCH. |
 | \`hearth-phone open-app PKG\` | Open an app by package name (find it with apps). |
 | \`hearth-phone apps\` | List installed apps (package names). |
+| \`hearth-phone pull-apk PKG\` | Copy that app's installed APK off the phone into out/ (the exact file installed; a Play app installed in parts gives one file per part). It prints the paths: send them with \`@file\`. |
 | \`hearth-phone handover WHAT\` | Hand the phone to the owner to sign in (see below): their reply gets an "Open your phone" button. |
 | \`hearth-phone gsf-id\` | The phone's Google device id, if Play says the device isn't certified (see below). |
 | \`hearth-phone dump\` | The screen's text/buttons as XML, to find things without a screenshot. |
@@ -867,6 +926,7 @@ export function pinnedFor(knownHosts: string | undefined, ip: string): string | 
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const PKG_RE = /^[A-Za-z][\w]*(\.[A-Za-z_][\w]*)+$/;
 const num = (v: string) => (/^-?\d+$/.test(String(v || "")) ? v : "0");
 /** Keep AWS error text short and free of anything secret. */
 function plainError(msg: string) { return msg.replace(/[A-Z0-9]{20,}/g, "…").slice(0, 200); }
