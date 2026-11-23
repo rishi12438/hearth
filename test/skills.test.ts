@@ -124,3 +124,16 @@ test("the automation guide is always there (even with no tools installed), and y
   expect(mine).toHaveLength(1);
   expect(mine[0].body).toBe("mine");
 });
+
+test("a skill registered after the brain first looked (the phone's, at startup) is there on its next call", async () => {
+  const { Brain } = await import("../src/brain.ts");
+  const { registerSkills } = await import("../src/brains/skills.ts");
+  const { loadConfig } = await import("../src/config.ts");
+  const dir = mkdtempSync(join(tmpdir(), "hearth-late-skill-"));
+  const brain = new Brain({ ...loadConfig({}), dataDir: dir } as any);
+  const name = `late-skill-${Date.now()}`;
+  expect(brain.skills().skills.some((s) => s.name === name)).toBe(false);
+  registerSkills(() => [{ name, description: "d", body: "b", commands: [name], reads: [], scripts: { [name]: "#!/bin/sh\necho hi\n" } }]);
+  expect(brain.skills().skills.some((s) => s.name === name)).toBe(true);
+  expect(existsSync(join(dir, "brain", "bin", name))).toBe(true);
+});

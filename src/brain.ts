@@ -8,7 +8,7 @@ import { wallParts, zonedToUtc } from "./time.ts";
 import { SOURCES } from "./sources/index.ts";
 import { BrainUsage, isLimitError } from "./brains/usage.ts";
 import { readClaudeToken } from "./brains/logins.ts";
-import { describeSkillStep, hubSkills, installCodexRules, installSkills, skillCatalog, skillFlags, type Skill } from "./brains/skills.ts";
+import { describeSkillStep, hubSkills, skillsRegistered, installCodexRules, installSkills, skillCatalog, skillFlags, type Skill } from "./brains/skills.ts";
 import { BrainHealth, signInProblem } from "./brains/health.ts";
 import { jailArgs, jailWorks } from "./brains/jail.ts";
 import { loginsFile } from "./brains/browser-logins.ts";
@@ -959,16 +959,16 @@ export class Brain {
   /** Set by the hub: the MCP servers a working run gets, as the hub's proxy (mcp.ts). No tokens: the proxy adds them. */
   mcpServers: ((jobId?: string) => { name: string; url: string; headers: Record<string, string> }[]) | null = null;
 
-  private skillState: { at: number; key: string; skills: Skill[]; paths: string[] } | null = null;
+  private skillState: { at: number; key: string; skills: Skill[]; paths: string[]; registered: number } | null = null;
   /** Look again on the next call (a connector that brings a skill just connected or left). */
   refreshSkills() { if (this.skillState) this.skillState.at = 0; }
 
   /** The hub's skills, re-scanned at most every 5 minutes (a tool installed later shows up without a restart). */
   skills(): { skills: Skill[]; paths: string[] } {
-    if (this.skillState && Date.now() - this.skillState.at < 300_000) return this.skillState;
+    if (this.skillState && this.skillState.registered === skillsRegistered() && Date.now() - this.skillState.at < 300_000) return this.skillState;
     const skills = hubSkills(this.config.dataDir);
     const key = JSON.stringify(skills);
-    if (this.skillState?.key === key) { this.skillState.at = Date.now(); return this.skillState; }
+    if (this.skillState?.key === key) { this.skillState.at = Date.now(); this.skillState.registered = skillsRegistered(); return this.skillState; }
     let paths: string[] = [];
     try {
       const bin = installSkills(this.workDir, skills);
@@ -980,7 +980,7 @@ export class Brain {
       }
       paths = [...new Set([bin, ...skills.flatMap((s) => s.commands.map((c) => findCommandDir(c)).filter(Boolean) as string[])])];
     } catch { return { skills: [], paths: [] }; }
-    this.skillState = { at: Date.now(), key, skills, paths };
+    this.skillState = { at: Date.now(), key, skills, paths, registered: skillsRegistered() };
     return this.skillState;
   }
 
